@@ -59,7 +59,9 @@
     </flux:sidebar>
 
     <flux:main container>
-        @livewire($livewireComponent)
+        <div class="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+            @livewire($livewireComponent, ['routeParameters' => request()->route()?->parameters() ?? []])
+        </div>
     </flux:main>
 
     @livewireScripts

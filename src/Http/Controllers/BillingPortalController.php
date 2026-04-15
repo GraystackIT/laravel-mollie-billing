@@ -12,26 +12,28 @@ class BillingPortalController extends Controller
 {
     public function index(Request $request): View
     {
-        return view('mollie-billing::livewire.billing.dashboard');
-    }
-
-    public function checkout(Request $request): View
-    {
-        return view('mollie-billing::livewire.billing.checkout');
+        return $this->render('dashboard');
     }
 
     public function plan(Request $request): View
     {
-        return view('mollie-billing::livewire.billing.plan');
+        return $this->render('plan-change');
     }
 
     public function invoices(Request $request): View
     {
-        return view('mollie-billing::livewire.billing.invoices');
+        return $this->render('invoices');
     }
 
     public function return(Request $request): View
     {
-        return view('mollie-billing::livewire.billing.return');
+        return $this->render('return');
+    }
+
+    private function render(string $screen): View
+    {
+        return view('mollie-billing::layouts.portal', [
+            'livewireComponent' => 'mollie-billing::'.$screen,
+        ]);
     }
 }

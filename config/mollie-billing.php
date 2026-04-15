@@ -15,6 +15,11 @@ return [
 
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN', 'billing.index'),
 
+    // Consuming app owns the checkout/plan-selection flow. Package code (promotion redirect,
+    // past-due middleware, trial-expired mail) needs to know where to send users who don't
+    // yet have an active subscription. Set this to your app's checkout route name.
+    'checkout_route' => env('BILLING_CHECKOUT_ROUTE', 'billing.index'),
+
     'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),
 
     'mollie_api_key' => env('MOLLIE_API_KEY'),

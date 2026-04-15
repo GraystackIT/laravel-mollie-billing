@@ -43,4 +43,11 @@ interface SubscriptionCatalogInterface
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 
     public function yearlySavingsPercent(string $planCode): float;
+
+    public function featureName(string $featureKey): string;
+
+    public function featureDescription(string $featureKey): ?string;
+
+    /** @return array<string, array{name: string, description: ?string}> */
+    public function allFeatures(): array;
 }

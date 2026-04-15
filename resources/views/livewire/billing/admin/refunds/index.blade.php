@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Livewire\Component;
 use Livewire\WithPagination;
@@ -43,50 +44,62 @@ new class extends Component {
 
 ?>
 
-<div class="p-6 space-y-4">
-    <flux:heading size="xl">Refunds</flux:heading>
+<div class="space-y-6">
+    <x-mollie-billing::admin.page-header
+        title="Refunds"
+        subtitle="Credit notes issued for partial or full refunds."
+    />
 
-    <div class="flex gap-2 items-center">
+    <div class="flex flex-wrap items-center gap-2">
         <flux:input
             type="search"
             wire:model.live.debounce.300ms="search"
-            placeholder="Billable id"
+            placeholder="Filter by billable id"
             icon="magnifying-glass"
-            class="flex-1 basis-0"
+            class="flex-1 basis-64"
         />
-        <flux:select wire:model.live="reasonFilter" placeholder="All reasons" class="w-64 shrink-0">
+        <flux:select wire:model.live="reasonFilter" placeholder="All reasons" class="w-56 shrink-0">
             <flux:select.option value="">All reasons</flux:select.option>
-            <flux:select.option value="service_outage">Service outage</flux:select.option>
-            <flux:select.option value="billing_error">Billing error</flux:select.option>
-            <flux:select.option value="goodwill">Goodwill</flux:select.option>
-            <flux:select.option value="chargeback">Chargeback</flux:select.option>
-            <flux:select.option value="cancellation">Cancellation</flux:select.option>
-            <flux:select.option value="other">Other</flux:select.option>
+            @foreach (RefundReasonCode::cases() as $reason)
+                <flux:select.option value="{{ $reason->value }}">{{ \GraystackIT\MollieBilling\Support\EnumLabels::label($reason) }}</flux:select.option>
+            @endforeach
         </flux:select>
     </div>
 
-    <flux:table :paginate="$notes">
-        <flux:table.columns>
-            <flux:table.column sortable :sorted="$sortBy === 'created_at'" :direction="$sortDirection" wire:click="sort('created_at')">Date</flux:table.column>
-            <flux:table.column>Billable</flux:table.column>
-            <flux:table.column sortable :sorted="$sortBy === 'amount_gross'" :direction="$sortDirection" wire:click="sort('amount_gross')" align="end">Amount</flux:table.column>
-            <flux:table.column sortable :sorted="$sortBy === 'refund_reason_code'" :direction="$sortDirection" wire:click="sort('refund_reason_code')">Reason</flux:table.column>
-            <flux:table.column>Original</flux:table.column>
-        </flux:table.columns>
-        <flux:table.rows>
-            @forelse ($notes as $n)
-                <flux:table.row :key="$n->id">
-                    <flux:table.cell>{{ $n->created_at->format('Y-m-d') }}</flux:table.cell>
-                    <flux:table.cell variant="strong">{{ class_basename($n->billable_type) }}#{{ $n->billable_id }}</flux:table.cell>
-                    <flux:table.cell align="end">{{ number_format($n->amount_gross / 100, 2) }}</flux:table.cell>
-                    <flux:table.cell>{{ $n->refund_reason_code?->value ?? '—' }}</flux:table.cell>
-                    <flux:table.cell>#{{ $n->parent_invoice_id ?? '—' }}</flux:table.cell>
-                </flux:table.row>
-            @empty
-                <flux:table.row>
-                    <flux:table.cell colspan="5" align="center">No refunds yet.</flux:table.cell>
-                </flux:table.row>
-            @endforelse
-        </flux:table.rows>
-    </flux:table>
+    @if ($notes->isEmpty())
+        <flux:card>
+            <x-mollie-billing::admin.empty
+                icon="arrow-uturn-left"
+                title="No refunds yet"
+                description="Credit notes issued from the invoices tab will appear here."
+            />
+        </flux:card>
+    @else
+        <flux:card class="p-0!">
+            <flux:table :paginate="$notes">
+                <flux:table.columns>
+                    <flux:table.column sortable :sorted="$sortBy === 'created_at'" :direction="$sortDirection" wire:click="sort('created_at')">Date</flux:table.column>
+                    <flux:table.column>Billable</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'amount_gross'" :direction="$sortDirection" wire:click="sort('amount_gross')" align="end">Amount</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'refund_reason_code'" :direction="$sortDirection" wire:click="sort('refund_reason_code')">Reason</flux:table.column>
+                    <flux:table.column>Original</flux:table.column>
+                </flux:table.columns>
+                <flux:table.rows>
+                    @foreach ($notes as $n)
+                        <flux:table.row :key="$n->id">
+                            <flux:table.cell class="tabular-nums">{{ $n->created_at->format('Y-m-d') }}</flux:table.cell>
+                            <flux:table.cell variant="strong" class="font-mono">{{ class_basename($n->billable_type) }}#{{ $n->billable_id }}</flux:table.cell>
+                            <flux:table.cell align="end">
+                                <x-mollie-billing::admin.money :cents="$n->amount_gross" />
+                            </flux:table.cell>
+                            <flux:table.cell>
+                                <x-mollie-billing::admin.enum-badge :value="$n->refund_reason_code" />
+                            </flux:table.cell>
+                            <flux:table.cell class="font-mono text-sm">#{{ $n->parent_invoice_id ?? '—' }}</flux:table.cell>
+                        </flux:table.row>
+                    @endforeach
+                </flux:table.rows>
+            </flux:table>
+        </flux:card>
+    @endif
 </div>

@@ -27,7 +27,7 @@ class RequireActiveSubscription
         }
 
         if (! $billable->hasAccessibleBillingSubscription()) {
-            return redirect()->route('billing.checkout');
+            return redirect()->route(config('mollie-billing.checkout_route', 'billing.index'));
         }
 
         return $next($request);

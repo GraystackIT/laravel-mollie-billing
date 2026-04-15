@@ -6,14 +6,16 @@ use Livewire\Component;
 
 new class extends Component {
     public ?string $flash = null;
+    public ?string $error = null;
 
     public function export(int $year, OssProtocolService $service): void
     {
+        $this->flash = $this->error = null;
         try {
             $path = $service->export($year);
             $this->flash = "CSV written to {$path}";
         } catch (\Throwable $e) {
-            $this->flash = 'Error: '.$e->getMessage();
+            $this->error = $e->getMessage();
         }
     }
 
@@ -37,31 +39,40 @@ new class extends Component {
 
 ?>
 
-<div class="p-6 space-y-4 max-w-md">
-    <flux:heading size="xl">OSS protocol</flux:heading>
+<div class="space-y-6">
+    <x-mollie-billing::admin.page-header
+        title="OSS protocol"
+        subtitle="Export the one-stop-shop VAT protocol as a CSV file, by year."
+    />
 
-    @if ($flash)
-        <flux:callout variant="success" icon="check-circle">{{ $flash }}</flux:callout>
-    @endif
+    <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
 
     @if (empty($years))
-        <flux:text class="text-zinc-500">No invoices yet.</flux:text>
+        <flux:card>
+            <x-mollie-billing::admin.empty
+                icon="document-arrow-down"
+                title="No invoices yet"
+                description="Once invoices exist, the applicable years will appear here for export."
+            />
+        </flux:card>
     @else
-        <flux:table>
-            <flux:table.columns>
-                <flux:table.column>Year</flux:table.column>
-                <flux:table.column align="end"></flux:table.column>
-            </flux:table.columns>
-            <flux:table.rows>
-                @foreach ($years as $year)
-                    <flux:table.row :key="$year">
-                        <flux:table.cell variant="strong" class="font-mono">{{ $year }}</flux:table.cell>
-                        <flux:table.cell align="end">
-                            <flux:button size="xs" wire:click="export({{ $year }})">Export CSV</flux:button>
-                        </flux:table.cell>
-                    </flux:table.row>
-                @endforeach
-            </flux:table.rows>
-        </flux:table>
+        <flux:card class="p-0! max-w-lg">
+            <flux:table>
+                <flux:table.columns>
+                    <flux:table.column>Year</flux:table.column>
+                    <flux:table.column align="end"></flux:table.column>
+                </flux:table.columns>
+                <flux:table.rows>
+                    @foreach ($years as $year)
+                        <flux:table.row :key="$year">
+                            <flux:table.cell variant="strong" class="font-mono">{{ $year }}</flux:table.cell>
+                            <flux:table.cell align="end">
+                                <flux:button size="xs" icon="arrow-down-tray" wire:click="export({{ $year }})">Export CSV</flux:button>
+                            </flux:table.cell>
+                        </flux:table.row>
+                    @endforeach
+                </flux:table.rows>
+            </flux:table>
+        </flux:card>
     @endif
 </div>

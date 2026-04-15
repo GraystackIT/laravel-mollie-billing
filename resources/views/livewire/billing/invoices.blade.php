@@ -19,7 +19,7 @@ new class extends Component {
     {
         return [
             'invoices' => $this->billable
-                ? $this->billable->billingInvoices()->paginate(20)
+                ? $this->billable->billingInvoices()->latest()->paginate(20)
                 : null,
         ];
     }
@@ -27,42 +27,46 @@ new class extends Component {
 
 ?>
 
-<div class="p-6 space-y-4">
-    <h1 class="text-xl font-semibold">Invoices</h1>
+<div class="space-y-6">
+    <flux:heading size="xl">{{ __('billing::portal.invoices') }}</flux:heading>
 
     @if (! $invoices || $invoices->isEmpty())
-        <p class="text-zinc-500">No invoices yet.</p>
+        <flux:callout variant="secondary" icon="document-text">
+            {{ __('billing::portal.no_invoices') }}
+        </flux:callout>
     @else
-        <table class="w-full text-sm border">
-            <thead class="bg-zinc-50 text-left">
-                <tr>
-                    <th class="p-2">Date</th>
-                    <th class="p-2">Kind</th>
-                    <th class="p-2">Net</th>
-                    <th class="p-2">VAT</th>
-                    <th class="p-2">Gross</th>
-                    <th class="p-2">Status</th>
-                    <th class="p-2">PDF</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach ($invoices as $invoice)
-                    <tr class="border-t">
-                        <td class="p-2">{{ $invoice->created_at->format('Y-m-d') }}</td>
-                        <td class="p-2">{{ $invoice->invoice_kind }}</td>
-                        <td class="p-2">{{ number_format($invoice->amount_net / 100, 2) }}</td>
-                        <td class="p-2">{{ number_format($invoice->amount_vat / 100, 2) }}</td>
-                        <td class="p-2 font-medium">{{ number_format($invoice->amount_gross / 100, 2) }}</td>
-                        <td class="p-2">{{ $invoice->status->value }}</td>
-                        <td class="p-2">
-                            @if ($invoice->mollie_pdf_url)
-                                <a href="{{ $invoice->mollie_pdf_url }}" class="text-indigo-600" target="_blank">download</a>
-                            @endif
-                        </td>
-                    </tr>
-                @endforeach
-            </tbody>
-        </table>
-        {{ $invoices->links() }}
+        <flux:card>
+            <flux:table>
+                <flux:table.columns>
+                    <flux:table.column>{{ __('billing::portal.invoice.date') }}</flux:table.column>
+                    <flux:table.column>{{ __('billing::portal.invoice.kind') }}</flux:table.column>
+                    <flux:table.column align="right">{{ __('billing::portal.invoice.net') }}</flux:table.column>
+                    <flux:table.column align="right">{{ __('billing::portal.invoice.vat') }}</flux:table.column>
+                    <flux:table.column align="right">{{ __('billing::portal.invoice.gross') }}</flux:table.column>
+                    <flux:table.column>{{ __('billing::portal.invoice.status') }}</flux:table.column>
+                    <flux:table.column align="right">{{ __('billing::portal.invoice.pdf') }}</flux:table.column>
+                </flux:table.columns>
+                <flux:table.rows>
+                    @foreach ($invoices as $invoice)
+                        <flux:table.row>
+                            <flux:table.cell>{{ $invoice->created_at->format('Y-m-d') }}</flux:table.cell>
+                            <flux:table.cell>{{ $invoice->invoice_kind }}</flux:table.cell>
+                            <flux:table.cell align="right">{{ number_format($invoice->amount_net / 100, 2) }}</flux:table.cell>
+                            <flux:table.cell align="right">{{ number_format($invoice->amount_vat / 100, 2) }}</flux:table.cell>
+                            <flux:table.cell align="right" class="font-medium">{{ number_format($invoice->amount_gross / 100, 2) }}</flux:table.cell>
+                            <flux:table.cell><flux:badge size="sm" color="zinc">{{ $invoice->status->value }}</flux:badge></flux:table.cell>
+                            <flux:table.cell align="right">
+                                @if ($invoice->mollie_pdf_url)
+                                    <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $invoice->mollie_pdf_url }}" target="_blank">
+                                        {{ __('billing::portal.download') }}
+                                    </flux:button>
+                                @endif
+                            </flux:table.cell>
+                        </flux:table.row>
+                    @endforeach
+                </flux:table.rows>
+            </flux:table>
+            <div class="pt-4">{{ $invoices->links() }}</div>
+        </flux:card>
     @endif
 </div>

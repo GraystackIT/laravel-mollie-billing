@@ -10,9 +10,9 @@ use Livewire\Component;
 new class extends Component {
     public ?Billable $billable = null;
     public string $applyAt = 'immediate';
-    public array $preview = [];
-    public ?string $selectedPlan = null;
     public string $selectedInterval = 'monthly';
+    public ?string $selectedPlan = null;
+    public array $preview = [];
     public ?string $flash = null;
 
     public function mount(): void
@@ -20,12 +20,11 @@ new class extends Component {
         $this->billable = MollieBilling::resolveBillable(request());
     }
 
-    public function previewFor(string $planCode, string $interval, PreviewService $service): void
+    public function previewFor(string $planCode, PreviewService $service): void
     {
         $this->selectedPlan = $planCode;
-        $this->selectedInterval = $interval;
         if ($this->billable) {
-            $this->preview = $service->previewPlanChange($this->billable, $planCode, $interval);
+            $this->preview = $service->previewPlanChange($this->billable, $planCode, $this->selectedInterval);
         }
     }
 
@@ -38,49 +37,78 @@ new class extends Component {
                 'interval' => $this->selectedInterval,
                 'apply_at' => $this->applyAt,
             ]);
-            $this->flash = 'Plan changed.';
+            $this->flash = __('billing::portal.flash.plan_changed');
+            $this->preview = [];
+            $this->selectedPlan = null;
         } catch (\Throwable $e) {
-            $this->flash = 'Error: '.$e->getMessage();
+            $this->flash = $e->getMessage();
         }
     }
 
     public function with(): array
     {
-        return ['plans' => app(SubscriptionCatalogInterface::class)->allPlans()];
+        return [
+            'plans' => app(SubscriptionCatalogInterface::class)->allPlans(),
+            'catalog' => app(SubscriptionCatalogInterface::class),
+        ];
     }
 };
 
 ?>
 
-<div class="p-6 space-y-4">
-    <h1 class="text-xl font-semibold">Change plan</h1>
-    @if ($flash)<div class="p-3 rounded bg-green-50 border border-green-200 text-sm">{{ $flash }}</div>@endif
-    <div class="flex gap-3 text-sm">
-        <label><input type="radio" wire:model.live="applyAt" value="immediate"> Apply immediately</label>
-        <label><input type="radio" wire:model.live="applyAt" value="end_of_period"> Apply at period end</label>
-    </div>
-    <div class="flex gap-3 text-sm">
-        <label><input type="radio" wire:model.live="selectedInterval" value="monthly"> Monthly</label>
-        <label><input type="radio" wire:model.live="selectedInterval" value="yearly"> Yearly</label>
-    </div>
-    <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+<div class="space-y-6">
+    <flux:heading size="xl">{{ __('billing::portal.plan_change') }}</flux:heading>
+
+    @if ($flash)
+        <flux:callout variant="secondary" icon="information-circle">{{ $flash }}</flux:callout>
+    @endif
+
+    <flux:card class="space-y-4">
+        <flux:radio.group wire:model.live="selectedInterval" variant="segmented" label="{{ __('billing::portal.interval') }}">
+            <flux:radio value="monthly" label="{{ __('billing::portal.interval_monthly') }}" />
+            <flux:radio value="yearly" label="{{ __('billing::portal.interval_yearly') }}" />
+        </flux:radio.group>
+
+        <flux:radio.group wire:model.live="applyAt" variant="segmented" label="{{ __('billing::portal.apply_at') }}">
+            <flux:radio value="immediate" label="{{ __('billing::portal.apply_immediate') }}" />
+            <flux:radio value="end_of_period" label="{{ __('billing::portal.apply_period_end') }}" />
+        </flux:radio.group>
+    </flux:card>
+
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         @foreach ($plans as $code)
-            @php $cat = app(SubscriptionCatalogInterface::class); @endphp
-            <div class="p-4 border rounded space-y-1">
-                <div class="font-semibold">{{ $cat->planName($code) ?? $code }}</div>
-                <div class="text-sm text-zinc-600">{{ number_format($cat->basePriceNet($code, $selectedInterval) / 100, 2) }} / {{ $selectedInterval }}</div>
-                <button wire:click="previewFor('{{ $code }}', '{{ $selectedInterval }}')" class="px-3 py-1 border rounded text-sm">Preview</button>
-            </div>
+            <flux:card class="space-y-3">
+                <div>
+                    <flux:heading size="lg">{{ $catalog->planName($code) ?? $code }}</flux:heading>
+                    <flux:text size="sm" class="text-zinc-500">
+                        {{ number_format($catalog->basePriceNet($code, $selectedInterval) / 100, 2) }} / {{ $selectedInterval }}
+                    </flux:text>
+                </div>
+                <flux:button size="sm" variant="primary" wire:click="previewFor('{{ $code }}')">
+                    {{ __('billing::portal.preview') }}
+                </flux:button>
+            </flux:card>
         @endforeach
     </div>
 
     @if ($selectedPlan && !empty($preview))
-        <section class="p-4 border rounded bg-zinc-50 space-y-1 text-sm">
-            <div class="font-semibold">Preview for {{ $selectedPlan }} ({{ $selectedInterval }})</div>
-            <pre class="text-xs overflow-x-auto">{{ json_encode($preview, JSON_PRETTY_PRINT) }}</pre>
-            <button wire:click="commit" class="px-3 py-1.5 rounded bg-indigo-600 text-white">
-                {{ $applyAt === 'end_of_period' ? 'Schedule change' : 'Apply now' }}
-            </button>
-        </section>
+        <flux:card class="space-y-3">
+            <flux:heading size="lg">
+                {{ __('billing::portal.preview_for', ['plan' => $catalog->planName($selectedPlan) ?? $selectedPlan, 'interval' => $selectedInterval]) }}
+            </flux:heading>
+            <dl class="grid grid-cols-2 gap-2 text-sm">
+                @foreach (['netTotal' => __('billing::portal.net'), 'vatTotal' => __('billing::portal.vat'), 'grossTotal' => __('billing::portal.gross'), 'discountTotal' => __('billing::portal.discount')] as $key => $label)
+                    @if (isset($preview[$key]))
+                        <dt class="text-zinc-500">{{ $label }}</dt>
+                        <dd class="font-medium text-right">{{ number_format(($preview[$key] ?? 0) / 100, 2) }}</dd>
+                    @endif
+                @endforeach
+            </dl>
+            <div class="flex justify-end">
+                <flux:button variant="primary" wire:click="commit">
+                    {{ $applyAt === 'end_of_period' ? __('billing::portal.schedule_change') : __('billing::portal.apply_now') }}
+                </flux:button>
+            </div>
+        </flux:card>
     @endif
 </div>

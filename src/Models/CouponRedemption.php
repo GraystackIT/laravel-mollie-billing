@@ -22,7 +22,13 @@ class CouponRedemption extends Model
             'credits_applied' => 'array',
             'grant_applied_snapshot' => 'array',
             'applied_at' => 'datetime',
+            'revoked_at' => 'datetime',
         ];
+    }
+
+    public function isRevoked(): bool
+    {
+        return $this->revoked_at !== null;
     }
 
     public function coupon(): BelongsTo
