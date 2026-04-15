@@ -101,32 +101,7 @@ class CouponService
 
     public function validate(string $code, Billable $billable, array $context): Coupon
     {
-        $code = strtoupper(trim($code));
-        $coupon = Coupon::query()
-            ->whereRaw('UPPER(code) = ?', [$code])
-            ->first();
-
-        if ($coupon === null) {
-            throw new InvalidCouponException($billable, $code, 'not_found');
-        }
-
-        if (! $coupon->active) {
-            throw new InvalidCouponException($billable, $code, 'inactive');
-        }
-
-        $now = now();
-
-        if ($coupon->valid_from !== null && $coupon->valid_from->isAfter($now)) {
-            throw new InvalidCouponException($billable, $code, 'not_yet_valid');
-        }
-
-        if ($coupon->valid_until !== null && $coupon->valid_until->isBefore($now)) {
-            throw new InvalidCouponException($billable, $code, 'expired');
-        }
-
-        if ($coupon->max_redemptions !== null && $coupon->redemptions_count >= $coupon->max_redemptions) {
-            throw new InvalidCouponException($billable, $code, 'globally_exhausted');
-        }
+        $coupon = $this->resolveAndValidateShared($code, $billable, $context);
 
         // Per-billable count
         if ($billable instanceof Model) {
@@ -137,63 +112,12 @@ class CouponService
                 ->count();
 
             if ($perBillable >= (int) ($coupon->max_redemptions_per_billable ?? 1)) {
-                throw new InvalidCouponException($billable, $code, 'per_billable_limit_reached');
-            }
-        }
-
-        $planCode = $context['planCode'] ?? null;
-        $interval = $context['interval'] ?? null;
-        $addonCodes = (array) ($context['addonCodes'] ?? []);
-        $orderAmount = (int) ($context['orderAmountNet'] ?? 0);
-        $existingCouponIds = (array) ($context['existingCouponIds'] ?? []);
-
-        if (
-            ! empty($coupon->applicable_plans)
-            && $planCode !== null
-            && ! in_array($planCode, (array) $coupon->applicable_plans, true)
-        ) {
-            throw new InvalidCouponException($billable, $code, 'plan_not_applicable');
-        }
-
-        if (
-            ! empty($coupon->applicable_intervals)
-            && $interval !== null
-            && ! in_array($interval, (array) $coupon->applicable_intervals, true)
-        ) {
-            throw new InvalidCouponException($billable, $code, 'interval_not_applicable');
-        }
-
-        if (! empty($coupon->applicable_addons) && $addonCodes !== []) {
-            $allowed = (array) $coupon->applicable_addons;
-            foreach ($addonCodes as $addon) {
-                if (! in_array($addon, $allowed, true)) {
-                    throw new InvalidCouponException($billable, $code, 'addon_not_applicable');
-                }
-            }
-        }
-
-        if (
-            $coupon->minimum_order_amount_net !== null
-            && $orderAmount < (int) $coupon->minimum_order_amount_net
-        ) {
-            throw new InvalidCouponException($billable, $code, 'min_order_not_met');
-        }
-
-        // Stackability
-        if ($coupon->type !== CouponType::AccessGrant) {
-            if (! $coupon->stackable && $existingCouponIds !== []) {
-                $others = Coupon::query()->whereIn('id', $existingCouponIds)->get();
-                foreach ($others as $other) {
-                    if (! $other->stackable) {
-                        throw new CouponNotStackableException(
-                            "Coupon {$coupon->code} is not stackable with {$other->code}."
-                        );
-                    }
-                }
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'per_billable_limit_reached');
             }
         }
 
         if ($coupon->type === CouponType::TrialExtension) {
+            $planCode = $context['planCode'] ?? null;
             $planTrialDays = (int) (config('mollie-billing-plans.plans.'.$planCode.'.trial_days') ?? 0);
             $onTrial = $billable->isOnBillingTrial();
 
@@ -248,6 +172,106 @@ class CouponService
                 throw new AccessGrantConflictsWithMollieSubscriptionException(
                     "Coupon {$coupon->code} cannot be applied to a Mollie subscription."
                 );
+            }
+        }
+
+        return $coupon;
+    }
+
+    /**
+     * Validate a coupon code without a Billable (e.g. during checkout for a
+     * not-yet-created account). Applies all billable-independent checks.
+     * TrialExtension is rejected because it requires a billable; AccessGrant
+     * skips source-based checks since no subscription exists yet.
+     */
+    public function validateWithoutBillable(string $code, array $context): Coupon
+    {
+        $coupon = $this->resolveAndValidateShared($code, null, $context);
+
+        if ($coupon->type === CouponType::TrialExtension) {
+            throw new InvalidCouponException(null, (string) $coupon->code, 'requires_billable');
+        }
+
+        return $coupon;
+    }
+
+    private function resolveAndValidateShared(string $code, ?Billable $billable, array $context): Coupon
+    {
+        $code = strtoupper(trim($code));
+        $coupon = Coupon::query()
+            ->whereRaw('UPPER(code) = ?', [$code])
+            ->first();
+
+        if ($coupon === null) {
+            throw new InvalidCouponException($billable, $code, 'not_found');
+        }
+
+        if (! $coupon->active) {
+            throw new InvalidCouponException($billable, $code, 'inactive');
+        }
+
+        $now = now();
+
+        if ($coupon->valid_from !== null && $coupon->valid_from->isAfter($now)) {
+            throw new InvalidCouponException($billable, $code, 'not_yet_valid');
+        }
+
+        if ($coupon->valid_until !== null && $coupon->valid_until->isBefore($now)) {
+            throw new InvalidCouponException($billable, $code, 'expired');
+        }
+
+        if ($coupon->max_redemptions !== null && $coupon->redemptions_count >= $coupon->max_redemptions) {
+            throw new InvalidCouponException($billable, $code, 'globally_exhausted');
+        }
+
+        $planCode = $context['planCode'] ?? null;
+        $interval = $context['interval'] ?? null;
+        $addonCodes = (array) ($context['addonCodes'] ?? []);
+        $orderAmount = (int) ($context['orderAmountNet'] ?? 0);
+        $existingCouponIds = (array) ($context['existingCouponIds'] ?? []);
+
+        if (
+            ! empty($coupon->applicable_plans)
+            && $planCode !== null
+            && ! in_array($planCode, (array) $coupon->applicable_plans, true)
+        ) {
+            throw new InvalidCouponException($billable, $code, 'plan_not_applicable');
+        }
+
+        if (
+            ! empty($coupon->applicable_intervals)
+            && $interval !== null
+            && ! in_array($interval, (array) $coupon->applicable_intervals, true)
+        ) {
+            throw new InvalidCouponException($billable, $code, 'interval_not_applicable');
+        }
+
+        if (! empty($coupon->applicable_addons) && $addonCodes !== []) {
+            $allowed = (array) $coupon->applicable_addons;
+            foreach ($addonCodes as $addon) {
+                if (! in_array($addon, $allowed, true)) {
+                    throw new InvalidCouponException($billable, $code, 'addon_not_applicable');
+                }
+            }
+        }
+
+        if (
+            $coupon->minimum_order_amount_net !== null
+            && $orderAmount < (int) $coupon->minimum_order_amount_net
+        ) {
+            throw new InvalidCouponException($billable, $code, 'min_order_not_met');
+        }
+
+        if ($coupon->type !== CouponType::AccessGrant) {
+            if (! $coupon->stackable && $existingCouponIds !== []) {
+                $others = Coupon::query()->whereIn('id', $existingCouponIds)->get();
+                foreach ($others as $other) {
+                    if (! $other->stackable) {
+                        throw new CouponNotStackableException(
+                            "Coupon {$coupon->code} is not stackable with {$other->code}."
+                        );
+                    }
+                }
             }
         }
 
