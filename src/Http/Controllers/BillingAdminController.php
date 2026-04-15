@@ -19,7 +19,7 @@ class BillingAdminController extends Controller
         }
 
         return view('mollie-billing::layouts.admin', [
-            'component' => 'billing::admin.'.$screen,
+            'livewireComponent' => 'mollie-billing::admin.'.$screen,
         ]);
     }
 }

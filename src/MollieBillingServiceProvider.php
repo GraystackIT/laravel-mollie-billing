@@ -122,7 +122,7 @@ class MollieBillingServiceProvider extends ServiceProvider
     private function doRegisterLivewireComponents(): void
     {
         Livewire::addNamespace(
-            namespace: 'billing',
+            namespace: 'mollie-billing',
             viewPath: __DIR__.'/../resources/views/livewire/billing',
         );
     }

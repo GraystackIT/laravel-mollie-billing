@@ -43,24 +43,32 @@ new class extends Component {
 
 ?>
 
-<div class="space-y-3 text-sm">
+<div class="space-y-3">
     @php $b = $this->billable(); @endphp
-    @if ($flash)<div class="p-2 rounded bg-green-50 border border-green-200">{{ $flash }}</div>@endif
+    @if ($flash)
+        <flux:callout variant="success" icon="check-circle" inline>{{ $flash }}</flux:callout>
+    @endif
     @if ($b)
-        <ul class="space-y-1">
-            <li><strong>Interval:</strong> {{ is_object($b->subscription_interval) ? $b->subscription_interval->value : $b->subscription_interval }}</li>
-            <li><strong>Seats:</strong> {{ $b->getBillingSeatCount() }}</li>
-            <li><strong>Addons:</strong> {{ implode(', ', $b->getActiveBillingAddonCodes() ?: ['—']) }}</li>
-            <li><strong>Trial ends:</strong> {{ $b->trial_ends_at?->format('Y-m-d') ?? '—' }}</li>
-            <li><strong>Subscription ends:</strong> {{ $b->subscription_ends_at?->format('Y-m-d') ?? '—' }}</li>
-        </ul>
-        <div class="flex flex-wrap gap-2 mt-3">
-            <form wire:submit="extendTrial" class="flex gap-1 items-center">
-                <input type="date" wire:model="trialUntil" class="border rounded px-2 py-1">
-                <button class="px-3 py-1 border rounded">Extend trial</button>
+        <dl class="grid grid-cols-2 gap-2 text-sm">
+            <dt class="text-zinc-500 dark:text-zinc-400">Interval</dt>
+            <dd>{{ is_object($b->subscription_interval) ? $b->subscription_interval->value : $b->subscription_interval }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Seats</dt>
+            <dd>{{ $b->getBillingSeatCount() }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Addons</dt>
+            <dd>{{ implode(', ', $b->getActiveBillingAddonCodes() ?: ['—']) }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Trial ends</dt>
+            <dd>{{ $b->trial_ends_at?->format('Y-m-d') ?? '—' }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Subscription ends</dt>
+            <dd>{{ $b->subscription_ends_at?->format('Y-m-d') ?? '—' }}</dd>
+        </dl>
+
+        <div class="flex flex-wrap gap-2 mt-3 items-end">
+            <form wire:submit="extendTrial" class="flex gap-2 items-end">
+                <flux:input type="date" wire:model="trialUntil" label="Trial until" />
+                <flux:button type="submit" size="sm">Extend trial</flux:button>
             </form>
-            <button wire:click="forceCancel" class="px-3 py-1 border rounded text-red-600">Force cancel</button>
-            <button wire:click="resubscribe" class="px-3 py-1 border rounded">Resubscribe</button>
+            <flux:button size="sm" variant="danger" wire:click="forceCancel">Force cancel</flux:button>
+            <flux:button size="sm" wire:click="resubscribe">Resubscribe</flux:button>
         </div>
     @endif
 </div>

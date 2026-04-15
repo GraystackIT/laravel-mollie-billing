@@ -43,43 +43,60 @@ new class extends Component {
 
 ?>
 
-<div class="space-y-3 text-sm">
-    @if ($flash)<div class="p-2 rounded bg-green-50 border border-green-200">{{ $flash }}</div>@endif
+<div class="space-y-3">
+    @if ($flash)
+        <flux:callout variant="success" icon="check-circle" inline>{{ $flash }}</flux:callout>
+    @endif
     @php $b = $this->billable(); @endphp
     @if ($b)
-        <table class="w-full border text-xs">
-            <thead class="bg-zinc-50 text-left"><tr><th class="p-1">Date</th><th class="p-1">Kind</th><th class="p-1">Net</th><th class="p-1">Gross</th><th class="p-1">Status</th><th></th></tr></thead>
-            <tbody>
-                @foreach ($b->billingInvoices()->limit(20)->get() as $inv)
-                    <tr class="border-t">
-                        <td class="p-1">{{ $inv->created_at->format('Y-m-d') }}</td>
-                        <td class="p-1">{{ $inv->invoice_kind }}</td>
-                        <td class="p-1">{{ number_format($inv->amount_net / 100, 2) }}</td>
-                        <td class="p-1">{{ number_format($inv->amount_gross / 100, 2) }}</td>
-                        <td class="p-1">{{ $inv->status->value }}</td>
-                        <td class="p-1"><button wire:click="$set('refundInvoiceId', {{ $inv->id }})" class="text-indigo-600">Refund</button></td>
-                    </tr>
-                @endforeach
-            </tbody>
-        </table>
+        <flux:table>
+            <flux:table.columns>
+                <flux:table.column>Date</flux:table.column>
+                <flux:table.column>Kind</flux:table.column>
+                <flux:table.column align="end">Net</flux:table.column>
+                <flux:table.column align="end">Gross</flux:table.column>
+                <flux:table.column>Status</flux:table.column>
+                <flux:table.column></flux:table.column>
+            </flux:table.columns>
+            <flux:table.rows>
+                @forelse ($b->billingInvoices()->limit(20)->get() as $inv)
+                    <flux:table.row :key="$inv->id">
+                        <flux:table.cell>{{ $inv->created_at->format('Y-m-d') }}</flux:table.cell>
+                        <flux:table.cell>{{ $inv->invoice_kind }}</flux:table.cell>
+                        <flux:table.cell align="end">{{ number_format($inv->amount_net / 100, 2) }}</flux:table.cell>
+                        <flux:table.cell align="end">{{ number_format($inv->amount_gross / 100, 2) }}</flux:table.cell>
+                        <flux:table.cell>{{ $inv->status->value }}</flux:table.cell>
+                        <flux:table.cell>
+                            <flux:button size="xs" variant="ghost" wire:click="$set('refundInvoiceId', {{ $inv->id }})">Refund</flux:button>
+                        </flux:table.cell>
+                    </flux:table.row>
+                @empty
+                    <flux:table.row>
+                        <flux:table.cell colspan="6" align="center">No invoices.</flux:table.cell>
+                    </flux:table.row>
+                @endforelse
+            </flux:table.rows>
+        </flux:table>
         @if ($refundInvoiceId)
-            <form wire:submit="refund" class="p-3 border rounded space-y-2 bg-zinc-50">
-                <h3 class="font-medium">Refund invoice #{{ $refundInvoiceId }}</h3>
-                <input type="number" wire:model="refundAmount" placeholder="Amount in cents (empty = full)" class="border rounded px-2 py-1 w-full">
-                <select wire:model="refundReason" class="border rounded px-2 py-1 w-full">
-                    <option value="service_outage">Service outage</option>
-                    <option value="billing_error">Billing error</option>
-                    <option value="goodwill">Goodwill</option>
-                    <option value="chargeback">Chargeback</option>
-                    <option value="cancellation">Cancellation</option>
-                    <option value="other">Other</option>
-                </select>
-                <input wire:model="refundText" placeholder="Reason text (required for Other)" class="border rounded px-2 py-1 w-full">
-                <div class="flex gap-2">
-                    <button class="px-3 py-1 border rounded bg-red-600 text-white">Issue refund</button>
-                    <button type="button" wire:click="$set('refundInvoiceId', null)" class="px-3 py-1 border rounded">Cancel</button>
-                </div>
-            </form>
+            <flux:card>
+                <form wire:submit="refund" class="space-y-3">
+                    <flux:heading size="md">Refund invoice #{{ $refundInvoiceId }}</flux:heading>
+                    <flux:input type="number" wire:model="refundAmount" label="Amount (cents)" placeholder="Empty = full" />
+                    <flux:select wire:model="refundReason" label="Reason">
+                        <flux:select.option value="service_outage">Service outage</flux:select.option>
+                        <flux:select.option value="billing_error">Billing error</flux:select.option>
+                        <flux:select.option value="goodwill">Goodwill</flux:select.option>
+                        <flux:select.option value="chargeback">Chargeback</flux:select.option>
+                        <flux:select.option value="cancellation">Cancellation</flux:select.option>
+                        <flux:select.option value="other">Other</flux:select.option>
+                    </flux:select>
+                    <flux:input wire:model="refundText" label="Reason text" description="Required for Other" />
+                    <div class="flex gap-2">
+                        <flux:button type="submit" size="sm" variant="danger">Issue refund</flux:button>
+                        <flux:button type="button" size="sm" wire:click="$set('refundInvoiceId', null)">Cancel</flux:button>
+                    </div>
+                </form>
+            </flux:card>
         @endif
     @endif
 </div>

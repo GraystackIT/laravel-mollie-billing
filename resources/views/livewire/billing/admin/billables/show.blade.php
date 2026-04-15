@@ -18,30 +18,45 @@ new class extends Component {
 
 <div class="p-6 space-y-6">
     @if (! $billable)
-        <p class="text-zinc-500">Billable not found.</p>
+        <flux:text class="text-zinc-500">Billable not found.</flux:text>
     @else
         <flux:heading size="xl">{{ $billable->name }}</flux:heading>
-        <div class="text-sm text-zinc-600">{{ $billable->email }}</div>
+        <flux:text class="text-zinc-600 dark:text-zinc-400">{{ $billable->email }}</flux:text>
 
         <div class="grid gap-4 md:grid-cols-3">
-            <div class="p-3 border rounded"><div class="text-xs uppercase text-zinc-500">Plan</div><div class="font-medium">{{ $billable->subscription_plan_code ?? '—' }}</div></div>
-            <div class="p-3 border rounded"><div class="text-xs uppercase text-zinc-500">Status</div><div class="font-medium">{{ is_object($billable->subscription_status) ? $billable->subscription_status->value : $billable->subscription_status }}</div></div>
-            <div class="p-3 border rounded"><div class="text-xs uppercase text-zinc-500">Mandate</div><div class="font-medium">{{ $billable->mollie_mandate_id ? 'yes' : 'no' }}</div></div>
+            <flux:card>
+                <flux:text size="xs" class="uppercase text-zinc-500">Plan</flux:text>
+                <flux:heading size="md" class="mt-1">{{ $billable->subscription_plan_code ?? '—' }}</flux:heading>
+            </flux:card>
+            <flux:card>
+                <flux:text size="xs" class="uppercase text-zinc-500">Status</flux:text>
+                <flux:heading size="md" class="mt-1">{{ is_object($billable->subscription_status) ? $billable->subscription_status->value : $billable->subscription_status }}</flux:heading>
+            </flux:card>
+            <flux:card>
+                <flux:text size="xs" class="uppercase text-zinc-500">Mandate</flux:text>
+                <flux:heading size="md" class="mt-1">{{ $billable->mollie_mandate_id ? 'yes' : 'no' }}</flux:heading>
+            </flux:card>
         </div>
 
-        <section class="p-4 border rounded">
+        <flux:card>
             <flux:heading size="lg">Subscription</flux:heading>
-            <livewire:billing::admin.billables.subscription-tab :billable-id="$billable->getKey()" />
-        </section>
+            <div class="mt-3">
+                <livewire:mollie-billing::admin.billables.subscription-tab :billable-id="$billable->getKey()" />
+            </div>
+        </flux:card>
 
-        <section class="p-4 border rounded">
+        <flux:card>
             <flux:heading size="lg">Invoices</flux:heading>
-            <livewire:billing::admin.billables.invoices-tab :billable-id="$billable->getKey()" />
-        </section>
+            <div class="mt-3">
+                <livewire:mollie-billing::admin.billables.invoices-tab :billable-id="$billable->getKey()" />
+            </div>
+        </flux:card>
 
-        <section class="p-4 border rounded">
+        <flux:card>
             <flux:heading size="lg">Wallet</flux:heading>
-            <livewire:billing::admin.billables.wallet-tab :billable-id="$billable->getKey()" />
-        </section>
+            <div class="mt-3">
+                <livewire:mollie-billing::admin.billables.wallet-tab :billable-id="$billable->getKey()" />
+            </div>
+        </flux:card>
     @endif
 </div>

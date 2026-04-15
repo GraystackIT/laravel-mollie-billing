@@ -8,9 +8,21 @@ new class extends Component {
 
     public string $search = '';
     public string $statusFilter = '';
+    public string $sortBy = 'created_at';
+    public string $sortDirection = 'desc';
 
     public function updatingSearch(): void { $this->resetPage(); }
     public function updatingStatusFilter(): void { $this->resetPage(); }
+
+    public function sort(string $column): void
+    {
+        if ($this->sortBy === $column) {
+            $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+            $this->sortBy = $column;
+            $this->sortDirection = 'asc';
+        }
+    }
 
     public function with(): array
     {
@@ -28,8 +40,12 @@ new class extends Component {
             $query->where('subscription_status', $this->statusFilter);
         }
 
+        if ($query) {
+            $query->orderBy($this->sortBy, $this->sortDirection);
+        }
+
         return [
-            'billables' => $query ? $query->latest()->paginate(20) : null,
+            'billables' => $query ? $query->paginate(20) : null,
         ];
     }
 };
@@ -38,36 +54,53 @@ new class extends Component {
 
 <div class="p-6 space-y-4">
     <flux:heading size="xl">Billables</flux:heading>
-    <div class="flex gap-2">
-        <input type="search" wire:model.live.debounce.300ms="search" placeholder="Name or email" class="px-3 py-1.5 border rounded w-full max-w-md">
-        <select wire:model.live="statusFilter" class="px-3 py-1.5 border rounded">
-            <option value="">All</option>
-            <option value="active">Active</option>
-            <option value="trial">Trial</option>
-            <option value="past_due">Past due</option>
-            <option value="cancelled">Cancelled</option>
-            <option value="expired">Expired</option>
-        </select>
+
+    <div class="flex gap-2 items-center">
+        <flux:input
+            type="search"
+            wire:model.live.debounce.300ms="search"
+            placeholder="Name or email"
+            icon="magnifying-glass"
+            class="flex-1 basis-0"
+        />
+        <flux:select wire:model.live="statusFilter" placeholder="All statuses" class="w-64 shrink-0">
+            <flux:select.option value="">All</flux:select.option>
+            <flux:select.option value="active">Active</flux:select.option>
+            <flux:select.option value="trial">Trial</flux:select.option>
+            <flux:select.option value="past_due">Past due</flux:select.option>
+            <flux:select.option value="cancelled">Cancelled</flux:select.option>
+            <flux:select.option value="expired">Expired</flux:select.option>
+        </flux:select>
     </div>
+
     @if (! $billables)
-        <p class="text-zinc-500">No billable model configured.</p>
+        <flux:text class="text-zinc-500">No billable model configured.</flux:text>
     @else
-        <table class="w-full text-sm border">
-            <thead class="bg-zinc-50 text-left"><tr><th class="p-2">Name</th><th class="p-2">Email</th><th class="p-2">Plan</th><th class="p-2">Status</th><th></th></tr></thead>
-            <tbody>
+        <flux:table :paginate="$billables">
+            <flux:table.columns>
+                <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Name</flux:table.column>
+                <flux:table.column sortable :sorted="$sortBy === 'email'" :direction="$sortDirection" wire:click="sort('email')">Email</flux:table.column>
+                <flux:table.column sortable :sorted="$sortBy === 'subscription_plan_code'" :direction="$sortDirection" wire:click="sort('subscription_plan_code')">Plan</flux:table.column>
+                <flux:table.column sortable :sorted="$sortBy === 'subscription_status'" :direction="$sortDirection" wire:click="sort('subscription_status')">Status</flux:table.column>
+                <flux:table.column></flux:table.column>
+            </flux:table.columns>
+            <flux:table.rows>
                 @forelse ($billables as $b)
-                    <tr class="border-t">
-                        <td class="p-2">{{ $b->name }}</td>
-                        <td class="p-2">{{ $b->email }}</td>
-                        <td class="p-2">{{ $b->subscription_plan_code ?? '—' }}</td>
-                        <td class="p-2">{{ is_object($b->subscription_status) ? $b->subscription_status->value : $b->subscription_status }}</td>
-                        <td class="p-2"><a href="{{ route('billing.admin.billables.show', $b) }}" class="text-indigo-600">View</a></td>
-                    </tr>
+                    <flux:table.row :key="$b->getKey()">
+                        <flux:table.cell variant="strong">{{ $b->name }}</flux:table.cell>
+                        <flux:table.cell>{{ $b->email }}</flux:table.cell>
+                        <flux:table.cell>{{ $b->subscription_plan_code ?? '—' }}</flux:table.cell>
+                        <flux:table.cell>{{ is_object($b->subscription_status) ? $b->subscription_status->value : $b->subscription_status }}</flux:table.cell>
+                        <flux:table.cell>
+                            <flux:button size="xs" variant="ghost" :href="route('billing.admin.billables.show', $b)">View</flux:button>
+                        </flux:table.cell>
+                    </flux:table.row>
                 @empty
-                    <tr><td colspan="5" class="p-4 text-center text-zinc-500">No billables yet.</td></tr>
+                    <flux:table.row>
+                        <flux:table.cell colspan="5" align="center">No billables yet.</flux:table.cell>
+                    </flux:table.row>
                 @endforelse
-            </tbody>
-        </table>
-        <div>{{ $billables->links() }}</div>
+            </flux:table.rows>
+        </flux:table>
     @endif
 </div>

@@ -35,22 +35,26 @@ new class extends Component {
 
 ?>
 
-<div class="p-4 border rounded max-w-md space-y-3">
-    <h2 class="font-semibold">Issue refund</h2>
-    @if ($flash)<div class="p-2 rounded bg-green-50 border border-green-200 text-sm">{{ $flash }}</div>@endif
-    <form wire:submit="submit" class="space-y-2 text-sm">
-        <input type="number" wire:model="invoiceId" placeholder="Invoice id" class="border rounded px-2 py-1 w-full" required>
-        <input type="number" wire:model="amountCents" placeholder="Net amount in cents (empty = full)" class="border rounded px-2 py-1 w-full">
-        <select wire:model="reason" class="border rounded px-2 py-1 w-full">
-            <option value="service_outage">Service outage</option>
-            <option value="billing_error">Billing error</option>
-            <option value="goodwill">Goodwill</option>
-            <option value="chargeback">Chargeback</option>
-            <option value="cancellation">Cancellation</option>
-            <option value="other">Other</option>
-        </select>
-        <input wire:model="reasonText" placeholder="Reason text" class="border rounded px-2 py-1 w-full">
-        <label class="flex items-center gap-2"><input type="checkbox" wire:model="notifyUser"> Notify user</label>
-        <button class="px-3 py-1 border rounded bg-red-600 text-white">Refund</button>
+<flux:card class="max-w-md">
+    <flux:heading size="md">Issue refund</flux:heading>
+
+    @if ($flash)
+        <flux:callout variant="success" icon="check-circle" inline class="mt-3">{{ $flash }}</flux:callout>
+    @endif
+
+    <form wire:submit="submit" class="space-y-3 mt-3">
+        <flux:input type="number" wire:model="invoiceId" label="Invoice id" required />
+        <flux:input type="number" wire:model="amountCents" label="Net amount (cents)" placeholder="Empty = full" />
+        <flux:select wire:model="reason" label="Reason">
+            <flux:select.option value="service_outage">Service outage</flux:select.option>
+            <flux:select.option value="billing_error">Billing error</flux:select.option>
+            <flux:select.option value="goodwill">Goodwill</flux:select.option>
+            <flux:select.option value="chargeback">Chargeback</flux:select.option>
+            <flux:select.option value="cancellation">Cancellation</flux:select.option>
+            <flux:select.option value="other">Other</flux:select.option>
+        </flux:select>
+        <flux:input wire:model="reasonText" label="Reason text" />
+        <flux:checkbox wire:model="notifyUser" label="Notify user" />
+        <flux:button type="submit" size="sm" variant="danger">Refund</flux:button>
     </form>
-</div>
+</flux:card>
