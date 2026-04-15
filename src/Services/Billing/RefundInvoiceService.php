@@ -19,6 +19,8 @@ use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
+use Mollie\Api\Http\Data\Money;
+use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class RefundInvoiceService
@@ -214,15 +216,12 @@ class RefundInvoiceService
 
     protected function callMollieRefund(string $paymentId, int $grossCents): void
     {
-        $client = Mollie::api();
-        /** @phpstan-ignore-next-line — Mollie SDK uses magic property access for the payments endpoint. */
-        $payment = $client->payments->get($paymentId);
-        /** @phpstan-ignore-next-line */
-        $client->payments->refund($payment, [
-            'amount' => [
-                'currency' => config('mollie-billing.currency', 'EUR'),
-                'value' => number_format($grossCents / 100, 2, '.', ''),
-            ],
-        ]);
+        Mollie::send(new CreatePaymentRefundRequest(
+            paymentId: $paymentId,
+            amount: new Money(
+                (string) config('mollie-billing.currency', 'EUR'),
+                number_format($grossCents / 100, 2, '.', ''),
+            ),
+        ));
     }
 }

@@ -18,6 +18,10 @@ use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use Mollie\Api\Http\Data\Money;
+use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
+use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
+use Mollie\Laravel\Facades\Mollie;
 
 class UpdateSubscription
 {
@@ -364,9 +368,7 @@ class UpdateSubscription
 
     protected function mollieCancelSubscription(string $customerId, string $subscriptionId): void
     {
-        $client = \Mollie\Laravel\Facades\Mollie::api();
-        /** @phpstan-ignore-next-line — SDK magic. */
-        $client->subscriptions->cancelForId($customerId, $subscriptionId);
+        Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
     }
 
     /**
@@ -374,10 +376,16 @@ class UpdateSubscription
      */
     protected function mollieCreateSubscription(string $customerId, array $payload): object
     {
-        $client = \Mollie\Laravel\Facades\Mollie::api();
-        /** @phpstan-ignore-next-line — SDK magic. */
-        $customer = $client->customers->get($customerId);
-
-        return $customer->createSubscription($payload);
+        return Mollie::send(new CreateSubscriptionRequest(
+            customerId: $customerId,
+            amount: new Money(
+                (string) $payload['amount']['currency'],
+                (string) $payload['amount']['value'],
+            ),
+            interval: (string) $payload['interval'],
+            description: (string) $payload['description'],
+            metadata: $payload['metadata'] ?? null,
+            webhookUrl: $payload['webhookUrl'] ?? null,
+        ));
     }
 }

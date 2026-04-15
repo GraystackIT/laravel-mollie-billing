@@ -9,7 +9,7 @@
         "illuminate/contracts": "^11.0|^12.0|^13.0",
         "illuminate/database": "^11.0|^12.0|^13.0",
         "illuminate/support": "^11.0|^12.0|^13.0",
-        "mollie/laravel-cashier-mollie": "^2.0",
+        "mollie/laravel-mollie": "^4.1",
         "mpociot/vat-calculator": "^3.0",
         "bavix/laravel-wallet": "^11.5",
         "livewire/livewire": "^4.0",

@@ -12,6 +12,8 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Database\Eloquent\Model;
+use Mollie\Api\Http\Data\Money;
+use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class CreateSubscription
@@ -35,23 +37,19 @@ class CreateSubscription
         $amountGross = (int) $spec['amount_gross'];
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
-        $customer = Mollie::api()->customers->get($billable->getMollieCustomerId());
-
-        $customer->createSubscription([
-            'amount' => [
-                'currency' => $currency,
-                'value' => number_format($amountGross / 100, 2, '.', ''),
-            ],
-            'interval' => $interval === 'yearly' ? '12 months' : '1 month',
-            'description' => "{$planCode} subscription",
-            'webhookUrl' => route('billing.webhook'),
-            'metadata' => [
+        Mollie::send(new CreateSubscriptionRequest(
+            customerId: $billable->getMollieCustomerId(),
+            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            interval: $interval === 'yearly' ? '12 months' : '1 month',
+            description: "{$planCode} subscription",
+            metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),
                 'plan_code' => $planCode,
                 'interval' => $interval,
             ],
-        ]);
+            webhookUrl: route('billing.webhook'),
+        ));
 
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['seat_count'] = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
