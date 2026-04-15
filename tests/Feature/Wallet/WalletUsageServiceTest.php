@@ -18,12 +18,19 @@ beforeEach(function (): void {
         'tier' => 2,
         'trial_days' => 0,
         'included_seats' => 1,
-        'included_usages' => ['emails' => 100],
         'feature_keys' => [],
         'allowed_addons' => [],
         'intervals' => [
-            'monthly' => ['base_price_net' => 1000, 'seat_price_net' => null],
-            'yearly' => ['base_price_net' => 10000, 'seat_price_net' => null],
+            'monthly' => [
+                'base_price_net' => 1000,
+                'seat_price_net' => null,
+                'included_usages' => ['emails' => 100],
+            ],
+            'yearly' => [
+                'base_price_net' => 10000,
+                'seat_price_net' => null,
+                'included_usages' => ['emails' => 1200],
+            ],
         ],
     ]);
 });

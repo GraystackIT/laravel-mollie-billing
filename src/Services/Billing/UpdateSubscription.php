@@ -72,7 +72,8 @@ class UpdateSubscription
             $addonsRemoved = array_values(array_diff($currentAddons, $newAddons));
 
             // Downgrade-guard: usage types where new included is below used.
-            $this->assertDowngradesAllowed($billable, $currentPlan, $newPlan);
+            // Both plan AND interval can change the included quota — pass both pairs.
+            $this->assertDowngradesAllowed($billable, $currentPlan, $currentInterval, $newPlan, $newInterval);
 
             // Coupon
             $couponApplied = null;
@@ -220,8 +221,13 @@ class UpdateSubscription
      * For each wallet, if used > new plan's included quota, either charge the overage
      * (requires mandate) or throw.
      */
-    private function assertDowngradesAllowed(Billable $billable, string $currentPlan, string $newPlan): void
-    {
+    private function assertDowngradesAllowed(
+        Billable $billable,
+        string $currentPlan,
+        string $currentInterval,
+        string $newPlan,
+        string $newInterval,
+    ): void {
         if (! $billable instanceof Model) {
             return;
         }
@@ -231,14 +237,14 @@ class UpdateSubscription
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
             $used = $billable->usedBillingQuota($slug);
-            $newIncluded = $this->catalog->includedUsage($newPlan, $slug);
+            $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
 
             if ($used <= $newIncluded) {
                 continue;
             }
 
             $overageQty = $used - $newIncluded;
-            $overagePrice = (int) ($this->catalog->usageOveragePrice($currentPlan, $slug) ?? 0);
+            $overagePrice = (int) ($this->catalog->usageOveragePrice($currentPlan, $currentInterval, $slug) ?? 0);
 
             if (! $billable->hasMollieMandate()) {
                 throw new DowngradeRequiresMandateException($billable, $newPlan);

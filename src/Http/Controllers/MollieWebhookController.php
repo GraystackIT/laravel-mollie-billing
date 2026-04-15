@@ -292,7 +292,7 @@ class MollieWebhookController extends Controller
         }
 
         // Recharge wallets: add included usage on top of current balance.
-        foreach ((array) config('mollie-billing-plans.plans.'.$planCode.'.included_usages', []) as $type => $units) {
+        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
             try {
                 $this->walletService->credit($billable, (string) $type, (int) $units);
             } catch (\Throwable $e) {

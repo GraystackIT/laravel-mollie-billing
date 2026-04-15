@@ -67,10 +67,7 @@ class CreateSubscription
             'subscription_ends_at' => null,
         ])->save();
 
-        $includedUsages = (array) app('config')->get(
-            'mollie-billing-plans.plans.'.$planCode.'.included_usages',
-            []
-        );
+        $includedUsages = $this->catalog->includedUsages($planCode, $interval);
 
         foreach ($includedUsages as $type => $quantity) {
             if ((int) $quantity > 0) {

@@ -52,12 +52,11 @@ beforeEach(function (): void {
         'tier' => 2,
         'trial_days' => 0,
         'included_seats' => 1,
-        'included_usages' => [],
         'feature_keys' => [],
         'allowed_addons' => [],
         'intervals' => [
-            'monthly' => ['base_price_net' => 2900, 'seat_price_net' => 990],
-            'yearly' => ['base_price_net' => 29000, 'seat_price_net' => 9900],
+            'monthly' => ['base_price_net' => 2900, 'seat_price_net' => 990, 'included_usages' => []],
+            'yearly' => ['base_price_net' => 29000, 'seat_price_net' => 9900, 'included_usages' => []],
         ],
     ]);
 });

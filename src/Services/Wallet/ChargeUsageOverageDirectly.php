@@ -63,6 +63,7 @@ class ChargeUsageOverageDirectly
 
         $items = [];
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
+        $interval = $billable->getBillingSubscriptionInterval();
 
         // Force a fresh fetch — wallets is a MorphMany.
         $wallets = $billable->wallets()->get();
@@ -76,7 +77,7 @@ class ChargeUsageOverageDirectly
 
             $slug = (string) $wallet->slug;
             $quantity = abs($balance);
-            $unitPrice = (int) ($this->catalog->usageOveragePrice($planCode, $slug) ?? 0);
+            $unitPrice = (int) ($this->catalog->usageOveragePrice($planCode, $interval, $slug) ?? 0);
 
             if ($unitPrice <= 0) {
                 continue;

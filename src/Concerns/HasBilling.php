@@ -213,8 +213,11 @@ trait HasBilling
 
     public function includedBillingQuota(string $type): int
     {
-        return app(SubscriptionCatalogInterface::class)
-            ->includedUsage($this->getBillingSubscriptionPlanCode() ?? '', $type);
+        return app(SubscriptionCatalogInterface::class)->includedUsage(
+            $this->getBillingSubscriptionPlanCode() ?? '',
+            $this->getBillingSubscriptionInterval(),
+            $type,
+        );
     }
 
     public function usedBillingQuota(string $type): int
@@ -243,8 +246,11 @@ trait HasBilling
 
     public function billingOveragePrice(string $type): ?int
     {
-        return app(SubscriptionCatalogInterface::class)
-            ->usageOveragePrice($this->getBillingSubscriptionPlanCode() ?? '', $type);
+        return app(SubscriptionCatalogInterface::class)->usageOveragePrice(
+            $this->getBillingSubscriptionPlanCode() ?? '',
+            $this->getBillingSubscriptionInterval(),
+            $type,
+        );
     }
 
     // ── Seats ──
