@@ -1,0 +1,55 @@
+{
+    "name": "graystackit/laravel-mollie-billing",
+    "description": "Mollie billing for Laravel with VAT, metered billing, coupons, access grants and admin panel.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["laravel", "mollie", "billing", "subscriptions", "vat", "oss", "coupons"],
+    "require": {
+        "php": "^8.3",
+        "illuminate/contracts": "^11.0|^12.0|^13.0",
+        "illuminate/database": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "mollie/laravel-cashier-mollie": "^2.0",
+        "mpociot/vat-calculator": "^3.0",
+        "bavix/laravel-wallet": "^11.5",
+        "livewire/livewire": "^4.0",
+        "livewire/flux": "^2.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0|^11.0|^12.0",
+        "pestphp/pest": "^3.0",
+        "pestphp/pest-plugin-laravel": "^3.0",
+        "mockery/mockery": "^1.6"
+    },
+    "suggest": {
+        "livewire/flux-pro": "Unlocks the /billing/admin panel and enables <flux:table>/<flux:modal> in portal views."
+    },
+    "autoload": {
+        "psr-4": {
+            "GraystackIT\\MollieBilling\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "GraystackIT\\MollieBilling\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "GraystackIT\\MollieBilling\\MollieBillingServiceProvider"
+            ],
+            "aliases": {
+                "MollieBilling": "GraystackIT\\MollieBilling\\Facades\\MollieBilling"
+            }
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

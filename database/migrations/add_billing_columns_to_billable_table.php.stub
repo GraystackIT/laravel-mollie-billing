@@ -1,0 +1,73 @@
+<?php
+
+declare(strict_types=1);
+
+use GraystackIT\MollieBilling\Enums\SubscriptionSource;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        $model = config('mollie-billing.billable_model');
+
+        if (! $model) {
+            throw new \RuntimeException(
+                "config('mollie-billing.billable_model') is not set — cannot add billing columns."
+            );
+        }
+
+        $tableName = (new $model)->getTable();
+
+        Schema::table($tableName, function (Blueprint $table) use ($tableName): void {
+            $existing = Schema::getColumnListing($tableName);
+
+            $columns = [
+                'email' => fn () => $table->string('email')->nullable(),
+                'name' => fn () => $table->string('name')->nullable(),
+                'mollie_customer_id' => fn () => $table->string('mollie_customer_id')->nullable()->index(),
+                'mollie_mandate_id' => fn () => $table->string('mollie_mandate_id')->nullable(),
+                'pm_type' => fn () => $table->string('pm_type')->nullable(),
+                'pm_last_four' => fn () => $table->string('pm_last_four', 4)->nullable(),
+                'pm_country' => fn () => $table->string('pm_country', 2)->nullable(),
+                'tax_country_user' => fn () => $table->string('tax_country_user', 2)->nullable(),
+                'tax_country_ip' => fn () => $table->string('tax_country_ip', 2)->nullable(),
+                'tax_country_payment' => fn () => $table->string('tax_country_payment', 2)->nullable(),
+                'tax_country_verified' => fn () => $table->boolean('tax_country_verified')->default(false),
+                'country_mismatch_flagged_at' => fn () => $table->timestamp('country_mismatch_flagged_at')->nullable(),
+                'vat_number' => fn () => $table->string('vat_number')->nullable(),
+                'vat_exempt' => fn () => $table->boolean('vat_exempt')->default(false),
+                'billing_street' => fn () => $table->string('billing_street')->nullable(),
+                'billing_city' => fn () => $table->string('billing_city')->nullable(),
+                'billing_postal_code' => fn () => $table->string('billing_postal_code')->nullable(),
+                'billing_country' => fn () => $table->string('billing_country', 2)->nullable(),
+                'subscription_source' => fn () => $table->string('subscription_source')->default(SubscriptionSource::None->value),
+                'subscription_plan_code' => fn () => $table->string('subscription_plan_code')->nullable(),
+                'subscription_interval' => fn () => $table->string('subscription_interval')->nullable(),
+                'subscription_period_starts_at' => fn () => $table->timestamp('subscription_period_starts_at')->nullable(),
+                'trial_ends_at' => fn () => $table->timestamp('trial_ends_at')->nullable(),
+                'subscription_ends_at' => fn () => $table->timestamp('subscription_ends_at')->nullable(),
+                'active_addon_codes' => fn () => $table->json('active_addon_codes')->nullable(),
+                'subscription_meta' => fn () => $table->json('subscription_meta')->nullable(),
+                'subscription_status' => fn () => $table->string('subscription_status')->default(SubscriptionStatus::Active->value),
+                'scheduled_change_at' => fn () => $table->timestamp('scheduled_change_at')->nullable()->index(),
+                'allows_billing_overage' => fn () => $table->boolean('allows_billing_overage')->nullable(),
+            ];
+
+            foreach ($columns as $column => $definition) {
+                if (! in_array($column, $existing, true)) {
+                    $definition();
+                }
+            }
+        });
+    }
+
+    public function down(): void
+    {
+        // Intentionally a no-op: this migration adds columns to the app's billable table.
+        // Rolling back would be destructive to app data. Operators drop columns manually if needed.
+    }
+};
