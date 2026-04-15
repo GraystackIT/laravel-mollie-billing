@@ -68,6 +68,8 @@ Edit `config/mollie-billing.php` and set the billable model:
 'billable_key_type' => 'uuid', // 'uuid' | 'ulid' | 'int'
 ```
 
+> **Important:** `billable_key_type` must be set **before running migrations for the first time**. It controls the column type of every polymorphic foreign key that references your billable — including `bavix/laravel-wallet`'s `wallets.holder_id`, `transactions.payable_id`, and `transfers.{from,to}_id`, which we rewrite from the default `bigint` to `uuid`/`ulid`. Changing it later requires manually altering those columns.
+
 Then run migrations:
 
 ```bash
@@ -210,7 +212,7 @@ class Organization extends Model implements Billable
 - `recordBillingUsage($type, $quantity)` and `creditBillingUsage(...)`
 - `hasPlanFeature('reports.export')`
 - `cancelBillingSubscription()`, `changeBillingPlan(...)`, `enableBillingAddon(...)`
-- `billingPortalUrl()`, `billingCheckoutUrl()`, `billingPlanChangeUrl()`
+- `billingPortalUrl()`, `billingPlanChangeUrl()`
 - `latestBillingInvoice()` and `billingInvoices()` morph relation
 
 ## Coupon types

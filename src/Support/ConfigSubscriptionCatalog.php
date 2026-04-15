@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Support;
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use Illuminate\Support\Str;
 
 class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
 {
@@ -134,6 +135,57 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         }
 
         return round(($monthlyAnnualized - $yearly) / $monthlyAnnualized * 100, 2);
+    }
+
+    public function featureName(string $featureKey): string
+    {
+        $transKey = 'billing::features.'.$featureKey.'.name';
+        if (trans()->has($transKey)) {
+            return (string) trans($transKey);
+        }
+
+        $configName = $this->feature($featureKey)['name'] ?? null;
+        if (is_string($configName) && $configName !== '') {
+            return $configName;
+        }
+
+        return Str::headline($featureKey);
+    }
+
+    public function featureDescription(string $featureKey): ?string
+    {
+        $transKey = 'billing::features.'.$featureKey.'.description';
+        if (trans()->has($transKey)) {
+            $value = (string) trans($transKey);
+
+            return $value === '' ? null : $value;
+        }
+
+        $configDescription = $this->feature($featureKey)['description'] ?? null;
+
+        return is_string($configDescription) && $configDescription !== '' ? $configDescription : null;
+    }
+
+    public function allFeatures(): array
+    {
+        $keys = array_keys((array) config($this->configKey.'.features', []));
+
+        $result = [];
+        foreach ($keys as $key) {
+            $key = (string) $key;
+            $result[$key] = [
+                'name' => $this->featureName($key),
+                'description' => $this->featureDescription($key),
+            ];
+        }
+
+        return $result;
+    }
+
+    /** @return array<string, mixed> */
+    private function feature(string $key): array
+    {
+        return (array) config($this->configKey.'.features.'.$key, []);
     }
 
     /** @return array<string, mixed> */

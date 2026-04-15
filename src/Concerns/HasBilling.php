@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Concerns;
 
 use Bavix\Wallet\Traits\HasWallets;
-use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -96,17 +96,17 @@ trait HasBilling
         return $this->subscription_meta ?? [];
     }
 
-    public function getBillingPeriodStartsAt(): ?Carbon
+    public function getBillingPeriodStartsAt(): ?CarbonInterface
     {
         return $this->subscription_period_starts_at;
     }
 
-    public function getBillingTrialEndsAt(): ?Carbon
+    public function getBillingTrialEndsAt(): ?CarbonInterface
     {
         return $this->trial_ends_at;
     }
 
-    public function getBillingSubscriptionEndsAt(): ?Carbon
+    public function getBillingSubscriptionEndsAt(): ?CarbonInterface
     {
         return $this->subscription_ends_at;
     }
@@ -296,7 +296,7 @@ trait HasBilling
 
     // ── Trial management (admin actions) ──
 
-    public function extendBillingTrialUntil(Carbon $until): void
+    public function extendBillingTrialUntil(CarbonInterface $until): void
     {
         $previous = $this->trial_ends_at;
         $newEnd = $previous && $previous->isAfter($until) ? $previous : $until;
@@ -322,7 +322,7 @@ trait HasBilling
         return $this->billingInvoices()->first();
     }
 
-    public function nextBillingDate(): ?Carbon
+    public function nextBillingDate(): ?CarbonInterface
     {
         if ($this->subscription_period_starts_at === null || $this->subscription_interval === null) {
             return null;
@@ -359,11 +359,6 @@ trait HasBilling
     public function billingPortalUrl(): string
     {
         return route('billing.index', $this->urlRouteParameters());
-    }
-
-    public function billingCheckoutUrl(): string
-    {
-        return route('billing.checkout', $this->urlRouteParameters());
     }
 
     public function billingPlanChangeUrl(): string

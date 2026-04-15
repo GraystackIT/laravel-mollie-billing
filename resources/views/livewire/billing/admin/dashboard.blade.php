@@ -47,50 +47,75 @@ new class extends Component {
 
 ?>
 
-<div class="space-y-6">
-    <flux:heading size="xl">Billing Admin</flux:heading>
+<div class="space-y-8">
+    <x-mollie-billing::admin.page-header
+        title="Billing Admin"
+        subtitle="Revenue and operational overview at a glance."
+    />
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <flux:card>
-            <flux:text size="xs" class="uppercase text-zinc-500">MRR</flux:text>
-            <flux:heading size="lg" class="mt-1">{{ number_format($kpis['mrr'] / 100, 2) }}</flux:heading>
-        </flux:card>
-        <flux:card>
-            <flux:text size="xs" class="uppercase text-zinc-500">ARR</flux:text>
-            <flux:heading size="lg" class="mt-1">{{ number_format($kpis['arr'] / 100, 2) }}</flux:heading>
-        </flux:card>
-        <flux:card>
-            <flux:text size="xs" class="uppercase text-zinc-500">Churn (30d)</flux:text>
-            <flux:heading size="lg" class="mt-1">{{ number_format($kpis['churn'] * 100, 1) }}%</flux:heading>
-        </flux:card>
-        <flux:card>
-            <flux:text size="xs" class="uppercase text-zinc-500">Trial → Paid</flux:text>
-            <flux:heading size="lg" class="mt-1">{{ number_format($kpis['trial_conversion'] * 100, 1) }}%</flux:heading>
-        </flux:card>
-    </div>
+    <section class="space-y-3">
+        <flux:heading size="sm" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Revenue</flux:heading>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <x-mollie-billing::admin.stat
+                label="MRR"
+                :value="'€'.number_format($kpis['mrr'] / 100, 2)"
+                icon="arrow-trending-up"
+                hint="Monthly recurring revenue"
+            />
+            <x-mollie-billing::admin.stat
+                label="ARR"
+                :value="'€'.number_format($kpis['arr'] / 100, 2)"
+                icon="chart-bar"
+                hint="Annualised recurring revenue"
+            />
+            <x-mollie-billing::admin.stat
+                label="Churn (30d)"
+                :value="number_format($kpis['churn'] * 100, 1).'%'"
+                icon="arrow-trending-down"
+                :tone="$kpis['churn'] > 0.05 ? 'danger' : null"
+            />
+            <x-mollie-billing::admin.stat
+                label="Trial → Paid"
+                :value="number_format($kpis['trial_conversion'] * 100, 1).'%'"
+                icon="check-badge"
+                hint="Last 90 days"
+            />
+        </div>
+    </section>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <a href="{{ route('billing.admin.past_due.index') }}" class="block">
-            <flux:card class="hover:shadow-md transition">
-                <flux:text size="xs" class="uppercase text-zinc-500">Past due</flux:text>
-                <flux:heading size="lg" class="mt-1">{{ $pastDueCount }}</flux:heading>
-            </flux:card>
-        </a>
-        <a href="{{ route('billing.admin.mismatches.index') }}" class="block">
-            <flux:card class="hover:shadow-md transition">
-                <flux:text size="xs" class="uppercase text-zinc-500">Country mismatches</flux:text>
-                <flux:heading size="lg" class="mt-1">{{ $openMismatches }}</flux:heading>
-            </flux:card>
-        </a>
-        <a href="{{ route('billing.admin.scheduled_changes.index') }}" class="block">
-            <flux:card class="hover:shadow-md transition">
-                <flux:text size="xs" class="uppercase text-zinc-500">Scheduled changes</flux:text>
-                <flux:heading size="lg" class="mt-1">{{ $scheduledChanges }}</flux:heading>
-            </flux:card>
-        </a>
-        <flux:card>
-            <flux:text size="xs" class="uppercase text-zinc-500">Trials ending ≤ 3d</flux:text>
-            <flux:heading size="lg" class="mt-1">{{ $trialsEndingSoon }}</flux:heading>
-        </flux:card>
-    </div>
+    <section class="space-y-3">
+        <flux:heading size="sm" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Operations</flux:heading>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <x-mollie-billing::admin.stat
+                label="Past due"
+                :value="$pastDueCount"
+                :href="route('billing.admin.past_due.index')"
+                icon="exclamation-triangle"
+                :tone="$pastDueCount > 0 ? 'danger' : null"
+                hint="Failed recurring payments"
+            />
+            <x-mollie-billing::admin.stat
+                label="Country mismatches"
+                :value="$openMismatches"
+                :href="route('billing.admin.mismatches.index')"
+                icon="globe-europe-africa"
+                :tone="$openMismatches > 0 ? 'warning' : null"
+                hint="Pending manual review"
+            />
+            <x-mollie-billing::admin.stat
+                label="Scheduled changes"
+                :value="$scheduledChanges"
+                :href="route('billing.admin.scheduled_changes.index')"
+                icon="calendar"
+                hint="Within the next 7 days"
+            />
+            <x-mollie-billing::admin.stat
+                label="Trials ending"
+                :value="$trialsEndingSoon"
+                icon="clock"
+                :tone="$trialsEndingSoon > 0 ? 'warning' : null"
+                hint="Within the next 3 days"
+            />
+        </div>
+    </section>
 </div>

@@ -13,16 +13,17 @@ new class extends Component {
     /** @var array<int, string> */
     public array $addonCodes = [];
     public int $durationDays = 30;
-    public ?string $flash = null;
+    public ?string $error = null;
 
-    public function mount(mixed $billable = null, SubscriptionCatalogInterface $catalog): void
+    public function mount(SubscriptionCatalogInterface $catalog, array $routeParameters = []): void
     {
-        $this->billableId = $billable;
+        $this->billableId = $routeParameters['billable'] ?? null;
         $this->planCode = $catalog->allPlans()[0] ?? '';
     }
 
     public function with(SubscriptionCatalogInterface $catalog): array
     {
+        $class = config('mollie-billing.billable_model');
         return [
             'planOptions' => collect($catalog->allPlans())
                 ->mapWithKeys(fn (string $code) => [$code => $catalog->planName($code) ?: $code])
@@ -30,14 +31,16 @@ new class extends Component {
             'addonOptions' => collect($catalog->allAddons())
                 ->mapWithKeys(fn (string $code) => [$code => $catalog->addonName($code) ?: $code])
                 ->all(),
+            'billable' => $class && $this->billableId ? (new $class)->resolveRouteBinding($this->billableId) : null,
         ];
     }
 
-    public function issue(CouponService $service): void
+    public function issue(CouponService $service)
     {
+        $this->error = null;
         $class = config('mollie-billing.billable_model');
-        $b = $class?->find($this->billableId);
-        if (! $b) { $this->flash = 'Billable not found.'; return; }
+        $b = $class ? (new $class)->resolveRouteBinding($this->billableId) : null;
+        if (! $b) { $this->error = 'Billable not found.'; return; }
 
         $code = 'GRANT-'.Str::upper(Str::random(8));
         try {
@@ -45,39 +48,44 @@ new class extends Component {
                 ? $service->accessGrantCoupon($code, $this->planCode, $this->interval, $this->addonCodes, $this->durationDays)
                 : $service->addonGrantCoupon($code, $this->addonCodes);
             $service->redeem($coupon, $b, []);
-            $this->flash = "Grant {$code} issued and redeemed.";
+            session()->flash('status', "Grant {$code} issued and redeemed for {$b->name}.");
+            return $this->redirectRoute('billing.admin.billables.show', ['billable' => $b], navigate: true);
         } catch (\Throwable $e) {
-            $this->flash = 'Error: '.$e->getMessage();
+            $this->error = $e->getMessage();
         }
     }
 };
 
 ?>
 
-<div class="p-6 space-y-6">
-    <flux:heading size="xl">Issue access grant</flux:heading>
+<div class="space-y-6">
+    <x-mollie-billing::admin.page-header
+        title="Issue access grant"
+        :subtitle="$billable ? 'For '.$billable->name.' ('.$billable->email.')' : 'Grants plan and/or addon access without charge.'"
+        :back="$billable ? route('billing.admin.billables.show', $billable) : route('billing.admin.billables.index')"
+        :backLabel="$billable ? $billable->name : 'Billables'"
+    />
 
-    @if ($flash)
-        <flux:callout variant="success" icon="check-circle" inline>{{ $flash }}</flux:callout>
-    @endif
+    <x-mollie-billing::admin.flash :error="$error" />
 
     <form wire:submit="issue" class="space-y-6">
-        <flux:card class="space-y-4">
-            <div>
-                <flux:heading size="md">Grant configuration</flux:heading>
-                <flux:text class="text-zinc-500">Choose the mode and (for full grants) plan and duration.</flux:text>
-            </div>
-
-            <flux:separator />
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <flux:select wire:model.live="mode" label="Mode">
+        <x-mollie-billing::admin.section title="Grant configuration" description="Pick the mode and, for full grants, plan and duration.">
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <flux:select wire:model.live="mode" label="Mode" description="Full grants include a plan; addon grants only toggle addons.">
                     <flux:select.option value="full">Full — plan + addons + duration</flux:select.option>
                     <flux:select.option value="addon">Addon-only</flux:select.option>
                 </flux:select>
 
                 @if ($mode === 'full')
-                    <flux:input type="number" wire:model="durationDays" label="Duration (days)" />
+                    <flux:input
+                        type="number"
+                        wire:model="durationDays"
+                        label="Duration"
+                        description="Length of the grant."
+                        placeholder="30"
+                        suffix="days"
+                        min="1"
+                    />
 
                     <flux:select wire:model="planCode" label="Plan" required>
                         @foreach ($planOptions as $code => $name)
@@ -90,16 +98,9 @@ new class extends Component {
                     </flux:select>
                 @endif
             </div>
-        </flux:card>
+        </x-mollie-billing::admin.section>
 
-        <flux:card class="space-y-4">
-            <div>
-                <flux:heading size="md">Addons</flux:heading>
-                <flux:text class="text-zinc-500">Optional — granted alongside the plan.</flux:text>
-            </div>
-
-            <flux:separator />
-
+        <x-mollie-billing::admin.section title="Addons" description="Optional — granted alongside the plan.">
             <flux:select
                 wire:model="addonCodes"
                 label="Addons"
@@ -111,10 +112,11 @@ new class extends Component {
                     <flux:select.option value="{{ $code }}">{{ $name }}</flux:select.option>
                 @endforeach
             </flux:select>
-        </flux:card>
+        </x-mollie-billing::admin.section>
 
-        <div class="flex gap-2 justify-end">
-            <flux:button type="submit" variant="primary">Issue grant</flux:button>
+        <div class="flex justify-end gap-2">
+            <flux:button type="button" variant="ghost" :href="$billable ? route('billing.admin.billables.show', $billable) : route('billing.admin.billables.index')">Cancel</flux:button>
+            <flux:button type="submit" variant="primary" icon="gift">Issue grant</flux:button>
         </div>
     </form>
 </div>

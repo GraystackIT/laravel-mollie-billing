@@ -28,7 +28,6 @@ Route::get('promotion/{token}', PromotionController::class)
 
 Route::prefix('billing')->name('billing.')->group(function (): void {
     Route::get('/', [BillingPortalController::class, 'index'])->name('index');
-    Route::get('checkout', [BillingPortalController::class, 'checkout'])->name('checkout');
     Route::get('plan', [BillingPortalController::class, 'plan'])->name('plan');
     Route::get('invoices', [BillingPortalController::class, 'invoices'])->name('invoices');
     Route::get('return', [BillingPortalController::class, 'return'])->name('return');

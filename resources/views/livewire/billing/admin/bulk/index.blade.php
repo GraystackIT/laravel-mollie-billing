@@ -11,6 +11,7 @@ new class extends Component {
     public string $creditType = '';
     public int $trialDays = 7;
     public ?string $flash = null;
+    public ?string $error = null;
 
     public function mount(SubscriptionCatalogInterface $catalog): void
     {
@@ -30,8 +31,11 @@ new class extends Component {
 
     public function creditWallets(RefundInvoiceService $service): void
     {
+        $this->flash = $this->error = null;
         $class = config('mollie-billing.billable_model');
-        if (! $class || $this->creditUnits <= 0 || $this->creditType === '') return;
+        if (! $class) { $this->error = 'No billable model configured.'; return; }
+        if ($this->creditUnits <= 0) { $this->error = 'Units must be greater than zero.'; return; }
+        if ($this->creditType === '') { $this->error = 'Select a usage type.'; return; }
 
         $count = 0;
         $class::query()->where('subscription_plan_code', $this->planFilter)->each(function ($b) use ($service, &$count): void {
@@ -43,8 +47,9 @@ new class extends Component {
 
     public function extendTrials(): void
     {
+        $this->flash = $this->error = null;
         $class = config('mollie-billing.billable_model');
-        if (! $class) return;
+        if (! $class) { $this->error = 'No billable model configured.'; return; }
 
         $count = 0;
         $class::query()->where('subscription_plan_code', $this->planFilter)->each(function ($b) use (&$count): void {
@@ -57,62 +62,57 @@ new class extends Component {
 
 ?>
 
-<div class="p-6 space-y-6">
-    <flux:heading size="xl">Bulk actions</flux:heading>
+<div class="space-y-6">
+    <x-mollie-billing::admin.page-header
+        title="Bulk actions"
+        subtitle="Operate on all billables on a specific plan at once. Use with care."
+    />
 
-    @if ($flash)
-        <flux:callout variant="success" icon="check-circle" inline>{{ $flash }}</flux:callout>
-    @endif
+    <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
 
-    <flux:card class="space-y-4">
-        <div>
-            <flux:heading size="md">Target</flux:heading>
-            <flux:text class="text-zinc-500">Actions below apply to all billables on this plan.</flux:text>
-        </div>
-
-        <flux:separator />
-
-        <flux:select wire:model="planFilter" label="Plan">
+    <x-mollie-billing::admin.section title="Target" description="Actions below apply to every billable on the selected plan.">
+        <flux:select wire:model.live="planFilter" label="Plan">
             @foreach ($planOptions as $code => $name)
                 <flux:select.option value="{{ $code }}">{{ $name }}</flux:select.option>
             @endforeach
         </flux:select>
-    </flux:card>
+    </x-mollie-billing::admin.section>
 
-    <flux:card class="space-y-4">
-        <div>
-            <flux:heading size="md">Mass wallet credit</flux:heading>
-            <flux:text class="text-zinc-500">Credits every targeted billable's wallet.</flux:text>
-        </div>
-
-        <flux:separator />
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <flux:select wire:model="creditType" label="Usage type">
+    <x-mollie-billing::admin.section title="Mass wallet credit" description="Credits every targeted billable's wallet by the same amount.">
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <flux:select wire:model="creditType" label="Usage type" description="Which wallet to credit.">
                 @foreach ($usageTypes as $type)
                     <flux:select.option value="{{ $type }}">{{ $type }}</flux:select.option>
                 @endforeach
             </flux:select>
-            <flux:input type="number" wire:model="creditUnits" label="Units" />
+            <flux:input
+                type="number"
+                wire:model="creditUnits"
+                label="Units per billable"
+                description="Whole units to add. Example: 100"
+                placeholder="100"
+                min="1"
+            />
         </div>
 
         <div class="flex justify-end">
-            <flux:button wire:click="creditWallets" size="sm" variant="primary">Credit all</flux:button>
+            <flux:button wire:click="creditWallets" size="sm" variant="primary" icon="plus" wire:confirm="Credit all billables on this plan?">Credit all</flux:button>
         </div>
-    </flux:card>
+    </x-mollie-billing::admin.section>
 
-    <flux:card class="space-y-4">
-        <div>
-            <flux:heading size="md">Mass trial extension</flux:heading>
-            <flux:text class="text-zinc-500">Extends every targeted billable's trial from today.</flux:text>
-        </div>
-
-        <flux:separator />
-
-        <flux:input type="number" wire:model="trialDays" label="Days" />
+    <x-mollie-billing::admin.section title="Mass trial extension" description="Extends every targeted billable's trial by the same number of days from today.">
+        <flux:input
+            type="number"
+            wire:model="trialDays"
+            label="Days"
+            description="Whole days added from today. Example: 7"
+            placeholder="7"
+            suffix="days"
+            min="1"
+        />
 
         <div class="flex justify-end">
-            <flux:button wire:click="extendTrials" size="sm" variant="primary">Extend all</flux:button>
+            <flux:button wire:click="extendTrials" size="sm" variant="primary" icon="clock" wire:confirm="Extend trials for all billables on this plan?">Extend all</flux:button>
         </div>
-    </flux:card>
+    </x-mollie-billing::admin.section>
 </div>

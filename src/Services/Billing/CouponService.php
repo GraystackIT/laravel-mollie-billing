@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\CouponRedeemed;
+use GraystackIT\MollieBilling\Events\GrantRevoked;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Events\SubscriptionExtended;
 use GraystackIT\MollieBilling\Exceptions\AccessGrantConflictsWithMollieSubscriptionException;
@@ -483,6 +484,145 @@ class CouponService
             'grant_addon_codes' => $addonCodes,
             'active' => true,
         ]);
+    }
+
+    /**
+     * Revoke a previously applied access grant. Reverses the state changes
+     * recorded in the redemption's grant_applied_snapshot:
+     *
+     *  - addon-only grant: remove the granted addon codes from the billable
+     *    (only those that are not also granted by another still-active grant).
+     *  - full grant on a local subscription: subtract grant_days_added from
+     *    subscription_ends_at; if the grant was the only thing keeping the
+     *    subscription alive (ends_at <= now after subtraction), reset the
+     *    subscription source to None.
+     *
+     * A revoked redemption keeps its row for audit; redemptions_count on the
+     * coupon is decremented so the slot becomes available again.
+     */
+    public function revokeGrant(CouponRedemption $redemption, ?string $reason = null): void
+    {
+        if ($redemption->isRevoked()) {
+            return;
+        }
+
+        $coupon = $redemption->coupon;
+        if ($coupon === null || $coupon->type !== CouponType::AccessGrant) {
+            throw new \InvalidArgumentException('Only access grants can be revoked.');
+        }
+
+        $billable = $redemption->billable;
+        if (! $billable instanceof Billable) {
+            throw new \RuntimeException('Redemption has no resolvable billable.');
+        }
+
+        DB::transaction(function () use ($redemption, $coupon, $billable, $reason): void {
+            $snapshot = (array) ($redemption->grant_applied_snapshot ?? []);
+            $mode = $snapshot['mode'] ?? null;
+
+            if ($mode === 'addon_only') {
+                $this->revokeAddonOnlyGrant($billable, $redemption);
+            } elseif ($mode === 'full') {
+                $this->revokeFullGrant($billable, $redemption);
+            }
+
+            $redemption->forceFill([
+                'revoked_at' => now(),
+                'revoked_reason' => $reason,
+            ])->save();
+
+            if ((int) $coupon->redemptions_count > 0) {
+                $coupon->decrement('redemptions_count');
+            }
+
+            event(new GrantRevoked($billable, $coupon, $redemption, $reason));
+        });
+    }
+
+    private function revokeAddonOnlyGrant(Billable $billable, CouponRedemption $redemption): void
+    {
+        $snapshot = (array) ($redemption->grant_applied_snapshot ?? []);
+        $granted = (array) ($snapshot['addon_codes'] ?? []);
+        if ($granted === []) {
+            return;
+        }
+
+        $otherActiveAddons = $this->addonsFromOtherActiveGrants($billable, $redemption->id);
+        $current = $billable->getActiveBillingAddonCodes();
+        $remaining = array_values(array_filter(
+            $current,
+            fn (string $code) => ! in_array($code, $granted, true) || in_array($code, $otherActiveAddons, true),
+        ));
+
+        if ($billable instanceof Model) {
+            $billable->forceFill(['active_addon_codes' => $remaining])->save();
+        }
+    }
+
+    private function revokeFullGrant(Billable $billable, CouponRedemption $redemption): void
+    {
+        $days = (int) ($redemption->grant_days_added ?? 0);
+        $currentEnd = $billable->getBillingSubscriptionEndsAt();
+        $now = now();
+        $newEnd = $currentEnd?->copy()->subDays($days);
+
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        if ($newEnd === null || $newEnd->lessThanOrEqualTo($now)) {
+            $billable->forceFill([
+                'subscription_source' => SubscriptionSource::None,
+                'subscription_plan_code' => null,
+                'subscription_interval' => null,
+                'subscription_ends_at' => null,
+                'subscription_period_starts_at' => null,
+                'subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Expired,
+            ])->save();
+        } else {
+            $billable->forceFill([
+                'subscription_ends_at' => $newEnd,
+            ])->save();
+        }
+
+        $snapshot = (array) ($redemption->grant_applied_snapshot ?? []);
+        $grantedAddons = (array) ($snapshot['addon_codes'] ?? []);
+        if ($grantedAddons !== []) {
+            $otherActiveAddons = $this->addonsFromOtherActiveGrants($billable, $redemption->id);
+            $current = $billable->getActiveBillingAddonCodes();
+            $remaining = array_values(array_filter(
+                $current,
+                fn (string $code) => ! in_array($code, $grantedAddons, true) || in_array($code, $otherActiveAddons, true),
+            ));
+            $billable->forceFill(['active_addon_codes' => $remaining])->save();
+        }
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function addonsFromOtherActiveGrants(Billable $billable, int $excludeRedemptionId): array
+    {
+        if (! $billable instanceof Model) {
+            return [];
+        }
+
+        $rows = CouponRedemption::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->whereNull('revoked_at')
+            ->where('id', '!=', $excludeRedemptionId)
+            ->get(['grant_applied_snapshot']);
+
+        $addons = [];
+        foreach ($rows as $row) {
+            $snap = (array) ($row->grant_applied_snapshot ?? []);
+            foreach ((array) ($snap['addon_codes'] ?? []) as $code) {
+                $addons[] = (string) $code;
+            }
+        }
+
+        return array_values(array_unique($addons));
     }
 
     private function validateRequiredFieldsForType(CouponType $type, array $attributes): void

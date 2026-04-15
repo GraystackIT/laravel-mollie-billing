@@ -50,6 +50,21 @@ return [
         ],
     ],
 
+    'features' => [
+        'dashboard' => [
+            'name' => 'Dashboard',
+            'description' => null,
+        ],
+        'advanced-reports' => [
+            'name' => 'Advanced Reports',
+            'description' => null,
+        ],
+        'softdrinks' => [
+            'name' => 'Softdrinks',
+            'description' => null,
+        ],
+    ],
+
     'addons' => [
         'softdrinks' => [
             'name' => 'Softdrinks',

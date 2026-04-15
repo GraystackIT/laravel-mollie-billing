@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Contracts;
 
-use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
@@ -26,9 +26,9 @@ interface Billable
     public function getBillingSubscriptionStatus(): SubscriptionStatus;
     public function getBillingSubscriptionMeta(): array;
     public function getActiveBillingAddonCodes(): array;
-    public function getBillingPeriodStartsAt(): ?Carbon;
-    public function getBillingTrialEndsAt(): ?Carbon;
-    public function getBillingSubscriptionEndsAt(): ?Carbon;
+    public function getBillingPeriodStartsAt(): ?CarbonInterface;
+    public function getBillingTrialEndsAt(): ?CarbonInterface;
+    public function getBillingSubscriptionEndsAt(): ?CarbonInterface;
 
     // Mollie identifiers
     public function getMollieMandateId(): ?string;
@@ -71,12 +71,12 @@ interface Billable
     public function allowsBillingOverage(): bool;
 
     // Trial management (admin actions)
-    public function extendBillingTrialUntil(Carbon $until): void;
+    public function extendBillingTrialUntil(CarbonInterface $until): void;
 
     // Invoices / history
     public function billingInvoices(): MorphMany;
     public function latestBillingInvoice(): ?BillingInvoice;
-    public function nextBillingDate(): ?Carbon;
+    public function nextBillingDate(): ?CarbonInterface;
     public function totalBillingSpentGross(): int;
     public function redeemedBillingCoupons(): MorphMany;
 
@@ -85,7 +85,6 @@ interface Billable
 
     // URLs (convenience for UI links)
     public function billingPortalUrl(): string;
-    public function billingCheckoutUrl(): string;
     public function billingPlanChangeUrl(): string;
 
     // Subscription management (actions)
