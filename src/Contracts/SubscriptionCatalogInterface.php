@@ -30,7 +30,15 @@ interface SubscriptionCatalogInterface
     /** @return array<int, string> */
     public function allPlans(): array;
 
+    /** @return array<int, string> */
+    public function allAddons(): array;
+
+    /** @return array<int, string> */
+    public function allUsageTypes(): array;
+
     public function planName(string $planCode): ?string;
+
+    public function addonName(string $addonCode): ?string;
 
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 

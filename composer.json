@@ -16,10 +16,10 @@
         "livewire/flux": "^2.0"
     },
     "require-dev": {
+        "mockery/mockery": "^1.6",
         "orchestra/testbench": "^9.0|^10.0|^11.0|^12.0",
         "pestphp/pest": "^3.0",
-        "pestphp/pest-plugin-laravel": "^3.0",
-        "mockery/mockery": "^1.6"
+        "pestphp/pest-plugin-laravel": "^3.0"
     },
     "suggest": {
         "livewire/flux-pro": "Unlocks the /billing/admin panel and enables <flux:table>/<flux:modal> in portal views."

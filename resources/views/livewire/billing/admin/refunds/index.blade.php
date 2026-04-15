@@ -6,14 +6,38 @@ use Livewire\WithPagination;
 
 new class extends Component {
     use WithPagination;
+
     public string $reasonFilter = '';
+    public string $search = '';
+    public string $sortBy = 'created_at';
+    public string $sortDirection = 'desc';
+
     public function updatingReasonFilter(): void { $this->resetPage(); }
+    public function updatingSearch(): void { $this->resetPage(); }
+
+    public function sort(string $column): void
+    {
+        if ($this->sortBy === $column) {
+            $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+            $this->sortBy = $column;
+            $this->sortDirection = 'asc';
+        }
+    }
 
     public function with(): array
     {
-        $q = BillingInvoice::query()->where('invoice_kind', 'credit_note')->latest();
-        if ($this->reasonFilter !== '') $q->where('refund_reason_code', $this->reasonFilter);
-        return ['notes' => $q->paginate(20)];
+        $q = BillingInvoice::query()->where('invoice_kind', 'credit_note');
+
+        if ($this->reasonFilter !== '') {
+            $q->where('refund_reason_code', $this->reasonFilter);
+        }
+
+        if ($this->search !== '') {
+            $q->where('billable_id', 'like', '%'.$this->search.'%');
+        }
+
+        return ['notes' => $q->orderBy($this->sortBy, $this->sortDirection)->paginate(20)];
     }
 };
 
@@ -21,28 +45,48 @@ new class extends Component {
 
 <div class="p-6 space-y-4">
     <flux:heading size="xl">Refunds</flux:heading>
-    <select wire:model.live="reasonFilter" class="border rounded px-2 py-1.5">
-        <option value="">All reasons</option>
-        <option value="service_outage">Service outage</option>
-        <option value="billing_error">Billing error</option>
-        <option value="goodwill">Goodwill</option>
-        <option value="chargeback">Chargeback</option>
-        <option value="cancellation">Cancellation</option>
-        <option value="other">Other</option>
-    </select>
-    <table class="w-full border text-sm">
-        <thead class="bg-zinc-50 text-left"><tr><th class="p-2">Date</th><th class="p-2">Billable</th><th class="p-2">Amount</th><th class="p-2">Reason</th><th class="p-2">Original</th></tr></thead>
-        <tbody>
-            @foreach ($notes as $n)
-                <tr class="border-t">
-                    <td class="p-2">{{ $n->created_at->format('Y-m-d') }}</td>
-                    <td class="p-2">{{ class_basename($n->billable_type) }}#{{ $n->billable_id }}</td>
-                    <td class="p-2">{{ number_format($n->amount_gross / 100, 2) }}</td>
-                    <td class="p-2">{{ $n->refund_reason_code?->value ?? '—' }}</td>
-                    <td class="p-2">#{{ $n->parent_invoice_id ?? '—' }}</td>
-                </tr>
-            @endforeach
-        </tbody>
-    </table>
-    <div>{{ $notes->links() }}</div>
+
+    <div class="flex gap-2 items-center">
+        <flux:input
+            type="search"
+            wire:model.live.debounce.300ms="search"
+            placeholder="Billable id"
+            icon="magnifying-glass"
+            class="flex-1 basis-0"
+        />
+        <flux:select wire:model.live="reasonFilter" placeholder="All reasons" class="w-64 shrink-0">
+            <flux:select.option value="">All reasons</flux:select.option>
+            <flux:select.option value="service_outage">Service outage</flux:select.option>
+            <flux:select.option value="billing_error">Billing error</flux:select.option>
+            <flux:select.option value="goodwill">Goodwill</flux:select.option>
+            <flux:select.option value="chargeback">Chargeback</flux:select.option>
+            <flux:select.option value="cancellation">Cancellation</flux:select.option>
+            <flux:select.option value="other">Other</flux:select.option>
+        </flux:select>
+    </div>
+
+    <flux:table :paginate="$notes">
+        <flux:table.columns>
+            <flux:table.column sortable :sorted="$sortBy === 'created_at'" :direction="$sortDirection" wire:click="sort('created_at')">Date</flux:table.column>
+            <flux:table.column>Billable</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'amount_gross'" :direction="$sortDirection" wire:click="sort('amount_gross')" align="end">Amount</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'refund_reason_code'" :direction="$sortDirection" wire:click="sort('refund_reason_code')">Reason</flux:table.column>
+            <flux:table.column>Original</flux:table.column>
+        </flux:table.columns>
+        <flux:table.rows>
+            @forelse ($notes as $n)
+                <flux:table.row :key="$n->id">
+                    <flux:table.cell>{{ $n->created_at->format('Y-m-d') }}</flux:table.cell>
+                    <flux:table.cell variant="strong">{{ class_basename($n->billable_type) }}#{{ $n->billable_id }}</flux:table.cell>
+                    <flux:table.cell align="end">{{ number_format($n->amount_gross / 100, 2) }}</flux:table.cell>
+                    <flux:table.cell>{{ $n->refund_reason_code?->value ?? '—' }}</flux:table.cell>
+                    <flux:table.cell>#{{ $n->parent_invoice_id ?? '—' }}</flux:table.cell>
+                </flux:table.row>
+            @empty
+                <flux:table.row>
+                    <flux:table.cell colspan="5" align="center">No refunds yet.</flux:table.cell>
+                </flux:table.row>
+            @endforelse
+        </flux:table.rows>
+    </flux:table>
 </div>

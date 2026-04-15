@@ -33,33 +33,50 @@ new class extends Component {
 
 <div class="p-6 space-y-4 max-w-3xl">
     @if (! $coupon)
-        <p class="text-zinc-500">Coupon not found.</p>
+        <flux:text class="text-zinc-500">Coupon not found.</flux:text>
     @else
         <flux:heading size="xl">{{ $coupon->code }}</flux:heading>
-        @if ($flash)<div class="p-2 rounded bg-green-50 border border-green-200">{{ $flash }}</div>@endif
+
+        @if ($flash)
+            <flux:callout variant="success" icon="check-circle">{{ $flash }}</flux:callout>
+        @endif
+
         <dl class="grid grid-cols-2 gap-3 text-sm">
-            <dt class="text-zinc-500">Type</dt><dd>{{ $coupon->type?->value }}</dd>
-            <dt class="text-zinc-500">Active</dt><dd>{{ $coupon->active ? 'yes' : 'no' }}</dd>
-            <dt class="text-zinc-500">Redemptions</dt><dd>{{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : '' }}</dd>
-            <dt class="text-zinc-500">Valid until</dt><dd>{{ $coupon->valid_until?->format('Y-m-d') ?? '—' }}</dd>
-            <dt class="text-zinc-500">Auto-apply token</dt><dd>{{ $coupon->auto_apply_token ?? '—' }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Type</dt><dd>{{ $coupon->type?->value }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Active</dt><dd>
+                <flux:badge :color="$coupon->active ? 'green' : 'zinc'" size="sm">{{ $coupon->active ? 'yes' : 'no' }}</flux:badge>
+            </dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Redemptions</dt><dd>{{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : '' }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Valid from</dt><dd>{{ $coupon->valid_from?->format('Y-m-d H:i') ?? '—' }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Valid until</dt><dd>{{ $coupon->valid_until?->format('Y-m-d H:i') ?? '—' }}</dd>
+            <dt class="text-zinc-500 dark:text-zinc-400">Auto-apply token</dt><dd>{{ $coupon->auto_apply_token ?? '—' }}</dd>
         </dl>
+
         <div class="flex gap-2">
-            <button wire:click="deactivate" class="px-3 py-1.5 border rounded">Deactivate</button>
-            <button wire:click="delete" wire:confirm="Delete this coupon?" class="px-3 py-1.5 border rounded text-red-600">Delete</button>
+            <flux:button size="sm" wire:click="deactivate">Deactivate</flux:button>
+            <flux:button size="sm" variant="danger" wire:click="delete" wire:confirm="Delete this coupon?">Delete</flux:button>
         </div>
-        <h2 class="font-medium mt-4">Redemption history</h2>
-        <table class="w-full text-sm border">
-            <thead class="bg-zinc-50 text-left"><tr><th class="p-2">Applied</th><th class="p-2">Billable</th><th class="p-2">Discount net</th></tr></thead>
-            <tbody>
-                @foreach ($coupon->redemptions()->latest('applied_at')->limit(30)->get() as $r)
-                    <tr class="border-t">
-                        <td class="p-2">{{ $r->applied_at?->format('Y-m-d H:i') }}</td>
-                        <td class="p-2">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</td>
-                        <td class="p-2">{{ number_format($r->discount_amount_net / 100, 2) }}</td>
-                    </tr>
-                @endforeach
-            </tbody>
-        </table>
+
+        <flux:heading size="md" class="mt-4">Redemption history</flux:heading>
+        <flux:table>
+            <flux:table.columns>
+                <flux:table.column>Applied</flux:table.column>
+                <flux:table.column>Billable</flux:table.column>
+                <flux:table.column align="end">Discount net</flux:table.column>
+            </flux:table.columns>
+            <flux:table.rows>
+                @forelse ($coupon->redemptions()->latest('applied_at')->limit(30)->get() as $r)
+                    <flux:table.row :key="$r->id">
+                        <flux:table.cell>{{ $r->applied_at?->format('Y-m-d H:i') }}</flux:table.cell>
+                        <flux:table.cell variant="strong">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</flux:table.cell>
+                        <flux:table.cell align="end">{{ number_format($r->discount_amount_net / 100, 2) }}</flux:table.cell>
+                    </flux:table.row>
+                @empty
+                    <flux:table.row>
+                        <flux:table.cell colspan="3" align="center">No redemptions yet.</flux:table.cell>
+                    </flux:table.row>
+                @endforelse
+            </flux:table.rows>
+        </flux:table>
     @endif
 </div>

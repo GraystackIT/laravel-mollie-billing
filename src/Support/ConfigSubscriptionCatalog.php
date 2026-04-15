@@ -74,9 +74,36 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return array_keys(config($this->configKey.'.plans', []));
     }
 
+    public function allAddons(): array
+    {
+        return array_keys((array) config($this->configKey.'.addons', []));
+    }
+
+    public function allUsageTypes(): array
+    {
+        $types = [];
+        foreach ((array) config($this->configKey.'.plans', []) as $plan) {
+            foreach ((array) ($plan['intervals'] ?? []) as $interval) {
+                foreach (array_keys((array) ($interval['included_usages'] ?? [])) as $type) {
+                    $types[$type] = true;
+                }
+                foreach (array_keys((array) ($interval['usage_overage_prices'] ?? [])) as $type) {
+                    $types[$type] = true;
+                }
+            }
+        }
+
+        return array_values(array_map('strval', array_keys($types)));
+    }
+
     public function planName(string $planCode): ?string
     {
         return $this->plan($planCode)['name'] ?? null;
+    }
+
+    public function addonName(string $addonCode): ?string
+    {
+        return $this->addon($addonCode)['name'] ?? null;
     }
 
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int

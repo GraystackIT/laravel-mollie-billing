@@ -18,12 +18,6 @@ $csrfMiddleware = class_exists(\Illuminate\Foundation\Http\Middleware\VerifyCsrf
 $webhookRoute = Route::post('billing/webhook', MollieWebhookController::class)
     ->name('billing.webhook');
 
-// Validate signatures only when a secret is configured. The SDK's SignatureValidator
-// throws at construction if no secret is set, so in dev/test we skip the middleware.
-if (config('mollie.webhooks.signing_secrets')) {
-    $webhookRoute->middleware(\Mollie\Laravel\Middleware\ValidatesWebhookSignatures::class);
-}
-
 if ($csrfMiddleware !== null) {
     $webhookRoute->withoutMiddleware($csrfMiddleware);
 }

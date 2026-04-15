@@ -13,7 +13,6 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 ## Highlights
 
 - Mollie subscriptions, mandates and webhooks (built on Mollie's official Laravel SDK v4 with typed request objects)
-- Optional webhook signature validation (`ValidatesWebhookSignatures` middleware, opt-in via `MOLLIE_WEBHOOK_SIGNING_SECRETS`)
 - VAT calculation, VIES validation and OSS export (`mpociot/vat-calculator`)
 - Country-mismatch reconciliation across declared / IP / payment country
 - Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`)
@@ -101,11 +100,6 @@ MOLLIE_API_KEY=test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BILLING_BILLABLE_MODEL=App\Models\Organization
 BILLING_BILLABLE_KEY_TYPE=uuid
 BILLING_CURRENCY=EUR
-
-# Optional — enables ValidatesWebhookSignatures on the Mollie webhook route. Comma-separated
-# values supported for secret rotation. If unset, the middleware is skipped (webhook accepts
-# unsigned requests, same as pre-v4 behavior). Set this in production.
-MOLLIE_WEBHOOK_SIGNING_SECRETS=
 ```
 
 Mount the package routes in `routes/web.php`. Tenant-scoped routes (webhook, promotion, customer portal) and admin-panel routes are registered separately so they can run under different middleware stacks — the customer portal needs a resolved tenant, the admin panel does not:

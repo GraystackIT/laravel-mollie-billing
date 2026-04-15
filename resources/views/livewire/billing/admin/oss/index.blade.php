@@ -19,7 +19,6 @@ new class extends Component {
 
     public function with(): array
     {
-        // Driver-agnostic: pull min/max created_at and enumerate years in PHP.
         $oldest = BillingInvoice::query()->min('created_at');
         $newest = BillingInvoice::query()->max('created_at');
 
@@ -40,15 +39,29 @@ new class extends Component {
 
 <div class="p-6 space-y-4 max-w-md">
     <flux:heading size="xl">OSS protocol</flux:heading>
-    @if ($flash)<div class="p-3 rounded bg-green-50 border border-green-200 text-sm">{{ $flash }}</div>@endif
-    <ul class="space-y-2">
-        @forelse ($years as $year)
-            <li class="flex items-center justify-between p-3 border rounded">
-                <span class="font-mono">{{ $year }}</span>
-                <button wire:click="export({{ $year }})" class="px-3 py-1 border rounded text-sm">Export CSV</button>
-            </li>
-        @empty
-            <li class="text-zinc-500">No invoices yet.</li>
-        @endforelse
-    </ul>
+
+    @if ($flash)
+        <flux:callout variant="success" icon="check-circle">{{ $flash }}</flux:callout>
+    @endif
+
+    @if (empty($years))
+        <flux:text class="text-zinc-500">No invoices yet.</flux:text>
+    @else
+        <flux:table>
+            <flux:table.columns>
+                <flux:table.column>Year</flux:table.column>
+                <flux:table.column align="end"></flux:table.column>
+            </flux:table.columns>
+            <flux:table.rows>
+                @foreach ($years as $year)
+                    <flux:table.row :key="$year">
+                        <flux:table.cell variant="strong" class="font-mono">{{ $year }}</flux:table.cell>
+                        <flux:table.cell align="end">
+                            <flux:button size="xs" wire:click="export({{ $year }})">Export CSV</flux:button>
+                        </flux:table.cell>
+                    </flux:table.row>
+                @endforeach
+            </flux:table.rows>
+        </flux:table>
+    @endif
 </div>

@@ -9,12 +9,24 @@ new class extends Component {
     use WithPagination;
 
     public string $search = '';
+    public string $sortBy = 'created_at';
+    public string $sortDirection = 'desc';
 
     public array $selected = [];
 
     public function updatingSearch(): void
     {
         $this->resetPage();
+    }
+
+    public function sort(string $column): void
+    {
+        if ($this->sortBy === $column) {
+            $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+            $this->sortBy = $column;
+            $this->sortDirection = 'asc';
+        }
     }
 
     public function deactivateSelected(CouponService $service): void
@@ -33,7 +45,7 @@ new class extends Component {
                 ->when($this->search !== '', fn ($q) => $q
                     ->where('code', 'like', '%'.strtoupper($this->search).'%')
                     ->orWhere('name', 'like', '%'.$this->search.'%'))
-                ->latest()
+                ->orderBy($this->sortBy, $this->sortDirection)
                 ->paginate(20),
         ];
     }
@@ -44,51 +56,64 @@ new class extends Component {
 <div class="p-6 space-y-4">
     <div class="flex items-center justify-between">
         <flux:heading size="xl">Coupons</flux:heading>
-        <a href="{{ route('billing.admin.coupons.create') }}" class="px-3 py-1.5 rounded bg-indigo-600 text-white text-sm">New coupon</a>
+        <flux:button variant="primary" size="sm" :href="route('billing.admin.coupons.create')">New coupon</flux:button>
     </div>
 
     @if (session('status'))
-        <div class="p-3 rounded bg-green-50 border border-green-200 text-green-800 text-sm">{{ session('status') }}</div>
+        <flux:callout variant="success" icon="check-circle">{{ session('status') }}</flux:callout>
     @endif
 
-    <div class="flex gap-2">
-        <input type="search" wire:model.live.debounce.300ms="search" placeholder="Search by code or name"
-            class="px-3 py-1.5 border rounded w-full max-w-md">
+    <div class="flex gap-2 items-center">
+        <flux:input
+            type="search"
+            wire:model.live.debounce.300ms="search"
+            placeholder="Search by code or name"
+            icon="magnifying-glass"
+            class="flex-1 basis-0"
+        />
         @if (count($selected))
-            <button wire:click="deactivateSelected" class="px-3 py-1.5 border rounded text-sm">Deactivate selected ({{ count($selected) }})</button>
+            <flux:button size="sm" wire:click="deactivateSelected" class="shrink-0">
+                Deactivate selected ({{ count($selected) }})
+            </flux:button>
         @endif
     </div>
 
-    <table class="w-full text-sm border">
-        <thead class="bg-zinc-50 dark:bg-zinc-800 text-left">
-            <tr>
-                <th class="p-2 w-8"></th>
-                <th class="p-2">Code</th>
-                <th class="p-2">Name</th>
-                <th class="p-2">Type</th>
-                <th class="p-2">Redemptions</th>
-                <th class="p-2">Valid until</th>
-                <th class="p-2">Active</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody>
+    <flux:table :paginate="$coupons">
+        <flux:table.columns>
+            <flux:table.column></flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'code'" :direction="$sortDirection" wire:click="sort('code')">Code</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Name</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'type'" :direction="$sortDirection" wire:click="sort('type')">Type</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'redemptions_count'" :direction="$sortDirection" wire:click="sort('redemptions_count')">Redemptions</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'valid_until'" :direction="$sortDirection" wire:click="sort('valid_until')">Valid until</flux:table.column>
+            <flux:table.column sortable :sorted="$sortBy === 'active'" :direction="$sortDirection" wire:click="sort('active')">Active</flux:table.column>
+            <flux:table.column></flux:table.column>
+        </flux:table.columns>
+        <flux:table.rows>
             @forelse ($coupons as $coupon)
-                <tr class="border-t">
-                    <td class="p-2"><input type="checkbox" wire:model.live="selected" value="{{ $coupon->id }}"></td>
-                    <td class="p-2 font-mono">{{ $coupon->code }}</td>
-                    <td class="p-2">{{ $coupon->name }}</td>
-                    <td class="p-2">{{ $coupon->type?->value }}</td>
-                    <td class="p-2">{{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : '' }}</td>
-                    <td class="p-2">{{ $coupon->valid_until?->format('Y-m-d') ?? '—' }}</td>
-                    <td class="p-2">{{ $coupon->active ? 'yes' : 'no' }}</td>
-                    <td class="p-2"><a href="{{ route('billing.admin.coupons.show', $coupon) }}" class="text-indigo-600">View</a></td>
-                </tr>
+                <flux:table.row :key="$coupon->id">
+                    <flux:table.cell>
+                        <flux:checkbox wire:model.live="selected" value="{{ $coupon->id }}" />
+                    </flux:table.cell>
+                    <flux:table.cell variant="strong" class="font-mono">{{ $coupon->code }}</flux:table.cell>
+                    <flux:table.cell>{{ $coupon->name }}</flux:table.cell>
+                    <flux:table.cell>{{ $coupon->type?->value }}</flux:table.cell>
+                    <flux:table.cell>{{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : '' }}</flux:table.cell>
+                    <flux:table.cell>{{ $coupon->valid_until?->format('Y-m-d') ?? '—' }}</flux:table.cell>
+                    <flux:table.cell>
+                        <flux:badge :color="$coupon->active ? 'green' : 'zinc'" size="sm">
+                            {{ $coupon->active ? 'yes' : 'no' }}
+                        </flux:badge>
+                    </flux:table.cell>
+                    <flux:table.cell>
+                        <flux:button size="xs" variant="ghost" :href="route('billing.admin.coupons.show', $coupon)">View</flux:button>
+                    </flux:table.cell>
+                </flux:table.row>
             @empty
-                <tr><td colspan="8" class="p-4 text-center text-zinc-500">No coupons yet.</td></tr>
+                <flux:table.row>
+                    <flux:table.cell colspan="8" align="center">No coupons yet.</flux:table.cell>
+                </flux:table.row>
             @endforelse
-        </tbody>
-    </table>
-
-    <div>{{ $coupons->links() }}</div>
+        </flux:table.rows>
+    </flux:table>
 </div>
