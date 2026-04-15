@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use Livewire\Component;
@@ -28,7 +28,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="space-y-3 text-sm">
     @if ($flash)<div class="p-2 rounded bg-green-50 border border-green-200">{{ $flash }}</div>@endif

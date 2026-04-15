@@ -129,11 +129,24 @@ class MollieBilling
     }
 
     /**
-     * Convenience to register routes. Apps call `MollieBilling::routes()` inside their own
-     * route group (auth + tenant middleware), which keeps the package route-prefix-agnostic.
+     * Tenant-scoped routes (webhook, promotion, customer portal). Mount inside the route group
+     * that carries auth + tenant resolution middleware. Does NOT include the admin panel —
+     * register those separately via `adminRoutes()` so they can run under different middleware
+     * (e.g. without tenant scoping).
      */
     public static function routes(): void
     {
         require __DIR__.'/../routes/web.php';
+    }
+
+    /**
+     * Admin-panel routes (`/billing/admin/*`). Mount inside a route group that authorizes
+     * staff access — the package's `AuthorizeBillingAdmin` middleware is already applied
+     * inside the group. Keep this separate from `routes()` so admins do not need a tenant
+     * context to reach the panel.
+     */
+    public static function adminRoutes(): void
+    {
+        require __DIR__.'/../routes/admin.php';
     }
 }

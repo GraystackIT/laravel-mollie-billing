@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
@@ -63,7 +63,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-4 max-w-2xl">
     <flux:heading size="xl">Create coupon</flux:heading>

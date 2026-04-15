@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
@@ -39,7 +39,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-4">
     <div class="flex items-center justify-between">

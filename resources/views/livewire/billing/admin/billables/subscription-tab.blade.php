@@ -1,4 +1,4 @@
-@php
+<?php
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
@@ -41,7 +41,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="space-y-3 text-sm">
     @php $b = $this->billable(); @endphp

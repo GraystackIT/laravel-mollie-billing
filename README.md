@@ -102,13 +102,19 @@ BILLING_BILLABLE_KEY_TYPE=uuid
 BILLING_CURRENCY=EUR
 ```
 
-Mount the package routes in `routes/web.php`:
+Mount the package routes in `routes/web.php`. Tenant-scoped routes (webhook, promotion, customer portal) and admin-panel routes are registered separately so they can run under different middleware stacks — the customer portal needs a resolved tenant, the admin panel does not:
 
 ```php
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 
-Route::middleware(['web', 'auth'])->group(function () {
+// Customer portal — needs auth + your tenant resolution middleware
+Route::middleware(['web', 'auth', 'tenant'])->group(function () {
     MollieBilling::routes();
+});
+
+// Admin panel — auth only, no tenant scope. AuthorizeBillingAdmin runs inside the group.
+Route::middleware(['web', 'auth'])->group(function () {
+    MollieBilling::adminRoutes();
 });
 ```
 

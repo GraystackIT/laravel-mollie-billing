@@ -1,4 +1,4 @@
-@php
+<?php
 
 use Livewire\Component;
 
@@ -14,7 +14,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-6">
     @if (! $billable)

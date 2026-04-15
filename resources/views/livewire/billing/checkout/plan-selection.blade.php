@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use Livewire\Component;
@@ -34,7 +34,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-4 max-w-3xl">
     <h1 class="text-xl font-semibold">Choose your plan</h1>

@@ -24,6 +24,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static \GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService refunds()
  * @method static \GraystackIT\MollieBilling\Testing\MollieBillingFake fake()
  * @method static void routes()
+ * @method static void adminRoutes()
  *
  * @see \GraystackIT\MollieBilling\MollieBilling
  */

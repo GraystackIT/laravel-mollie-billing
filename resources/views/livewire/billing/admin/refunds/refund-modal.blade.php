@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
@@ -33,7 +33,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-4 border rounded max-w-md space-y-3">
     <h2 class="font-semibold">Issue refund</h2>

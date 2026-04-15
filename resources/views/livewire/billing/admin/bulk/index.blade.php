@@ -1,4 +1,4 @@
-@php
+<?php
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
@@ -38,7 +38,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-6 max-w-2xl">
     <flux:heading size="xl">Bulk actions</flux:heading>

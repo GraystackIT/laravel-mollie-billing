@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
@@ -45,7 +45,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-6">
     <flux:heading size="xl">Billing Admin</flux:heading>

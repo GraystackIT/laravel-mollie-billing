@@ -116,51 +116,19 @@ class MollieBillingServiceProvider extends ServiceProvider
             return;
         }
 
-        // Defer registration until the Livewire service provider has finished booting so
-        // that the `livewire.finder` binding (and friends) is available.
-        $this->app->booted(function (): void {
-            if (! $this->app->resolved('livewire')) {
-                return;
-            }
-
+        // Defer registration until the Livewire service provider has registered its
+        // `livewire.finder` binding. In tests that don't boot Livewire, this never fires.
+        $this->callAfterResolving('livewire.finder', function (): void {
             $this->doRegisterLivewireComponents();
         });
     }
 
     private function doRegisterLivewireComponents(): void
     {
-        $map = [
-            // Customer portal
-            'billing::dashboard' => 'mollie-billing::livewire.billing.dashboard',
-            'billing::checkout.plan-selection' => 'mollie-billing::livewire.billing.checkout.plan-selection',
-            'billing::checkout.form' => 'mollie-billing::livewire.billing.checkout.form',
-            'billing::plan-change' => 'mollie-billing::livewire.billing.plan-change',
-            'billing::invoices' => 'mollie-billing::livewire.billing.invoices',
-            'billing::usage-meter' => 'mollie-billing::livewire.billing.components.usage-meter',
-
-            // Admin panel
-            'billing::admin.dashboard' => 'mollie-billing::livewire.billing.admin.dashboard',
-            'billing::admin.coupons.index' => 'mollie-billing::livewire.billing.admin.coupons.index',
-            'billing::admin.coupons.create' => 'mollie-billing::livewire.billing.admin.coupons.create',
-            'billing::admin.coupons.show' => 'mollie-billing::livewire.billing.admin.coupons.show',
-            'billing::admin.billables.index' => 'mollie-billing::livewire.billing.admin.billables.index',
-            'billing::admin.billables.show' => 'mollie-billing::livewire.billing.admin.billables.show',
-            'billing::admin.billables.subscription-tab' => 'mollie-billing::livewire.billing.admin.billables.subscription-tab',
-            'billing::admin.billables.invoices-tab' => 'mollie-billing::livewire.billing.admin.billables.invoices-tab',
-            'billing::admin.billables.wallet-tab' => 'mollie-billing::livewire.billing.admin.billables.wallet-tab',
-            'billing::admin.refunds.index' => 'mollie-billing::livewire.billing.admin.refunds.index',
-            'billing::admin.refunds.refund-modal' => 'mollie-billing::livewire.billing.admin.refunds.refund-modal',
-            'billing::admin.grants.issue' => 'mollie-billing::livewire.billing.admin.grants.issue',
-            'billing::admin.scheduled_changes.index' => 'mollie-billing::livewire.billing.admin.scheduled-changes.index',
-            'billing::admin.past_due.index' => 'mollie-billing::livewire.billing.admin.past-due.index',
-            'billing::admin.mismatches.index' => 'mollie-billing::livewire.billing.admin.mismatches.index',
-            'billing::admin.oss.index' => 'mollie-billing::livewire.billing.admin.oss.index',
-            'billing::admin.bulk.index' => 'mollie-billing::livewire.billing.admin.bulk.index',
-        ];
-
-        foreach ($map as $alias => $view) {
-            Livewire::component($alias, $view);
-        }
+        Livewire::addNamespace(
+            namespace: 'billing',
+            viewPath: __DIR__.'/../resources/views/livewire/billing',
+        );
     }
 
     private function registerTranslations(): void
