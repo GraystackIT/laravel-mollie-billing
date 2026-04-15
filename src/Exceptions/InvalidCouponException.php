@@ -10,7 +10,7 @@ use RuntimeException;
 class InvalidCouponException extends RuntimeException
 {
     public function __construct(
-        public readonly Billable $billable,
+        public readonly ?Billable $billable,
         public readonly string $couponCode,
         private readonly string $reason,
     ) {
