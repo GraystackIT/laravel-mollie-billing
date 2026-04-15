@@ -16,12 +16,19 @@ beforeEach(function (): void {
         'tier' => 2,
         'trial_days' => 0,
         'included_seats' => 5,
-        'included_usages' => ['emails' => 100, 'sms' => 50],
         'feature_keys' => ['dashboard', 'pro-feature'],
         'allowed_addons' => [],
         'intervals' => [
-            'monthly' => ['base_price_net' => 1000, 'seat_price_net' => 500],
-            'yearly' => ['base_price_net' => 10000, 'seat_price_net' => 5000],
+            'monthly' => [
+                'base_price_net' => 1000,
+                'seat_price_net' => 500,
+                'included_usages' => ['emails' => 100, 'sms' => 50],
+            ],
+            'yearly' => [
+                'base_price_net' => 10000,
+                'seat_price_net' => 5000,
+                'included_usages' => ['emails' => 1200, 'sms' => 600],
+            ],
         ],
     ]);
 });

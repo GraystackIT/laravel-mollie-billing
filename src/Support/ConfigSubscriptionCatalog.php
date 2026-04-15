@@ -12,9 +12,24 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
     {
     }
 
-    public function includedUsage(string $planCode, string $usageType): int
+    public function includedUsage(string $planCode, ?string $interval, string $usageType): int
     {
-        return (int) $this->plan($planCode)['included_usages'][$usageType] ?? 0;
+        if ($interval === null) {
+            return 0;
+        }
+
+        return (int) ($this->plan($planCode)['intervals'][$interval]['included_usages'][$usageType] ?? 0);
+    }
+
+    public function includedUsages(string $planCode, ?string $interval): array
+    {
+        if ($interval === null) {
+            return [];
+        }
+
+        $values = (array) ($this->plan($planCode)['intervals'][$interval]['included_usages'] ?? []);
+
+        return array_map(static fn ($v) => (int) $v, $values);
     }
 
     public function planAllowsAddon(string $planCode, string $addonCode): bool
@@ -64,9 +79,13 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return $this->plan($planCode)['name'] ?? null;
     }
 
-    public function usageOveragePrice(string $planCode, string $usageType): ?int
+    public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int
     {
-        $value = $this->plan($planCode)['usage_overage_prices'][$usageType] ?? null;
+        if ($interval === null) {
+            return null;
+        }
+
+        $value = $this->plan($planCode)['intervals'][$interval]['usage_overage_prices'][$usageType] ?? null;
 
         return $value === null ? null : (int) $value;
     }

@@ -128,6 +128,7 @@ class WalletUsageService
 
         $included = $this->catalog->includedUsage(
             $billable->getBillingSubscriptionPlanCode() ?? '',
+            $billable->getBillingSubscriptionInterval(),
             $type,
         );
 

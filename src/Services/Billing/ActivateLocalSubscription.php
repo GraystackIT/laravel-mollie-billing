@@ -48,10 +48,7 @@ class ActivateLocalSubscription
             'subscription_ends_at' => $durationDays > 0 ? now()->addDays($durationDays) : null,
         ])->save();
 
-        $includedUsages = (array) app('config')->get(
-            'mollie-billing-plans.plans.'.$planCode.'.included_usages',
-            []
-        );
+        $includedUsages = $this->catalog->includedUsages($planCode, $interval);
 
         foreach ($includedUsages as $type => $quantity) {
             if ((int) $quantity > 0) {

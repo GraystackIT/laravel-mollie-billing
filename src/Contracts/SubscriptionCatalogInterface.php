@@ -6,7 +6,10 @@ namespace GraystackIT\MollieBilling\Contracts;
 
 interface SubscriptionCatalogInterface
 {
-    public function includedUsage(string $planCode, string $usageType): int;
+    public function includedUsage(string $planCode, ?string $interval, string $usageType): int;
+
+    /** @return array<string, int> */
+    public function includedUsages(string $planCode, ?string $interval): array;
 
     public function planAllowsAddon(string $planCode, string $addonCode): bool;
 
@@ -29,7 +32,7 @@ interface SubscriptionCatalogInterface
 
     public function planName(string $planCode): ?string;
 
-    public function usageOveragePrice(string $planCode, string $usageType): ?int;
+    public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 
     public function yearlySavingsPercent(string $planCode): float;
 }

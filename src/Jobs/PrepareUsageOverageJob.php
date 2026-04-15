@@ -244,8 +244,9 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     ): void {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
+        $interval = $billable->getBillingSubscriptionInterval();
 
-        $included = (array) (config('mollie-billing-plans.plans.'.$planCode.'.included_usages') ?? []);
+        $included = $catalog->includedUsages($planCode, $interval);
 
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;

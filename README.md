@@ -150,29 +150,38 @@ return [
     'plans' => [
         'pro' => [
             'name' => 'Pro',
-            'feature_keys' => ['projects.unlimited', 'reports.export'],
-            'included_usages' => [
-                'api_calls' => 100_000,
-                'seats' => 5,
-            ],
-            'usage_overage_prices' => [
-                'api_calls' => 1, // cents per unit
-            ],
+            'tier' => 2,
+            'trial_days' => 14,
+            'included_seats' => 3,
+            'feature_keys' => ['dashboard', 'advanced-reports'],
+            'allowed_addons' => ['softdrinks'],
             'intervals' => [
-                'monthly' => ['price' => 1900, 'currency' => 'EUR'],
-                'yearly' => ['price' => 19000, 'currency' => 'EUR'],
+                'monthly' => [
+                    'base_price_net' => 2900,
+                    'seat_price_net' => 990,
+                    // Included quota per billing period (here: per month)
+                    'included_usages' => ['tokens' => 100, 'sms' => 50],
+                    // Cents per unit over quota; omit a key for "no overage"
+                    'usage_overage_prices' => ['tokens' => 10, 'sms' => 15],
+                ],
+                'yearly' => [
+                    'base_price_net' => 29000,
+                    'seat_price_net' => 9900,
+                    // Included quota per billing period (here: per year)
+                    'included_usages' => ['tokens' => 1500, 'sms' => 600],
+                    'usage_overage_prices' => ['tokens' => 10, 'sms' => 15],
+                ],
             ],
-            'allowed_addons' => ['extra_seat', 'priority_support'],
         ],
     ],
 
     'addons' => [
-        'extra_seat' => [
-            'name' => 'Extra seat',
-            'feature_keys' => [],
-            'included_usages' => ['seats' => 1],
+        'softdrinks' => [
+            'name' => 'Softdrinks',
+            'feature_keys' => ['softdrinks'],
             'intervals' => [
-                'monthly' => ['price' => 500, 'currency' => 'EUR'],
+                'monthly' => ['price_net' => 490],
+                'yearly' => ['price_net' => 4900],
             ],
         ],
     ],
@@ -279,31 +288,23 @@ MollieBilling::refunds()->creditWalletOnly($organization, cents: 500, reason: 'g
 
 ## Admin panel
 
-The admin panel lives at `/billing/admin` and requires `livewire/flux-pro`. Authorize access by binding an `AuthorizesBillingAdmin` implementation:
+The admin panel lives at `/billing/admin` and requires `livewire/flux-pro`. Authorize access by implementing `AuthorizesBillingAdmin` directly on your user model. The `billing.admin` middleware checks `auth()->user() instanceof AuthorizesBillingAdmin && canAccessBillingAdmin()`; users without the interface receive a 403.
 
 ```php
 <?php
 
-namespace App\Billing;
+namespace App\Models;
 
 use GraystackIT\MollieBilling\Contracts\AuthorizesBillingAdmin;
+use Illuminate\Foundation\Auth\User as Authenticatable;
 
-class IsBillingAdmin implements AuthorizesBillingAdmin
+class User extends Authenticatable implements AuthorizesBillingAdmin
 {
-    public function authorize(): bool
+    public function canAccessBillingAdmin(): bool
     {
-        return auth()->user()?->is_admin === true;
+        return $this->is_admin === true;
     }
 }
-```
-
-Bind it in your `AppServiceProvider`:
-
-```php
-$this->app->bind(
-    \GraystackIT\MollieBilling\Contracts\AuthorizesBillingAdmin::class,
-    \App\Billing\IsBillingAdmin::class,
-);
 ```
 
 ## Promotion links
