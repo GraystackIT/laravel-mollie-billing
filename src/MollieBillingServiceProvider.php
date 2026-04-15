@@ -41,7 +41,9 @@ class MollieBillingServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        $this->propagateMollieApiKey();
         $this->registerPublishing();
+        $this->registerRoutes();
         $this->registerMiddleware();
         $this->registerBlade();
         $this->registerLivewireComponents();
@@ -49,6 +51,15 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->registerViews();
         $this->registerCommands();
         $this->registerScheduledJobs();
+    }
+
+    private function propagateMollieApiKey(): void
+    {
+        $key = config('mollie-billing.mollie_api_key');
+
+        if (is_string($key) && $key !== '') {
+            config(['mollie.key' => $key]);
+        }
     }
 
     private function registerPublishing(): void
@@ -77,6 +88,18 @@ class MollieBillingServiceProvider extends ServiceProvider
         ], 'mollie-billing-migrations');
 
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+    }
+
+    private function registerRoutes(): void
+    {
+        // Portal/webhook routes are not auto-loaded — apps must mount them via
+        // MollieBilling::routes() inside a group that carries their tenant
+        // prefix/middleware. Auto-loading here would register a duplicate set
+        // without the tenant prefix, and route('billing.*') helpers would pick
+        // the wrong copy.
+        //
+        // Admin routes are tenant-agnostic, so they can be auto-loaded safely.
+        $this->loadRoutesFrom(__DIR__.'/../routes/admin.php');
     }
 
     private function registerMiddleware(): void

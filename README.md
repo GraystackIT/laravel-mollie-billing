@@ -98,7 +98,7 @@ class Organization extends Model implements Billable
 Configure your environment:
 
 ```dotenv
-MOLLIE_API_KEY=test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+MOLLIE_KEY=test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BILLING_BILLABLE_MODEL=App\Models\Organization
 BILLING_BILLABLE_KEY_TYPE=uuid
 BILLING_CURRENCY=EUR
@@ -119,6 +119,22 @@ Route::middleware(['web', 'auth'])->group(function () {
     MollieBilling::adminRoutes();
 });
 ```
+
+The admin routes are auto-loaded by the service provider as well, so you only need to call `adminRoutes()` if you want them under a custom middleware stack.
+
+### Multi-tenant URL prefixes
+
+If your app nests the portal behind a tenant parameter (e.g. `prefix('{organization:slug}')`), mount `MollieBilling::routes()` **inside** that group — do not apply your own `->name('tenant.')` prefix around it, because the package's views call `route('billing.*')` by those exact names:
+
+```php
+Route::middleware(['auth', 'tenant'])
+    ->prefix('{organization:slug}')
+    ->group(function () {
+        MollieBilling::routes();
+    });
+```
+
+The package ships a `PropagateRouteDefaults` middleware that copies the active route's parameters into `URL::defaults`, so generated links inside the portal (e.g. `route('billing.plan')`) automatically carry the tenant slug — no app-side `URL::defaults` wiring required.
 
 Tell the facade how to resolve the current billable for the authenticated user — usually in `AppServiceProvider::boot()`:
 
