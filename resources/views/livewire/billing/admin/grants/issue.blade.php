@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use Illuminate\Support\Str;
@@ -38,7 +38,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-4 max-w-xl">
     <flux:heading size="xl">Issue access grant</flux:heading>

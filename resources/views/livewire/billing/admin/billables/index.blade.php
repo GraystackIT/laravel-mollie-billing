@@ -1,4 +1,4 @@
-@php
+<?php
 
 use Livewire\Component;
 use Livewire\WithPagination;
@@ -34,7 +34,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-4">
     <flux:heading size="xl">Billables</flux:heading>

@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Livewire\Component;
@@ -17,7 +17,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-6 space-y-4">
     <flux:heading size="xl">Refunds</flux:heading>

@@ -1,4 +1,4 @@
-@php
+<?php
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
@@ -16,7 +16,7 @@ new class extends Component {
     }
 };
 
-@endphp
+?>
 
 <div class="p-3 border rounded text-sm">
     @php
