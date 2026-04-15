@@ -22,8 +22,6 @@ return [
 
     'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),
 
-    'mollie_api_key' => env('MOLLIE_API_KEY'),
-
     // Package-wide currency (ISO-4217). Prices in mollie-billing-plans.php and coupon amounts
     // are interpreted in this currency. Mollie payments, sales invoices and BillingInvoice
     // persist this code. The EU VAT/OSS system (mpociot/vat-calculator, VIES, OSS export)
