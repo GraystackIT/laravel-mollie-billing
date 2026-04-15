@@ -8,6 +8,9 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Session;
+use Mollie\Api\Http\Data\Money;
+use Mollie\Api\Http\Requests\CreateCustomerRequest;
+use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class StartSubscriptionCheckout
@@ -37,17 +40,12 @@ class StartSubscriptionCheckout
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountGross = (int) $request['amount_gross'];
 
-        $payment = Mollie::api()->payments->create([
-            'amount' => [
-                'currency' => $currency,
-                'value' => number_format($amountGross / 100, 2, '.', ''),
-            ],
-            'description' => "Subscription {$request['plan_code']}",
-            'redirectUrl' => route('billing.return'),
-            'webhookUrl' => route('billing.webhook'),
-            'customerId' => $customerId,
-            'sequenceType' => 'first',
-            'metadata' => [
+        $payment = Mollie::send(new CreatePaymentRequest(
+            description: "Subscription {$request['plan_code']}",
+            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            redirectUrl: route('billing.return'),
+            webhookUrl: route('billing.webhook'),
+            metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),
                 'type' => 'subscription',
@@ -57,7 +55,9 @@ class StartSubscriptionCheckout
                 'extra_seats' => $request['extra_seats'] ?? 0,
                 'coupon_code' => $couponCode,
             ],
-        ]);
+            sequenceType: 'first',
+            customerId: $customerId,
+        ));
 
         return [
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
@@ -73,14 +73,14 @@ class StartSubscriptionCheckout
             return $existing;
         }
 
-        $customer = Mollie::api()->customers->create([
-            'name' => $billable->getBillingName(),
-            'email' => $billable->getBillingEmail(),
-            'metadata' => [
+        $customer = Mollie::send(new CreateCustomerRequest(
+            name: $billable->getBillingName(),
+            email: $billable->getBillingEmail(),
+            metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),
             ],
-        ]);
+        ));
 
         $billable->forceFill(['mollie_customer_id' => $customer->id])->save();
 

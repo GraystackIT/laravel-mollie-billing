@@ -15,14 +15,12 @@ use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
-use GraystackIT\MollieBilling\Models\Subscription as PackageSubscription;
 use GraystackIT\MollieBilling\Support\ConfigSubscriptionCatalog;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
-use Laravel\CashierMollie\Subscription as CashierSubscription;
 use Livewire\Livewire;
 
 class MollieBillingServiceProvider extends ServiceProvider
@@ -39,8 +37,6 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->app->singleton(FeatureAccess::class);
 
         $this->app->singleton(IpGeolocationManager::class, fn ($app) => new IpGeolocationManager($app));
-
-        $this->app->bind(CashierSubscription::class, PackageSubscription::class);
     }
 
     public function boot(): void

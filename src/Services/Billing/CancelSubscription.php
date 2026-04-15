@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
+use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class CancelSubscription
@@ -50,7 +51,7 @@ class CancelSubscription
 
         if ($customerId !== null && $subscriptionId !== null) {
             try {
-                Mollie::api()->subscriptions->cancelForId($customerId, $subscriptionId);
+                Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
             } catch (\Throwable $e) {
                 // Swallow — Mollie may already have cancelled it; we still need to update local state.
             }

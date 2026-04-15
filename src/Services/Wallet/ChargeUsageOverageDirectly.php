@@ -10,6 +10,9 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use Illuminate\Database\Eloquent\Model;
+use Mollie\Api\Http\Data\Money;
+use Mollie\Api\Http\Requests\CreatePaymentRequest;
+use Mollie\Laravel\Facades\Mollie;
 
 class ChargeUsageOverageDirectly
 {
@@ -147,41 +150,19 @@ class ChargeUsageOverageDirectly
     {
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountValue = number_format($vat['gross'] / 100, 2, '.', '');
-        $mandateId = $billable->getMollieMandateId();
-        $customerId = $billable->getMollieCustomerId();
 
-        $payload = [
-            'amount' => ['currency' => $currency, 'value' => $amountValue],
-            'description' => 'Usage overage',
-            'metadata' => [
+        return Mollie::send(new CreatePaymentRequest(
+            description: 'Usage overage',
+            amount: new Money($currency, $amountValue),
+            metadata: [
                 'type' => 'overage',
                 'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
                 'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
                 'line_items' => $lineItems,
             ],
-            'sequenceType' => 'recurring',
-            'customerId' => $customerId,
-            'mandateId' => $mandateId,
-        ];
-
-        $client = $this->resolveMollieClient();
-
-        return $client->payments->create($payload);
-    }
-
-    private function resolveMollieClient(): object
-    {
-        if (class_exists(\Mollie\Laravel\Facades\Mollie::class)) {
-            return \Mollie\Laravel\Facades\Mollie::api();
-        }
-
-        if (app()->bound(\Mollie\Api\MollieApiClient::class)) {
-            return app(\Mollie\Api\MollieApiClient::class);
-        }
-
-        throw new \RuntimeException(
-            'Mollie API client is not available. Install mollie/laravel-mollie '
-            .'or bind Mollie\Api\MollieApiClient in the container.'
-        );
+            sequenceType: 'recurring',
+            mandateId: $billable->getMollieMandateId(),
+            customerId: $billable->getMollieCustomerId(),
+        ));
     }
 }

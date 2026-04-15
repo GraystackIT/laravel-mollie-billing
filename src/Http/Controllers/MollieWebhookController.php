@@ -123,9 +123,7 @@ class MollieWebhookController extends Controller
     protected function fetchPayment(string $paymentId): object
     {
         try {
-            $client = Mollie::api();
-            /** @phpstan-ignore-next-line — SDK magic property. */
-            return $client->payments->get($paymentId);
+            return Mollie::send(new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId));
         } catch (\Mollie\Api\Exceptions\ApiException $e) {
             if (method_exists($e, 'getCode') && $e->getCode() === 404) {
                 throw new PaymentNotFoundException($paymentId);

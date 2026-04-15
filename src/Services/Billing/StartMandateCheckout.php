@@ -6,6 +6,9 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use Illuminate\Database\Eloquent\Model;
+use Mollie\Api\Http\Data\Money;
+use Mollie\Api\Http\Requests\CreateCustomerRequest;
+use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class StartMandateCheckout
@@ -19,19 +22,19 @@ class StartMandateCheckout
         $customerId = $this->ensureMollieCustomer($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
-        $payment = Mollie::api()->payments->create([
-            'amount' => ['currency' => $currency, 'value' => '0.00'],
-            'description' => 'Payment method authorisation',
-            'redirectUrl' => route('billing.return'),
-            'webhookUrl' => route('billing.webhook'),
-            'customerId' => $customerId,
-            'sequenceType' => 'first',
-            'metadata' => [
+        $payment = Mollie::send(new CreatePaymentRequest(
+            description: 'Payment method authorisation',
+            amount: new Money($currency, '0.00'),
+            redirectUrl: route('billing.return'),
+            webhookUrl: route('billing.webhook'),
+            metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),
                 'type' => 'mandate_only',
             ],
-        ]);
+            sequenceType: 'first',
+            customerId: $customerId,
+        ));
 
         return [
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
@@ -47,14 +50,14 @@ class StartMandateCheckout
             return $existing;
         }
 
-        $customer = Mollie::api()->customers->create([
-            'name' => $billable->getBillingName(),
-            'email' => $billable->getBillingEmail(),
-            'metadata' => [
+        $customer = Mollie::send(new CreateCustomerRequest(
+            name: $billable->getBillingName(),
+            email: $billable->getBillingEmail(),
+            metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),
             ],
-        ]);
+        ));
 
         $billable->forceFill(['mollie_customer_id' => $customer->id])->save();
 

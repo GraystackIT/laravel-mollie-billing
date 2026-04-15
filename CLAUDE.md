@@ -30,7 +30,7 @@ php artisan billing:oss-export {year}  # OssExportCommand     → CSV via OssPro
 
 ## Big-picture architecture
 
-The package wraps `mollie/laravel-cashier-mollie` and adds, on top of it, six layers:
+The package wraps `mollie/laravel-mollie` ^4 (Mollie's official Laravel SDK, which itself wraps `mollie/mollie-api-php` v3 with typed request objects) and adds, on top of it, six layers:
 
 1. **VAT / OSS compliance** — `Services/Vat/{VatCalculationService,CountryMatchService,OssProtocolService}` use `mpociot/vat-calculator` + VIES, reconcile user-declared / IP / payment country, and emit OSS export rows.
 2. **Wallet-based metered billing** — `Services/Wallet/WalletUsageService` debits/credits `bavix/laravel-wallet` wallets per `usage_type` (e.g. `tokens`, `sms`). Negative balance = overage. `ChargeUsageOverageDirectly` builds line items per wallet and creates a Mollie payment; `RetryUsageOverageChargeJob` handles failures and toggles `past_due`.
@@ -45,7 +45,11 @@ The package wraps `mollie/laravel-cashier-mollie` and adds, on top of it, six la
 
 ### Webhook handler
 
-`Http/Controllers/MollieWebhookController` must stay **idempotent** (deduped via `BillingProcessedWebhook`) and must branch on the `mandate_only` metadata for zero-amount first payments. After a successful recurring payment, wallets are recharged via `$this->catalog->includedUsages($planCode, $interval)` (additive — preserve negative balances from overage).
+`Http/Controllers/MollieWebhookController` handles Mollie's **legacy** webhooks (per-payment `webhookUrl`, ID-only payload). Mollie's v4 "next-gen" typed webhook events (`PaymentLinkPaid`, `SalesInvoicePaid`, etc.) don't cover subscription/recurring-payment flows yet, so we stay on legacy and fetch the payment via `GetPaymentRequest` inside `fetchPayment()`.
+
+The controller must stay **idempotent** (deduped via `BillingProcessedWebhook`) and must branch on the `mandate_only` metadata for zero-amount first payments. After a successful recurring payment, wallets are recharged via `$this->catalog->includedUsages($planCode, $interval)` (additive — preserve negative balances from overage).
+
+The route (in `routes/web.php`) conditionally wraps `\Mollie\Laravel\Middleware\ValidatesWebhookSignatures` when `config('mollie.webhooks.signing_secrets')` is set. Legacy webhooks pass through silently (no `X-Mollie-Signature` header), so the middleware is defense-in-depth: it rejects spoofed requests that carry an invalid signature, and stays no-op for unsigned legacy payloads.
 
 ### Events as the extension seam
 
@@ -65,10 +69,11 @@ MollieBilling::ipGeolocation(...);
 
 ## Conventions specific to this package
 
-- **Billable, not User** — all contracts and services take the `Billable` (typically the tenant/org). Do not assume `auth()->user()`. Methods on `HasBilling` follow the `…Billing…` naming convention (`recordBillingUsage`, `includedBillingQuota`, `getBillingSubscriptionInterval`, …) to avoid collisions with Cashier-Mollie, Jetstream/Sanctum, `spatie/laravel-permission`, etc.
+- **Billable, not User** — all contracts and services take the `Billable` (typically the tenant/org). Do not assume `auth()->user()`. Methods on `HasBilling` follow the `…Billing…` naming convention (`recordBillingUsage`, `includedBillingQuota`, `getBillingSubscriptionInterval`, …) to avoid collisions with Jetstream/Sanctum, `spatie/laravel-permission`, etc.
 - **Enums over strings** — see `src/Enums/`. Casts are merged via `HasBilling::initializeHasBilling()` (`mergeCasts`); don't redeclare them in the consuming model.
 - **Migration stub is table-agnostic** — `add_billing_columns_to_billable_table.php` reads the table name from `config('mollie-billing.billable_model')` and is idempotent (`Schema::getColumnListing` check). Preserve that pattern for any new billable-table migration.
-- **Coupon redemption uses `lockForUpdate`** — `CouponService::redeem()` must keep `DB::transaction` + `Coupon::lockForUpdate` + `increment('redemptions_count')`. Don't "simplify" it. The package does **not** implement Cashier-Mollie's `CouponHandler` contract — `CouponService` is the sole entry point and discounts flow directly into our pricing services.
+- **Coupon redemption uses `lockForUpdate`** — `CouponService::redeem()` must keep `DB::transaction` + `Coupon::lockForUpdate` + `increment('redemptions_count')`. Don't "simplify" it. `CouponService` is the sole entry point and discounts flow directly into our pricing services.
+- **Mollie API calls use typed request objects** — `Mollie::send(new CreatePaymentRequest(...))` with `Mollie\Api\Http\Data\Money` for amounts, never `Mollie::api()->payments->create([...])` with raw arrays. Exception: `MollieSalesInvoiceService` stays on property-access (`Mollie::api()->salesInvoices->create([...])`) because `CreateSalesInvoiceRequest`'s shape diverges significantly from our current payload (`vatScheme`, `vatMode`, `recipientIdentifier`, typed `Recipient`/`DataCollection`) — a separate refactor.
 - **VAT rate from country lookup, never reverse-engineered from gross** — `MollieWebhookController` computes expected gross from net + country and compares against Mollie's actual amount; mismatch → `PaymentAmountMismatch` event, invoice persisted with the actually-paid amount as source of truth.
 - **Test fixture shape** — when writing fixtures, follow the (planCode, interval) shape used in `tests/Feature/Wallet/WalletUsageServiceTest.php`: `included_usages` / `usage_overage_prices` go **inside each `intervals.{monthly|yearly}` block**, not at plan top level.
 
