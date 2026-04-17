@@ -35,6 +35,7 @@ return [
         'dashboard' => 'Übersicht',
         'plan' => 'Plan',
         'invoices' => 'Rechnungen',
+        'back_to_dashboard' => 'Zurück zum Dashboard',
     ],
     'flash' => [
         'cancelled' => 'Abo gekündigt.',

@@ -11,6 +11,11 @@ return [
     'primary_color' => env('BILLING_PRIMARY_COLOR', '#6366f1'),
     'company_name' => env('APP_NAME'),
 
+    // URL the portal logo links to (e.g. main app dashboard). When null the logo
+    // links to the billing dashboard itself. Supports a plain URL string or a named
+    // route via the 'route:' prefix, e.g. 'route:dashboard'.
+    'dashboard_url' => env('BILLING_DASHBOARD_URL'),
+
     // Where the checkout "Back" link leads when no explicit $backUrl is passed.
     'checkout_back_url' => env('BILLING_CHECKOUT_BACK_URL', '/'),
 
