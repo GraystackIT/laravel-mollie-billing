@@ -35,6 +35,8 @@ use Illuminate\Support\Facades\Facade;
  * @method static string checkoutUrl(?string $backUrl = null, ?string $plan = null, ?string $interval = null)
  * @method static void checkoutStepsUsing(\Closure $callback)
  * @method static array resolveCheckoutSteps()
+ * @method static void urlParametersUsing(\Closure $callback)
+ * @method static array<string, mixed> resolveUrlParameters(?\GraystackIT\MollieBilling\Contracts\Billable $billable = null)
  *
  * @see \GraystackIT\MollieBilling\MollieBilling
  */

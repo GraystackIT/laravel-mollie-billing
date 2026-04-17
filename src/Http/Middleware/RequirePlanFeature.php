@@ -23,6 +23,8 @@ class RequirePlanFeature
             return response()->json(['message' => 'Upgrade required.'], 403);
         }
 
-        return redirect()->route(BillingRoute::name('index'))->with('billing.status', 'upgrade_required');
+        $urlParams = MollieBilling::resolveUrlParameters($billable);
+
+        return redirect()->route(BillingRoute::name('index'), $urlParams)->with('billing.status', 'upgrade_required');
     }
 }

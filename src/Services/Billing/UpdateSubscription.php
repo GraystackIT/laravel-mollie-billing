@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
 use GraystackIT\MollieBilling\Events\AddonEnabled;
@@ -341,7 +342,7 @@ class UpdateSubscription
                 ],
                 'interval' => $interval === 'yearly' ? '12 months' : '1 month',
                 'description' => "{$planCode} subscription",
-                'webhookUrl' => url(route(BillingRoute::name('webhook'), [], false)),
+                'webhookUrl' => url(route(BillingRoute::name('webhook'), MollieBilling::resolveUrlParameters($billable), false)),
                 'metadata' => [
                     'billable_type' => $billable->getMorphClass(),
                     'billable_id' => (string) $billable->getKey(),
