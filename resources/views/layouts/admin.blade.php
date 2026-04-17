@@ -58,6 +58,20 @@
         </flux:navlist>
 
         <flux:spacer />
+
+        @if (Route::has('logout'))
+            <flux:navlist variant="outline">
+                <flux:navlist.item icon="arrow-right-start-on-rectangle"
+                    x-on:click.prevent="$refs.logoutForm.submit()"
+                    class="cursor-pointer"
+                >
+                    {{ __('billing::portal.nav.logout') }}
+                </flux:navlist.item>
+            </flux:navlist>
+            <form x-ref="logoutForm" method="POST" action="{{ route('logout') }}" class="hidden">
+                @csrf
+            </form>
+        @endif
     </flux:sidebar>
 
     <flux:main container>

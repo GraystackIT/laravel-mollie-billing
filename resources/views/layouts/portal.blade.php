@@ -64,12 +64,25 @@
 
         <flux:spacer />
 
-        @if ($dashboardUrl)
-            <flux:navlist variant="outline">
+        <flux:navlist variant="outline">
+            @if ($dashboardUrl)
                 <flux:navlist.item icon="arrow-left" href="{{ $dashboardUrl }}">
                     {{ __('billing::portal.nav.back_to_dashboard') }}
                 </flux:navlist.item>
-            </flux:navlist>
+            @endif
+            @if (Route::has('logout'))
+                <flux:navlist.item icon="arrow-right-start-on-rectangle"
+                    x-on:click.prevent="$refs.logoutForm.submit()"
+                    class="cursor-pointer"
+                >
+                    {{ __('billing::portal.nav.logout') }}
+                </flux:navlist.item>
+            @endif
+        </flux:navlist>
+        @if (Route::has('logout'))
+            <form x-ref="logoutForm" method="POST" action="{{ route('logout') }}" class="hidden">
+                @csrf
+            </form>
         @endif
     </flux:sidebar>
 
