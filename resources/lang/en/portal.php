@@ -35,6 +35,7 @@ return [
         'dashboard' => 'Dashboard',
         'plan' => 'Plan',
         'invoices' => 'Invoices',
+        'back_to_dashboard' => 'Back to dashboard',
     ],
     'flash' => [
         'cancelled' => 'Subscription cancelled.',

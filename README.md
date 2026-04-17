@@ -352,6 +352,7 @@ Highlights of `config/mollie-billing.php`:
 | `currency` | Default currency for prices and invoices (e.g. `EUR`). |
 | `logo_url` | Logo displayed in checkout and portal headers. |
 | `primary_color` | Accent color for checkout UI (hex, e.g. `#6366f1`). |
+| `dashboard_url` | URL the portal logo links to (e.g. your app's main dashboard). Supports `route:` prefix. |
 | `checkout_back_url` | Where the checkout "Back" link leads (default `/`). |
 | `checkout_countries` | Countries shown in checkout (regions, include, exclude). |
 | `prorata_enabled` | Enable prorated charges/credits when changing plans mid-period. |
@@ -361,6 +362,18 @@ Highlights of `config/mollie-billing.php`:
 | `company_name` | Display name used in headers, notifications and signatures. |
 | `billable_model` | Fully-qualified class name of your billable model. |
 | `billable_key_type` | `uuid`, `ulid`, or `int` — determines morph column shape. |
+
+### Portal "back to dashboard" link
+
+By default the portal logo links to the billing dashboard itself. Set `dashboard_url` to link it to your app's main dashboard instead — a "Back to dashboard" link will also appear at the bottom of the sidebar:
+
+```dotenv
+# Plain URL:
+BILLING_DASHBOARD_URL=/dashboard
+
+# Or a named route (prefix with "route:"):
+BILLING_DASHBOARD_URL=route:dashboard
+```
 
 ## Plans and addons
 

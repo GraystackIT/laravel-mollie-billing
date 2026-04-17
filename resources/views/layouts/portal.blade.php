@@ -4,6 +4,11 @@
     $logoUrl = config('mollie-billing.logo_url');
     $portalTitle = __('billing::portal.title', ['app' => config('mollie-billing.company_name', config('app.name'))]);
     $currentRoute = request()->route()?->getName();
+
+    $dashboardUrl = config('mollie-billing.dashboard_url');
+    if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
+        $dashboardUrl = route(substr($dashboardUrl, 6));
+    }
 @endphp
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="h-full">
@@ -19,7 +24,7 @@
     <flux:header sticky class="border-b border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
         <flux:sidebar.toggle class="lg:hidden" icon="bars-2" inset="left" />
 
-        <a href="{{ route(BillingRoute::name('index')) }}" class="flex items-center gap-2">
+        <a href="{{ $dashboardUrl ?? route(BillingRoute::name('index')) }}" class="flex items-center gap-2">
             @if ($logoUrl)
                 <img src="{{ $logoUrl }}" alt="{{ $portalTitle }}" class="h-8 w-auto">
             @else
@@ -58,6 +63,14 @@
         </flux:navlist>
 
         <flux:spacer />
+
+        @if ($dashboardUrl)
+            <flux:navlist variant="outline">
+                <flux:navlist.item icon="arrow-left" href="{{ $dashboardUrl }}">
+                    {{ __('billing::portal.nav.back_to_dashboard') }}
+                </flux:navlist.item>
+            </flux:navlist>
+        @endif
     </flux:sidebar>
 
     <flux:main container>
