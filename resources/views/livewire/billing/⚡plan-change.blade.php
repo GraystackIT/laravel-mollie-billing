@@ -20,6 +20,12 @@ new class extends Component {
         $this->billable = MollieBilling::resolveBillable(request());
     }
 
+    public function updatedSelectedInterval(): void
+    {
+        $this->preview = [];
+        $this->selectedPlan = null;
+    }
+
     public function previewFor(string $planCode, PreviewService $service): void
     {
         $this->selectedPlan = $planCode;
@@ -41,7 +47,8 @@ new class extends Component {
             $this->preview = [];
             $this->selectedPlan = null;
         } catch (\Throwable $e) {
-            $this->flash = $e->getMessage();
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
         }
     }
 

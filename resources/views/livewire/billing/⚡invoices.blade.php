@@ -57,7 +57,7 @@ new class extends Component {
                             <flux:table.cell><flux:badge size="sm" color="zinc">{{ $invoice->status->value }}</flux:badge></flux:table.cell>
                             <flux:table.cell align="right">
                                 @if ($invoice->mollie_pdf_url)
-                                    <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $invoice->mollie_pdf_url }}" target="_blank">
+                                    <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $invoice->mollie_pdf_url }}" target="_blank" rel="noopener noreferrer">
                                         {{ __('billing::portal.download') }}
                                     </flux:button>
                                 @endif

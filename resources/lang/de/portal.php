@@ -40,7 +40,9 @@ return [
         'cancelled' => 'Abo gekündigt.',
         'resubscribed' => 'Abo reaktiviert.',
         'plan_changed' => 'Plan geändert.',
+        'error' => 'Ein Fehler ist aufgetreten. Bitte versuche es erneut.',
     ],
+    'no_billable' => 'Dein Abrechnungskonto konnte nicht geladen werden. Bitte melde dich an und versuche es erneut.',
     'cancel_confirm' => [
         'title' => 'Abo kündigen?',
         'body' => 'Dein Abo wird zum Ende der aktuellen Abrechnungsperiode gekündigt.',

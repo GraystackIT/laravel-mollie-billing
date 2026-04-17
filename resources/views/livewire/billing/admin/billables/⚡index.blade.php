@@ -13,11 +13,17 @@ new class extends Component {
     public string $sortBy = 'created_at';
     public string $sortDirection = 'desc';
 
+    private const ALLOWED_SORTS = ['name', 'email', 'subscription_plan_code', 'subscription_status', 'created_at'];
+
     public function updatingSearch(): void { $this->resetPage(); }
     public function updatingStatusFilter(): void { $this->resetPage(); }
 
     public function sort(string $column): void
     {
+        if (! in_array($column, self::ALLOWED_SORTS, true)) {
+            return;
+        }
+
         if ($this->sortBy === $column) {
             $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
         } else {
@@ -43,7 +49,8 @@ new class extends Component {
         }
 
         if ($query) {
-            $query->orderBy($this->sortBy, $this->sortDirection);
+            $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
+            $query->orderBy($sortBy, $this->sortDirection);
         }
 
         return [

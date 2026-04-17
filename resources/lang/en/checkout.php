@@ -102,6 +102,7 @@ return [
     'yearly_savings' => 'Save :percent% with yearly billing',
 
     // Errors
+    'error_billable_creation' => 'Could not create the billing account. Please try again.',
     'error_no_billable' => 'Could not resolve the billing account. Please try again.',
     'error_payment_creation' => 'Could not create the payment. Please try again.',
 ];

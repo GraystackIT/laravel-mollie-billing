@@ -13,11 +13,17 @@ new class extends Component {
     public string $sortBy = 'created_at';
     public string $sortDirection = 'desc';
 
+    private const ALLOWED_SORTS = ['created_at', 'amount_gross', 'refund_reason_code'];
+
     public function updatingReasonFilter(): void { $this->resetPage(); }
     public function updatingSearch(): void { $this->resetPage(); }
 
     public function sort(string $column): void
     {
+        if (! in_array($column, self::ALLOWED_SORTS, true)) {
+            return;
+        }
+
         if ($this->sortBy === $column) {
             $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
         } else {
@@ -38,7 +44,9 @@ new class extends Component {
             $q->where('billable_id', 'like', '%'.$this->search.'%');
         }
 
-        return ['notes' => $q->orderBy($this->sortBy, $this->sortDirection)->paginate(20)];
+        $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
+
+        return ['notes' => $q->orderBy($sortBy, $this->sortDirection)->paginate(20)];
     }
 };
 

@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Support\Facades\DB;
+use GraystackIT\MollieBilling\Support\Sanitize;
 use Livewire\Attributes\Layout;
 use Livewire\Component;
 
@@ -61,7 +62,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function mount(): void
     {
-        $this->backUrl = request()->query('back');
+        $this->backUrl = Sanitize::backUrl(request()->query('back'));
 
         // Pre-select plan and/or interval from query parameters
         $plan = request()->query('plan');
@@ -263,8 +264,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $seatPrice = (int) ($plan['intervals'][$this->interval]['seat_price_net'] ?? 0);
         $net += $seatPrice * $this->extra_seats;
 
+        $addons = $this->addons();
         foreach ($this->addon_codes as $code) {
-            $net += (int) ($this->addons()[$code]['intervals'][$this->interval]['price_net'] ?? 0);
+            if (! isset($addons[$code])) {
+                continue;
+            }
+            $net += (int) ($addons[$code]['intervals'][$this->interval]['price_net'] ?? 0);
         }
 
         return $net;
@@ -556,7 +561,14 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
         // Create billable after billing-address step validation
         if ($pkg === 1 && $this->billableId === null) {
-            $this->createBillable();
+            try {
+                $this->createBillable();
+            } catch (\Throwable $e) {
+                report($e);
+                $this->errorMessage = __('billing::checkout.error_billable_creation');
+
+                return;
+            }
         }
 
         // Skip addons step if plan doesn't need it
@@ -724,6 +736,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'amount_gross' => $this->totals($vat)['gross'],
             ]);
         } catch (\Throwable $e) {
+            report($e);
             MollieBilling::runAfterCheckout($billable, false);
             $this->errorMessage = __('billing::checkout.error_payment_creation');
             $this->processing = false;

@@ -52,7 +52,8 @@ new class extends Component {
             session()->flash('status', "Grant {$code} issued and redeemed for {$b->name}.");
             return $this->redirectRoute(BillingRoute::admin('billables.show'), ['billable' => $b], navigate: true);
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'An unexpected error occurred. Please try again.';
         }
     }
 };

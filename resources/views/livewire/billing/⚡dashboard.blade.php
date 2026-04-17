@@ -22,7 +22,8 @@ new class extends Component {
             $this->billable->cancelBillingSubscription();
             $this->flash = __('billing::portal.flash.cancelled');
         } catch (\Throwable $e) {
-            $this->flash = $e->getMessage();
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
         }
     }
 
@@ -33,7 +34,8 @@ new class extends Component {
             $this->billable->resubscribeBillingPlan();
             $this->flash = __('billing::portal.flash.resubscribed');
         } catch (\Throwable $e) {
-            $this->flash = $e->getMessage();
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
         }
     }
 };
@@ -49,7 +51,7 @@ new class extends Component {
 
     @if (! $billable)
         <flux:callout variant="warning" icon="exclamation-triangle">
-            No billable context. Register a resolver via <code>MollieBilling::resolveBillableUsing(...)</code>.
+            {{ __('billing::portal.no_billable') }}
         </flux:callout>
     @else
         @php

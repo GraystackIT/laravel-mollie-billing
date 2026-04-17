@@ -21,18 +21,49 @@ new class extends Component {
         return $class ? $class::find($this->billableId) : null;
     }
 
+    public function with(): array
+    {
+        $billable = $this->billable();
+
+        return [
+            'billable' => $billable,
+            'invoices' => $billable ? $billable->billingInvoices()->limit(20)->get() : collect(),
+        ];
+    }
+
     public function refund(RefundInvoiceService $service): void
     {
         $this->flash = $this->error = null;
+
         $b = $this->billable();
-        if (! $b || ! $this->refundInvoiceId) return;
+        if (! $b) {
+            $this->error = 'Billable not found.';
+            return;
+        }
+
+        if (! $this->refundInvoiceId) {
+            $this->error = 'No invoice selected.';
+            return;
+        }
+
+        $reason = RefundReasonCode::tryFrom($this->refundReason);
+        if ($reason === null) {
+            $this->error = 'Invalid refund reason.';
+            return;
+        }
+
+        if ($this->refundAmount !== null && $this->refundAmount <= 0) {
+            $this->error = 'Amount must be greater than zero.';
+            return;
+        }
+
         $invoice = $b->billingInvoices()->where('id', $this->refundInvoiceId)->first();
         if (! $invoice) {
             $this->error = 'Invoice not found.';
             return;
         }
+
         try {
-            $reason = RefundReasonCode::from($this->refundReason);
             if ($this->refundAmount) {
                 $service->refundPartially($invoice, (int) $this->refundAmount, $reason, $this->refundText);
             } else {
@@ -41,7 +72,8 @@ new class extends Component {
             $this->flash = 'Refund processed.';
             $this->reset(['refundInvoiceId', 'refundAmount', 'refundText']);
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'Unable to process refund.';
         }
     }
 };
@@ -51,9 +83,7 @@ new class extends Component {
 <div class="space-y-4">
     <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
 
-    @php $b = $this->billable(); @endphp
-    @if ($b)
-        @php $invoices = $b->billingInvoices()->limit(20)->get(); @endphp
+    @if ($billable)
         @if ($invoices->isEmpty())
             <flux:card>
                 <x-mollie-billing::admin.empty
