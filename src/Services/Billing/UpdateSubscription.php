@@ -342,7 +342,7 @@ class UpdateSubscription
                 ],
                 'interval' => $interval === 'yearly' ? '12 months' : '1 month',
                 'description' => "{$planCode} subscription",
-                'webhookUrl' => url(route(BillingRoute::name('webhook'), MollieBilling::resolveUrlParameters($billable), false)),
+                'webhookUrl' => route(BillingRoute::webhook()),
                 'metadata' => [
                     'billable_type' => $billable->getMorphClass(),
                     'billable_id' => (string) $billable->getKey(),

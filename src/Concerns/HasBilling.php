@@ -181,6 +181,7 @@ trait HasBilling
             SubscriptionStatus::Trial => true,
             SubscriptionStatus::Cancelled => $this->subscription_ends_at?->isFuture() ?? false,
             SubscriptionStatus::PastDue, SubscriptionStatus::Expired => false,
+            default => false,
         };
     }
 

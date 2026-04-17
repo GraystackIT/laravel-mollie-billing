@@ -25,6 +25,8 @@ use Illuminate\Support\Facades\Facade;
  * @method static \GraystackIT\MollieBilling\Testing\MollieBillingFake fake()
  * @method static void routes()
  * @method static void checkoutRoutes()
+ * @method static void webhookRoutes()
+ * @method static void promotionRoutes()
  * @method static void adminRoutes()
  * @method static void createBillableUsing(\Closure $callback)
  * @method static void beforeCheckoutUsing(\Closure $callback)

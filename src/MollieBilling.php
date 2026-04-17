@@ -233,10 +233,8 @@ class MollieBilling
     }
 
     /**
-     * Tenant-scoped routes (webhook, promotion, customer portal). Mount inside the route group
-     * that carries auth + tenant resolution middleware. Does NOT include the checkout or admin
-     * panel — register those separately via `checkoutRoutes()` / `adminRoutes()` so they can
-     * run under different middleware (e.g. without tenant scoping).
+     * Tenant-scoped portal routes (dashboard, plan, invoices, return). Mount inside the
+     * route group that carries auth + tenant resolution middleware.
      */
     public static function dashboardRoutes(): void
     {
@@ -251,6 +249,25 @@ class MollieBilling
     public static function checkoutRoutes(): void
     {
         require __DIR__.'/../routes/checkout.php';
+    }
+
+    /**
+     * Webhook route (`POST /billing/webhook`). Mount in `routes/api.php` or a
+     * group WITHOUT the `web` middleware — Mollie calls this server-to-server
+     * with no session, no CSRF token, and no tenant slug.
+     */
+    public static function webhookRoutes(): void
+    {
+        require __DIR__.'/../routes/webhook.php';
+    }
+
+    /**
+     * Promotion route (`/promotion/{token}`). Mount WITHOUT tenant scoping —
+     * the token identifies the promotion, no tenant context is needed.
+     */
+    public static function promotionRoutes(): void
+    {
+        require __DIR__.'/../routes/promotion.php';
     }
 
     /**

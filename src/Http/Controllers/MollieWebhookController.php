@@ -184,6 +184,12 @@ class MollieWebhookController extends Controller
                 return;
             }
 
+            // First checkout payment that never resulted in a subscription.
+            if ($subscriptionId === '' && ! $billable->hasAccessibleBillingSubscription()) {
+                MollieBilling::runAfterCheckout($billable, false);
+                return;
+            }
+
             $this->handleSubscriptionPaymentFailed($payment, $billable);
         }
     }
@@ -273,6 +279,8 @@ class MollieWebhookController extends Controller
         event(new PaymentSucceeded($billable, $invoice));
 
         $this->notifyInvoiceAvailable($billable, $invoice);
+
+        MollieBilling::runAfterCheckout($billable, true);
     }
 
     protected function handleSubscriptionPaymentPaid(object $payment, Billable $billable, array $metadata): void

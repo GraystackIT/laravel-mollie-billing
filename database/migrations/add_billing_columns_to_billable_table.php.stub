@@ -52,7 +52,7 @@ return new class extends Migration
                 'subscription_ends_at' => fn () => $table->timestamp('subscription_ends_at')->nullable(),
                 'active_addon_codes' => fn () => $table->json('active_addon_codes')->nullable(),
                 'subscription_meta' => fn () => $table->json('subscription_meta')->nullable(),
-                'subscription_status' => fn () => $table->string('subscription_status')->default(SubscriptionStatus::Active->value),
+                'subscription_status' => fn () => $table->string('subscription_status')->default(SubscriptionStatus::New->value),
                 'scheduled_change_at' => fn () => $table->timestamp('scheduled_change_at')->nullable()->index(),
                 'allows_billing_overage' => fn () => $table->boolean('allows_billing_overage')->nullable(),
             ];

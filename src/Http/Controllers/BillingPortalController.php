@@ -36,7 +36,10 @@ class BillingPortalController extends Controller
 
     public function return(Request $request): View
     {
-        return $this->render('return');
+        return view('mollie-billing::layouts.checkout', [
+            'livewireComponent' => 'mollie-billing::return',
+            'backUrl' => null,
+        ]);
     }
 
     private function render(string $screen): View

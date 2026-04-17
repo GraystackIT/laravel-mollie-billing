@@ -47,6 +47,8 @@ abstract class TestCase extends Orchestra
     protected function defineRoutes($router): void
     {
         MollieBilling::dashboardRoutes();
+        MollieBilling::webhookRoutes();
+        MollieBilling::promotionRoutes();
         MollieBilling::checkoutRoutes();
     }
 

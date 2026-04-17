@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Support;
 
+use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\MollieBilling;
+
 class BillingRoute
 {
     protected static ?string $dashboardPrefix = null;
@@ -11,6 +14,10 @@ class BillingRoute
     protected static ?string $checkoutPrefix = null;
 
     protected static ?string $adminPrefix = null;
+
+    protected static ?string $webhookName = null;
+
+    protected static ?string $promotionName = null;
 
     /** Resolve the full route name for a dashboard/portal route. */
     public static function name(string $suffix): string
@@ -82,11 +89,51 @@ class BillingRoute
         return self::$checkoutPrefix = 'billing.';
     }
 
+    /** Resolve the full route name for the webhook route (may live outside tenant prefix). */
+    public static function webhook(): string
+    {
+        if (self::$webhookName !== null) {
+            return self::$webhookName;
+        }
+
+        foreach (app('router')->getRoutes()->getRoutesByName() as $name => $route) {
+            if (str_ends_with($name, 'billing.webhook')) {
+                return self::$webhookName = $name;
+            }
+        }
+
+        return self::$webhookName = 'billing.webhook';
+    }
+
+    /** Resolve the full route name for the promotion route (may live outside tenant prefix). */
+    public static function promotion(): string
+    {
+        if (self::$promotionName !== null) {
+            return self::$promotionName;
+        }
+
+        foreach (app('router')->getRoutes()->getRoutesByName() as $name => $route) {
+            if (str_ends_with($name, 'billing.promotion')) {
+                return self::$promotionName = $name;
+            }
+        }
+
+        return self::$promotionName = 'billing.promotion';
+    }
+
+    /** Generate a full URL for a portal route, resolving tenant parameters from the billable. */
+    public static function url(string $suffix, ?Billable $billable = null): string
+    {
+        return route(self::name($suffix), MollieBilling::resolveUrlParameters($billable));
+    }
+
     /** Reset cached prefixes (for testing). */
     public static function flush(): void
     {
         self::$dashboardPrefix = null;
         self::$checkoutPrefix = null;
         self::$adminPrefix = null;
+        self::$webhookName = null;
+        self::$promotionName = null;
     }
 }

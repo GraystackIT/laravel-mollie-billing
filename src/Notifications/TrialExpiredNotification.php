@@ -37,7 +37,7 @@ class TrialExpiredNotification extends Notification
             ->subject(__('billing::notifications.trial_expired.subject', ['app' => $app]))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
             ->line(__('billing::notifications.trial_expired.body', ['date' => $date]))
-            ->action(__('billing::emails.subscribe_now'), route(config('mollie-billing.checkout_route', BillingRoute::name('index')), MollieBilling::resolveUrlParameters($this->billable)))
+            ->action(__('billing::emails.subscribe_now'), route(BillingRoute::checkout(), MollieBilling::resolveUrlParameters($this->billable)))
             ->line(__('billing::emails.signature_line', ['app' => $app]));
     }
 

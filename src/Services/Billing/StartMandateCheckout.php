@@ -29,7 +29,7 @@ class StartMandateCheckout
             description: 'Payment method authorisation',
             amount: new Money($currency, '0.00'),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
-            webhookUrl: route(BillingRoute::name('webhook'), $urlParams),
+            webhookUrl: route(BillingRoute::webhook()),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),

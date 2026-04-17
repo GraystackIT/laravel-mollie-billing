@@ -49,7 +49,7 @@ it('reserves and finalises a webhook signature', function () {
 
 it('exposes the enum cases used by the package', function () {
     expect(CouponType::cases())->toHaveCount(5);
-    expect(SubscriptionStatus::cases())->toHaveCount(5);
+    expect(SubscriptionStatus::cases())->toHaveCount(6);
     expect(SubscriptionSource::cases())->toHaveCount(3);
 });
 

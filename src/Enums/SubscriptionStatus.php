@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Enums;
 
 enum SubscriptionStatus: string
 {
+    case New = 'new';
     case Active = 'active';
     case Trial = 'trial';
     case PastDue = 'past_due';
