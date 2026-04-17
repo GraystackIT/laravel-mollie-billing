@@ -78,6 +78,7 @@ return [
     'total' => 'Gesamt',
     'redirect_notice' => 'Nach der Bestätigung werden Sie zu Mollie weitergeleitet, um Ihre Zahlungsmethode zu autorisieren. Sie können jederzeit kündigen.',
     'confirm_and_pay' => 'Bestätigen und bezahlen',
+    'processing' => 'Wird verarbeitet…',
     'continue' => 'Weiter',
 
     // Coupon errors

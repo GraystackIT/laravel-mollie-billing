@@ -78,6 +78,7 @@ return [
     'total' => 'Total',
     'redirect_notice' => 'After confirming you will be redirected to Mollie to authorise your payment method. You can cancel anytime.',
     'confirm_and_pay' => 'Confirm and pay',
+    'processing' => 'Processing…',
     'continue' => 'Continue',
 
     // Coupon errors

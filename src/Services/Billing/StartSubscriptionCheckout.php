@@ -25,10 +25,16 @@ class StartSubscriptionCheckout
     /**
      * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,coupon_code?:?string,amount_gross:int}  $request
      * @return array{checkout_url:?string,payment_id:string}
+     *
+     * @throws \RuntimeException if the billable already has an accessible subscription
      */
     public function handle(Billable $billable, array $request): array
     {
         /** @var Model&Billable $billable */
+        if ($billable->hasAccessibleBillingSubscription()) {
+            throw new \RuntimeException('Billable already has an active subscription.');
+        }
+
         $couponCode = $request['coupon_code'] ?? null;
         if ($couponCode === null || $couponCode === '') {
             $auto = Session::get('billing.auto_apply_coupon');

@@ -704,6 +704,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return null;
         }
 
+        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+        $billable->refresh();
+        if ($billable->hasAccessibleBillingSubscription()) {
+            return $this->redirectRoute(BillingRoute::name('index'), navigate: false);
+        }
+
         // Update billing address on the billable (may have changed since step 1)
         /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
         $billable->forceFill([
