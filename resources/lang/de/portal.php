@@ -62,7 +62,7 @@ return [
     'return' => [
         'title' => 'Zahlung erhalten',
         'body' => 'Danke — deine Zahlung wurde verarbeitet. Es kann einen Moment dauern, bis die Rechnung hier erscheint.',
-        'to_dashboard' => 'Zur Übersicht',
+        'to_dashboard' => 'Zum Dashboard',
         'to_invoices' => 'Rechnungen ansehen',
     ],
 ];

@@ -32,7 +32,7 @@ new class extends Component {
         <flux:heading size="xl">{{ __('billing::portal.return.title') }}</flux:heading>
         <flux:text>{{ __('billing::portal.return.body') }}</flux:text>
         <div class="flex justify-center gap-2">
-            <flux:button variant="primary" href="{{ route(BillingRoute::name('index')) }}">
+            <flux:button variant="primary" href="{{ route(config('mollie-billing.redirect_after_return', BillingRoute::name('index'))) }}">
                 {{ __('billing::portal.return.to_dashboard') }}
             </flux:button>
             <flux:button variant="ghost" href="{{ route(BillingRoute::name('invoices')) }}">

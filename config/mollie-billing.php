@@ -27,7 +27,7 @@ return [
 
     'prorata_enabled' => env('BILLING_PRORATA_ENABLED', false),
 
-    'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN', 'billing.index'),
+    'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN'),
 
     // Consuming app owns the checkout/plan-selection flow. Package code (promotion redirect,
     // past-due middleware, trial-expired mail) needs to know where to send users who don't
