@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Http\Middleware;
 
 use Closure;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Http\Request;
 
 class RequirePlanFeature
@@ -22,6 +23,6 @@ class RequirePlanFeature
             return response()->json(['message' => 'Upgrade required.'], 403);
         }
 
-        return redirect()->route('billing.index')->with('billing.status', 'upgrade_required');
+        return redirect()->route(BillingRoute::name('index'))->with('billing.status', 'upgrade_required');
     }
 }

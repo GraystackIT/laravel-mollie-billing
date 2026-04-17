@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Session;
 use Mollie\Api\Http\Data\Money;
@@ -43,8 +44,8 @@ class StartSubscriptionCheckout
         $payment = Mollie::send(new CreatePaymentRequest(
             description: "Subscription {$request['plan_code']}",
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
-            redirectUrl: route('billing.return'),
-            webhookUrl: route('billing.webhook'),
+            redirectUrl: route(BillingRoute::name('return')),
+            webhookUrl: route(BillingRoute::name('webhook')),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),

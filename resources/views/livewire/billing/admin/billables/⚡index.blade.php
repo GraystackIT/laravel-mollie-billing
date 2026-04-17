@@ -1,6 +1,7 @@
 <?php
 
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -112,7 +113,7 @@ new class extends Component {
                                     <x-mollie-billing::admin.enum-badge :value="$b->subscription_status" />
                                 </flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route('billing.admin.billables.show', $b)">View</flux:button>
+                                    <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route(BillingRoute::admin('billables.show'), $b)">View</flux:button>
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

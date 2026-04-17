@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
 new class extends Component {
@@ -63,7 +64,7 @@ new class extends Component {
 
             $service->create($attrs);
             session()->flash('status', "Coupon {$attrs['code']} created.");
-            return $this->redirectRoute('billing.admin.coupons.index', navigate: true);
+            return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\Throwable $e) {
             $this->error = $e->getMessage();
         }
@@ -76,7 +77,7 @@ new class extends Component {
     <x-mollie-billing::admin.page-header
         title="Create coupon"
         subtitle="Configure a coupon and its benefit. Fields below adapt to the selected type."
-        :back="route('billing.admin.coupons.index')"
+        :back="route(BillingRoute::admin('coupons.index'))"
         backLabel="Coupons"
     />
 
@@ -247,7 +248,7 @@ new class extends Component {
         </x-mollie-billing::admin.section>
 
         <div class="flex justify-end gap-2">
-            <flux:button type="button" variant="ghost" :href="route('billing.admin.coupons.index')">Cancel</flux:button>
+            <flux:button type="button" variant="ghost" :href="route(BillingRoute::admin('coupons.index'))">Cancel</flux:button>
             <flux:button type="submit" variant="primary" icon="check">Create coupon</flux:button>
         </div>
     </form>

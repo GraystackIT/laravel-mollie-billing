@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
 new class extends Component {
@@ -21,7 +22,7 @@ new class extends Component {
     @if (! $billable)
         <x-mollie-billing::admin.page-header
             title="Billable not found"
-            :back="route('billing.admin.billables.index')"
+            :back="route(BillingRoute::admin('billables.index'))"
             backLabel="Billables"
         />
         <flux:card>
@@ -41,7 +42,7 @@ new class extends Component {
         @endphp
 
         <div class="space-y-2">
-            <flux:button :href="route('billing.admin.billables.index')" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">Billables</flux:button>
+            <flux:button :href="route(BillingRoute::admin('billables.index'))" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">Billables</flux:button>
 
             <div class="flex flex-wrap items-start justify-between gap-4">
                 <div class="flex min-w-0 items-center gap-4">

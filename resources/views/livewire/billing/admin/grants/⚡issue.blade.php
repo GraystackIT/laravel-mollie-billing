@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Support\Str;
 use Livewire\Component;
 
@@ -49,7 +50,7 @@ new class extends Component {
                 : $service->addonGrantCoupon($code, $this->addonCodes);
             $service->redeem($coupon, $b, []);
             session()->flash('status', "Grant {$code} issued and redeemed for {$b->name}.");
-            return $this->redirectRoute('billing.admin.billables.show', ['billable' => $b], navigate: true);
+            return $this->redirectRoute(BillingRoute::admin('billables.show'), ['billable' => $b], navigate: true);
         } catch (\Throwable $e) {
             $this->error = $e->getMessage();
         }
@@ -62,7 +63,7 @@ new class extends Component {
     <x-mollie-billing::admin.page-header
         title="Issue access grant"
         :subtitle="$billable ? 'For '.$billable->name.' ('.$billable->email.')' : 'Grants plan and/or addon access without charge.'"
-        :back="$billable ? route('billing.admin.billables.show', $billable) : route('billing.admin.billables.index')"
+        :back="$billable ? route(BillingRoute::admin('billables.show'), $billable) : route(BillingRoute::admin('billables.index'))"
         :backLabel="$billable ? $billable->name : 'Billables'"
     />
 
@@ -115,7 +116,7 @@ new class extends Component {
         </x-mollie-billing::admin.section>
 
         <div class="flex justify-end gap-2">
-            <flux:button type="button" variant="ghost" :href="$billable ? route('billing.admin.billables.show', $billable) : route('billing.admin.billables.index')">Cancel</flux:button>
+            <flux:button type="button" variant="ghost" :href="$billable ? route(BillingRoute::admin('billables.show'), $billable) : route(BillingRoute::admin('billables.index'))">Cancel</flux:button>
             <flux:button type="submit" variant="primary" icon="gift">Issue grant</flux:button>
         </div>
     </form>

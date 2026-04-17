@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Tests;
 use Bavix\Wallet\WalletServiceProvider;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\MollieBillingServiceProvider;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Route;
@@ -45,6 +46,13 @@ abstract class TestCase extends Orchestra
 
     protected function defineRoutes($router): void
     {
-        MollieBilling::routes();
+        MollieBilling::dashboardRoutes();
+        MollieBilling::checkoutRoutes();
+    }
+
+    protected function tearDown(): void
+    {
+        BillingRoute::flush();
+        parent::tearDown();
     }
 }

@@ -10,6 +10,14 @@ use Illuminate\Routing\Controller;
 
 class BillingPortalController extends Controller
 {
+    public function checkout(Request $request): View
+    {
+        return view('mollie-billing::layouts.checkout', [
+            'livewireComponent' => 'mollie-billing::checkout',
+            'backUrl' => $request->query('back'),
+        ]);
+    }
+
     public function index(Request $request): View
     {
         return $this->render('dashboard');

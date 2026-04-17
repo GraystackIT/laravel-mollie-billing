@@ -1,6 +1,7 @@
 <?php
 
 use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -101,7 +102,7 @@ new class extends Component {
                         @foreach ($billables as $b)
                             <flux:table.row :key="$b->getKey()">
                                 <flux:table.cell variant="strong">
-                                    <a href="{{ route('billing.admin.billables.show', $b) }}" class="hover:underline">{{ $b->name }}</a>
+                                    <a href="{{ route(BillingRoute::admin('billables.show'), $b) }}" class="hover:underline">{{ $b->name }}</a>
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->email }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">

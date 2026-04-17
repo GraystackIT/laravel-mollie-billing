@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -56,7 +57,7 @@ new class extends Component {
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header title="Coupons" subtitle="Discounts, credits, trial extensions and access grants.">
         <x-slot:actions>
-            <flux:button variant="primary" size="sm" icon="plus" :href="route('billing.admin.coupons.create')">New coupon</flux:button>
+            <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">New coupon</flux:button>
         </x-slot:actions>
     </x-mollie-billing::admin.page-header>
 
@@ -85,7 +86,7 @@ new class extends Component {
                 description="Create your first coupon to offer discounts, credits, trial extensions or free access."
             >
                 <x-slot:cta>
-                    <flux:button variant="primary" size="sm" icon="plus" :href="route('billing.admin.coupons.create')">New coupon</flux:button>
+                    <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">New coupon</flux:button>
                 </x-slot:cta>
             </x-mollie-billing::admin.empty>
         </flux:card>
@@ -123,7 +124,7 @@ new class extends Component {
                                 </flux:badge>
                             </flux:table.cell>
                             <flux:table.cell>
-                                <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route('billing.admin.coupons.show', $coupon)">View</flux:button>
+                                <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route(BillingRoute::admin('coupons.show'), $coupon)">View</flux:button>
                             </flux:table.cell>
                         </flux:table.row>
                     @endforeach

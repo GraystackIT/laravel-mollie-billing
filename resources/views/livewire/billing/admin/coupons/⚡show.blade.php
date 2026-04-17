@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
 new class extends Component {
@@ -34,7 +35,7 @@ new class extends Component {
         try {
             $service->delete($this->coupon);
             session()->flash('status', 'Coupon deleted.');
-            return $this->redirectRoute('billing.admin.coupons.index', navigate: true);
+            return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\Throwable $e) {
             $this->error = $e->getMessage();
         }
@@ -47,7 +48,7 @@ new class extends Component {
     @if (! $coupon)
         <x-mollie-billing::admin.page-header
             title="Coupon not found"
-            :back="route('billing.admin.coupons.index')"
+            :back="route(BillingRoute::admin('coupons.index'))"
             backLabel="Coupons"
         />
         <flux:card>
@@ -68,7 +69,7 @@ new class extends Component {
         @endphp
 
         <div class="space-y-2">
-            <flux:button :href="route('billing.admin.coupons.index')" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">Coupons</flux:button>
+            <flux:button :href="route(BillingRoute::admin('coupons.index'))" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">Coupons</flux:button>
 
             <div class="flex flex-wrap items-start justify-between gap-4">
                 <div class="min-w-0 space-y-2">
