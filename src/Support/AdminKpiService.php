@@ -48,6 +48,7 @@ class AdminKpiService
         return $this->cached('active_subs', function (): array {
             $billableClass = config('mollie-billing.billable_model');
             $defaults = [
+                SubscriptionStatus::New->value => 0,
                 SubscriptionStatus::Active->value => 0,
                 SubscriptionStatus::Trial->value => 0,
                 SubscriptionStatus::Cancelled->value => 0,

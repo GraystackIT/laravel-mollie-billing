@@ -22,6 +22,6 @@ class PromotionController extends Controller
             session()->flash('billing.promotion_status', 'expired_or_invalid');
         }
 
-        return redirect()->route(config('mollie-billing.checkout_route', BillingRoute::name('index')));
+        return redirect()->route(BillingRoute::checkout());
     }
 }

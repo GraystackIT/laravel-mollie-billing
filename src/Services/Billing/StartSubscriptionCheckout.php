@@ -53,7 +53,7 @@ class StartSubscriptionCheckout
             description: "Subscription {$request['plan_code']}",
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
-            webhookUrl: route(BillingRoute::name('webhook'), $urlParams),
+            webhookUrl: route(BillingRoute::webhook()),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),

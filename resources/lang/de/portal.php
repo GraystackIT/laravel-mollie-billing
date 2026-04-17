@@ -88,8 +88,9 @@ return [
     ],
     'return' => [
         'title' => 'Zahlung erhalten',
-        'body' => 'Danke — deine Zahlung wurde verarbeitet. Es kann einen Moment dauern, bis die Rechnung hier erscheint.',
+        'body' => 'Danke — deine Zahlung wurde erfolgreich verarbeitet. Du kannst jetzt zu deinem Dashboard weitergehen.',
         'to_dashboard' => 'Zum Dashboard',
-        'to_invoices' => 'Rechnungen ansehen',
+        'processing_title' => 'Abo wird aktiviert…',
+        'processing_body' => 'Wir bestätigen deine Zahlung. Das dauert normalerweise nur wenige Sekunden.',
     ],
 ];

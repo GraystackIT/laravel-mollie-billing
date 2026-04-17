@@ -15,7 +15,7 @@ return [
     'step_confirm' => 'Confirm',
 
     // Step headlines
-    'headline_billing' => 'Where should we send the invoices?',
+    'headline_billing' => 'Which company should we set up?',
     'headline_plan' => 'Pick a plan that fits',
     'headline_addons' => 'Fine-tune your subscription',
     'headline_confirm' => 'One last look',

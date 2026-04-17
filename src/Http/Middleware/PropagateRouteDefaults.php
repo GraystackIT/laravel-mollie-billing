@@ -24,13 +24,15 @@ class PropagateRouteDefaults
             $defaults = [];
 
             foreach ($route->parameters() as $name => $value) {
+                $bindingField = $route->bindingFieldFor($name);
+                $defaultKey = $bindingField ? "{$name}:{$bindingField}" : $name;
+
                 if (is_object($value)) {
-                    $key = $route->bindingFieldFor($name);
-                    $defaults[$name] = $key !== null && isset($value->{$key})
-                        ? $value->{$key}
+                    $defaults[$defaultKey] = $bindingField !== null && isset($value->{$bindingField})
+                        ? $value->{$bindingField}
                         : (method_exists($value, 'getRouteKey') ? $value->getRouteKey() : $value);
                 } else {
-                    $defaults[$name] = $value;
+                    $defaults[$defaultKey] = $value;
                 }
             }
 

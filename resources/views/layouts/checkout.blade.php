@@ -37,10 +37,10 @@
                         <img src="{{ $logoUrl }}" alt="{{ $companyName }}" class="h-8 w-auto">
                     @else
                         <flux:icon.credit-card class="size-7 text-accent" />
+                        <span class="text-sm font-medium tracking-tight text-zinc-900 dark:text-white">
+                            {{ $companyName }}
+                        </span>
                     @endif
-                    <span class="text-sm font-medium tracking-tight text-zinc-900 dark:text-white">
-                        {{ $companyName }}
-                    </span>
                 </span>
                 <flux:link :href="$resolvedBackUrl" class="text-sm" icon="arrow-left">
                     {{ __('billing::checkout.back') }}

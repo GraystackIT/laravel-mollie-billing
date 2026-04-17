@@ -703,11 +703,9 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
             return null;
         }
-
         /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
-        $billable->refresh();
         if ($billable->hasAccessibleBillingSubscription()) {
-            return $this->redirectRoute(BillingRoute::name('index'), navigate: false);
+            return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
         }
 
         // Update billing address on the billable (may have changed since step 1)
@@ -757,7 +755,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // Zero-amount / local subscription — no Mollie redirect needed
         MollieBilling::runAfterCheckout($billable, true);
 
-        return $this->redirectRoute(BillingRoute::name('index'), navigate: false);
+        return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
     }
 }; ?>
 

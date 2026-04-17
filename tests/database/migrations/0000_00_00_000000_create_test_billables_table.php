@@ -44,7 +44,7 @@ return new class extends Migration
             $table->timestamp('subscription_ends_at')->nullable();
             $table->json('active_addon_codes')->nullable();
             $table->json('subscription_meta')->nullable();
-            $table->string('subscription_status')->default(SubscriptionStatus::Active->value);
+            $table->string('subscription_status')->default(SubscriptionStatus::New->value);
             $table->timestamp('scheduled_change_at')->nullable()->index();
             $table->boolean('allows_billing_overage')->nullable();
 

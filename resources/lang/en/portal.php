@@ -88,8 +88,9 @@ return [
     ],
     'return' => [
         'title' => 'Payment received',
-        'body' => 'Thanks — your payment was processed. It can take a moment for the invoice to appear here.',
+        'body' => 'Thanks — your payment was processed successfully. You can now continue to your dashboard.',
         'to_dashboard' => 'Back to dashboard',
-        'to_invoices' => 'View invoices',
+        'processing_title' => 'Activating your subscription…',
+        'processing_body' => 'We are confirming your payment. This usually takes just a few seconds.',
     ],
 ];

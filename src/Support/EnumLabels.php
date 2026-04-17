@@ -31,6 +31,7 @@ final class EnumLabels
 
         return match (true) {
             $enum instanceof SubscriptionStatus => match ($enum) {
+                SubscriptionStatus::New => 'New',
                 SubscriptionStatus::Active => 'Active',
                 SubscriptionStatus::Trial => 'Trial',
                 SubscriptionStatus::PastDue => 'Past due',
@@ -98,6 +99,7 @@ final class EnumLabels
 
         return match (true) {
             $enum instanceof SubscriptionStatus => match ($enum) {
+                SubscriptionStatus::New => 'amber',
                 SubscriptionStatus::Active => 'green',
                 SubscriptionStatus::Trial => 'blue',
                 SubscriptionStatus::PastDue => 'red',

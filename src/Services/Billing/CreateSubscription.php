@@ -52,7 +52,7 @@ class CreateSubscription
                 'plan_code' => $planCode,
                 'interval' => $interval,
             ],
-            webhookUrl: route(BillingRoute::name('webhook'), $urlParams),
+            webhookUrl: route(BillingRoute::webhook()),
         ));
 
         $meta = $billable->getBillingSubscriptionMeta();

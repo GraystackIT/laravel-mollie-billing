@@ -15,7 +15,7 @@ return [
     'step_confirm' => 'Bestätigen',
 
     // Step headlines
-    'headline_billing' => 'Wohin sollen wir die Rechnungen senden?',
+    'headline_billing' => 'Welches Unternehmen dürfen wir anlegen?',
     'headline_plan' => 'Wählen Sie den passenden Plan',
     'headline_addons' => 'Passen Sie Ihr Abonnement an',
     'headline_confirm' => 'Ein letzter Blick',
