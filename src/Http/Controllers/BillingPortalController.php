@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
+use GraystackIT\MollieBilling\Support\Sanitize;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -14,7 +15,7 @@ class BillingPortalController extends Controller
     {
         return view('mollie-billing::layouts.checkout', [
             'livewireComponent' => 'mollie-billing::checkout',
-            'backUrl' => $request->query('back'),
+            'backUrl' => Sanitize::backUrl($request->query('back')),
         ]);
     }
 

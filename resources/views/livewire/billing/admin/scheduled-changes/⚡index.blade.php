@@ -14,10 +14,16 @@ new class extends Component {
     public ?string $flash = null;
     public ?string $error = null;
 
+    private const ALLOWED_SORTS = ['name', 'email', 'scheduled_change_at'];
+
     public function updatingSearch(): void { $this->resetPage(); }
 
     public function sort(string $column): void
     {
+        if (! in_array($column, self::ALLOWED_SORTS, true)) {
+            return;
+        }
+
         if ($this->sortBy === $column) {
             $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
         } else {
@@ -41,7 +47,7 @@ new class extends Component {
         $b = $class ? $class::find($id) : null;
         if ($b) {
             try { $service->apply($b); $this->flash = 'Scheduled change applied.'; }
-            catch (\Throwable $e) { $this->error = $e->getMessage(); }
+            catch (\Throwable $e) { report($e); $this->error = 'An error occurred while applying the scheduled change.'; }
         }
     }
 
@@ -58,7 +64,8 @@ new class extends Component {
         }
 
         if ($query) {
-            $query->orderBy($this->sortBy, $this->sortDirection);
+            $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'scheduled_change_at';
+            $query->orderBy($sortBy, $this->sortDirection);
         }
 
         return ['billables' => $query ? $query->paginate(20) : null];

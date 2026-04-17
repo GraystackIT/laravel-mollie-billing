@@ -40,7 +40,9 @@ return [
         'cancelled' => 'Subscription cancelled.',
         'resubscribed' => 'Subscription reactivated.',
         'plan_changed' => 'Plan changed.',
+        'error' => 'An error occurred. Please try again.',
     ],
+    'no_billable' => 'Unable to load your billing account. Please sign in and try again.',
     'cancel_confirm' => [
         'title' => 'Cancel subscription?',
         'body' => 'Your subscription will be cancelled at the end of the current billing period.',

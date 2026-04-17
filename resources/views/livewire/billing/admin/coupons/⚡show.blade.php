@@ -37,7 +37,8 @@ new class extends Component {
             session()->flash('status', 'Coupon deleted.');
             return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'Unable to delete coupon. Please try again.';
         }
     }
 };

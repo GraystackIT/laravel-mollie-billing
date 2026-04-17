@@ -10,7 +10,7 @@ new class extends Component {
     {
         $id = $routeParameters['billable'] ?? null;
         $class = config('mollie-billing.billable_model');
-        if ($class && $id !== null) {
+        if ($class && $id !== null && is_string($class) && is_subclass_of($class, \Illuminate\Database\Eloquent\Model::class)) {
             $this->billable = (new $class)->resolveRouteBinding($id);
         }
     }

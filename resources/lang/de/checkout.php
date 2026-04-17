@@ -102,6 +102,7 @@ return [
     'yearly_savings' => ':percent% sparen mit jährlicher Abrechnung',
 
     // Errors
+    'error_billable_creation' => 'Das Abrechnungskonto konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
     'error_no_billable' => 'Das Abrechnungskonto konnte nicht aufgelöst werden. Bitte versuchen Sie es erneut.',
     'error_payment_creation' => 'Die Zahlung konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
 ];

@@ -15,8 +15,11 @@ new class extends Component {
 
     public function mount(SubscriptionCatalogInterface $catalog): void
     {
-        $this->planFilter = $catalog->allPlans()[0] ?? '';
-        $this->creditType = $catalog->allUsageTypes()[0] ?? '';
+        $plans = $catalog->allPlans();
+        $usageTypes = $catalog->allUsageTypes();
+
+        $this->planFilter = $plans[0] ?? '';
+        $this->creditType = $usageTypes[0] ?? '';
     }
 
     public function with(SubscriptionCatalogInterface $catalog): array

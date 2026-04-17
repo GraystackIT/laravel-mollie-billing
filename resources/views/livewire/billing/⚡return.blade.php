@@ -13,8 +13,13 @@ new class extends Component {
         $this->billable = MollieBilling::resolveBillable(request());
 
         if ($this->billable !== null) {
-            $hasSubscription = $this->billable->hasAccessibleBillingSubscription();
-            MollieBilling::runAfterCheckout($this->billable, $hasSubscription);
+            $sessionKey = 'mollie_after_checkout_' . $this->billable->getKey();
+
+            if (! session()->has($sessionKey)) {
+                $hasSubscription = $this->billable->hasAccessibleBillingSubscription();
+                MollieBilling::runAfterCheckout($this->billable, $hasSubscription);
+                session()->put($sessionKey, now()->timestamp);
+            }
         }
     }
 };

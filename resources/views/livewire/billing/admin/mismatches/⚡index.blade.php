@@ -14,10 +14,16 @@ new class extends Component {
     public string $sortDirection = 'desc';
     public ?string $flash = null;
 
+    private const ALLOWED_SORTS = ['id', 'tax_country_user', 'tax_country_ip', 'tax_country_payment', 'created_at'];
+
     public function updatingSearch(): void { $this->resetPage(); }
 
     public function sort(string $column): void
     {
+        if (! in_array($column, self::ALLOWED_SORTS, true)) {
+            return;
+        }
+
         if ($this->sortBy === $column) {
             $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
         } else {
@@ -47,7 +53,9 @@ new class extends Component {
             });
         }
 
-        return ['rows' => $q->orderBy($this->sortBy, $this->sortDirection)->paginate(20)];
+        $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
+
+        return ['rows' => $q->orderBy($sortBy, $this->sortDirection)->paginate(20)];
     }
 };
 

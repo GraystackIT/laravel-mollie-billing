@@ -15,7 +15,8 @@ new class extends Component {
             $path = $service->export($year);
             $this->flash = "CSV written to {$path}";
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'An unexpected error occurred.';
         }
     }
 

@@ -44,8 +44,9 @@ new class extends Component {
         return [
             'coupons' => Coupon::query()
                 ->when($this->search !== '', fn ($q) => $q
-                    ->where('code', 'like', '%'.strtoupper($this->search).'%')
-                    ->orWhere('name', 'like', '%'.$this->search.'%'))
+                    ->where(fn ($w) => $w
+                        ->where('code', 'like', '%'.strtoupper($this->search).'%')
+                        ->orWhere('name', 'like', '%'.$this->search.'%')))
                 ->orderBy($this->sortBy, $this->sortDirection)
                 ->paginate(20),
         ];

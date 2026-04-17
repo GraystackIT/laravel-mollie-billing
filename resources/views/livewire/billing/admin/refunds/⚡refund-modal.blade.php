@@ -17,13 +17,28 @@ new class extends Component {
     public function submit(RefundInvoiceService $service): void
     {
         $this->flash = $this->error = null;
+
+        $this->validate([
+            'invoiceId' => ['required', 'integer', 'min:1'],
+            'amountCents' => ['nullable', 'integer', 'min:1'],
+            'reason' => ['required', 'string'],
+            'reasonText' => ['nullable', 'string', 'max:1000'],
+            'notifyUser' => ['boolean'],
+        ]);
+
+        $reasonCode = RefundReasonCode::tryFrom($this->reason);
+        if ($reasonCode === null) {
+            $this->error = 'Invalid refund reason.';
+            return;
+        }
+
         $invoice = BillingInvoice::find($this->invoiceId);
         if (! $invoice) {
             $this->error = 'Invoice not found.';
             return;
         }
+
         try {
-            $reasonCode = RefundReasonCode::from($this->reason);
             $service->refund($invoice, [
                 'amount_net' => $this->amountCents,
                 'wallet_credits' => [],
@@ -33,7 +48,8 @@ new class extends Component {
             ]);
             $this->flash = 'Refund issued.';
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'Unable to process refund.';
         }
     }
 };

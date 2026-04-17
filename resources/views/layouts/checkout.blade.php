@@ -1,8 +1,11 @@
 @php
     $logoUrl = config('mollie-billing.logo_url');
     $companyName = config('mollie-billing.company_name', config('app.name'));
-    $primaryColor = config('mollie-billing.primary_color', '#6366f1');
-    $resolvedBackUrl = $backUrl ?? config('mollie-billing.checkout_back_url', '/');
+    $primaryColor = \GraystackIT\MollieBilling\Support\Sanitize::cssColor(
+        (string) config('mollie-billing.primary_color', '#6366f1'),
+    );
+    $resolvedBackUrl = \GraystackIT\MollieBilling\Support\Sanitize::backUrl($backUrl)
+        ?? config('mollie-billing.checkout_back_url', '/');
 @endphp
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="dark">
