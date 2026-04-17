@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Http\Middleware;
 
 use Closure;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Http\Request;
 
 class RequireActiveSubscription
@@ -14,7 +15,7 @@ class RequireActiveSubscription
     {
         $billable = MollieBilling::resolveBillable($request);
 
-        if ($request->routeIs('billing.*')) {
+        if ($request->routeIs(BillingRoute::name('*'))) {
             return $next($request);
         }
 
@@ -23,11 +24,11 @@ class RequireActiveSubscription
         }
 
         if ($billable->isBillingPastDue()) {
-            return redirect()->route('billing.index');
+            return redirect()->route(BillingRoute::name('index'));
         }
 
         if (! $billable->hasAccessibleBillingSubscription()) {
-            return redirect()->route(config('mollie-billing.checkout_route', 'billing.index'));
+            return redirect()->route(config('mollie-billing.checkout_route', BillingRoute::name('index')));
         }
 
         return $next($request);

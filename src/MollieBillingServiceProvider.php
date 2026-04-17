@@ -93,10 +93,9 @@ class MollieBillingServiceProvider extends ServiceProvider
     private function registerRoutes(): void
     {
         // Portal/webhook routes are not auto-loaded — apps must mount them via
-        // MollieBilling::routes() inside a group that carries their tenant
-        // prefix/middleware. Auto-loading here would register a duplicate set
-        // without the tenant prefix, and route('billing.*') helpers would pick
-        // the wrong copy.
+        // MollieBilling::dashboardRoutes() inside a route group that carries
+        // their tenant prefix/middleware. BillingRoute auto-detects any
+        // wrapping name prefix at runtime.
         //
         // Admin routes are tenant-agnostic, so they can be auto-loaded safely.
         $this->loadRoutesFrom(__DIR__.'/../routes/admin.php');

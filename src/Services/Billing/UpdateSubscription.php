@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Mollie\Api\Http\Data\Money;
@@ -340,7 +341,7 @@ class UpdateSubscription
                 ],
                 'interval' => $interval === 'yearly' ? '12 months' : '1 month',
                 'description' => "{$planCode} subscription",
-                'webhookUrl' => url(route('billing.webhook', [], false)),
+                'webhookUrl' => url(route(BillingRoute::name('webhook'), [], false)),
                 'metadata' => [
                     'billable_type' => $billable->getMorphClass(),
                     'billable_id' => (string) $billable->getKey(),

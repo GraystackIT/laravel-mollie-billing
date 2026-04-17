@@ -2,6 +2,7 @@
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Enums\CouponType;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
@@ -205,7 +206,7 @@ new class extends Component {
             :description="'Free plan and addon grants currently applied. '.($grants->isEmpty() ? 'This billable has no active grants.' : $grants->count().' active.')"
         >
             <x-slot:actions>
-                <flux:button size="xs" icon="gift" :href="route('billing.admin.grants.create', $b)">Issue grant</flux:button>
+                <flux:button size="xs" icon="gift" :href="route(BillingRoute::admin('grants.create'), $b)">Issue grant</flux:button>
             </x-slot:actions>
 
             @if ($grants->isEmpty())

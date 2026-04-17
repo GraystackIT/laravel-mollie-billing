@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
@@ -35,7 +36,7 @@ class TrialExpiredNotification extends Notification
             ->subject(__('billing::notifications.trial_expired.subject', ['app' => $app]))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
             ->line(__('billing::notifications.trial_expired.body', ['date' => $date]))
-            ->action(__('billing::emails.subscribe_now'), route(config('mollie-billing.checkout_route', 'billing.index')))
+            ->action(__('billing::emails.subscribe_now'), route(config('mollie-billing.checkout_route', BillingRoute::name('index'))))
             ->line(__('billing::emails.signature_line', ['app' => $app]));
     }
 

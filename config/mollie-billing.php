@@ -11,6 +11,20 @@ return [
     'primary_color' => env('BILLING_PRIMARY_COLOR', '#6366f1'),
     'company_name' => env('APP_NAME'),
 
+    // Where the checkout "Back" link leads when no explicit $backUrl is passed.
+    'checkout_back_url' => env('BILLING_CHECKOUT_BACK_URL', '/'),
+
+    // Countries available in the checkout country selector.
+    // 'regions': built-in groups — currently only 'EU' (27 member states).
+    // 'include': additional ISO-3166-1 alpha-2 codes (e.g. ['CH', 'GB']).
+    // 'exclude': codes to remove from the resolved list.
+    // Countries from 'additional_countries' below are also included automatically.
+    'checkout_countries' => [
+        'regions' => ['EU'],
+        'include' => [],
+        'exclude' => [],
+    ],
+
     'prorata_enabled' => env('BILLING_PRORATA_ENABLED', false),
 
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN', 'billing.index'),

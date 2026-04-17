@@ -24,9 +24,11 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - IP geolocation hook for tax-country detection
 - Trial flow with Local-to-Mollie subscription conversion
 - Feature gating via `@planFeature` Blade directive and `billing.feature` middleware
+- Built-in first-checkout flow with configurable country list, VAT/VIES validation and coupon support
 - Livewire 4 SFC customer portal with optional Flux Pro admin panel
 - Promotion links via signed `/promotion/{token}` URLs
 - Localized notifications (English and German out of the box)
+- All Livewire SFC views publishable and overridable
 
 ## Requirements
 
@@ -104,7 +106,7 @@ BILLING_BILLABLE_KEY_TYPE=uuid
 BILLING_CURRENCY=EUR
 ```
 
-Mount the package routes in `routes/web.php`. Tenant-scoped routes (webhook, promotion, customer portal) and admin-panel routes are registered separately so they can run under different middleware stacks — the customer portal needs a resolved tenant, the admin panel does not:
+Mount the package routes in `routes/web.php`. The three route groups serve different scopes and need different middleware:
 
 ```php
 use GraystackIT\MollieBilling\Facades\MollieBilling;
@@ -112,6 +114,11 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 // Customer portal — needs auth + your tenant resolution middleware
 Route::middleware(['web', 'auth', 'tenant'])->group(function () {
     MollieBilling::routes();
+});
+
+// Checkout — needs auth but NOT tenant resolution (the checkout creates the tenant)
+Route::middleware(['web', 'auth'])->group(function () {
+    MollieBilling::checkoutRoutes();
 });
 
 // Admin panel — auth only, no tenant scope. AuthorizeBillingAdmin runs inside the group.
@@ -124,7 +131,7 @@ The admin routes are auto-loaded by the service provider as well, so you only ne
 
 ### Multi-tenant URL prefixes
 
-If your app nests the portal behind a tenant parameter (e.g. `prefix('{organization:slug}')`), mount `MollieBilling::routes()` **inside** that group — do not apply your own `->name('tenant.')` prefix around it, because the package's views call `route('billing.*')` by those exact names:
+If your app nests the portal behind a tenant parameter (e.g. `prefix('{organization:slug}')`), mount `MollieBilling::routes()` **inside** that group — do not apply your own `->name('tenant.')` prefix around it, because the package's views call `route('billing.*')` by those exact names. Keep `checkoutRoutes()` **outside** the tenant group since no tenant exists yet at checkout time:
 
 ```php
 Route::middleware(['auth', 'tenant'])
@@ -132,6 +139,11 @@ Route::middleware(['auth', 'tenant'])
     ->group(function () {
         MollieBilling::routes();
     });
+
+// Checkout lives outside the tenant prefix — the billable is created during checkout
+Route::middleware(['auth'])->group(function () {
+    MollieBilling::checkoutRoutes();
+});
 ```
 
 The package ships a `PropagateRouteDefaults` middleware that copies the active route's parameters into `URL::defaults`, so generated links inside the portal (e.g. `route('billing.plan')`) automatically carry the tenant slug — no app-side `URL::defaults` wiring required.
@@ -147,6 +159,171 @@ MollieBilling::authUsing(fn () => auth()->check());
 
 Customize `config/mollie-billing-plans.php` to define your plans, addons and feature keys.
 
+## First checkout
+
+The package ships a complete first-checkout flow — a multi-step Livewire wizard that collects billing details, lets the customer choose a plan, optional addons/seats, apply a coupon, and redirects to Mollie for payment.
+
+### Setup
+
+Register three callbacks in your `AppServiceProvider::boot()`:
+
+```php
+use GraystackIT\MollieBilling\Facades\MollieBilling;
+
+// How to create a billable (Organization, Team, …) from checkout form data:
+MollieBilling::createBillableUsing(function (array $data) {
+    return Organization::create([
+        'name'              => $data['name'],
+        'billing_street'    => $data['billing_street'],
+        'billing_city'      => $data['billing_city'],
+        'billing_postal_code' => $data['billing_postal_code'],
+        'billing_country'   => $data['billing_country'],
+        'vat_number'        => $data['vat_number'],
+    ]);
+});
+
+// Optional: run logic before the Mollie payment is created.
+// Return null to proceed, or a string to block checkout with that error message.
+MollieBilling::beforeCheckoutUsing(function (Billable $billable): ?string {
+    // e.g. create a User and attach to the billable
+    return null;
+});
+
+// Optional: run cleanup after checkout succeeds or fails.
+MollieBilling::afterCheckoutUsing(function (Billable $billable, bool $success): void {
+    if (! $success) {
+        // e.g. delete the orphaned user
+    }
+});
+```
+
+### Link to checkout
+
+```php
+<a href="{{ MollieBilling::checkoutUrl('/pricing') }}">Subscribe now</a>
+```
+
+The optional `$backUrl` parameter controls where the "Back" link in the checkout header leads. When omitted, the package falls back to `config('mollie-billing.checkout_back_url')` (default `/`).
+
+To pre-select a plan and/or billing interval, pass them as additional parameters:
+
+```php
+<a href="{{ MollieBilling::checkoutUrl('/pricing', plan: 'pro', interval: 'yearly') }}">
+    Get Pro yearly
+</a>
+```
+
+The plan step will still be shown so the customer can change their mind, but the given plan will be pre-selected. Invalid plan codes or intervals are silently ignored.
+
+### Checkout countries
+
+By default the checkout shows all 27 EU member states. Customize via config:
+
+```php
+// config/mollie-billing.php
+'checkout_countries' => [
+    'regions' => ['EU'],          // built-in: 'EU' (27 member states)
+    'include' => ['CH', 'GB'],    // additional ISO codes
+    'exclude' => ['MT'],          // remove from the list
+],
+
+// Countries defined here are auto-included in the checkout selector:
+'additional_countries' => [
+    'CH' => ['vat_rate' => 8.1, 'name' => 'Switzerland'],
+],
+```
+
+Country names are translated via the package's `billing::countries` lang files (English and German included). Publish and extend them for additional locales:
+
+```bash
+php artisan vendor:publish --tag=billing-lang
+```
+
+### Custom checkout steps
+
+If your app needs additional steps before the billing-address form (e.g. "Create your account"), register them via the facade. Custom steps are inserted **before** the package's built-in steps; numbering, timeline and navigation adjust automatically.
+
+```php
+use Livewire\Component;
+use GraystackIT\MollieBilling\Facades\MollieBilling;
+
+// AppServiceProvider::boot()
+MollieBilling::checkoutStepsUsing(fn () => [
+    [
+        'key'         => 'account',
+        'label'       => 'Account',
+        'headline'    => 'Create your account',
+        'description' => 'Set up your login credentials before we continue.',
+        'view'        => 'checkout.steps.account', // your app's Blade view
+        'validate'    => function (Component $component) {
+            $component->validate([
+                'customData.name'  => ['required', 'string', 'max:255'],
+                'customData.email' => ['required', 'email', 'unique:users,email'],
+            ]);
+        },
+    ],
+]);
+```
+
+Each step definition requires:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `key` | `string` | Unique identifier for the step. |
+| `label` | `string` | Short label shown in the timeline. |
+| `headline` | `string` | Heading displayed above the step content. |
+| `description` | `string` | Subheading text below the headline. |
+| `view` | `string` | Blade view name to `@include` for this step's form fields. |
+| `validate` | `Closure` | *(optional)* Receives the Livewire `Component` instance. Throw a `ValidationException` (or call `$component->validate(...)`) to block navigation. |
+
+**Binding form data** — The checkout component exposes a `public array $customData = []` property. Use `wire:model` with dot notation in your step view:
+
+```blade
+{{-- resources/views/checkout/steps/account.blade.php --}}
+<div class="flex flex-col gap-5">
+    <flux:input wire:model.live="customData.name" label="Full name" required />
+    <flux:input wire:model.live="customData.email" label="Email" type="email" required />
+    <flux:input wire:model="customData.password" label="Password" type="password" required />
+</div>
+```
+
+The `customData` array is passed to your `createBillableUsing` callback as `$data['custom']`, so you can access it when creating the billable:
+
+```php
+MollieBilling::createBillableUsing(function (array $data) {
+    $user = User::create([
+        'name'     => $data['custom']['name'],
+        'email'    => $data['custom']['email'],
+        'password' => Hash::make($data['custom']['password']),
+    ]);
+
+    $org = Organization::create([
+        'name'            => $data['name'],
+        'billing_street'  => $data['billing_street'],
+        'billing_city'    => $data['billing_city'],
+        'billing_postal_code' => $data['billing_postal_code'],
+        'billing_country' => $data['billing_country'],
+        'vat_number'      => $data['vat_number'],
+    ]);
+
+    $user->organizations()->attach($org);
+
+    return $org;
+});
+```
+
+You can register multiple custom steps — they appear in the order returned by the callback.
+
+### Customizing views
+
+All Livewire views (checkout, portal, admin) can be published and customized:
+
+```bash
+php artisan vendor:publish --tag=mollie-billing-views
+```
+
+Views are published to `resources/views/vendor/mollie-billing/`. SFC files use the ⚡ prefix convention (e.g. `⚡checkout.blade.php`).
+
 ## Configuration
 
 Highlights of `config/mollie-billing.php`:
@@ -154,12 +331,15 @@ Highlights of `config/mollie-billing.php`:
 | Key | Purpose |
 | --- | --- |
 | `currency` | Default currency for prices and invoices (e.g. `EUR`). |
+| `logo_url` | Logo displayed in checkout and portal headers. |
+| `primary_color` | Accent color for checkout UI (hex, e.g. `#6366f1`). |
+| `checkout_back_url` | Where the checkout "Back" link leads (default `/`). |
+| `checkout_countries` | Countries shown in checkout (regions, include, exclude). |
 | `prorata_enabled` | Enable prorated charges/credits when changing plans mid-period. |
 | `allow_overage_default` | Default policy when a plan does not declare its own overage rule. |
-| `ip_driver` | IP geolocation driver name (rebind `MollieBilling::ipGeolocation()` for custom). |
-| `additional_countries` | ISO-3166 codes for non-EU jurisdictions you also serve. |
+| `additional_countries` | ISO-3166 codes + VAT rates for non-EU jurisdictions. |
 | `vat_rate_overrides` | Map of country code to override VAT percentage. |
-| `company_name` | Display name used in notification subjects and signatures. |
+| `company_name` | Display name used in headers, notifications and signatures. |
 | `billable_model` | Fully-qualified class name of your billable model. |
 | `billable_key_type` | `uuid`, `ulid`, or `int` — determines morph column shape. |
 
@@ -345,14 +525,17 @@ Tokens are generated via `MollieBilling::coupons()->promotionToken($coupon)`.
 
 Every state change dispatches a Laravel event so apps can react via listeners. Notable events include:
 
-- `SubscriptionStarted`, `SubscriptionActivated`, `SubscriptionChanged`, `SubscriptionCancelled`
-- `TrialStarted`, `TrialConverted`, `TrialExpired`
-- `MandateAdded`, `MandateRevoked`
-- `InvoiceIssued`, `InvoicePaid`, `InvoiceFailed`
-- `OverageBilled`, `OverageBillingFailed`
-- `CouponRedeemed`, `AccessGrantApplied`, `AccessGrantExpired`
-- `CountryMismatchDetected`, `CountryMismatchResolved`
-- `RefundIssued`, `CreditNoteCreated`
+- `CheckoutStarted`, `CheckoutAbandoned`
+- `SubscriptionCreated`, `SubscriptionCancelled`, `SubscriptionExpired`, `SubscriptionResumed`
+- `PlanChanged`, `SubscriptionUpdated`, `SubscriptionChangeScheduled`
+- `TrialStarted`, `TrialConverted`, `TrialExpired`, `TrialExtended`
+- `MandateUpdated`
+- `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`
+- `InvoiceCreated`, `InvoiceRefunded`, `CreditNoteIssued`
+- `OverageCharged`, `OverageChargeFailed`
+- `CouponRedeemed`, `GrantRevoked`
+- `CountryMismatchFlagged`, `CountryMismatchResolved`
+- `WalletCredited`, `UsageLimitReached`
 
 Subscribe in your `EventServiceProvider` exactly like any other Laravel event.
 
@@ -387,7 +570,7 @@ php artisan billing:oss-export 2026
 
 ## Architecture
 
-This package sits on top of `mollie/laravel-cashier-mollie` and adds a VAT/OSS layer (`mpociot/vat-calculator` plus VIES), a wallet layer for metered billing (`bavix/laravel-wallet`), a coupon engine, an admin panel and a Livewire 4 customer portal. Subscription lifecycle is split into single-purpose service classes per action (Start, Create, Activate, Change, Cancel, Resubscribe, EnableAddon, DisableAddon, SyncSeats) — the `HasBilling` trait delegates to them via the container, so apps customize behavior by rebinding services rather than subclassing models.
+This package wraps `mollie/laravel-mollie` ^4 and adds a VAT/OSS layer (`mpociot/vat-calculator` plus VIES), a wallet layer for metered billing (`bavix/laravel-wallet`), a coupon engine, a built-in first-checkout wizard, an admin panel and a Livewire 4 customer portal. Subscription lifecycle is split into single-purpose service classes per action (Start, Create, Activate, Change, Cancel, Resubscribe, EnableAddon, DisableAddon, SyncSeats) — the `HasBilling` trait delegates to them via the container, so apps customize behavior by rebinding services rather than subclassing models. Extension points are provided via facade callbacks (`createBillableUsing`, `beforeCheckoutUsing`, `afterCheckoutUsing`, `resolveBillableUsing`, etc.) and events.
 
 Free or zero-price plans run as `SubscriptionSource::Local` without a Mollie subscription; paid plans are `SubscriptionSource::Mollie`. The trial flow seamlessly converts Local subscriptions to Mollie ones the moment a mandate is added.
 
@@ -398,7 +581,7 @@ The MIT License (MIT). See [LICENSE](LICENSE) for details.
 ## Credits
 
 - [graystackit](https://github.com/GraystackIT)
-- [mollie/laravel-cashier-mollie](https://github.com/mollie/laravel-cashier-mollie)
+- [mollie/laravel-mollie](https://github.com/mollie/laravel-mollie)
 - [mpociot/vat-calculator](https://github.com/mpociot/vat-calculator)
 - [bavix/laravel-wallet](https://github.com/bavix/laravel-wallet)
 - [livewire/flux](https://fluxui.dev)

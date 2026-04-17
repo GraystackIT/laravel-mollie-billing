@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
@@ -48,7 +49,7 @@ class CreateSubscription
                 'plan_code' => $planCode,
                 'interval' => $interval,
             ],
-            webhookUrl: route('billing.webhook'),
+            webhookUrl: route(BillingRoute::name('webhook')),
         ));
 
         $meta = $billable->getBillingSubscriptionMeta();

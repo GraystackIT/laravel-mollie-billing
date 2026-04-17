@@ -1,4 +1,6 @@
 @php
+    use GraystackIT\MollieBilling\Support\BillingRoute;
+
     $logoUrl = config('mollie-billing.logo_url');
     $portalTitle = __('billing::portal.title', ['app' => config('mollie-billing.company_name', config('app.name'))]);
     $currentRoute = request()->route()?->getName();
@@ -17,7 +19,7 @@
     <flux:header sticky class="border-b border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
         <flux:sidebar.toggle class="lg:hidden" icon="bars-2" inset="left" />
 
-        <a href="{{ route('billing.index') }}" class="flex items-center gap-2">
+        <a href="{{ route(BillingRoute::name('index')) }}" class="flex items-center gap-2">
             @if ($logoUrl)
                 <img src="{{ $logoUrl }}" alt="{{ $portalTitle }}" class="h-8 w-auto">
             @else
@@ -44,13 +46,13 @@
         <flux:sidebar.toggle class="lg:hidden" icon="x-mark" inset="left" />
 
         <flux:navlist variant="outline">
-            <flux:navlist.item icon="home" href="{{ route('billing.index') }}" :current="$currentRoute === 'billing.index'">
+            <flux:navlist.item icon="home" href="{{ route(BillingRoute::name('index')) }}" :current="$currentRoute === BillingRoute::name('index')">
                 {{ __('billing::portal.nav.dashboard') }}
             </flux:navlist.item>
-            <flux:navlist.item icon="arrow-path" href="{{ route('billing.plan') }}" :current="$currentRoute === 'billing.plan'">
+            <flux:navlist.item icon="arrow-path" href="{{ route(BillingRoute::name('plan')) }}" :current="$currentRoute === BillingRoute::name('plan')">
                 {{ __('billing::portal.nav.plan') }}
             </flux:navlist.item>
-            <flux:navlist.item icon="document-text" href="{{ route('billing.invoices') }}" :current="$currentRoute === 'billing.invoices'">
+            <flux:navlist.item icon="document-text" href="{{ route(BillingRoute::name('invoices')) }}" :current="$currentRoute === BillingRoute::name('invoices')">
                 {{ __('billing::portal.nav.invoices') }}
             </flux:navlist.item>
         </flux:navlist>

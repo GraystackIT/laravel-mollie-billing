@@ -24,7 +24,17 @@ use Illuminate\Support\Facades\Facade;
  * @method static \GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService refunds()
  * @method static \GraystackIT\MollieBilling\Testing\MollieBillingFake fake()
  * @method static void routes()
+ * @method static void checkoutRoutes()
  * @method static void adminRoutes()
+ * @method static void createBillableUsing(\Closure $callback)
+ * @method static void beforeCheckoutUsing(\Closure $callback)
+ * @method static void afterCheckoutUsing(\Closure $callback)
+ * @method static \GraystackIT\MollieBilling\Contracts\Billable createBillable(array $data)
+ * @method static ?string runBeforeCheckout(\GraystackIT\MollieBilling\Contracts\Billable $billable)
+ * @method static void runAfterCheckout(\GraystackIT\MollieBilling\Contracts\Billable $billable, bool $success)
+ * @method static string checkoutUrl(?string $backUrl = null, ?string $plan = null, ?string $interval = null)
+ * @method static void checkoutStepsUsing(\Closure $callback)
+ * @method static array resolveCheckoutSteps()
  *
  * @see \GraystackIT\MollieBilling\MollieBilling
  */

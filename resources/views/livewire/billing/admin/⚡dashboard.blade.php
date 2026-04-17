@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Support\AdminKpiService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
 new class extends Component {
@@ -89,7 +90,7 @@ new class extends Component {
             <x-mollie-billing::admin.stat
                 label="Past due"
                 :value="$pastDueCount"
-                :href="route('billing.admin.past_due.index')"
+                :href="route(BillingRoute::admin('past_due.index'))"
                 icon="exclamation-triangle"
                 :tone="$pastDueCount > 0 ? 'danger' : null"
                 hint="Failed recurring payments"
@@ -97,7 +98,7 @@ new class extends Component {
             <x-mollie-billing::admin.stat
                 label="Country mismatches"
                 :value="$openMismatches"
-                :href="route('billing.admin.mismatches.index')"
+                :href="route(BillingRoute::admin('mismatches.index'))"
                 icon="globe-europe-africa"
                 :tone="$openMismatches > 0 ? 'warning' : null"
                 hint="Pending manual review"
@@ -105,7 +106,7 @@ new class extends Component {
             <x-mollie-billing::admin.stat
                 label="Scheduled changes"
                 :value="$scheduledChanges"
-                :href="route('billing.admin.scheduled_changes.index')"
+                :href="route(BillingRoute::admin('scheduled_changes.index'))"
                 icon="calendar"
                 hint="Within the next 7 days"
             />

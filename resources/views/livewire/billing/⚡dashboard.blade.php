@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
 new class extends Component {
@@ -86,10 +87,10 @@ new class extends Component {
             </dl>
 
             <div class="flex flex-wrap gap-2 pt-2">
-                <flux:button size="sm" variant="primary" href="{{ route('billing.plan') }}">
+                <flux:button size="sm" variant="primary" href="{{ route(BillingRoute::name('plan')) }}">
                     {{ __('billing::portal.plan_change') }}
                 </flux:button>
-                <flux:button size="sm" variant="ghost" href="{{ route('billing.invoices') }}" icon="document-text">
+                <flux:button size="sm" variant="ghost" href="{{ route(BillingRoute::name('invoices')) }}" icon="document-text">
                     {{ __('billing::portal.invoices') }}
                 </flux:button>
                 @if ($isActive)

@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Concerns;
 use Bavix\Wallet\Traits\HasWallets;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
@@ -358,12 +359,12 @@ trait HasBilling
 
     public function billingPortalUrl(): string
     {
-        return route('billing.index', $this->urlRouteParameters());
+        return route(BillingRoute::name('index'), $this->urlRouteParameters());
     }
 
     public function billingPlanChangeUrl(): string
     {
-        return route('billing.plan', $this->urlRouteParameters());
+        return route(BillingRoute::name('plan'), $this->urlRouteParameters());
     }
 
     /** Override in multi-tenant apps to inject tenant parameters. */
