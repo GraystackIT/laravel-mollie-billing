@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -38,6 +39,8 @@ class CreateSubscription
         $amountGross = (int) $spec['amount_gross'];
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
+        $urlParams = MollieBilling::resolveUrlParameters($billable);
+
         Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
@@ -49,7 +52,7 @@ class CreateSubscription
                 'plan_code' => $planCode,
                 'interval' => $interval,
             ],
-            webhookUrl: route(BillingRoute::name('webhook')),
+            webhookUrl: route(BillingRoute::name('webhook'), $urlParams),
         ));
 
         $meta = $billable->getBillingSubscriptionMeta();

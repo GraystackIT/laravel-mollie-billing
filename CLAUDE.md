@@ -65,7 +65,10 @@ MollieBilling::authUsing(fn () => auth()->check());
 MollieBilling::notifyBillingAdminsUsing(...);
 MollieBilling::notifyAdminUsing(...);
 MollieBilling::ipGeolocation(...);
+MollieBilling::urlParametersUsing(fn (?Billable $b) => $b ? ['organization' => $b->slug] : []);
 ```
+
+**Multi-tenant URL resolution** has two layers: `PropagateRouteDefaults` middleware copies route params into `URL::defaults` for the active HTTP request (portal, Livewire, form POSTs). `MollieBilling::urlParametersUsing()` provides parameters for contexts **without** a request — Mollie redirect/webhook URLs built in `StartSubscriptionCheckout`, `CreateSubscription`, queued `TrialExpiredNotification`, etc. Both are active simultaneously without conflict. Services always pass explicit params from the resolver to `route()` defensively, so URLs are correct even outside a request.
 
 ## Conventions specific to this package
 

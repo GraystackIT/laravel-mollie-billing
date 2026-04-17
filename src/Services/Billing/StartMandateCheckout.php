@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
@@ -22,12 +23,13 @@ class StartMandateCheckout
         /** @var Model&Billable $billable */
         $customerId = $this->ensureMollieCustomer($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
+        $urlParams = MollieBilling::resolveUrlParameters($billable);
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: 'Payment method authorisation',
             amount: new Money($currency, '0.00'),
-            redirectUrl: route(BillingRoute::name('return')),
-            webhookUrl: route(BillingRoute::name('webhook')),
+            redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            webhookUrl: route(BillingRoute::name('webhook'), $urlParams),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),

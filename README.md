@@ -148,6 +148,25 @@ Route::middleware(['auth'])->group(function () {
 
 The package ships a `PropagateRouteDefaults` middleware that copies the active route's parameters into `URL::defaults`, so generated links inside the portal (e.g. `route('billing.plan')`) automatically carry the tenant slug — no app-side `URL::defaults` wiring required.
 
+For contexts **without** an active HTTP request — queued notifications, background jobs, or services that run before tenant resolution — `PropagateRouteDefaults` cannot help. Register a global URL parameter resolver so the package can build correct URLs from any context:
+
+```php
+use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Facades\MollieBilling;
+
+MollieBilling::urlParametersUsing(
+    fn (?Billable $billable) => $billable
+        ? ['organization' => $billable->slug]
+        : []
+);
+```
+
+The `$billable` parameter is `null` in rare cases where no billable is available yet (e.g. some middleware checks). In those cases the closure should return `[]` or derive a fallback from `auth()->user()` or session state.
+
+> **How the two mechanisms interact:** `PropagateRouteDefaults` covers the request context (portal views, form submissions). `urlParametersUsing` covers everything else (Mollie webhook URLs, redirect URLs sent to Mollie, queued mail, background jobs). They complement each other — both can be active simultaneously without conflict.
+
+If your billable model needs custom logic beyond the global resolver, you can still override `urlRouteParameters()` on the model directly — the override takes precedence.
+
 Tell the facade how to resolve the current billable for the authenticated user — usually in `AppServiceProvider::boot()`:
 
 ```php

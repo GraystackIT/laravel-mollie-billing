@@ -45,6 +45,9 @@ class MollieBilling
     /** @var Closure(): array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:Closure}>|null */
     protected static ?Closure $checkoutStepsCallback = null;
 
+    /** @var Closure(?Billable): array<string, mixed>|null */
+    protected static ?Closure $urlParametersCallback = null;
+
     protected static ?MollieBillingFake $fake = null;
 
     public static function authUsing(Closure $callback): void
@@ -121,6 +124,21 @@ class MollieBilling
     public static function checkoutStepsUsing(Closure $callback): void
     {
         self::$checkoutStepsCallback = $callback;
+    }
+
+    public static function urlParametersUsing(Closure $callback): void
+    {
+        self::$urlParametersCallback = $callback;
+    }
+
+    /** @return array<string, mixed> */
+    public static function resolveUrlParameters(?Billable $billable = null): array
+    {
+        if (self::$urlParametersCallback === null) {
+            return [];
+        }
+
+        return (self::$urlParametersCallback)($billable);
     }
 
     /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:Closure}> */

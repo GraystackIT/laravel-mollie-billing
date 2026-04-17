@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Concerns;
 use Bavix\Wallet\Traits\HasWallets;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -367,10 +368,16 @@ trait HasBilling
         return route(BillingRoute::name('plan'), $this->urlRouteParameters());
     }
 
-    /** Override in multi-tenant apps to inject tenant parameters. */
+    /**
+     * Override in multi-tenant apps to inject tenant parameters, or register
+     * a global resolver via MollieBilling::urlParametersUsing().
+     *
+     * @return array<string, mixed>
+     */
     protected function urlRouteParameters(): array
     {
-        return [];
+        /** @var \GraystackIT\MollieBilling\Contracts\Billable $this */
+        return MollieBilling::resolveUrlParameters($this);
     }
 
     // ── Subscription management ──
