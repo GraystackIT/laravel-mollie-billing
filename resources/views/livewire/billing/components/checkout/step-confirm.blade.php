@@ -158,7 +158,8 @@
 
 <div class="flex items-center justify-between pt-2">
     <flux:button wire:click="back" variant="ghost" icon="arrow-left">{{ __('billing::checkout.back') }}</flux:button>
-    <flux:button wire:click="submit" variant="primary" icon:trailing="arrow-right" :disabled="$processing" wire:loading.attr="disabled">
-        {{ __('billing::checkout.confirm_and_pay') }}
+    <flux:button wire:click="submit" variant="primary" icon:trailing="arrow-right" :disabled="$processing" wire:loading.attr="disabled" wire:loading.class="opacity-50 cursor-not-allowed">
+        <span wire:loading.remove wire:target="submit">{{ __('billing::checkout.confirm_and_pay') }}</span>
+        <span wire:loading wire:target="submit">{{ __('billing::checkout.processing') }}</span>
     </flux:button>
 </div>

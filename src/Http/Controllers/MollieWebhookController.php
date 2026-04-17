@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Events\OverageCharged;
 use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
@@ -215,6 +216,17 @@ class MollieWebhookController extends Controller
         $extraSeats = (int) ($metadata['extra_seats'] ?? 0);
 
         if ($planCode === '') {
+            return;
+        }
+
+        if ($billable->hasAccessibleBillingSubscription()) {
+            Log::warning('Duplicate first-payment received — billable already has an active subscription', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+            ]);
+
+            DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? ''));
+
             return;
         }
 
