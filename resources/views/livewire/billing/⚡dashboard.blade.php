@@ -176,7 +176,7 @@ new class extends Component {
             <div class="absolute inset-x-0 top-0 "></div>
 
             <div class="flex flex-col gap-4 px-6 pb-6 pt-8 sm:flex-row sm:items-start sm:justify-between">
-                <div class="space-y-1">
+                <div class="space-y-1 mb-5">
                     <flux:subheading>{{ __('billing::portal.current_plan') }}</flux:subheading>
                     <div class="flex items-center gap-3">
                         <flux:heading size="xl">{{ $d['planName'] }}</flux:heading>
@@ -208,21 +208,21 @@ new class extends Component {
             @if ($d['hasSubscription'])
                 <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-5 dark:border-zinc-700/50 dark:bg-white/[0.02]">
                     <div class="grid grid-cols-2 gap-x-8 gap-y-5 sm:grid-cols-4">
-                        <div>
+                        <div class="mb-3">
                             <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.next_billing') }}</flux:subheading>
                             <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
                         </div>
-                        <div>
+                        <div class="mb-3">
                             <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.period_start') }}</flux:subheading>
                             <flux:text class="mt-1 font-semibold">{{ $d['periodStart'] }}</flux:text>
                         </div>
                         @if ($d['includedSeats'] > 0 || $d['seatCount'] > 0)
-                            <div>
+                            <div class="mb-3">
                                 <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.seats') }}</flux:subheading>
                                 <flux:text class="mt-1 font-semibold">{{ $d['seatCount'] }} <span class="font-normal text-zinc-400">({{ $d['includedSeats'] }} {{ __('billing::portal.included') }})</span></flux:text>
                             </div>
                         @endif
-                        <div>
+                        <div class="mb-3">
                             <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.addons') }}</flux:subheading>
                             <flux:text class="mt-1 font-semibold">{{ $d['addonCount'] > 0 ? $d['addonCount'] . ' ' . __('billing::portal.active') : '—' }}</flux:text>
                         </div>
