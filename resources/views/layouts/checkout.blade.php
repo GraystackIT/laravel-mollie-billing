@@ -1,6 +1,7 @@
 @php
     $logoUrl = config('mollie-billing.logo_url');
     $companyName = config('mollie-billing.company_name', config('app.name'));
+    $faviconUrl = config('mollie-billing.favicon_url');
     $primaryColor = config('mollie-billing.primary_color', 'teal');    $resolvedBackUrl = \GraystackIT\MollieBilling\Support\Sanitize::backUrl($backUrl)
         ?? config('mollie-billing.checkout_back_url', '/');
 @endphp
@@ -10,6 +11,9 @@
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>{{ __('billing::checkout.title', ['app' => $companyName]) }}</title>
+        @if ($faviconUrl)
+            <link rel="icon" href="{{ $faviconUrl }}">
+        @endif
         @vite(['resources/css/app.css', 'resources/js/app.js'])
         @livewireStyles
         @fluxAppearance

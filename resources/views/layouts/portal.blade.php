@@ -5,6 +5,7 @@
     $portalTitle = __('billing::portal.title', ['app' => config('mollie-billing.company_name', config('app.name'))]);
     $currentRoute = request()->route()?->getName();
 
+    $faviconUrl = config('mollie-billing.favicon_url');
     $primaryColor = config('mollie-billing.primary_color', 'teal');
     $dashboardUrl = config('mollie-billing.dashboard_url');
     if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
@@ -17,6 +18,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ $portalTitle }}</title>
+    @if ($faviconUrl)
+        <link rel="icon" href="{{ $faviconUrl }}">
+    @endif
     @vite(['resources/css/app.css', 'resources/js/app.js'])
     @livewireStyles
     @fluxAppearance

@@ -2,6 +2,7 @@
     use GraystackIT\MollieBilling\Support\BillingRoute;
 
     $logoUrl = config('mollie-billing.logo_url');
+    $faviconUrl = config('mollie-billing.favicon_url');
     $primaryColor = config('mollie-billing.primary_color', 'teal');
     $portalTitle = config('app.name').' Billing Portal';
     $currentRoute = request()->route()?->getName();
@@ -12,6 +13,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ $portalTitle }}</title>
+    @if ($faviconUrl)
+        <link rel="icon" href="{{ $faviconUrl }}">
+    @endif
     @vite(['resources/css/app.css', 'resources/js/app.js'])
     @livewireStyles
     @fluxAppearance
