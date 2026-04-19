@@ -8,6 +8,7 @@ return [
     'billable_model' => env('BILLING_BILLABLE_MODEL'),
 
     'logo_url' => env('BILLING_LOGO_URL'),
+    'favicon_url' => env('BILLING_FAVICON_URL'),
     'primary_color' => env('BILLING_PRIMARY_COLOR', 'teal'),
     'company_name' => env('APP_NAME'),
 
