@@ -45,7 +45,7 @@ return [
     'per_month' => '/month',
     'per_year' => '/year',
     'save_yearly' => 'Save :percent%',
-    'seats_included' => ':count seat included|:count seats included',
+    'seats_included_count' => ':count seat included|:count seats included',
     'features' => 'Features',
     'plan_change_subtitle' => 'Choose the right plan for your team.',
     'preview' => 'Preview',

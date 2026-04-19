@@ -6,8 +6,9 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use Livewire\Component;
 
 new class extends Component {
-    public int $seatCount = 0;
+    public ?int $seatCount = 0;
     public ?string $flash = null;
+    public bool $flashSuccess = true;
 
     public function mount(): void
     {
@@ -22,13 +23,23 @@ new class extends Component {
         return MollieBilling::resolveBillable(request());
     }
 
+    private function ensureMinSeats(): void
+    {
+        $min = $this->minSeats();
+        if ($this->seatCount === null || $this->seatCount < $min) {
+            $this->seatCount = $min;
+        }
+    }
+
     public function increment(): void
     {
+        $this->ensureMinSeats();
         $this->seatCount++;
     }
 
     public function decrement(): void
     {
+        $this->ensureMinSeats();
         $min = $this->minSeats();
         if ($this->seatCount > $min) {
             $this->seatCount--;
@@ -48,12 +59,16 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        $this->ensureMinSeats();
+
         try {
             $billable->syncBillingSeats($this->seatCount);
             $this->flash = __('billing::portal.seats_flash.synced');
+            $this->flashSuccess = true;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
+            $this->flashSuccess = false;
         }
     }
 
@@ -69,7 +84,7 @@ new class extends Component {
         $includedSeats = $planCode ? $catalog->includedSeats($planCode) : 0;
         $seatPrice = $planCode ? $catalog->seatPriceNet($planCode, $interval) : null;
         $usedSeats = $billable?->getUsedBillingSeats() ?? 0;
-        $extraSeats = max(0, $this->seatCount - $includedSeats);
+        $extraSeats = max(0, ($this->seatCount ?? $includedSeats) - $includedSeats);
 
         return [
             'billable' => $billable,
@@ -88,11 +103,12 @@ new class extends Component {
 ?>
 
 @php
-    $utilizationPercent = $this->seatCount > 0 ? min(100, (int) round(($usedSeats ?? 0) / $this->seatCount * 100)) : 0;
+    $currentSeats = $this->seatCount ?? $includedSeats;
+    $utilizationPercent = $currentSeats > 0 ? min(100, (int) round(($usedSeats ?? 0) / $currentSeats * 100)) : 0;
     $isHighUtilization = $utilizationPercent >= 80 && $utilizationPercent < 100;
     $isFullUtilization = $utilizationPercent >= 100;
     $savedSeatCount = $billable?->getBillingSeatCount() ?? 0;
-    $hasChanges = $this->seatCount !== $savedSeatCount;
+    $hasChanges = $this->seatCount !== null && $this->seatCount !== $savedSeatCount;
 @endphp
 
 <div class="space-y-6">
@@ -105,7 +121,7 @@ new class extends Component {
     </div>
 
     @if ($flash)
-        <flux:callout variant="secondary" icon="information-circle" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })">{{ $flash }}</flux:callout>
+        <flux:callout icon="{{ $flashSuccess ? 'check-circle' : 'exclamation-triangle' }}" color="{{ $flashSuccess ? 'lime' : 'red' }}" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" inline>{{ $flash }}</flux:callout>
     @endif
 
     @if (! $billable)
@@ -128,7 +144,7 @@ new class extends Component {
                     </div>
                 </div>
                 <div class="mt-3">
-                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $this->seatCount }}</span>
+                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $currentSeats }}</span>
                 </div>
             </flux:card>
 
@@ -156,7 +172,7 @@ new class extends Component {
                 </div>
                 <div class="mt-3 flex items-baseline gap-1.5">
                     <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $usedSeats }}</span>
-                    <span class="text-sm text-zinc-400">/ {{ $this->seatCount }}</span>
+                    <span class="text-sm text-zinc-400">/ {{ $currentSeats }}</span>
                 </div>
                 <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                     <div
@@ -207,10 +223,10 @@ new class extends Component {
                         <div class="flex items-center gap-1">
                             <flux:button size="sm" variant="ghost" icon="minus"
                                 wire:click="decrement"
-                                :disabled="$this->seatCount <= $includedSeats"
+                                :disabled="$currentSeats <= $includedSeats"
                                 class="rounded-r-none"
                             />
-                            <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" class="w-20 text-center tabular-nums rounded-none! border-x-0!" />
+                            <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" class="w-20 text-center tabular-nums rounded-none! border-x-0!" x-on:blur="if (!$el.value || parseInt($el.value) < {{ $includedSeats }}) { $wire.set('seatCount', {{ $includedSeats }}) }" />
                             <flux:button size="sm" variant="ghost" icon="plus"
                                 wire:click="increment"
                                 class="rounded-l-none"
@@ -247,7 +263,7 @@ new class extends Component {
                     @endif
                 </div>
 
-                @if ($usedSeats > $this->seatCount)
+                @if ($usedSeats > $currentSeats)
                     <flux:callout icon="exclamation-triangle" color="amber" class="mt-5" inline>
                         {{ __('billing::portal.seats_warning_below_used', ['used' => $usedSeats]) }}
                     </flux:callout>

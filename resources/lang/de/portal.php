@@ -45,7 +45,7 @@ return [
     'per_month' => '/Monat',
     'per_year' => '/Jahr',
     'save_yearly' => ':percent% sparen',
-    'seats_included' => ':count Platz inkl.|:count Plätze inkl.',
+    'seats_included_count' => ':count Platz inkl.|:count Plätze inkl.',
     'features' => 'Funktionen',
     'plan_change_subtitle' => 'Wähle den passenden Plan für dein Team.',
     'preview' => 'Vorschau',
