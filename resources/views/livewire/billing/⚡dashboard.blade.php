@@ -133,13 +133,13 @@ new class extends Component {
     $d = $this->dashboardData($billable);
 @endphp
 
-<div class="space-y-10">
+<div class="space-y-6">
     {{-- Page header --}}
-    <div class="mb-4">
+    <div>
         <flux:heading size="xl">{{ __('billing::portal.dashboard') }}</flux:heading>
-        <flux:text class="mt-2 text-zinc-500 dark:text-zinc-400">
+        <flux:subheading>
             {{ __('billing::portal.dashboard_subtitle', ['name' => $billable?->getBillingName() ?? '']) }}
-        </flux:text>
+        </flux:subheading>
     </div>
 
     @if ($flash)
@@ -172,10 +172,10 @@ new class extends Component {
         @endif
 
         {{-- Subscription overview --}}
-        <flux:card>
-            <div class="absolute inset-x-0 top-0 h-1 {{ $d['accentClass'] }}"></div>
+        <flux:card class="relative overflow-hidden p-0!">
+            <div class="absolute inset-x-0 top-0 "></div>
 
-            <div class="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+            <div class="flex flex-col gap-4 px-6 pb-6 pt-8 sm:flex-row sm:items-start sm:justify-between">
                 <div class="space-y-1">
                     <flux:subheading>{{ __('billing::portal.current_plan') }}</flux:subheading>
                     <div class="flex items-center gap-3">
@@ -206,62 +206,63 @@ new class extends Component {
             </div>
 
             @if ($d['hasSubscription'])
-                <flux:separator class="my-6" />
+                <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-5 dark:border-zinc-700/50 dark:bg-white/[0.02]">
+                    <div class="grid grid-cols-2 gap-x-8 gap-y-5 sm:grid-cols-4">
+                        <div>
+                            <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.next_billing') }}</flux:subheading>
+                            <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
+                        </div>
+                        <div>
+                            <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.period_start') }}</flux:subheading>
+                            <flux:text class="mt-1 font-semibold">{{ $d['periodStart'] }}</flux:text>
+                        </div>
+                        @if ($d['includedSeats'] > 0 || $d['seatCount'] > 0)
+                            <div>
+                                <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.seats') }}</flux:subheading>
+                                <flux:text class="mt-1 font-semibold">{{ $d['seatCount'] }} <span class="font-normal text-zinc-400">({{ $d['includedSeats'] }} {{ __('billing::portal.included') }})</span></flux:text>
+                            </div>
+                        @endif
+                        <div>
+                            <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.addons') }}</flux:subheading>
+                            <flux:text class="mt-1 font-semibold">{{ $d['addonCount'] > 0 ? $d['addonCount'] . ' ' . __('billing::portal.active') : '—' }}</flux:text>
+                        </div>
+                    </div>
 
-                <div class="grid grid-cols-2 gap-6 sm:grid-cols-4">
-                    <div class="space-y-1">
-                        <flux:subheading size="sm">{{ __('billing::portal.next_billing') }}</flux:subheading>
-                        <flux:text class="font-semibold">{{ $d['nextBilling'] }}</flux:text>
-                    </div>
-                    <div class="space-y-1">
-                        <flux:subheading size="sm">{{ __('billing::portal.period_start') }}</flux:subheading>
-                        <flux:text class="font-semibold">{{ $d['periodStart'] }}</flux:text>
-                    </div>
-                    @if ($d['includedSeats'] > 0 || $d['seatCount'] > 0)
-                        <div class="space-y-1">
-                            <flux:subheading size="sm">{{ __('billing::portal.seats') }}</flux:subheading>
-                            <flux:text class="font-semibold">{{ $d['seatCount'] }} <span class="font-normal text-zinc-400">({{ $d['includedSeats'] }} {{ __('billing::portal.included') }})</span></flux:text>
+                    @if ($d['addonCount'] > 0)
+                        <div class="mt-5 flex flex-wrap gap-1.5">
+                            @foreach ($d['addonLabels'] as $label)
+                                <flux:badge size="sm" color="zinc">{{ $label }}</flux:badge>
+                            @endforeach
                         </div>
                     @endif
-                    <div class="space-y-1">
-                        <flux:subheading size="sm">{{ __('billing::portal.addons') }}</flux:subheading>
-                        <flux:text class="font-semibold">{{ $d['addonCount'] > 0 ? $d['addonCount'] . ' ' . __('billing::portal.active') : '—' }}</flux:text>
-                    </div>
                 </div>
-
-                @if ($d['addonCount'] > 0)
-                    <div class="mt-4 flex flex-wrap gap-2">
-                        @foreach ($d['addonLabels'] as $label)
-                            <flux:badge size="sm" color="zinc">{{ $label }}</flux:badge>
-                        @endforeach
-                    </div>
-                @endif
             @endif
         </flux:card>
 
         {{-- Usage meters --}}
         @if (count($d['usageTypes']) > 0)
-            <div>
-                <flux:heading size="sm" class="mb-5">{{ __('billing::portal.usage') }}</flux:heading>
-                <div class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            <div class="space-y-4">
+                <flux:heading size="lg">{{ __('billing::portal.usage') }}</flux:heading>
+                <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     @foreach ($d['usageTypes'] as $usage)
-                        <flux:card>
-                            <div class="flex items-start justify-between">
-                                <div>
-                                    <flux:subheading>{{ $usage['label'] }}</flux:subheading>
-                                    <div class="mt-1 text-2xl font-bold tabular-nums tracking-tight">
-                                        {{ number_format($usage['used']) }}
-                                        <span class="text-sm font-normal text-zinc-400">/ {{ number_format($usage['included']) }}</span>
-                                    </div>
-                                </div>
+                        <flux:card class="p-5!">
+                            <div class="flex items-start justify-between gap-2">
+                                <flux:subheading>{{ $usage['label'] }}</flux:subheading>
                                 @if ($usage['overage'] > 0)
                                     <flux:badge size="sm" color="red">+{{ number_format($usage['overage']) }} {{ __('billing::portal.overage') }}</flux:badge>
                                 @elseif ($usage['isWarning'])
                                     <flux:badge size="sm" color="amber">{{ $usage['percent'] }}%</flux:badge>
                                 @endif
                             </div>
-                            <div class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
-                                <div class="h-full rounded-full transition-all duration-500 {{ $usage['isDanger'] ? 'bg-red-500' : ($usage['isWarning'] ? 'bg-amber-500' : 'bg-emerald-500') }}" style="width: {{ $usage['percent'] }}%"></div>
+                            <div class="mt-3 flex items-baseline gap-1.5">
+                                <span class="text-2xl font-bold tabular-nums tracking-tight">{{ number_format($usage['used']) }}</span>
+                                <span class="text-sm text-zinc-400">/ {{ number_format($usage['included']) }}</span>
+                            </div>
+                            <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                                <div
+                                    class="h-full rounded-full transition-all duration-500 {{ $usage['isDanger'] ? 'bg-red-500' : ($usage['isWarning'] ? 'bg-amber-400' : 'bg-emerald-500') }}"
+                                    style="width: {{ $usage['percent'] }}%"
+                                ></div>
                             </div>
                             <flux:text class="mt-2 text-xs text-zinc-400">{{ number_format($usage['remaining']) }} {{ __('billing::portal.remaining') }}</flux:text>
                         </flux:card>
@@ -271,55 +272,59 @@ new class extends Component {
         @endif
 
         {{-- Recent invoices --}}
-        <flux:card>
-            <div class="mb-5 flex items-center justify-between">
-                <flux:heading size="sm">{{ __('billing::portal.recent_invoices') }}</flux:heading>
+        <div class="space-y-4">
+            <div class="flex items-center justify-between">
+                <flux:heading size="lg">{{ __('billing::portal.recent_invoices') }}</flux:heading>
                 <flux:button size="sm" variant="ghost" href="{{ route(BillingRoute::name('invoices')) }}" icon:trailing="arrow-right">
                     {{ __('billing::portal.view_all_invoices') }}
                 </flux:button>
             </div>
 
-            <flux:table>
-                <flux:table.columns>
-                    <flux:table.column>{{ __('billing::portal.invoice.date') }}</flux:table.column>
-                    <flux:table.column>{{ __('billing::portal.invoice.kind') }}</flux:table.column>
-                    <flux:table.column class="text-right">{{ __('billing::portal.invoice.amount') }}</flux:table.column>
-                    <flux:table.column>{{ __('billing::portal.invoice.status') }}</flux:table.column>
-                    <flux:table.column class="text-right"></flux:table.column>
-                </flux:table.columns>
-                <flux:table.rows>
-                    @forelse ($d['invoices'] as $inv)
-                        <flux:table.row>
-                            <flux:table.cell class="tabular-nums">{{ $inv['date'] }}</flux:table.cell>
-                            <flux:table.cell>
-                                <flux:badge size="sm" color="zinc">{{ $inv['kind'] }}</flux:badge>
-                            </flux:table.cell>
-                            <flux:table.cell class="text-right tabular-nums font-medium">{{ $inv['amount'] }}</flux:table.cell>
-                            <flux:table.cell>
-                                <flux:badge size="sm" :color="$inv['statusColor']">{{ $inv['status'] }}</flux:badge>
-                            </flux:table.cell>
-                            <flux:table.cell class="text-right">
-                                @if ($inv['pdfUrl'])
-                                    <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $inv['pdfUrl'] }}" target="_blank">
-                                        {{ __('billing::portal.invoice.pdf') }}
-                                    </flux:button>
-                                @endif
-                            </flux:table.cell>
-                        </flux:table.row>
-                    @empty
-                        <flux:table.row>
-                            <flux:table.cell colspan="5" class="text-center text-zinc-400">{{ __('billing::portal.no_invoices') }}</flux:table.cell>
-                        </flux:table.row>
-                    @endforelse
-                </flux:table.rows>
-            </flux:table>
-        </flux:card>
+            <flux:card class="p-0! overflow-hidden">
+                <flux:table>
+                    <flux:table.columns>
+                        <flux:table.column>{{ __('billing::portal.invoice.date') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::portal.invoice.kind') }}</flux:table.column>
+                        <flux:table.column class="text-right">{{ __('billing::portal.invoice.amount') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::portal.invoice.status') }}</flux:table.column>
+                        <flux:table.column class="text-right"></flux:table.column>
+                    </flux:table.columns>
+                    <flux:table.rows>
+                        @forelse ($d['invoices'] as $inv)
+                            <flux:table.row>
+                                <flux:table.cell class="tabular-nums">{{ $inv['date'] }}</flux:table.cell>
+                                <flux:table.cell>
+                                    <flux:badge size="sm" color="zinc">{{ $inv['kind'] }}</flux:badge>
+                                </flux:table.cell>
+                                <flux:table.cell class="text-right tabular-nums font-medium">{{ $inv['amount'] }}</flux:table.cell>
+                                <flux:table.cell>
+                                    <flux:badge size="sm" :color="$inv['statusColor']">{{ $inv['status'] }}</flux:badge>
+                                </flux:table.cell>
+                                <flux:table.cell class="text-right">
+                                    @if ($inv['pdfUrl'])
+                                        <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $inv['pdfUrl'] }}" target="_blank">
+                                            {{ __('billing::portal.invoice.pdf') }}
+                                        </flux:button>
+                                    @endif
+                                </flux:table.cell>
+                            </flux:table.row>
+                        @empty
+                            <flux:table.row>
+                                <flux:table.cell colspan="5" class="text-center text-zinc-400">{{ __('billing::portal.no_invoices') }}</flux:table.cell>
+                            </flux:table.row>
+                        @endforelse
+                    </flux:table.rows>
+                </flux:table>
+            </flux:card>
+        </div>
 
         {{-- Cancel modal --}}
         <flux:modal name="cancel-subscription" class="max-w-md">
-            <div class="space-y-4">
-                <flux:heading size="lg">{{ __('billing::portal.cancel_confirm.title') }}</flux:heading>
-                <flux:text>{{ __('billing::portal.cancel_confirm.body') }}</flux:text>
+            <div class="space-y-6">
+                <div class="space-y-2">
+                    <flux:heading size="lg">{{ __('billing::portal.cancel_confirm.title') }}</flux:heading>
+                    <flux:text>{{ __('billing::portal.cancel_confirm.body') }}</flux:text>
+                </div>
                 <div class="flex justify-end gap-2">
                     <flux:modal.close>
                         <flux:button variant="ghost">{{ __('billing::portal.cancel_confirm.keep') }}</flux:button>
