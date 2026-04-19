@@ -41,9 +41,9 @@ new class extends Component {
         }
     }
 
-    public function dashboardData(): array
+    public function dashboardData(?Billable $billable): array
     {
-        $b = $this->resolveBillable();
+        $b = $billable;
         if (! $b) return [];
 
         $status = $b->getBillingSubscriptionStatus();
@@ -130,7 +130,7 @@ new class extends Component {
 
 @php
     $billable = $this->resolveBillable();
-    $d = $this->dashboardData();
+    $d = $this->dashboardData($billable);
 @endphp
 
 <div class="space-y-10">
