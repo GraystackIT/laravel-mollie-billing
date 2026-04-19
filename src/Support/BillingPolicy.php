@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Support;
 
-use Carbon\Carbon;
+use Carbon\CarbonInterface;
 
 class BillingPolicy
 {
@@ -16,7 +16,7 @@ class BillingPolicy
     /**
      * Remaining fraction of the period from now to periodEnd, in [0, 1].
      */
-    public static function prorataFactor(Carbon $periodStart, Carbon $periodEnd): float
+    public static function prorataFactor(CarbonInterface $periodStart, CarbonInterface $periodEnd): float
     {
         $totalDays = $periodStart->diffInDays($periodEnd);
 

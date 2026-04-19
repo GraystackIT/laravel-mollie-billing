@@ -782,7 +782,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     @endif
 
     {{-- Horizontal timeline --}}
-    <flux:timeline :horizontal="true" align="center" class="rounded-xl border border-zinc-200/80 bg-white/60 p-6 backdrop-blur-sm dark:border-white/10 dark:bg-white/2">
+    <flux:timeline :horizontal="true" align="center" class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
         @foreach ($this->timelineSteps() as $item)
             <flux:timeline.item :status="$this->timelineStatus($item['key'])">
                 <flux:timeline.indicator />

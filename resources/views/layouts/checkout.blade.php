@@ -1,10 +1,7 @@
 @php
     $logoUrl = config('mollie-billing.logo_url');
     $companyName = config('mollie-billing.company_name', config('app.name'));
-    $primaryColor = \GraystackIT\MollieBilling\Support\Sanitize::cssColor(
-        (string) config('mollie-billing.primary_color', '#6366f1'),
-    );
-    $resolvedBackUrl = \GraystackIT\MollieBilling\Support\Sanitize::backUrl($backUrl)
+    $primaryColor = config('mollie-billing.primary_color', 'teal');    $resolvedBackUrl = \GraystackIT\MollieBilling\Support\Sanitize::backUrl($backUrl)
         ?? config('mollie-billing.checkout_back_url', '/');
 @endphp
 <!DOCTYPE html>
@@ -16,13 +13,9 @@
         @vite(['resources/css/app.css', 'resources/js/app.js'])
         @livewireStyles
         @fluxAppearance
-        <style>
-            :root {
-                --color-accent: {{ $primaryColor }};
-            }
-        </style>
     </head>
     <body class="min-h-screen bg-white antialiased dark:bg-neutral-950">
+        <flux:accent color="{{ $primaryColor }}">
         <div class="relative min-h-svh overflow-hidden">
             {{-- Ambient background: radial glow + subtle grid texture --}}
             <div aria-hidden="true" class="pointer-events-none absolute inset-0">
@@ -51,6 +44,7 @@
             <main class="relative z-10 mx-auto flex w-full max-w-3xl flex-col px-6 pb-16 pt-4 lg:px-0 lg:pt-8">
                 @livewire($livewireComponent)
             </main>
+            </flux:accent>
         </div>
         @livewireScripts
         @fluxScripts

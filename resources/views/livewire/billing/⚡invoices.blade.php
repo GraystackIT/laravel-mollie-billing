@@ -8,18 +8,18 @@ use Livewire\WithPagination;
 new class extends Component {
     use WithPagination;
 
-    public ?Billable $billable = null;
-
-    public function mount(): void
+    private function resolveBillable(): ?Billable
     {
-        $this->billable = MollieBilling::resolveBillable(request());
+        return MollieBilling::resolveBillable(request());
     }
 
     public function with(): array
     {
+        $billable = $this->resolveBillable();
+
         return [
-            'invoices' => $this->billable
-                ? $this->billable->billingInvoices()->latest()->paginate(20)
+            'invoices' => $billable
+                ? $billable->billingInvoices()->latest()->paginate(20)
                 : null,
         ];
     }

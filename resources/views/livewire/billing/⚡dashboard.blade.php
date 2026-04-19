@@ -8,19 +8,19 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
 new class extends Component {
-    public ?Billable $billable = null;
     public ?string $flash = null;
 
-    public function mount(): void
+    private function resolveBillable(): ?Billable
     {
-        $this->billable = MollieBilling::resolveBillable(request());
+        return MollieBilling::resolveBillable(request());
     }
 
-    public function cancel(): void
+    public function cancelSubscription(): void
     {
-        if (! $this->billable) return;
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
         try {
-            $this->billable->cancelBillingSubscription();
+            $billable->cancelBillingSubscription();
             $this->flash = __('billing::portal.flash.cancelled');
         } catch (\Throwable $e) {
             report($e);
@@ -30,9 +30,10 @@ new class extends Component {
 
     public function resubscribe(): void
     {
-        if (! $this->billable) return;
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
         try {
-            $this->billable->resubscribeBillingPlan();
+            $billable->resubscribeBillingPlan();
             $this->flash = __('billing::portal.flash.resubscribed');
         } catch (\Throwable $e) {
             report($e);
@@ -42,7 +43,7 @@ new class extends Component {
 
     public function dashboardData(): array
     {
-        $b = $this->billable;
+        $b = $this->resolveBillable();
         if (! $b) return [];
 
         $status = $b->getBillingSubscriptionStatus();
@@ -127,7 +128,10 @@ new class extends Component {
 
 ?>
 
-@php($d = $this->dashboardData())
+@php
+    $billable = $this->resolveBillable();
+    $d = $this->dashboardData();
+@endphp
 
 <div class="space-y-10">
     {{-- Page header --}}
@@ -320,7 +324,7 @@ new class extends Component {
                     <flux:modal.close>
                         <flux:button variant="ghost">{{ __('billing::portal.cancel_confirm.keep') }}</flux:button>
                     </flux:modal.close>
-                    <flux:button variant="danger" wire:click="cancel" x-on:click="$flux.modal('cancel-subscription').close()">
+                    <flux:button variant="danger" wire:click="cancelSubscription" x-on:click="$flux.modal('cancel-subscription').close()">
                         {{ __('billing::portal.cancel_confirm.confirm') }}
                     </flux:button>
                 </div>
