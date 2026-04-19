@@ -66,6 +66,12 @@
             <flux:navlist.item icon="document-text" href="{{ route(BillingRoute::name('invoices')) }}" :current="$currentRoute === BillingRoute::name('invoices')">
                 {{ __('billing::portal.nav.invoices') }}
             </flux:navlist.item>
+            <flux:navlist.item icon="puzzle-piece" href="{{ route(BillingRoute::name('addons')) }}" :current="$currentRoute === BillingRoute::name('addons')">
+                {{ __('billing::portal.nav.addons') }}
+            </flux:navlist.item>
+            <flux:navlist.item icon="users" href="{{ route(BillingRoute::name('seats')) }}" :current="$currentRoute === BillingRoute::name('seats')">
+                {{ __('billing::portal.nav.seats') }}
+            </flux:navlist.item>
         </flux:navlist>
 
         <flux:spacer />

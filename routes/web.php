@@ -13,5 +13,7 @@ Route::prefix('billing')
         Route::get('/', [BillingPortalController::class, 'index'])->name('index');
         Route::get('plan', [BillingPortalController::class, 'plan'])->name('plan');
         Route::get('invoices', [BillingPortalController::class, 'invoices'])->name('invoices');
+        Route::get('addons', [BillingPortalController::class, 'addons'])->name('addons');
+        Route::get('seats', [BillingPortalController::class, 'seats'])->name('seats');
         Route::get('return', [BillingPortalController::class, 'return'])->name('return');
     });
