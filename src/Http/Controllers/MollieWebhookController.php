@@ -24,7 +24,7 @@ use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
 use GraystackIT\MollieBilling\Notifications\SubscriptionPaymentFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
-use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -38,7 +38,7 @@ use Mollie\Laravel\Facades\Mollie;
 class MollieWebhookController extends Controller
 {
     public function __construct(
-        protected readonly MollieSalesInvoiceService $salesInvoiceService,
+        protected readonly InvoiceService $salesInvoiceService,
         protected readonly VatCalculationService $vatService,
         protected readonly SubscriptionCatalogInterface $catalog,
         protected readonly CreateSubscription $createSubscription,

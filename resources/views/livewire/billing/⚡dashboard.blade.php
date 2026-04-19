@@ -81,7 +81,7 @@ new class extends Component {
             'amount' => ($currency === 'EUR' ? '€' : $currency) . number_format($inv->amount_gross / 100, 2),
             'status' => $inv->status->value,
             'statusColor' => $inv->status->value === 'paid' ? 'lime' : ($inv->status->value === 'refunded' ? 'amber' : 'zinc'),
-            'pdfUrl' => $inv->mollie_pdf_url,
+            'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
         ])->all();
 
         $addonLabels = array_map(

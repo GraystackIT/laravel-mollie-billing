@@ -7,7 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Wallet;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
-use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
@@ -19,7 +19,7 @@ class ChargeUsageOverageDirectly
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
-        private readonly MollieSalesInvoiceService $invoiceService,
+        private readonly InvoiceService $invoiceService,
     ) {
     }
 

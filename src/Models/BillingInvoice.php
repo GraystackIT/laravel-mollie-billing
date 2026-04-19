@@ -6,6 +6,8 @@ namespace GraystackIT\MollieBilling\Models;
 
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -52,5 +54,23 @@ class BillingInvoice extends Model
     public function remainingRefundableNet(): int
     {
         return max(0, $this->amount_net - $this->refunded_net);
+    }
+
+    public function hasPdf(): bool
+    {
+        return $this->pdf_path !== null;
+    }
+
+    public function getDownloadUrl(): ?string
+    {
+        if (! $this->hasPdf()) {
+            return null;
+        }
+
+        $billable = $this->billable()->first();
+        $parameters = MollieBilling::resolveUrlParameters($billable);
+        $parameters['invoice'] = $this;
+
+        return route(BillingRoute::name('invoice.download'), $parameters);
     }
 }

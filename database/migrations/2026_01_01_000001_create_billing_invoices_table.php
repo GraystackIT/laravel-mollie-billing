@@ -17,9 +17,9 @@ return new class extends Migration
 
             $table->string('mollie_payment_id')->unique();
             $table->string('mollie_subscription_id')->nullable();
-            $table->string('mollie_sales_invoice_id')->nullable()->unique();
-            $table->string('mollie_invoice_url')->nullable();
-            $table->string('mollie_pdf_url')->nullable();
+            $table->string('serial_number')->nullable()->unique();
+            $table->string('pdf_disk')->nullable();
+            $table->string('pdf_path')->nullable();
 
             $table->string('invoice_kind'); // subscription | overage | prorata | credit_note
             $table->string('status');       // InvoiceStatus enum

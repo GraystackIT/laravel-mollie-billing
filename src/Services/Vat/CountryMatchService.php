@@ -12,7 +12,7 @@ use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\CountryMismatchNotification;
-use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
 
@@ -20,7 +20,7 @@ class CountryMatchService
 {
     public function __construct(
         private readonly VatCalculationService $vat,
-        private readonly MollieSalesInvoiceService $salesInvoices,
+        private readonly InvoiceService $salesInvoices,
     ) {
     }
 

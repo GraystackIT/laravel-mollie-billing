@@ -44,10 +44,43 @@ return [
     'currency' => env('BILLING_CURRENCY', 'EUR'),
     'currency_symbol' => env('BILLING_CURRENCY_SYMBOL', '€'),
 
-    // Enable creation of Mollie Sales Invoices (B2B add-on) for each payment. When disabled
-    // (default) the package still persists a local BillingInvoice with full line items, but
-    // Mollie-side sales invoice id / url / pdf stay null.
-    'mollie_sales_invoices_enabled' => env('BILLING_MOLLIE_SALES_INVOICES', false),
+    // Invoice PDF generation and storage. PDFs are generated locally via elegantly/laravel-invoices
+    // and stored on the configured Laravel filesystem disk.
+    'invoices' => [
+        // Laravel filesystem disk for storing generated PDF invoices.
+        'disk' => env('BILLING_INVOICE_DISK', 'local'),
+
+        // Base path within the disk. Invoices are stored as {path}/{YYYY/MM}/{serial}.pdf.
+        'path' => 'billing/invoices',
+
+        // Seller information printed on every invoice.
+        'seller' => [
+            'company' => env('BILLING_SELLER_COMPANY'),
+            'name' => env('BILLING_SELLER_NAME'),
+            'email' => env('BILLING_SELLER_EMAIL'),
+            'phone' => env('BILLING_SELLER_PHONE'),
+            'tax_number' => env('BILLING_SELLER_TAX_NUMBER'),
+            'address' => [
+                'street' => env('BILLING_SELLER_STREET'),
+                'city' => env('BILLING_SELLER_CITY'),
+                'postal_code' => env('BILLING_SELLER_POSTAL_CODE'),
+                'state' => env('BILLING_SELLER_STATE'),
+                'country' => env('BILLING_SELLER_COUNTRY'),
+            ],
+        ],
+
+        // Serial number format. P=prefix, Y=year, C=counter (each char = one digit slot).
+        'serial_number' => [
+            'format' => 'PP-YYCCCCCC',
+            'prefix' => [
+                'invoice' => 'IN',
+                'credit_note' => 'CR',
+            ],
+        ],
+
+        // Temporary URL expiry in minutes (for S3-compatible disks).
+        'temporary_url_expiry' => 30,
+    ],
 
     // Default for Billable::allowsBillingOverage() — overridable per billable.
     'allow_overage_default' => env('BILLING_ALLOW_OVERAGE', true),
