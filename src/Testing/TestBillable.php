@@ -24,4 +24,9 @@ class TestBillable extends Model implements Billable
     public $incrementing = true;
 
     protected $keyType = 'int';
+
+    public function getUsedBillingSeats(): int
+    {
+        return (int) ($this->getBillingSubscriptionMeta()['used_seats'] ?? 0);
+    }
 }

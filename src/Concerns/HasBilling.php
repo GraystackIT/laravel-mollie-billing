@@ -275,6 +275,9 @@ trait HasBilling
         return max(0, $this->getBillingSeatCount() - $this->getIncludedBillingSeats());
     }
 
+    // getUsedBillingSeats() is intentionally NOT provided by this trait.
+    // Each app MUST implement it on the billable model (e.g. return $this->users()->count()).
+
     // ── Addons ──
 
     /**

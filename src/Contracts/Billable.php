@@ -63,6 +63,7 @@ interface Billable
     public function getBillingSeatCount(): int;
     public function getIncludedBillingSeats(): int;
     public function getExtraBillingSeats(): int;
+    public function getUsedBillingSeats(): int;
 
     // Addons
     public function getBillingAddonQuantity(string $addonCode): int;
