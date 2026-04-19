@@ -41,6 +41,7 @@ return [
     // persist this code. The EU VAT/OSS system (mpociot/vat-calculator, VIES, OSS export)
     // is EU-only but the currency itself is independent of it.
     'currency' => env('BILLING_CURRENCY', 'EUR'),
+    'currency_symbol' => env('BILLING_CURRENCY_SYMBOL', '€'),
 
     // Enable creation of Mollie Sales Invoices (B2B add-on) for each payment. When disabled
     // (default) the package still persists a local BillingInvoice with full line items, but

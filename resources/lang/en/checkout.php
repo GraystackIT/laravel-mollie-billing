@@ -52,7 +52,13 @@ return [
     'trial_days' => ':days-day trial',
     'per_month' => 'mo',
     'per_year' => 'yr',
-    'seats_included' => ':count seats included',
+    'seats_included' => ':count seats incl.',
+    'extra_seat_cost' => ':currency:price per extra seat',
+    'usage_included' => ':count :type incl.',
+    'usage_overage' => ':currency:price per extra :type',
+    'usage_unlimited' => 'Unlimited :type',
+    'available_addons' => 'Add-ons',
+    'addon_price' => '+:currency:price/:interval',
 
     // Step 3: addons + seats
     'addons_heading' => 'Add-ons',

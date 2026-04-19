@@ -1,7 +1,8 @@
 @php($plan = $this->selectedPlan())
+@php($currencySymbol = config('mollie-billing.currency_symbol', '€'))
 
-<div class="grid gap-4 lg:grid-cols-5">
-    <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2 lg:col-span-3">
+<div class="grid gap-6 sm:grid-cols-2 mt-4">
+    <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
         <div class="flex items-center gap-2">
             <flux:icon.building-office class="size-4 text-zinc-500" />
             <flux:heading size="sm">{{ __('billing::checkout.billing_details') }}</flux:heading>
@@ -28,7 +29,7 @@
         </dl>
     </section>
 
-    <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2 lg:col-span-2">
+    <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
         <div class="flex items-center gap-2">
             <flux:icon.credit-card class="size-4 text-zinc-500" />
             <flux:heading size="sm">{{ __('billing::checkout.order') }}</flux:heading>
@@ -112,20 +113,20 @@
             @if ($applied_coupon !== null)
                 <div class="flex items-baseline justify-between text-sm">
                     <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.subtotal') }}</span>
-                    <span class="tabular-nums">€{{ number_format($this->subtotalNet() / 100, 2) }}</span>
+                    <span class="tabular-nums">{{ $currencySymbol }}{{ number_format($this->subtotalNet() / 100, 2) }}</span>
                 </div>
                 <div class="flex items-baseline justify-between text-sm">
                     <span class="text-emerald-700 dark:text-emerald-400">
                         {{ __('billing::checkout.discount', ['code' => $applied_coupon['code']]) }}
                     </span>
                     <span class="tabular-nums text-emerald-700 dark:text-emerald-400">
-                        −€{{ number_format(($applied_coupon['discount_net'] ?? 0) / 100, 2) }}
+                        −{{ $currencySymbol }}{{ number_format(($applied_coupon['discount_net'] ?? 0) / 100, 2) }}
                     </span>
                 </div>
             @endif
             <div class="flex items-baseline justify-between text-sm">
                 <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.net') }}</span>
-                <span class="tabular-nums">€{{ number_format($totals['net'] / 100, 2) }}</span>
+                <span class="tabular-nums">{{ $currencySymbol }}{{ number_format($totals['net'] / 100, 2) }}</span>
             </div>
             @if ($totals['reverseCharge'])
                 <div class="flex items-baseline justify-between text-sm">
@@ -137,7 +138,7 @@
                     <span class="text-zinc-500 dark:text-zinc-400">
                         {{ __('billing::checkout.vat_with_rate', ['rate' => rtrim(rtrim(number_format($totals['rate'], 1), '0'), '.')]) }}
                     </span>
-                    <span class="tabular-nums">€{{ number_format($totals['vat'] / 100, 2) }}</span>
+                    <span class="tabular-nums">{{ $currencySymbol }}{{ number_format($totals['vat'] / 100, 2) }}</span>
                 </div>
             @endif
             <div class="flex items-baseline justify-between border-t border-zinc-200 pt-3 dark:border-white/10">
@@ -152,7 +153,7 @@
     </section>
 </div>
 
-<flux:callout icon="shield-check" color="zinc" inline>
+<flux:callout icon="shield-check" color="zinc" inline class="mt-4 mb-6">
     {{ __('billing::checkout.redirect_notice') }}
 </flux:callout>
 

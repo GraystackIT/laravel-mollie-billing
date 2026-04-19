@@ -52,7 +52,13 @@ return [
     'trial_days' => ':days Tage Testphase',
     'per_month' => 'Mo.',
     'per_year' => 'Jahr',
-    'seats_included' => ':count Plätze inklusive',
+    'seats_included' => ':count Plätze inkl.',
+    'extra_seat_cost' => ':currency:price per extra Platz',
+    'usage_included' => ':count :type inkl.',
+    'usage_overage' => ':currency:price per extra :type',
+    'usage_unlimited' => 'Unbegrenzte :type',
+    'available_addons' => 'Add-ons',
+    'addon_price' => '+:currency:price/:interval',
 
     // Step 3: addons + seats
     'addons_heading' => 'Add-ons',
