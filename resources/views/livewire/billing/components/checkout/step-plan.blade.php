@@ -1,6 +1,5 @@
 <div class="flex flex-col items-center gap-2 pt-4">
-</div>
-<flux:radio.group wire:model.live="interval" variant="segmented">
+    <flux:radio.group wire:model.live="interval" variant="segmented">
         <flux:radio value="monthly" :label="__('billing::checkout.monthly')" />
         <flux:radio value="yearly" :label="__('billing::checkout.yearly')" />
     </flux:radio.group>

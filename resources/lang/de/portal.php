@@ -132,6 +132,7 @@ return [
         'keep' => 'Abo behalten',
         'confirm' => 'Kündigen',
     ],
+    'invoices_subtitle' => 'Alle Rechnungen einsehen und herunterladen.',
     'invoice' => [
         'date' => 'Datum',
         'kind' => 'Art',
@@ -141,6 +142,10 @@ return [
         'amount' => 'Betrag',
         'status' => 'Status',
         'pdf' => 'PDF',
+        'total_invoices' => 'Gesamt',
+        'paid_count' => 'Bezahlt',
+        'open_count' => 'Offen',
+        'total_paid' => 'Gesamt bezahlt',
     ],
     'return' => [
         'title' => 'Zahlung erhalten',

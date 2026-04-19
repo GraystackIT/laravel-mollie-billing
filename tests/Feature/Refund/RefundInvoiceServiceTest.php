@@ -9,7 +9,7 @@ use GraystackIT\MollieBilling\Events\WalletCredited;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
-use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Testing\TestBillable;
@@ -22,7 +22,7 @@ beforeEach(function (): void {
 
     // Replace the real binding with a subclass that skips the real Mollie HTTP call.
     $this->app->bind(RefundInvoiceService::class, function ($app): RefundInvoiceService {
-        return new class ($app->make(MollieSalesInvoiceService::class), $app->make(WalletUsageService::class)) extends RefundInvoiceService {
+        return new class ($app->make(InvoiceService::class), $app->make(WalletUsageService::class)) extends RefundInvoiceService {
             protected function callMollieRefund(string $paymentId, int $grossCents): void
             {
                 // no-op for tests

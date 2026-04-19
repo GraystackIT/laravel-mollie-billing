@@ -14,6 +14,9 @@ use GraystackIT\MollieBilling\Http\Middleware\RequireActiveSubscription;
 use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
 use GraystackIT\MollieBilling\Support\ConfigSubscriptionCatalog;
 use Illuminate\Console\Scheduling\Schedule;
@@ -37,6 +40,10 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->app->singleton(FeatureAccess::class);
 
         $this->app->singleton(IpGeolocationManager::class, fn ($app) => new IpGeolocationManager($app));
+
+        $this->app->singleton(InvoiceNumberGenerator::class);
+        $this->app->singleton(InvoiceService::class);
+        $this->app->alias(InvoiceService::class, MollieSalesInvoiceService::class);
     }
 
     public function boot(): void

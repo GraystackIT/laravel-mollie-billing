@@ -26,7 +26,7 @@ use Mollie\Laravel\Facades\Mollie;
 class RefundInvoiceService
 {
     public function __construct(
-        private readonly MollieSalesInvoiceService $invoices,
+        private readonly InvoiceService $invoices,
         private readonly WalletUsageService $wallet,
     ) {
     }

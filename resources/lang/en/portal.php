@@ -132,6 +132,7 @@ return [
         'keep' => 'Keep subscription',
         'confirm' => 'Cancel',
     ],
+    'invoices_subtitle' => 'View and download all your invoices.',
     'invoice' => [
         'date' => 'Date',
         'kind' => 'Kind',
@@ -141,6 +142,10 @@ return [
         'amount' => 'Amount',
         'status' => 'Status',
         'pdf' => 'PDF',
+        'total_invoices' => 'Total',
+        'paid_count' => 'Paid',
+        'open_count' => 'Open',
+        'total_paid' => 'Total paid',
     ],
     'return' => [
         'title' => 'Payment received',
