@@ -28,11 +28,11 @@ class ScheduleSubscriptionChange
         DB::transaction(function () use ($billable, $dto): void {
             /** @var Model&Billable $billable */
             if ($billable instanceof Model) {
-                $billable->refresh();
                 $billable->newQuery()
                     ->whereKey($billable->getKey())
                     ->lockForUpdate()
                     ->first();
+                $billable->refresh();
             }
 
             $currentPlan = $billable->getBillingSubscriptionPlanCode() ?? '';
@@ -42,10 +42,23 @@ class ScheduleSubscriptionChange
 
             $newPlan = $dto->planCode ?? $currentPlan;
             $newInterval = $dto->interval ?? $currentInterval;
-            $newSeats = $dto->seats ?? $currentSeats;
+            $planChanged = $newPlan !== $currentPlan;
+
+            // Auto-derive seats from the new plan.
+            $usedSeats = $billable->getUsedBillingSeats();
+            $newSeats = $dto->seats ?? max($usedSeats, $this->catalog->includedSeats($newPlan));
+
+            // Auto-filter incompatible addons.
             $newAddons = $dto->addons !== null
                 ? array_keys(array_filter($dto->addons, fn ($q) => (int) $q > 0))
                 : $currentAddons;
+
+            if ($planChanged) {
+                $newAddons = array_values(array_filter(
+                    $newAddons,
+                    fn (string $code) => $this->catalog->planAllowsAddon($newPlan, $code),
+                ));
+            }
 
             $currentNet = $this->computeAmountNet($currentPlan, $currentInterval, $currentSeats, $currentAddons);
             $newNet = $this->computeAmountNet($newPlan, $newInterval, $newSeats, $newAddons);

@@ -52,16 +52,43 @@ class PreviewService
 
         $newPlan = $dto->planCode ?? $currentPlan;
         $newInterval = $dto->interval ?? $currentInterval;
+        $planChanged = $dto->planCode !== null && $dto->planCode !== $currentPlan;
+
+        // Auto-filter incompatible addons when the plan changes.
+        $incompatibleAddons = [];
         $newAddons = $dto->addons ?? $currentAddons;
 
-        // When no explicit seat count is requested, carry forward only the
-        // seats actually in use — not the old plan's total.  This avoids
-        // charging for extra seats that are already included in the new plan.
+        if ($planChanged) {
+            $filteredAddons = [];
+            foreach ($newAddons as $code => $qty) {
+                if ($this->catalog->planAllowsAddon($newPlan, (string) $code)) {
+                    $filteredAddons[$code] = $qty;
+                } else {
+                    $incompatibleAddons[] = (string) $code;
+                }
+            }
+            $newAddons = $filteredAddons;
+        }
+
+        // Auto-derive seats with A+C strategy.
         $usedSeats = $billable->getUsedBillingSeats();
-        $newSeats = $dto->seats ?? max($usedSeats, $this->catalog->includedSeats($newPlan));
+        $newIncludedSeats = $this->catalog->includedSeats($newPlan);
+        $seatPriceNet = $this->catalog->seatPriceNet($newPlan, $newInterval);
+        $newSeats = $dto->seats ?? max($usedSeats, $newIncludedSeats);
 
         $warnings = [];
         $errors = [];
+
+        // Seat validation: block if plan doesn't support extra seats.
+        if ($dto->seats === null && $usedSeats > $newIncludedSeats) {
+            if ($seatPriceNet === null) {
+                $errors[] = [
+                    'type' => 'seats_exceed_plan',
+                    'used' => $usedSeats,
+                    'included' => $newIncludedSeats,
+                ];
+            }
+        }
 
         $currentNet = $this->computeAmountNet(
             $currentPlan,
@@ -120,7 +147,6 @@ class PreviewService
 
         // Seat-downgrade warning
         if ($dto->seats !== null) {
-            $usedSeats = $billable->getUsedBillingSeats();
             $includedSeats = $this->catalog->includedSeats($newPlan);
             $minimumRequired = max($usedSeats, $includedSeats);
             if ($dto->seats < $minimumRequired) {
@@ -129,7 +155,6 @@ class PreviewService
         }
 
         // Prorata
-        $planChanged = $dto->planCode !== null && $dto->planCode !== $currentPlan;
         $intervalChanged = $dto->interval !== null && $dto->interval !== $currentInterval;
         $prorataFactor = 0.0;
         $prorataChargeNet = 0;
@@ -139,7 +164,7 @@ class PreviewService
         $periodEnd = $billable->nextBillingDate();
 
         if (
-            ($planChanged || $intervalChanged || BillingPolicy::isProrataEnabled())
+            ($planChanged || $intervalChanged)
             && $periodStart !== null
             && $periodEnd !== null
         ) {
@@ -152,13 +177,30 @@ class PreviewService
             }
         }
 
-        // VAT
+        // VAT on recurring price
         $country = $billable->getBillingCountry() ?? 'DE';
+        $vatNumber = $billable instanceof \Illuminate\Database\Eloquent\Model ? ($billable->vat_number ?? null) : null;
         try {
-            $vat = $this->vatService->calculate($country, max(0, $newNet - $couponDiscountNet));
+            $vat = $this->vatService->calculate($country, max(0, $newNet - $couponDiscountNet), $vatNumber);
         } catch (\Throwable $e) {
             $vat = ['net' => max(0, $newNet - $couponDiscountNet), 'vat' => 0, 'gross' => max(0, $newNet - $couponDiscountNet), 'rate' => 0.0];
             $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
+        }
+
+        // VAT on prorata amount (due now)
+        $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $vat['rate']];
+        if ($prorataChargeNet > 0) {
+            try {
+                $prorataVat = $this->vatService->calculate($country, $prorataChargeNet, $vatNumber);
+            } catch (\Throwable) {
+                $prorataVat = ['net' => $prorataChargeNet, 'vat' => 0, 'gross' => $prorataChargeNet, 'rate' => 0.0];
+            }
+        } elseif ($prorataCreditNet > 0) {
+            try {
+                $prorataVat = $this->vatService->calculate($country, $prorataCreditNet, $vatNumber);
+            } catch (\Throwable) {
+                $prorataVat = ['net' => $prorataCreditNet, 'vat' => 0, 'gross' => $prorataCreditNet, 'rate' => 0.0];
+            }
         }
 
         // Usage comparison
@@ -177,7 +219,7 @@ class PreviewService
 
         // Seat comparison
         $currentIncludedSeats = $currentPlan !== '' ? $this->catalog->includedSeats($currentPlan) : 0;
-        $newIncludedSeats = $newPlan !== '' ? $this->catalog->includedSeats($newPlan) : 0;
+        $extraSeatsCharged = max(0, $newSeats - $newIncludedSeats);
 
         return [
             'currentPlanCode' => $currentPlan,
@@ -193,13 +235,22 @@ class PreviewService
             'newSeats' => $newSeats,
             'currentIncludedSeats' => $currentIncludedSeats,
             'newIncludedSeats' => $newIncludedSeats,
+            'extraSeatsCharged' => $extraSeatsCharged,
+            'seatPriceNet' => $seatPriceNet,
+            'incompatibleAddons' => $incompatibleAddons,
             'usageChanges' => $usageChanges,
             'currentPriceNet' => $currentNet,
             'newPriceNet' => $newNet,
             'diffNet' => $newNet - $currentNet,
             'prorataFactor' => $prorataFactor,
             'prorataChargeNet' => $prorataChargeNet,
+            'prorataChargeGross' => $prorataChargeNet > 0 ? (int) $prorataVat['gross'] : 0,
+            'prorataChargeVat' => $prorataChargeNet > 0 ? (int) $prorataVat['vat'] : 0,
             'prorataCreditNet' => $prorataCreditNet,
+            'prorataCreditGross' => $prorataCreditNet > 0 ? (int) $prorataVat['gross'] : 0,
+            'currentPeriodCredit' => $periodStart !== null && $periodEnd !== null
+                ? (int) round($currentNet * $prorataFactor)
+                : 0,
             'couponDiscountNet' => $couponDiscountNet,
             'vatRate' => $vat['rate'],
             'vatAmount' => $vat['vat'],
@@ -294,7 +345,7 @@ class PreviewService
             $price = $this->catalog->addonPriceNet((string) $addonCode, $interval);
             $items[] = [
                 'kind' => 'addon',
-                'label' => (string) $addonCode,
+                'label' => $this->catalog->addonName((string) $addonCode) ?? (string) $addonCode,
                 'code' => (string) $addonCode,
                 'quantity' => $qty,
                 'unit_price_net' => $price,

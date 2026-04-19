@@ -218,6 +218,7 @@ class RefundInvoiceService
     {
         Mollie::send(new CreatePaymentRefundRequest(
             paymentId: $paymentId,
+            description: 'Prorata refund',
             amount: new Money(
                 (string) config('mollie-billing.currency', 'EUR'),
                 number_format($grossCents / 100, 2, '.', ''),

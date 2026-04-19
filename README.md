@@ -360,7 +360,6 @@ Highlights of `config/mollie-billing.php`:
 | `dashboard_url` | URL the portal logo links to (e.g. your app's main dashboard). Supports `route:` prefix. |
 | `checkout_back_url` | Where the checkout "Back" link leads (default `/`). |
 | `checkout_countries` | Countries shown in checkout (regions, include, exclude). |
-| `prorata_enabled` | Enable prorated charges/credits when changing plans mid-period. |
 | `allow_overage_default` | Default policy when a plan does not declare its own overage rule. |
 | `additional_countries` | ISO-3166 codes + VAT rates for non-EU jurisdictions. |
 | `vat_rate_overrides` | Map of country code to override VAT percentage. |

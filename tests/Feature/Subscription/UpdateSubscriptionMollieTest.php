@@ -10,6 +10,8 @@ use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 
@@ -31,6 +33,16 @@ class SpyUpdateSubscription extends UpdateSubscription
 
         return (object) ['id' => 'sub_new_'.uniqid()];
     }
+
+    protected function chargeProrataImmediate(\GraystackIT\MollieBilling\Contracts\Billable $billable, int $prorataChargeNet): void
+    {
+        self::$calls[] = ['prorata_charge', $prorataChargeNet];
+    }
+
+    protected function refundProrataCredit(\GraystackIT\MollieBilling\Contracts\Billable $billable, int $prorataCreditNet): void
+    {
+        self::$calls[] = ['prorata_refund', $prorataCreditNet];
+    }
 }
 
 beforeEach(function (): void {
@@ -44,6 +56,8 @@ beforeEach(function (): void {
             $app->make(VatCalculationService::class),
             $app->make(ChargeUsageOverageDirectly::class),
             $app->make(ScheduleSubscriptionChange::class),
+            $app->make(RefundInvoiceService::class),
+            $app->make(WalletUsageService::class),
         );
     });
 
@@ -80,9 +94,11 @@ it('cancels and recreates the Mollie subscription on plan change', function (): 
 
     expect($result['planChanged'])->toBeTrue();
     expect($result['mollieSubscriptionPatched'])->toBeTrue();
-    expect(count(SpyUpdateSubscription::$calls))->toBe(2);
-    expect(SpyUpdateSubscription::$calls[0][0])->toBe('cancel');
-    expect(SpyUpdateSubscription::$calls[1][0])->toBe('create');
+
+    $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
+    expect($callTypes)->toContain('cancel');
+    expect($callTypes)->toContain('create');
+    expect($callTypes)->toContain('prorata_charge');
 
     $b->refresh();
     expect($b->subscription_meta['mollie_subscription_id'])->toStartWith('sub_new_');

@@ -17,5 +17,6 @@ Route::prefix('billing')
         Route::get('invoices/{invoice}/download', InvoiceDownloadController::class)->name('invoice.download');
         Route::get('addons', [BillingPortalController::class, 'addons'])->name('addons');
         Route::get('seats', [BillingPortalController::class, 'seats'])->name('seats');
+        Route::get('payment-method', [BillingPortalController::class, 'paymentMethod'])->name('payment-method');
         Route::get('return', [BillingPortalController::class, 'return'])->name('return');
     });
