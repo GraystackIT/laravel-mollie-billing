@@ -13,6 +13,21 @@
         @vite(['resources/css/app.css', 'resources/js/app.js'])
         @livewireStyles
         @fluxAppearance
+        <style>
+            .billing-grid-bg {
+                background-image:
+                    linear-gradient(to right, rgba(228,228,231,0.4) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(228,228,231,0.4) 1px, transparent 1px);
+                background-size: 64px 64px;
+                mask-image: radial-gradient(ellipse at top, black 20%, transparent 70%);
+                -webkit-mask-image: radial-gradient(ellipse at top, black 20%, transparent 70%);
+            }
+            .dark .billing-grid-bg {
+                background-image:
+                    linear-gradient(to right, rgba(255,255,255,0.05) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(255,255,255,0.05) 1px, transparent 1px);
+            }
+        </style>
     </head>
     <body class="min-h-screen bg-white antialiased dark:bg-neutral-950">
         <flux:accent color="{{ $primaryColor }}">
@@ -20,7 +35,7 @@
             {{-- Ambient background: radial glow + subtle grid texture --}}
             <div aria-hidden="true" class="pointer-events-none absolute inset-0">
                 <div class="absolute -top-40 left-1/2 h-[32rem] w-[64rem] -translate-x-1/2 rounded-full bg-linear-to-b from-zinc-200/60 via-zinc-100/20 to-transparent blur-3xl dark:from-white/6 dark:via-white/2 dark:to-transparent"></div>
-                <div class="absolute inset-0 bg-[linear-gradient(to_right,theme(colors.zinc.200/40)_1px,transparent_1px),linear-gradient(to_bottom,theme(colors.zinc.200/40)_1px,transparent_1px)] bg-[size:64px_64px] [mask-image:radial-gradient(ellipse_at_top,black_20%,transparent_70%)] dark:bg-[linear-gradient(to_right,theme(colors.white/5)_1px,transparent_1px),linear-gradient(to_bottom,theme(colors.white/5)_1px,transparent_1px)]"></div>
+                <div class="billing-grid-bg absolute inset-0"></div>
             </div>
 
             {{-- Header: logo + back link --}}
@@ -43,9 +58,9 @@
             {{-- Content --}}
             <main class="relative z-10 mx-auto flex w-full max-w-3xl flex-col px-6 pb-16 pt-4 lg:px-0 lg:pt-8">
                 @livewire($livewireComponent)
-            </main>
-            </flux:accent>
+            </main>            
         </div>
+        </flux:accent>
         @livewireScripts
         @fluxScripts
     </body>
