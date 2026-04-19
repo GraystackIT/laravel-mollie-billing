@@ -5,6 +5,7 @@
     $portalTitle = __('billing::portal.title', ['app' => config('mollie-billing.company_name', config('app.name'))]);
     $currentRoute = request()->route()?->getName();
 
+    $primaryColor = config('mollie-billing.primary_color', 'teal');
     $dashboardUrl = config('mollie-billing.dashboard_url');
     if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
         $dashboardUrl = route(substr($dashboardUrl, 6));
@@ -21,6 +22,7 @@
     @fluxAppearance
 </head>
 <body class="h-full min-h-screen bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">
+    <flux:accent color="{{ $primaryColor }}">
     <flux:header sticky class="border-b border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
         <flux:sidebar.toggle class="lg:hidden" icon="bars-2" inset="left" />
 
@@ -90,6 +92,7 @@
         @livewire($livewireComponent)
     </flux:main>
 
+    </flux:accent>
     @livewireScripts
     @fluxScripts
 </body>

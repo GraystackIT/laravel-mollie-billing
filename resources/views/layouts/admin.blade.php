@@ -2,6 +2,7 @@
     use GraystackIT\MollieBilling\Support\BillingRoute;
 
     $logoUrl = config('mollie-billing.logo_url');
+    $primaryColor = config('mollie-billing.primary_color', 'teal');
     $portalTitle = config('app.name').' Billing Portal';
     $currentRoute = request()->route()?->getName();
 @endphp
@@ -16,6 +17,7 @@
     @fluxAppearance
 </head>
 <body class="h-full min-h-screen bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">
+    <flux:accent color="{{ $primaryColor }}">
     <flux:header sticky class="border-b border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
         <flux:sidebar.toggle class="lg:hidden" icon="bars-2" inset="left" />
 
@@ -80,6 +82,7 @@
         </div>
     </flux:main>
 
+    </flux:accent>
     @livewireScripts
     @fluxScripts
 </body>
