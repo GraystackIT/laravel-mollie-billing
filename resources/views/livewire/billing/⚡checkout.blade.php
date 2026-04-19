@@ -113,6 +113,46 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         );
     }
 
+    /** @return array<string, array{included: int, overage_price: int|null}> */
+    public function planUsages(string $planCode, string $interval): array
+    {
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $usages = $catalog->includedUsages($planCode, $interval);
+        $result = [];
+
+        foreach ($usages as $type => $included) {
+            $result[$type] = [
+                'included' => $included,
+                'overage_price' => $catalog->usageOveragePrice($planCode, $interval, $type),
+            ];
+        }
+
+        return $result;
+    }
+
+    /** @return array<string, array{name: string, price_net: int}> */
+    public function planAddons(string $planCode, string $interval): array
+    {
+        $plan = $this->plans()[$planCode] ?? [];
+        $allowedAddons = $plan['allowed_addons'] ?? [];
+        $allAddons = $this->addons();
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $result = [];
+
+        foreach ($allowedAddons as $addonCode) {
+            $addon = $allAddons[$addonCode] ?? null;
+            if ($addon === null) {
+                continue;
+            }
+            $result[$addonCode] = [
+                'name' => $catalog->addonName($addonCode) ?? $addonCode,
+                'price_net' => $catalog->addonPriceNet($addonCode, $interval),
+            ];
+        }
+
+        return $result;
+    }
+
     /** @return array<string, mixed>|null */
     public function selectedPlan(): ?array
     {
@@ -559,18 +599,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             };
         }
 
-        // Create billable after billing-address step validation
-        if ($pkg === 1 && $this->billableId === null) {
-            try {
-                $this->createBillable();
-            } catch (\Throwable $e) {
-                report($e);
-                $this->errorMessage = __('billing::checkout.error_billable_creation');
-
-                return;
-            }
-        }
-
         // Skip addons step if plan doesn't need it
         if ($pkg === 2 && ! $this->hasAddonsOrSeatsStep()) {
             $this->step = $offset + 4;
@@ -696,6 +724,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             $this->validateStep3();
         }
 
+        if ($this->billableId === null) {
+            try {
+                $this->createBillable();
+            } catch (\Throwable $e) {
+                report($e);
+                $this->errorMessage = __('billing::checkout.error_billable_creation');
+                $this->processing = false;
+
+                return null;
+            }
+        }
+
         $billable = $this->resolveBillable();
         if ($billable === null) {
             $this->errorMessage = __('billing::checkout.error_no_billable');
@@ -776,7 +816,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     {{-- Error message from hooks --}}
     @if ($errorMessage)
-        <flux:callout icon="exclamation-triangle" color="red" inline>
+        <flux:callout icon="exclamation-triangle" color="red" inline class="mt-4 mb-4">
             {{ $errorMessage }}
         </flux:callout>
     @endif

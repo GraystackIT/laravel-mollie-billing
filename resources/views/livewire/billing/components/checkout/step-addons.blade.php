@@ -2,7 +2,7 @@
 @php($allowedAddons = (array) ($plan['allowed_addons'] ?? []))
 @php($seatPrice = $plan['intervals'][$interval]['seat_price_net'] ?? null)
 
-<div class="flex flex-col gap-6">
+<div class="flex flex-col gap-6 mt-4">
     @if (! empty($allowedAddons))
         <section class="flex flex-col gap-3 rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
             <div>
