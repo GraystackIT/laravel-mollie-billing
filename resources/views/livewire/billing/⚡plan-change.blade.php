@@ -8,8 +8,13 @@ use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use Livewire\Component;
 
 new class extends Component {
-    public string $applyAt = 'immediate';
+    public string $applyAt;
     public string $selectedInterval = 'monthly';
+
+    public function mount(): void
+    {
+        $this->applyAt = config('mollie-billing.prorata_enabled') ? 'immediate' : 'end_of_period';
+    }
     public ?string $selectedPlan = null;
     public array $preview = [];
     public ?string $flash = null;
@@ -88,11 +93,6 @@ new class extends Component {
         <flux:radio.group wire:model.live="selectedInterval" variant="segmented">
             <flux:radio value="monthly" label="{{ __('billing::portal.interval_monthly') }}" />
             <flux:radio value="yearly" label="{{ __('billing::portal.interval_yearly') }}" />
-        </flux:radio.group>
-
-        <flux:radio.group wire:model.live="applyAt" variant="segmented">
-            <flux:radio value="immediate" label="{{ __('billing::portal.apply_immediate') }}" />
-            <flux:radio value="end_of_period" label="{{ __('billing::portal.apply_period_end') }}" />
         </flux:radio.group>
     </div>
 
