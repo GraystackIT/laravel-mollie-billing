@@ -4,7 +4,7 @@
 
 <div class="flex flex-col gap-6">
     @if (! empty($allowedAddons))
-        <section class="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-6 dark:border-white/10 dark:bg-white/2">
+        <section class="flex flex-col gap-3 rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
             <div>
                 <flux:heading size="sm">{{ __('billing::checkout.addons_heading') }}</flux:heading>
                 <flux:text class="text-sm">{{ __('billing::checkout.addons_description') }}</flux:text>
@@ -14,7 +14,7 @@
                     @php($addon = $this->addons()[$addonCode] ?? null)
                     @if ($addon)
                         @php($addonPrice = number_format($priceFormatter((int) ($addon['intervals'][$interval]['price_net'] ?? 0)) / 100, 2))
-                        <label class="flex items-center justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4 transition hover:border-zinc-400 dark:border-white/10 dark:bg-white/2 dark:hover:border-white/30">
+                        <label class="flex items-center justify-between gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50 p-4 transition hover:border-zinc-300 hover:bg-white dark:border-white/10 dark:bg-white/2 dark:hover:border-white/30">
                             <div class="flex items-center gap-3">
                                 <flux:checkbox wire:model="addon_codes" value="{{ $addonCode }}" />
                                 <div>
@@ -32,7 +32,7 @@
     @endif
 
     @if ($seatPrice !== null)
-        <section class="rounded-xl border border-zinc-200 bg-white p-6 dark:border-white/10 dark:bg-white/2">
+        <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
             <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div class="min-w-0 flex-1">
                     <flux:heading size="sm">{{ __('billing::checkout.extra_seats') }}</flux:heading>

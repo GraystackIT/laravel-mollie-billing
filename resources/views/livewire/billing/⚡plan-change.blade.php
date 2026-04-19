@@ -8,16 +8,15 @@ use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use Livewire\Component;
 
 new class extends Component {
-    public ?Billable $billable = null;
     public string $applyAt = 'immediate';
     public string $selectedInterval = 'monthly';
     public ?string $selectedPlan = null;
     public array $preview = [];
     public ?string $flash = null;
 
-    public function mount(): void
+    private function resolveBillable(): ?Billable
     {
-        $this->billable = MollieBilling::resolveBillable(request());
+        return MollieBilling::resolveBillable(request());
     }
 
     public function updatedSelectedInterval(): void
@@ -29,16 +28,23 @@ new class extends Component {
     public function previewFor(string $planCode, PreviewService $service): void
     {
         $this->selectedPlan = $planCode;
-        if ($this->billable) {
-            $this->preview = $service->previewPlanChange($this->billable, $planCode, $this->selectedInterval);
+        $billable = $this->resolveBillable();
+        if ($billable) {
+            $this->preview = $service->previewPlanChange($billable, $planCode, $this->selectedInterval);
         }
     }
 
-    public function commit(UpdateSubscription $service): void
+    public function applyChange(UpdateSubscription $service): void
     {
-        if (! $this->billable || ! $this->selectedPlan) return;
+        $billable = $this->resolveBillable();
+
+        if (! $billable || ! $this->selectedPlan) {
+            $this->flash = __('billing::portal.flash.error');
+            return;
+        }
+
         try {
-            $service->update($this->billable, [
+            $service->update($billable, [
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
                 'apply_at' => $this->applyAt,
@@ -55,6 +61,7 @@ new class extends Component {
     public function with(): array
     {
         return [
+            'billable' => $this->resolveBillable(),
             'plans' => app(SubscriptionCatalogInterface::class)->allPlans(),
             'catalog' => app(SubscriptionCatalogInterface::class),
         ];
@@ -73,7 +80,7 @@ new class extends Component {
     </div>
 
     @if ($flash)
-        <flux:callout variant="secondary" icon="information-circle">{{ $flash }}</flux:callout>
+        <flux:callout variant="secondary" icon="information-circle" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })">{{ $flash }}</flux:callout>
     @endif
 
     {{-- Controls --}}
@@ -205,8 +212,8 @@ new class extends Component {
             </div>
 
             <dl class="divide-y divide-zinc-100 dark:divide-zinc-800">
-                @foreach (['netTotal' => __('billing::portal.net'), 'vatTotal' => __('billing::portal.vat'), 'discountTotal' => __('billing::portal.discount'), 'grossTotal' => __('billing::portal.gross')] as $key => $label)
-                    @if (isset($preview[$key]))
+                @foreach (['newPriceNet' => __('billing::portal.net'), 'vatAmount' => __('billing::portal.vat'), 'couponDiscountNet' => __('billing::portal.discount'), 'grossTotal' => __('billing::portal.gross')] as $key => $label)
+                    @if (isset($preview[$key]) && $preview[$key] != 0)
                         <div class="flex items-center justify-between py-3 text-sm {{ $key === 'grossTotal' ? 'font-semibold text-base' : '' }}">
                             <dt class="{{ $key === 'grossTotal' ? '' : 'text-zinc-500 dark:text-zinc-400' }}">{{ $label }}</dt>
                             <dd class="tabular-nums {{ $key === 'grossTotal' ? '' : 'font-medium' }}">
@@ -218,7 +225,7 @@ new class extends Component {
             </dl>
 
             <div class="flex justify-end pt-2">
-                <flux:button variant="primary" size="sm" wire:click="commit">
+                <flux:button variant="primary" size="sm" wire:click="applyChange">
                     {{ $applyAt === 'end_of_period' ? __('billing::portal.schedule_change') : __('billing::portal.apply_now') }}
                 </flux:button>
             </div>

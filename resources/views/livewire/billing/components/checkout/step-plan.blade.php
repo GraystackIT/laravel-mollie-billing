@@ -23,8 +23,8 @@
             wire:click="$set('plan_code', '{{ $code }}')"
             class="group relative flex flex-col items-start gap-4 rounded-xl border p-6 text-left transition duration-200
                 {{ $isSelected
-                    ? 'border-accent bg-accent/5 ring-2 ring-accent/40 dark:border-accent dark:bg-accent/8 dark:ring-accent/30'
-                    : 'border-zinc-200 bg-white hover:-translate-y-0.5 hover:border-zinc-400 hover:shadow-md dark:border-white/10 dark:bg-white/2 dark:hover:border-white/30 dark:hover:bg-white/4' }}"
+                    ? 'border-accent bg-accent/5 ring-2 ring-accent/40 shadow-md dark:border-accent dark:bg-accent/8 dark:ring-accent/30'
+                    : 'border-zinc-200/80 bg-white shadow-sm hover:-translate-y-0.5 hover:border-zinc-300 hover:shadow-md dark:border-white/10 dark:bg-white/2 dark:hover:border-white/30 dark:hover:bg-white/4' }}"
         >
             <div class="flex w-full items-start justify-between">
                 <div class="flex flex-col gap-1">

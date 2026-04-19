@@ -1,7 +1,7 @@
 @php($plan = $this->selectedPlan())
 
 <div class="grid gap-4 lg:grid-cols-5">
-    <section class="rounded-xl border border-zinc-200 bg-white p-6 dark:border-white/10 dark:bg-white/2 lg:col-span-3">
+    <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2 lg:col-span-3">
         <div class="flex items-center gap-2">
             <flux:icon.building-office class="size-4 text-zinc-500" />
             <flux:heading size="sm">{{ __('billing::checkout.billing_details') }}</flux:heading>
@@ -28,7 +28,7 @@
         </dl>
     </section>
 
-    <section class="rounded-xl border border-zinc-200 bg-white p-6 dark:border-white/10 dark:bg-white/2 lg:col-span-2">
+    <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2 lg:col-span-2">
         <div class="flex items-center gap-2">
             <flux:icon.credit-card class="size-4 text-zinc-500" />
             <flux:heading size="sm">{{ __('billing::checkout.order') }}</flux:heading>
