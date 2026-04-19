@@ -52,8 +52,13 @@ class PreviewService
 
         $newPlan = $dto->planCode ?? $currentPlan;
         $newInterval = $dto->interval ?? $currentInterval;
-        $newSeats = $dto->seats ?? $currentSeats;
         $newAddons = $dto->addons ?? $currentAddons;
+
+        // When no explicit seat count is requested, carry forward only the
+        // seats actually in use — not the old plan's total.  This avoids
+        // charging for extra seats that are already included in the new plan.
+        $usedSeats = $billable->getUsedBillingSeats();
+        $newSeats = $dto->seats ?? max($usedSeats, $this->catalog->includedSeats($newPlan));
 
         $warnings = [];
         $errors = [];
@@ -115,7 +120,7 @@ class PreviewService
 
         // Seat-downgrade warning
         if ($dto->seats !== null) {
-            $usedSeats = (int) ($billable->getBillingSubscriptionMeta()['used_seats'] ?? 0);
+            $usedSeats = $billable->getUsedBillingSeats();
             $includedSeats = $this->catalog->includedSeats($newPlan);
             $minimumRequired = max($usedSeats, $includedSeats);
             if ($dto->seats < $minimumRequired) {
@@ -156,7 +161,39 @@ class PreviewService
             $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
         }
 
+        // Usage comparison
+        $usageChanges = [];
+        foreach ($this->catalog->allUsageTypes() as $usageType) {
+            $currentQuota = $this->catalog->includedUsage($currentPlan, $currentInterval, $usageType);
+            $newQuota = $this->catalog->includedUsage($newPlan, $newInterval, $usageType);
+            if ($currentQuota > 0 || $newQuota > 0) {
+                $usageChanges[$usageType] = [
+                    'current' => $currentQuota,
+                    'new' => $newQuota,
+                    'diff' => $newQuota - $currentQuota,
+                ];
+            }
+        }
+
+        // Seat comparison
+        $currentIncludedSeats = $currentPlan !== '' ? $this->catalog->includedSeats($currentPlan) : 0;
+        $newIncludedSeats = $newPlan !== '' ? $this->catalog->includedSeats($newPlan) : 0;
+
         return [
+            'currentPlanCode' => $currentPlan,
+            'currentPlanName' => $currentPlan !== '' ? ($this->catalog->planName($currentPlan) ?? $currentPlan) : null,
+            'currentInterval' => $currentInterval,
+            'newPlanCode' => $newPlan,
+            'newPlanName' => $newPlan !== '' ? ($this->catalog->planName($newPlan) ?? $newPlan) : null,
+            'newInterval' => $newInterval,
+            'planChanged' => $planChanged,
+            'intervalChanged' => $intervalChanged,
+            'usedSeats' => $usedSeats,
+            'currentSeats' => $currentSeats,
+            'newSeats' => $newSeats,
+            'currentIncludedSeats' => $currentIncludedSeats,
+            'newIncludedSeats' => $newIncludedSeats,
+            'usageChanges' => $usageChanges,
             'currentPriceNet' => $currentNet,
             'newPriceNet' => $newNet,
             'diffNet' => $newNet - $currentNet,

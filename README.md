@@ -94,6 +94,11 @@ use Illuminate\Database\Eloquent\Model;
 class Organization extends Model implements Billable
 {
     use HasBilling;
+
+    public function getUsedBillingSeats(): int
+    {
+        return $this->users()->count();
+    }
 }
 ```
 
@@ -426,14 +431,21 @@ return [
 
 ## The Billable contract
 
-A minimal billable model needs nothing beyond the trait — `HasBilling` handles casts, relations, URLs and delegates actions to the underlying services through the container. To override behavior (e.g. how the portal URL is generated), bind your own implementation of the relevant service interface.
+A minimal billable model needs the trait **plus** one required method — `getUsedBillingSeats()`. This method is intentionally not provided by the trait because only your app knows how to count active seats (team members, users, etc.):
 
 ```php
 class Organization extends Model implements Billable
 {
     use HasBilling;
+
+    public function getUsedBillingSeats(): int
+    {
+        return $this->users()->count();
+    }
 }
 ```
+
+The seat count is used during plan-change previews to calculate whether extra seats need to be purchased on the new plan.
 
 `HasBilling` provides among others:
 
