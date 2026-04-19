@@ -1,5 +1,6 @@
 <div class="flex flex-col items-center gap-2 pt-4">
-    <flux:radio.group wire:model.live="interval" variant="segmented">
+</div>
+<flux:radio.group wire:model.live="interval" variant="segmented">
         <flux:radio value="monthly" :label="__('billing::checkout.monthly')" />
         <flux:radio value="yearly" :label="__('billing::checkout.yearly')" />
     </flux:radio.group>
@@ -136,4 +137,3 @@
     <flux:button wire:click="back" variant="ghost" icon="arrow-left">{{ __('billing::checkout.back') }}</flux:button>
     <flux:button wire:click="next" variant="primary" icon:trailing="arrow-right">{{ __('billing::checkout.continue') }}</flux:button>
 </div>
-    
