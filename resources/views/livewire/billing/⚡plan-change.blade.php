@@ -18,6 +18,7 @@ new class extends Component {
     public ?string $selectedPlan = null;
     public array $preview = [];
     public ?string $flash = null;
+    public bool $flashError = false;
 
     private function resolveBillable(): ?Billable
     {
@@ -39,36 +40,111 @@ new class extends Component {
         }
     }
 
-    public function applyChange(UpdateSubscription $service): void
+    public function cancelScheduledChange(UpdateSubscription $service): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+
+        try {
+            $service->cancelScheduledChange($billable);
+            $this->flash = __('billing::portal.flash.scheduled_cancelled');
+            $this->flashError = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
+        }
+    }
+
+    public function applyScheduledNow(UpdateSubscription $service): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $sc = $meta['scheduled_change'] ?? null;
+        if (! $sc) return;
+
+        try {
+            $service->cancelScheduledChange($billable);
+            $service->update($billable, [
+                'plan_code' => $sc['plan_code'] ?? null,
+                'interval' => $sc['interval'] ?? null,
+                'seats' => $sc['seats'] ?? null,
+                'addons' => $sc['addons'] ?? null,
+                'coupon_code' => $sc['coupon_code'] ?? null,
+                'apply_at' => 'immediate',
+            ]);
+            $this->flash = __('billing::portal.flash.plan_changed');
+            $this->flashError = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->flash = config('app.debug')
+                ? __('billing::portal.flash.error').' ('.$e->getMessage().')'
+                : __('billing::portal.flash.error');
+            $this->flashError = true;
+        }
+    }
+
+    public function applyChange(UpdateSubscription $service, bool $immediate = false): void
     {
         $billable = $this->resolveBillable();
 
         if (! $billable || ! $this->selectedPlan) {
             $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
             return;
         }
 
         try {
-            $service->update($billable, [
+            $result = $service->update($billable, [
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
-                'apply_at' => $this->applyAt,
+                'apply_at' => $immediate ? 'immediate' : $this->applyAt,
             ]);
-            $this->flash = __('billing::portal.flash.plan_changed');
+
+            if (! empty($result['scheduledFor'])) {
+                $date = \Carbon\Carbon::parse($result['scheduledFor'])->translatedFormat('d. M Y');
+                $this->flash = __('billing::portal.flash.plan_scheduled', ['date' => $date]);
+            } else {
+                $this->flash = __('billing::portal.flash.plan_changed');
+            }
+            $this->flashError = false;
             $this->preview = [];
             $this->selectedPlan = null;
         } catch (\Throwable $e) {
             report($e);
-            $this->flash = __('billing::portal.flash.error');
+            $this->flash = config('app.debug')
+                ? __('billing::portal.flash.error').' ('.$e->getMessage().')'
+                : __('billing::portal.flash.error');
+            $this->flashError = true;
         }
     }
 
     public function with(): array
     {
+        $billable = $this->resolveBillable();
+        $scheduledChange = null;
+
+        if ($billable) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $sc = $meta['scheduled_change'] ?? null;
+            if ($sc !== null) {
+                $scheduledChange = [
+                    'plan_code' => $sc['plan_code'] ?? null,
+                    'interval' => $sc['interval'] ?? null,
+                    'scheduled_at' => isset($sc['scheduled_at'])
+                        ? \Carbon\Carbon::parse($sc['scheduled_at'])->translatedFormat('d. M Y')
+                        : null,
+                ];
+            }
+        }
+
         return [
-            'billable' => $this->resolveBillable(),
+            'billable' => $billable,
             'plans' => app(SubscriptionCatalogInterface::class)->allPlans(),
             'catalog' => app(SubscriptionCatalogInterface::class),
+            'scheduledChange' => $scheduledChange,
         ];
     }
 };
@@ -85,7 +161,7 @@ new class extends Component {
     </div>
 
     @if ($flash)
-        <flux:callout variant="secondary" icon="information-circle" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })">{{ $flash }}</flux:callout>
+        <flux:callout variant="{{ $flashError ? 'danger' : 'success' }}" icon="{{ $flashError ? 'exclamation-triangle' : 'check-circle' }}" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })">{{ $flash }}</flux:callout>
     @endif
 
     {{-- Controls --}}
@@ -109,10 +185,17 @@ new class extends Component {
         $cols = $planCount <= 3 ? $planCount : (int) ceil($planCount / 2);
     @endphp
 
+    @php
+        $hasScheduled = $scheduledChange !== null;
+        $scheduledPlanCode = $scheduledChange['plan_code'] ?? null;
+        $scheduledInterval = $scheduledChange['interval'] ?? null;
+    @endphp
+
     <div class="grid gap-4" style="grid-template-columns: repeat({{ $cols }}, minmax(0, 1fr))">
         @foreach ($plans as $code)
             @php
                 $isCurrent = $currentPlanCode === $code && $currentInterval === $selectedInterval;
+                $isScheduledTarget = $hasScheduled && $scheduledPlanCode === $code && $scheduledInterval === $selectedInterval;
                 $isSelected = $selectedPlan === $code;
                 $price = $catalog->basePriceNet($code, $selectedInterval);
                 $features = $catalog->planFeatures($code);
@@ -122,10 +205,12 @@ new class extends Component {
             @endphp
 
             <flux:card
-                class="relative flex flex-col overflow-hidden transition {{ $isSelected ? 'ring-2 ring-accent shadow-lg' : 'hover:shadow-md' }}"
+                class="relative flex flex-col overflow-hidden transition {{ $isSelected ? 'ring-2 ring-accent shadow-lg' : ($isScheduledTarget ? 'ring-2 ring-amber-400 shadow-lg' : 'hover:shadow-md') }}"
             >
                 {{-- Top accent strip --}}
-                <div class="absolute inset-x-0 top-0 h-1 {{ $isCurrent ? 'bg-emerald-500' : ($isSelected ? 'bg-accent' : 'bg-transparent') }}"></div>
+                @if ($isCurrent || $isScheduledTarget || $isSelected)
+                    <div class="absolute inset-x-0 top-0 h-1.5 {{ $isCurrent ? 'bg-emerald-500' : ($isScheduledTarget ? 'bg-amber-500' : 'bg-accent') }}"></div>
+                @endif
 
                 <div class="flex-1 space-y-4 pt-2">
                     {{-- Plan name + badge --}}
@@ -133,6 +218,8 @@ new class extends Component {
                         <flux:heading size="lg">{{ $catalog->planName($code) ?? $code }}</flux:heading>
                         @if ($isCurrent)
                             <flux:badge size="sm" color="lime">{{ __('billing::portal.current') }}</flux:badge>
+                        @elseif ($isScheduledTarget)
+                            <flux:badge size="sm" color="amber">{{ __('billing::portal.scheduled') }}</flux:badge>
                         @endif
                     </div>
 
@@ -151,7 +238,7 @@ new class extends Component {
                             @endunless
                         </div>
                         @if ($savings > 0)
-                            <flux:badge size="sm" color="lime" icon="arrow-trending-down">{{ __('billing::portal.save_yearly', ['percent' => round($savings)]) }}</flux:badge>
+                            <flux:badge size="sm" color="lime" icon="arrow-trending-down" class="mt-2 mb-2">{{ __('billing::portal.save_yearly', ['percent' => round($savings)]) }}</flux:badge>
                         @endif
                         @unless ($isFree)
                             <flux:text class="text-xs text-zinc-400">{{ __('billing::portal.prices_excl_vat') }}</flux:text>
@@ -183,8 +270,28 @@ new class extends Component {
                 </div>
 
                 {{-- Action --}}
-                <div class="mt-6">
-                    @if ($isSelected)
+                <div class="mt-6 space-y-2">
+                    @if ($isScheduledTarget)
+                        {{-- Scheduled date info --}}
+                        @if ($scheduledChange['scheduled_at'])
+                            <flux:text class="text-center text-xs text-amber-600 dark:text-amber-400">
+                                {{ __('billing::portal.scheduled_change_on', ['date' => $scheduledChange['scheduled_at']]) }}
+                            </flux:text>
+                        @endif
+                        <flux:button.group class="w-full">
+                            <flux:button class="flex-1" size="sm" wire:click="cancelScheduledChange">
+                                <span class="text-amber-600">{{ __('billing::portal.cancel_scheduled_change') }}</span>
+                            </flux:button>
+                            <flux:dropdown position="bottom end">
+                                <flux:button size="sm" icon="chevron-down" />
+                                <flux:menu>
+                                    <flux:menu.item icon="bolt" wire:click="applyScheduledNow">
+                                        {{ __('billing::portal.apply_now') }}
+                                    </flux:menu.item>
+                                </flux:menu>
+                            </flux:dropdown>
+                        </flux:button.group>
+                    @elseif ($isSelected)
                         <flux:button class="w-full" variant="filled" disabled>
                             <flux:icon.check class="size-4" />
                             {{ __('billing::portal.selected') }}
@@ -193,7 +300,7 @@ new class extends Component {
                         <flux:button class="w-full" variant="ghost" disabled>
                             {{ __('billing::portal.current') }}
                         </flux:button>
-                    @else
+                    @elseif (! $hasScheduled)
                         <flux:button class="w-full" variant="primary" wire:click="previewFor('{{ $code }}')">
                             {{ __('billing::portal.select') }}
                         </flux:button>
@@ -390,9 +497,29 @@ new class extends Component {
 
                 {{-- Action button --}}
                 <div class="mt-5 flex justify-end">
-                    <flux:button variant="primary" size="sm" wire:click="applyChange">
-                        {{ $applyAt === 'end_of_period' ? __('billing::portal.schedule_change') : __('billing::portal.apply_now') }}
-                    </flux:button>
+                    @if (! $isUpgrade && $applyAt === 'end_of_period')
+                        <flux:button.group>
+                            <flux:button variant="primary" size="sm" wire:click="applyChange">
+                                {{ __('billing::portal.schedule_change') }}
+                            </flux:button>
+                            <flux:dropdown position="bottom end">
+                                <flux:button variant="primary" size="sm" icon="chevron-down" />
+                                <flux:menu>
+                                    <flux:menu.item icon="bolt" wire:click="applyChange(true)">
+                                        {{ __('billing::portal.apply_now') }}
+                                    </flux:menu.item>
+                                </flux:menu>
+                            </flux:dropdown>
+                        </flux:button.group>
+                    @else
+                        <flux:button variant="primary" size="sm" wire:click="applyChange">
+                            @if ($isUpgrade)
+                                {{ __('billing::portal.upgrade_now') }}
+                            @else
+                                {{ __('billing::portal.apply_now') }}
+                            @endif
+                        </flux:button>
+                    @endif
                 </div>
             </div>
         </flux:card>

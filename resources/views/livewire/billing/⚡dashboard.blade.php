@@ -9,6 +9,7 @@ use Livewire\Component;
 
 new class extends Component {
     public ?string $flash = null;
+    public bool $flashError = false;
 
     private function resolveBillable(): ?Billable
     {
@@ -22,9 +23,11 @@ new class extends Component {
         try {
             $billable->cancelBillingSubscription();
             $this->flash = __('billing::portal.flash.cancelled');
+            $this->flashError = false;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
         }
     }
 
@@ -35,9 +38,27 @@ new class extends Component {
         try {
             $billable->resubscribeBillingPlan();
             $this->flash = __('billing::portal.flash.resubscribed');
+            $this->flashError = false;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
+        }
+    }
+
+    public function cancelScheduledChange(): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+        try {
+            app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
+                ->cancelScheduledChange($billable);
+            $this->flash = __('billing::portal.flash.scheduled_cancelled');
+            $this->flashError = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
         }
     }
 
@@ -120,8 +141,28 @@ new class extends Component {
             'trialEnds' => $b->getBillingTrialEndsAt()?->translatedFormat('d. M Y') ?? '—',
             'subscriptionEnds' => $b->getBillingSubscriptionEndsAt()?->translatedFormat('d. M Y'),
             'subscriptionEndsFuture' => $b->getBillingSubscriptionEndsAt()?->isFuture() ?? false,
+            'scheduledChange' => $this->resolveScheduledChange($b),
             'usageTypes' => $usageTypes,
             'invoices' => $invoices,
+        ];
+    }
+    private function resolveScheduledChange(Billable $b): ?array
+    {
+        $meta = $b->getBillingSubscriptionMeta();
+        $sc = $meta['scheduled_change'] ?? null;
+        if ($sc === null) {
+            return null;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $planCode = $sc['plan_code'] ?? null;
+
+        return [
+            'planName' => $planCode ? ($catalog->planName($planCode) ?? $planCode) : null,
+            'interval' => $sc['interval'] ?? null,
+            'scheduledAt' => isset($sc['scheduled_at'])
+                ? \Carbon\Carbon::parse($sc['scheduled_at'])->translatedFormat('d. M Y')
+                : null,
         ];
     }
 };
@@ -143,7 +184,7 @@ new class extends Component {
     </div>
 
     @if ($flash)
-        <flux:callout variant="secondary" icon="information-circle">{{ $flash }}</flux:callout>
+        <flux:callout variant="{{ $flashError ? 'danger' : 'success' }}" icon="{{ $flashError ? 'exclamation-triangle' : 'check-circle' }}">{{ $flash }}</flux:callout>
     @endif
 
     @if (! $billable)
@@ -168,6 +209,21 @@ new class extends Component {
         @elseif ($d['isCancelled'] && $d['subscriptionEndsFuture'])
             <flux:callout icon="information-circle" color="zinc" inline>
                 {{ __('billing::portal.cancelled_banner', ['date' => $d['subscriptionEnds']]) }}
+            </flux:callout>
+        @endif
+
+        @if ($d['scheduledChange'])
+            <flux:callout icon="calendar" color="amber" inline>
+                <div class="flex items-center justify-between gap-4 w-full">
+                    <span>{{ __('billing::portal.scheduled_change_banner', [
+                        'date' => $d['scheduledChange']['scheduledAt'],
+                        'plan' => $d['scheduledChange']['planName'],
+                        'interval' => $d['scheduledChange']['interval'] === 'monthly' ? __('billing::portal.interval_monthly') : __('billing::portal.interval_yearly'),
+                    ]) }}</span>
+                    <flux:button size="xs" variant="ghost" wire:click="cancelScheduledChange">
+                        {{ __('billing::portal.scheduled_change_cancel') }}
+                    </flux:button>
+                </div>
             </flux:callout>
         @endif
 

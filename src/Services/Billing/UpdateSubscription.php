@@ -42,11 +42,23 @@ class UpdateSubscription
         $dto = SubscriptionUpdateRequest::from($request);
 
         if ($dto->applyAt === 'end_of_period') {
-            $this->scheduleService->schedule($billable, $dto);
+            if ($this->isUpgrade($billable, $dto)) {
+                // Upgrades cannot be scheduled — apply immediately instead.
+                $dto = new SubscriptionUpdateRequest(
+                    planCode: $dto->planCode,
+                    interval: $dto->interval,
+                    seats: $dto->seats,
+                    addons: $dto->addons,
+                    couponCode: $dto->couponCode,
+                    applyAt: 'immediate',
+                );
+            } else {
+                $this->scheduleService->schedule($billable, $dto);
 
-            return [
-                'scheduledFor' => $billable->nextBillingDate()?->toIso8601String(),
-            ];
+                return [
+                    'scheduledFor' => $billable->nextBillingDate()?->toIso8601String(),
+                ];
+            }
         }
 
         /** @var Model&Billable $billable */
@@ -68,7 +80,7 @@ class UpdateSubscription
             $newInterval = $dto->interval ?? $currentInterval;
             $newSeats = $dto->seats ?? $currentSeats;
             $newAddons = $dto->addons !== null
-                ? array_keys(array_filter($dto->addons, fn ($q) => (int) $q > 0))
+                ? $this->normalizeAddonCodes($dto->addons)
                 : $currentAddons;
 
             $planChanged = $newPlan !== $currentPlan;
@@ -221,6 +233,50 @@ class UpdateSubscription
     public function cancelScheduledChange(Billable $billable): void
     {
         $this->scheduleService->cancel($billable);
+    }
+
+    /**
+     * Normalize addon input: supports both a simple list of codes (['a', 'b'])
+     * and an associative quantity map (['a' => 1, 'b' => 0]).
+     *
+     * @param  array<int|string, int|string>  $addons
+     * @return array<int, string>
+     */
+    private function normalizeAddonCodes(array $addons): array
+    {
+        if ($addons === []) {
+            return [];
+        }
+
+        // Associative format: keys are addon codes, values are quantities.
+        if (! array_is_list($addons)) {
+            return array_values(
+                array_keys(array_filter($addons, fn ($q) => (int) $q > 0))
+            );
+        }
+
+        // Simple list of addon code strings.
+        return array_values($addons);
+    }
+
+    private function isUpgrade(Billable $billable, SubscriptionUpdateRequest $dto): bool
+    {
+        $currentPlan = $billable->getBillingSubscriptionPlanCode() ?? '';
+        $currentInterval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
+        $currentSeats = $billable->getBillingSeatCount();
+        $currentAddons = $billable->getActiveBillingAddonCodes();
+
+        $newPlan = $dto->planCode ?? $currentPlan;
+        $newInterval = $dto->interval ?? $currentInterval;
+        $newSeats = $dto->seats ?? $currentSeats;
+        $newAddons = $dto->addons !== null
+            ? $this->normalizeAddonCodes($dto->addons)
+            : $currentAddons;
+
+        $currentNet = $this->computeAmountNet($currentPlan, $currentInterval, $currentSeats, $currentAddons);
+        $newNet = $this->computeAmountNet($newPlan, $newInterval, $newSeats, $newAddons);
+
+        return $newNet > $currentNet;
     }
 
     /**
