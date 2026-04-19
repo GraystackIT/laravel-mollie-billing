@@ -153,6 +153,9 @@ new class extends Component {
                         @if ($savings > 0)
                             <flux:badge size="sm" color="lime" icon="arrow-trending-down">{{ __('billing::portal.save_yearly', ['percent' => round($savings)]) }}</flux:badge>
                         @endif
+                        @unless ($isFree)
+                            <flux:text class="text-xs text-zinc-400">{{ __('billing::portal.prices_excl_vat') }}</flux:text>
+                        @endunless
                     </div>
 
                     <flux:separator />
