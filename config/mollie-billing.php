@@ -31,8 +31,6 @@ return [
         'exclude' => [],
     ],
 
-    'prorata_enabled' => env('BILLING_PRORATA_ENABLED', false),
-
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN'),
 
     'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),

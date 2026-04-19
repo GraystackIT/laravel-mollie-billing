@@ -44,6 +44,11 @@ class BillingPortalController extends Controller
         return $this->render('seats');
     }
 
+    public function paymentMethod(Request $request): View
+    {
+        return $this->render('payment-method');
+    }
+
     public function return(Request $request): View
     {
         return view('mollie-billing::layouts.checkout', [

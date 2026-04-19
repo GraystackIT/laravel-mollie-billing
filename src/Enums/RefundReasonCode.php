@@ -11,5 +11,6 @@ enum RefundReasonCode: string
     case Goodwill = 'goodwill';
     case Chargeback = 'chargeback';
     case Cancellation = 'cancellation';
+    case PlanDowngrade = 'plan_downgrade';
     case Other = 'other';
 }

@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
 use GraystackIT\MollieBilling\Events\AddonEnabled;
@@ -14,14 +15,18 @@ use GraystackIT\MollieBilling\Events\PlanChanged;
 use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
 use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
+use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Mollie\Api\Http\Data\Money;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
+use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
 
@@ -34,6 +39,8 @@ class UpdateSubscription
         private readonly VatCalculationService $vatService,
         private readonly ChargeUsageOverageDirectly $overageService,
         private readonly ScheduleSubscriptionChange $scheduleService,
+        private readonly RefundInvoiceService $refundService,
+        private readonly WalletUsageService $walletService,
     ) {
     }
 
@@ -64,11 +71,11 @@ class UpdateSubscription
         /** @var Model&Billable $billable */
         return DB::transaction(function () use ($billable, $dto): array {
             if ($billable instanceof Model) {
-                $billable->refresh();
                 $billable->newQuery()
                     ->whereKey($billable->getKey())
                     ->lockForUpdate()
                     ->first();
+                $billable->refresh();
             }
 
             $currentPlan = $billable->getBillingSubscriptionPlanCode() ?? '';
@@ -78,12 +85,35 @@ class UpdateSubscription
 
             $newPlan = $dto->planCode ?? $currentPlan;
             $newInterval = $dto->interval ?? $currentInterval;
-            $newSeats = $dto->seats ?? $currentSeats;
+            $planChanged = $newPlan !== $currentPlan;
+
+            // Auto-derive seats from the new plan when not explicitly provided.
+            if ($dto->seats !== null) {
+                $newSeats = $dto->seats;
+            } else {
+                $usedSeats = $billable->getUsedBillingSeats();
+                $newIncludedSeats = $this->catalog->includedSeats($newPlan);
+                $seatPriceNet = $this->catalog->seatPriceNet($newPlan, $newInterval);
+
+                if ($usedSeats > $newIncludedSeats && $seatPriceNet === null) {
+                    throw new SeatDowngradeRequiredException($billable, $usedSeats, $newIncludedSeats);
+                }
+
+                $newSeats = max($usedSeats, $newIncludedSeats);
+            }
+
             $newAddons = $dto->addons !== null
                 ? $this->normalizeAddonCodes($dto->addons)
                 : $currentAddons;
 
-            $planChanged = $newPlan !== $currentPlan;
+            // Auto-strip addons the new plan does not support.
+            if ($planChanged) {
+                $newAddons = array_values(array_filter(
+                    $newAddons,
+                    fn (string $code) => $this->catalog->planAllowsAddon($newPlan, $code),
+                ));
+            }
+
             $intervalChanged = $newInterval !== $currentInterval;
             $seatsChanged = $newSeats !== $currentSeats;
             $addonsAdded = array_values(array_diff($newAddons, $currentAddons));
@@ -141,6 +171,13 @@ class UpdateSubscription
                 }
             }
 
+            // Prorata payments: charge for upgrade, refund for immediate downgrade.
+            if ($prorataChargeNet > 0) {
+                $this->chargeProrataImmediate($billable, $prorataChargeNet);
+            } elseif ($prorataCreditNet > 0 && $dto->applyAt === 'immediate') {
+                $this->refundProrataCredit($billable, $prorataCreditNet);
+            }
+
             // Mollie patch placeholder
             $isMollie = $billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value;
             $mollieSubscriptionPatched = false;
@@ -177,6 +214,11 @@ class UpdateSubscription
                     'active_addon_codes' => array_values($newAddons),
                     'subscription_meta' => $meta,
                 ])->save();
+            }
+
+            // Adjust wallet balances to reflect the new plan's included usage.
+            if ($planChanged || $intervalChanged) {
+                $this->adjustWalletsForPlanChange($billable, $currentPlan, $currentInterval, $newPlan, $newInterval);
             }
 
             // Events
@@ -268,10 +310,23 @@ class UpdateSubscription
 
         $newPlan = $dto->planCode ?? $currentPlan;
         $newInterval = $dto->interval ?? $currentInterval;
-        $newSeats = $dto->seats ?? $currentSeats;
+        $planChanged = $newPlan !== $currentPlan;
+
+        // Auto-derive seats
+        $usedSeats = $billable->getUsedBillingSeats();
+        $newSeats = $dto->seats ?? max($usedSeats, $this->catalog->includedSeats($newPlan));
+
+        // Auto-filter incompatible addons
         $newAddons = $dto->addons !== null
             ? $this->normalizeAddonCodes($dto->addons)
             : $currentAddons;
+
+        if ($planChanged) {
+            $newAddons = array_values(array_filter(
+                $newAddons,
+                fn (string $code) => $this->catalog->planAllowsAddon($newPlan, $code),
+            ));
+        }
 
         $currentNet = $this->computeAmountNet($currentPlan, $currentInterval, $currentSeats, $currentAddons);
         $newNet = $this->computeAmountNet($newPlan, $newInterval, $newSeats, $newAddons);
@@ -415,12 +470,12 @@ class UpdateSubscription
 
             return true;
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::warning('Mollie cancel+create failed', [
+            \Illuminate\Support\Facades\Log::error('Mollie cancel+create failed', [
                 'billable' => $billable->getKey(),
                 'error' => $e->getMessage(),
             ]);
 
-            return false;
+            throw $e;
         }
     }
 
@@ -445,5 +500,140 @@ class UpdateSubscription
             metadata: $payload['metadata'] ?? null,
             webhookUrl: $payload['webhookUrl'] ?? null,
         ));
+    }
+
+    /**
+     * Create a one-off Mollie payment for the prorata upgrade charge.
+     * The webhook handler processes type=prorata and creates a BillingInvoice.
+     */
+    protected function chargeProrataImmediate(Billable $billable, int $prorataChargeNet): void
+    {
+        if (! ($billable instanceof Model) || ! $billable->hasMollieMandate()) {
+            return;
+        }
+
+        $country = $billable->getBillingCountry() ?? 'DE';
+        $vat = $this->vatService->calculate($country, $prorataChargeNet, $billable->vat_number ?? null);
+
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+        $amountValue = number_format($vat['gross'] / 100, 2, '.', '');
+
+        $lineItems = [[
+            'kind' => 'prorata',
+            'label' => 'Pro-rata upgrade charge',
+            'quantity' => 1,
+            'unit_price_net' => $prorataChargeNet,
+            'total_net' => $prorataChargeNet,
+        ]];
+
+        $payment = Mollie::send(new CreatePaymentRequest(
+            description: 'Pro-rata plan upgrade',
+            amount: new Money($currency, $amountValue),
+            metadata: [
+                'type' => 'prorata',
+                'billable_type' => $billable->getMorphClass(),
+                'billable_id' => (string) $billable->getKey(),
+                'line_items' => $lineItems,
+            ],
+            sequenceType: 'recurring',
+            mandateId: $billable->getMollieMandateId(),
+            customerId: $billable->getMollieCustomerId(),
+        ));
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['prorata_pending_payment_id'] = is_object($payment) ? ($payment->id ?? null) : null;
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Issue a partial refund on the last subscription invoice for the prorata
+     * credit from an immediate downgrade. Creates both a Mollie refund and a
+     * local credit-note invoice.
+     */
+    protected function refundProrataCredit(Billable $billable, int $prorataCreditNet): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $latestInvoice = $billable->billingInvoices()
+            ->where('invoice_kind', 'subscription')
+            ->where('status', 'paid')
+            ->whereNotNull('mollie_payment_id')
+            ->first();
+
+        if ($latestInvoice === null) {
+            return;
+        }
+
+        if ($prorataCreditNet > $latestInvoice->remainingRefundableNet()) {
+            $prorataCreditNet = $latestInvoice->remainingRefundableNet();
+        }
+
+        if ($prorataCreditNet <= 0) {
+            return;
+        }
+
+        try {
+            $this->refundService->refundPartially(
+                $latestInvoice,
+                $prorataCreditNet,
+                RefundReasonCode::PlanDowngrade,
+                'Pro-rata credit for plan downgrade',
+            );
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Prorata refund failed', [
+                'billable' => $billable->getKey(),
+                'invoice' => $latestInvoice->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Adjust wallet balances when the plan or interval changes.
+     *
+     * Upgrade (more quota): credit the difference.
+     * Downgrade (less quota): cap the balance to the new plan's quota.
+     * Note: assertDowngradesAllowed() runs BEFORE this and charges overage
+     * for used units above the new quota.
+     */
+    private function adjustWalletsForPlanChange(
+        Billable $billable,
+        string $oldPlan,
+        string $oldInterval,
+        string $newPlan,
+        string $newInterval,
+    ): void {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        foreach ($billable->wallets()->get() as $wallet) {
+            $slug = (string) $wallet->slug;
+            $oldIncluded = $this->catalog->includedUsage($oldPlan, $oldInterval, $slug);
+            $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
+            $balance = (int) $wallet->balanceInt;
+
+            $diff = $newIncluded - $oldIncluded;
+
+            if ($diff > 0) {
+                $wallet->deposit($diff, ['type' => $slug, 'reason' => 'plan_change_upgrade']);
+            } elseif ($diff < 0) {
+                $newBalance = max(0, $balance + $diff);
+                $withdraw = $balance - $newBalance;
+                if ($withdraw > 0) {
+                    $wallet->forceWithdraw($withdraw, ['type' => $slug, 'reason' => 'plan_change_downgrade']);
+                }
+            }
+        }
+
+        // Create wallets for usage types that are new in the target plan.
+        $newUsages = $this->catalog->includedUsages($newPlan, $newInterval);
+        foreach ($newUsages as $type => $quantity) {
+            if ((int) $quantity > 0 && $billable->getWallet($type) === null) {
+                $this->walletService->credit($billable, (string) $type, (int) $quantity);
+            }
+        }
     }
 }

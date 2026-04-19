@@ -16,9 +16,11 @@ use Mollie\Laravel\Facades\Mollie;
 class StartMandateCheckout
 {
     /**
+     * @param  ?string  $redirectUrl  Optional override for the post-checkout redirect URL.
+     *                                Defaults to the package "return" route.
      * @return array{checkout_url:?string,payment_id:string}
      */
-    public function handle(Billable $billable): array
+    public function handle(Billable $billable, ?string $redirectUrl = null): array
     {
         /** @var Model&Billable $billable */
         $customerId = $this->ensureMollieCustomer($billable);
@@ -28,7 +30,7 @@ class StartMandateCheckout
         $payment = Mollie::send(new CreatePaymentRequest(
             description: 'Payment method authorisation',
             amount: new Money($currency, '0.00'),
-            redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            redirectUrl: $redirectUrl ?? route(BillingRoute::name('return'), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),

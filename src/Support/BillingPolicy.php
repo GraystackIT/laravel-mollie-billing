@@ -8,11 +8,6 @@ use Carbon\CarbonInterface;
 
 class BillingPolicy
 {
-    public static function isProrataEnabled(): bool
-    {
-        return (bool) config('mollie-billing.prorata_enabled');
-    }
-
     /**
      * Remaining fraction of the period from now to periodEnd, in [0, 1].
      */

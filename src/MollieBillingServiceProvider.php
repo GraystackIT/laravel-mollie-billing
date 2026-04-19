@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling;
 use GraystackIT\MollieBilling\Commands\OssExportCommand;
 use GraystackIT\MollieBilling\Commands\PrepareOverageCommand;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Features\FeatureAccess;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingPortal;
@@ -14,14 +15,15 @@ use GraystackIT\MollieBilling\Http\Middleware\RequireActiveSubscription;
 use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
+use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
+use GraystackIT\MollieBilling\Listeners\RevokePreviousMandate;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
-use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
 use GraystackIT\MollieBilling\Support\ConfigSubscriptionCatalog;
 use Illuminate\Console\Scheduling\Schedule;
-use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Support\Facades\Blade;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Livewire\Livewire;
@@ -58,6 +60,12 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->registerViews();
         $this->registerCommands();
         $this->registerScheduledJobs();
+        $this->registerEventListeners();
+    }
+
+    private function registerEventListeners(): void
+    {
+        Event::listen(MandateUpdated::class, RevokePreviousMandate::class);
     }
 
     private function propagateMollieApiKey(): void
@@ -90,8 +98,7 @@ class MollieBillingServiceProvider extends ServiceProvider
 
         $this->publishes([
             __DIR__.'/../database/migrations' => database_path('migrations'),
-            __DIR__.'/../database/migrations/add_billing_columns_to_billable_table.php.stub'
-                => database_path('migrations/'.date('Y_m_d_His').'_add_billing_columns_to_billable_table.php'),
+            __DIR__.'/../database/migrations/add_billing_columns_to_billable_table.php.stub' => database_path('migrations/'.date('Y_m_d_His').'_add_billing_columns_to_billable_table.php'),
         ], 'mollie-billing-migrations');
 
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
