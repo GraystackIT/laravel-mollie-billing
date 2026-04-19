@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Events;
 
-use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
@@ -17,7 +17,7 @@ class SubscriptionChangeScheduled
     public function __construct(
         public readonly Billable $billable,
         public readonly array $scheduledChange,
-        public readonly Carbon $scheduledAt,
+        public readonly CarbonInterface $scheduledAt,
     ) {
     }
 }

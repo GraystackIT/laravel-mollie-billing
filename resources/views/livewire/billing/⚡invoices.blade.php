@@ -25,12 +25,12 @@ new class extends Component {
 
         $invoices = $billable->billingInvoices()->latest()->paginate(20);
 
-        $allInvoices = $billable->billingInvoices()->get();
+        $query = $billable->billingInvoices();
         $stats = [
-            'total' => $allInvoices->count(),
-            'paid' => $allInvoices->where('status', InvoiceStatus::Paid)->count(),
-            'open' => $allInvoices->where('status', InvoiceStatus::Open)->count(),
-            'totalAmount' => $currency . number_format($allInvoices->where('status', InvoiceStatus::Paid)->sum('amount_gross') / 100, 2),
+            'total' => $query->count(),
+            'paid' => $query->clone()->where('status', InvoiceStatus::Paid)->count(),
+            'open' => $query->clone()->where('status', InvoiceStatus::Open)->count(),
+            'totalAmount' => $currency . number_format($query->clone()->where('status', InvoiceStatus::Paid)->sum('amount_gross') / 100, 2),
         ];
 
         return [

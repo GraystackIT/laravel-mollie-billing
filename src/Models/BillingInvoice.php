@@ -67,6 +67,10 @@ class BillingInvoice extends Model
             return null;
         }
 
+        if (! $this->billable()) {
+            return null;
+        }
+
         $billable = $this->billable()->first();
         $parameters = MollieBilling::resolveUrlParameters($billable);
         $parameters['invoice'] = $this;
