@@ -7,6 +7,7 @@ use Livewire\Component;
 
 new class extends Component {
     public ?string $flash = null;
+    public bool $flashSuccess = true;
 
     private function resolveBillable(): ?Billable
     {
@@ -21,9 +22,11 @@ new class extends Component {
         try {
             $billable->enableBillingAddon($addonCode);
             $this->flash = __('billing::portal.addons_flash.enabled', ['addon' => app(SubscriptionCatalogInterface::class)->addonName($addonCode) ?? $addonCode]);
+            $this->flashSuccess = true;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
+            $this->flashSuccess = false;
         }
     }
 
@@ -35,9 +38,11 @@ new class extends Component {
         try {
             $billable->disableBillingAddon($addonCode);
             $this->flash = __('billing::portal.addons_flash.disabled', ['addon' => app(SubscriptionCatalogInterface::class)->addonName($addonCode) ?? $addonCode]);
+            $this->flashSuccess = true;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
+            $this->flashSuccess = false;
         }
     }
 
@@ -86,7 +91,7 @@ new class extends Component {
     </div>
 
     @if ($flash)
-        <flux:callout icon="check-circle" color="lime" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" inline>{{ $flash }}</flux:callout>
+        <flux:callout icon="{{ $flashSuccess ? 'check-circle' : 'exclamation-triangle' }}" color="{{ $flashSuccess ? 'lime' : 'red' }}" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" inline>{{ $flash }}</flux:callout>
     @endif
 
     @if (! $billable)

@@ -165,7 +165,7 @@ new class extends Component {
                         @if ($seats > 0)
                             <div class="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
                                 <flux:icon.users class="size-4 shrink-0 text-zinc-400" />
-                                <span>{{ trans_choice('billing::portal.seats_included', $seats, ['count' => $seats]) }}</span>
+                                <span>{{ trans_choice('billing::portal.seats_included_count', $seats, ['count' => $seats]) }}</span>
                             </div>
                         @endif
 
@@ -284,7 +284,7 @@ new class extends Component {
                                     @if ($preview['currentIncludedSeats'] !== $preview['newIncludedSeats'])
                                         {{ __('billing::portal.preview_seats_from_to', ['from' => $preview['currentIncludedSeats'], 'to' => $preview['newIncludedSeats']]) }}
                                     @else
-                                        {{ trans_choice('billing::portal.seats_included', $preview['newIncludedSeats'], ['count' => $preview['newIncludedSeats']]) }}
+                                        {{ trans_choice('billing::portal.seats_included_count', $preview['newIncludedSeats'], ['count' => $preview['newIncludedSeats']]) }}
                                     @endif
                                 </flux:text>
                                 <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">
