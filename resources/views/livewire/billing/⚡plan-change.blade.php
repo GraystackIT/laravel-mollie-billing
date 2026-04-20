@@ -14,6 +14,7 @@ new class extends Component {
     public ?string $flash = null;
     public bool $flashError = false;
     public bool $wasPending = false;
+    public bool $dropExtraSeats = false;
 
     private function resolveBillable(): ?Billable
     {
@@ -24,15 +25,40 @@ new class extends Component {
     {
         $this->preview = [];
         $this->selectedPlan = null;
+        $this->dropExtraSeats = false;
     }
 
     public function previewFor(string $planCode, PreviewService $service): void
     {
         $this->selectedPlan = $planCode;
+        $this->refreshPreview($service);
+    }
+
+    public function toggleDropExtraSeats(PreviewService $service): void
+    {
+        $this->dropExtraSeats = ! $this->dropExtraSeats;
+        $this->refreshPreview($service);
+    }
+
+    private function refreshPreview(PreviewService $service): void
+    {
         $billable = $this->resolveBillable();
-        if ($billable) {
-            $this->preview = $service->previewPlanChange($billable, $planCode, $this->selectedInterval);
+        if (! $billable || ! $this->selectedPlan) {
+            return;
         }
+
+        $seats = null;
+        if ($this->dropExtraSeats) {
+            $includedSeats = app(SubscriptionCatalogInterface::class)->includedSeats($this->selectedPlan);
+            $usedSeats = $billable->getUsedBillingSeats();
+            $seats = max($usedSeats, $includedSeats);
+        }
+
+        $this->preview = $service->previewUpdate($billable, new \GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest(
+            planCode: $this->selectedPlan,
+            interval: $this->selectedInterval,
+            seats: $seats,
+        ));
     }
 
     public function cancelScheduledChange(UpdateSubscription $service): void
@@ -108,11 +134,21 @@ new class extends Component {
         }
 
         try {
-            $result = $service->update($billable, [
+            $updateData = [
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
                 'apply_at' => $applyAt,
-            ]);
+            ];
+
+            if ($this->dropExtraSeats) {
+                $catalog = app(SubscriptionCatalogInterface::class);
+                $updateData['seats'] = max(
+                    $billable->getUsedBillingSeats(),
+                    $catalog->includedSeats($this->selectedPlan),
+                );
+            }
+
+            $result = $service->update($billable, $updateData);
 
             if (! empty($result['pendingPaymentConfirmation'])) {
                 $this->flash = __('billing::portal.flash.plan_change_pending_payment');
@@ -451,6 +487,12 @@ new class extends Component {
 
                     {{-- Seats change --}}
                     @if (($preview['currentIncludedSeats'] ?? 0) > 0 || ($preview['newIncludedSeats'] ?? 0) > 0)
+                        @php
+                            $previewExtraSeats = $preview['extraSeatsCharged'] ?? 0;
+                            $previewNewSeats = $preview['newSeats'] ?? 0;
+                            $previewNewIncluded = $preview['newIncludedSeats'] ?? 0;
+                            $previewSeatPrice = $preview['seatPriceNet'] ?? 0;
+                        @endphp
                         <div class="flex items-start gap-3">
                             <div class="mt-0.5 flex size-8 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800">
                                 <flux:icon.users class="size-4 text-zinc-500" />
@@ -458,15 +500,46 @@ new class extends Component {
                             <div>
                                 <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.seats') }}</flux:subheading>
                                 <flux:text class="mt-0.5 font-medium">
-                                    @if ($preview['currentIncludedSeats'] !== $preview['newIncludedSeats'])
-                                        {{ __('billing::portal.preview_seats_from_to', ['from' => $preview['currentIncludedSeats'], 'to' => $preview['newIncludedSeats']]) }}
+                                    @if ($preview['currentIncludedSeats'] !== $previewNewIncluded)
+                                        {{ __('billing::portal.preview_seats_from_to', ['from' => $preview['currentIncludedSeats'], 'to' => $previewNewIncluded]) }}
                                     @else
-                                        {{ trans_choice('billing::portal.seats_included_count', $preview['newIncludedSeats'], ['count' => $preview['newIncludedSeats']]) }}
+                                        {{ trans_choice('billing::portal.seats_included_count', $previewNewIncluded, ['count' => $previewNewIncluded]) }}
                                     @endif
                                 </flux:text>
                                 <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">
                                     {{ __('billing::portal.preview_seats_used', ['count' => $preview['usedSeats'] ?? 0]) }}
                                 </flux:text>
+                                @if ($previewExtraSeats > 0)
+                                    <div class="mt-2 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                        <div>{{ __('billing::portal.preview_seats_total', [
+                                            'total' => $previewNewSeats,
+                                            'included' => $previewNewIncluded,
+                                            'extra' => $previewExtraSeats,
+                                        ]) }}</div>
+                                        @if ($previewSeatPrice > 0)
+                                            <div class="text-zinc-600 dark:text-zinc-300">
+                                                {{ __('billing::portal.preview_seats_extra_price', [
+                                                    'price' => $currencySymbol . number_format($previewSeatPrice / 100, 2),
+                                                    'interval' => __('billing::portal.interval_' . $selectedInterval),
+                                                ]) }}
+                                            </div>
+                                        @endif
+                                    </div>
+                                    <div class="mt-2">
+                                        <flux:button size="xs" variant="subtle" wire:click="toggleDropExtraSeats" icon="{{ $dropExtraSeats ? 'arrow-uturn-left' : 'x-mark' }}">
+                                            {{ $dropExtraSeats ? __('billing::portal.preview_seats_keep_extra') : __('billing::portal.preview_seats_drop_extra') }}
+                                        </flux:button>
+                                    </div>
+                                @elseif ($this->dropExtraSeats)
+                                    <div class="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+                                        {{ __('billing::portal.preview_seats_extra_dropped') }}
+                                    </div>
+                                    <div class="mt-2">
+                                        <flux:button size="xs" variant="subtle" wire:click="toggleDropExtraSeats" icon="arrow-uturn-left">
+                                            {{ __('billing::portal.preview_seats_keep_extra') }}
+                                        </flux:button>
+                                    </div>
+                                @endif
                             </div>
                         </div>
                     @endif
@@ -477,7 +550,7 @@ new class extends Component {
                             <div class="mt-0.5 flex size-8 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800">
                                 <flux:icon.chart-bar class="size-4 text-zinc-500" />
                             </div>
-                            <div>
+                            <div class="min-w-0 flex-1">
                                 <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.usage') }} · {{ ucfirst($usageType) }}</flux:subheading>
                                 <flux:text class="mt-0.5 font-medium">
                                     @if ($usage['diff'] !== 0)
@@ -494,6 +567,39 @@ new class extends Component {
                                         {{ number_format($usage['new']) }} ({{ __('billing::portal.preview_no_change') }})
                                     @endif
                                 </flux:text>
+
+                                {{-- Prorated usage settlement details --}}
+                                @if (($usage['excess'] ?? 0) > 0 || ($usage['actually_used'] ?? 0) > 0)
+                                    <div class="mt-2 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                        @if (($usage['prorated_old_quota'] ?? 0) > 0)
+                                            <div>{{ __('billing::portal.preview_usage_used', [
+                                                'used' => number_format($usage['actually_used'] ?? 0),
+                                                'quota' => number_format($usage['prorated_old_quota']),
+                                            ]) }}</div>
+                                        @endif
+                                        @if (($usage['excess'] ?? 0) > 0)
+                                            <div class="text-amber-600 dark:text-amber-400">
+                                                {{ __('billing::portal.preview_usage_excess', [
+                                                    'excess' => number_format($usage['excess']),
+                                                ]) }}
+                                            </div>
+                                        @endif
+                                        @if (($usage['excess'] ?? 0) > 0)
+                                            <div class="font-medium text-zinc-600 dark:text-zinc-300">
+                                                {{ __('billing::portal.preview_usage_effective', [
+                                                    'quota' => number_format($usage['effective_new_quota'] ?? 0),
+                                                ]) }}
+                                            </div>
+                                        @endif
+                                        @if (($usage['unresolved_overage'] ?? 0) > 0)
+                                            <div class="text-red-600 dark:text-red-400">
+                                                {{ __('billing::portal.preview_usage_overage_charge', [
+                                                    'count' => number_format($usage['unresolved_overage']),
+                                                ]) }}
+                                            </div>
+                                        @endif
+                                    </div>
+                                @endif
                             </div>
                         </div>
                     @endforeach
@@ -568,6 +674,9 @@ new class extends Component {
                                     $dueNowNet = $preview['prorataChargeNet'] ?? 0;
                                     $refundAmount = 0;
                                 }
+                                // Usage overage that could not be offset against the new quota.
+                                $usageOverageNet = $preview['usageOverageChargeNet'] ?? 0;
+                                $dueNowNet += $usageOverageNet;
                                 $dueNowVatRate = (float) ($preview['vatRate'] ?? 0);
                                 $dueNowVat = (int) round($dueNowNet * $dueNowVatRate / 100);
                                 $dueNowGross = $dueNowNet + $dueNowVat;
@@ -582,6 +691,17 @@ new class extends Component {
                                         <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_prorata_credit') }}</span>
                                         <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($dueNowCredit / 100, 2) }}</span>
                                     </div>
+                                @endif
+
+                                @if ($usageOverageNet > 0)
+                                    @foreach (($preview['usageChanges'] ?? []) as $usageType => $usage)
+                                        @if (($usage['unresolved_overage'] ?? 0) > 0 && ($usage['overage_total_net'] ?? 0) > 0)
+                                            <div class="flex items-center justify-between text-sm">
+                                                <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_usage_overage_line', ['type' => ucfirst($usageType)]) }}</span>
+                                                <span class="tabular-nums font-medium text-red-600 dark:text-red-400">{{ $currencySymbol }}{{ number_format($usage['overage_total_net'] / 100, 2) }}</span>
+                                            </div>
+                                        @endif
+                                    @endforeach
                                 @endif
 
                                 <flux:separator class="my-2!" />

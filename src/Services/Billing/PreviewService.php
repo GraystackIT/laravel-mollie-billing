@@ -74,7 +74,7 @@ class PreviewService
         $usedSeats = $billable->getUsedBillingSeats();
         $newIncludedSeats = $this->catalog->includedSeats($newPlan);
         $seatPriceNet = $this->catalog->seatPriceNet($newPlan, $newInterval);
-        $newSeats = $dto->seats ?? max($usedSeats, $newIncludedSeats);
+        $newSeats = $dto->seats ?? max($currentSeats, $usedSeats, $newIncludedSeats);
 
         $warnings = [];
         $errors = [];
@@ -255,6 +255,16 @@ class PreviewService
             ];
         }
 
+        // VAT on usage overage
+        $usageOverageChargeGross = 0;
+        if ($usageOverageChargeNet > 0) {
+            try {
+                $usageOverageChargeGross = (int) $this->vatService->calculate($country, $usageOverageChargeNet, $vatNumber)['gross'];
+            } catch (\Throwable) {
+                $usageOverageChargeGross = $usageOverageChargeNet;
+            }
+        }
+
         // Seat comparison
         $currentIncludedSeats = $currentPlan !== '' ? $this->catalog->includedSeats($currentPlan) : 0;
         $extraSeatsCharged = max(0, $newSeats - $newIncludedSeats);
@@ -290,9 +300,7 @@ class PreviewService
                 ? (int) round($currentNet * $prorataFactor)
                 : 0,
             'usageOverageChargeNet' => $usageOverageChargeNet,
-            'usageOverageChargeGross' => $usageOverageChargeNet > 0
-                ? (int) (($this->vatService->calculate($country, $usageOverageChargeNet, $vatNumber)['gross'] ?? $usageOverageChargeNet))
-                : 0,
+            'usageOverageChargeGross' => $usageOverageChargeGross,
             'couponDiscountNet' => $couponDiscountNet,
             'vatRate' => $vat['rate'],
             'vatAmount' => $vat['vat'],
