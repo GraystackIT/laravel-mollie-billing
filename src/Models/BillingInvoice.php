@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\MollieBilling;
@@ -23,6 +24,7 @@ class BillingInvoice extends Model
     {
         return [
             'status' => InvoiceStatus::class,
+            'invoice_kind' => InvoiceKind::class,
             'refund_reason_code' => RefundReasonCode::class,
             'line_items' => 'array',
             'vat_rate' => 'decimal:2',

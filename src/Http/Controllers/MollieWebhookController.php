@@ -454,18 +454,18 @@ class MollieWebhookController extends Controller
 
             app(UpdateSubscription::class)->clearPendingPlanChange($billable);
 
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['plan_change_failed_at'] = now()->toIso8601String();
-            $meta['plan_change_failed_reason'] = $reason;
-            $billable->forceFill(['subscription_meta' => $meta])->save();
-
             if ($pendingChange) {
-                event(new PlanChangeFailed($billable, $pendingChange, (string) $payment->id, $reason));
-            }
+                $meta = $billable->getBillingSubscriptionMeta();
+                $meta['plan_change_failed_at'] = now()->toIso8601String();
+                $meta['plan_change_failed_reason'] = $reason;
+                $billable->forceFill(['subscription_meta' => $meta])->save();
 
-            $recipients = MollieBilling::notifyBillingAdmins($billable);
-            if (! empty($recipients)) {
-                Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+                event(new PlanChangeFailed($billable, $pendingChange, (string) $payment->id, $reason));
+
+                $recipients = MollieBilling::notifyBillingAdmins($billable);
+                if (! empty($recipients)) {
+                    Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+                }
             }
         }
 

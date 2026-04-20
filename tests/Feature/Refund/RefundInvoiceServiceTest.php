@@ -84,7 +84,7 @@ it('fully refunds a subscription invoice and creates a credit note', function ()
     $creditNote = app(RefundInvoiceService::class)->refundFully($invoice, RefundReasonCode::Goodwill);
 
     expect($creditNote->amount_net)->toBe(-1000);
-    expect($creditNote->invoice_kind)->toBe('credit_note');
+    expect($creditNote->invoice_kind)->toBe(\GraystackIT\MollieBilling\Enums\InvoiceKind::CreditNote);
     expect($invoice->fresh()->refunded_net)->toBe(1000);
 
     Event::assertDispatched(InvoiceRefunded::class);

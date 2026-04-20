@@ -83,7 +83,7 @@ new class extends Component {
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
             <flux:select wire:model="reason" label="Reason">
                 @foreach (RefundReasonCode::cases() as $r)
-                    <flux:select.option value="{{ $r->value }}">{{ \GraystackIT\MollieBilling\Support\EnumLabels::label($r) }}</flux:select.option>
+                    <flux:select.option value="{{ $r->value }}">{{ $r->label() }}</flux:select.option>
                 @endforeach
             </flux:select>
             <flux:input

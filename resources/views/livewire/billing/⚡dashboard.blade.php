@@ -98,10 +98,11 @@ new class extends Component {
 
         $invoices = $b->billingInvoices()->latest()->limit(5)->get()->map(fn ($inv) => [
             'date' => $inv->created_at->translatedFormat('d. M Y'),
-            'kind' => $inv->invoice_kind?->value ?? '—',
+            'kind' => $inv->invoice_kind?->label() ?? '—',
+            'kindColor' => $inv->invoice_kind?->color() ?? 'zinc',
             'amount' => ($currency === 'EUR' ? '€' : $currency) . number_format($inv->amount_gross / 100, 2),
-            'status' => $inv->status->value,
-            'statusColor' => $inv->status->value === 'paid' ? 'lime' : ($inv->status->value === 'refunded' ? 'amber' : 'zinc'),
+            'status' => $inv->status->label(),
+            'statusColor' => $inv->status->color(),
             'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
         ])->all();
 
@@ -112,13 +113,8 @@ new class extends Component {
 
         return [
             'status' => $status,
-            'statusLabel' => $status->value,
-            'statusColor' => match($status) {
-                SubscriptionStatus::Active => 'lime',
-                SubscriptionStatus::Trial => 'amber',
-                SubscriptionStatus::PastDue => 'red',
-                default => 'zinc',
-            },
+            'statusLabel' => $status->label(),
+            'statusColor' => $status->color(),
             'accentClass' => match($status) {
                 SubscriptionStatus::Active => 'bg-emerald-500',
                 SubscriptionStatus::Trial => 'bg-amber-400',
@@ -350,7 +346,7 @@ new class extends Component {
                             <flux:table.row>
                                 <flux:table.cell class="tabular-nums">{{ $inv['date'] }}</flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:badge size="sm" color="zinc">{{ $inv['kind'] }}</flux:badge>
+                                    <flux:badge size="sm" :color="$inv['kindColor']">{{ $inv['kind'] }}</flux:badge>
                                 </flux:table.cell>
                                 <flux:table.cell class="text-right tabular-nums font-medium">{{ $inv['amount'] }}</flux:table.cell>
                                 <flux:table.cell>

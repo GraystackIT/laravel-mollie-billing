@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
@@ -119,7 +120,7 @@ class RefundInvoiceService
     {
         $walletCredits = [];
 
-        if ($invoice->invoice_kind === 'overage') {
+        if ($invoice->invoice_kind === InvoiceKind::Overage) {
             foreach ((array) $invoice->line_items as $item) {
                 $type = $item['code'] ?? $item['type'] ?? null;
                 $qty = (int) ($item['quantity'] ?? 0);
@@ -150,7 +151,7 @@ class RefundInvoiceService
 
     public function refundOverageUnits(BillingInvoice $invoice, string $usageType, int $units, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
-        if ($invoice->invoice_kind !== 'overage') {
+        if ($invoice->invoice_kind !== InvoiceKind::Overage) {
             throw new InvalidRefundTargetException('refundOverageUnits only applies to overage invoices.');
         }
 
@@ -169,7 +170,7 @@ class RefundInvoiceService
      */
     public function refundOverageUnitsBulk(BillingInvoice $invoice, array $unitsPerType, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
-        if ($invoice->invoice_kind !== 'overage') {
+        if ($invoice->invoice_kind !== InvoiceKind::Overage) {
             throw new InvalidRefundTargetException('refundOverageUnitsBulk only applies to overage invoices.');
         }
 

@@ -756,16 +756,22 @@ class UpdateSubscription
             && empty($addonsAdded);
 
         if ($onlyAddonsChanged) {
+            $addonCount = count($addonsAdded);
+            $perAddonNet = $addonCount > 0 ? intdiv($prorataChargeNet, $addonCount) : $prorataChargeNet;
             $lineItems = [];
-            foreach ($addonsAdded as $code) {
+            foreach ($addonsAdded as $i => $code) {
                 $addonName = $this->catalog->addonName($code) ?? $code;
+                $isLast = $i === $addonCount - 1;
+                $lineTotal = $isLast
+                    ? $prorataChargeNet - $perAddonNet * ($addonCount - 1)
+                    : $perAddonNet;
                 $lineItems[] = [
                     'kind' => 'addon',
                     'label' => $addonName.' ('.__('billing::portal.prorata').')',
                     'code' => $code,
                     'quantity' => 1,
-                    'unit_price_net' => $prorataChargeNet,
-                    'total_net' => $prorataChargeNet,
+                    'unit_price_net' => $lineTotal,
+                    'total_net' => $lineTotal,
                 ];
             }
 
@@ -781,6 +787,7 @@ class UpdateSubscription
 
         if ($onlySeatsChanged) {
             $extraSeats = $context->newSeats - $context->currentSeats;
+            $unitPriceNet = $extraSeats > 0 ? intdiv($prorataChargeNet, $extraSeats) : $prorataChargeNet;
 
             return [
                 'type' => 'seats',
@@ -789,7 +796,7 @@ class UpdateSubscription
                     'kind' => 'seat',
                     'label' => 'Extra seats ('.__('billing::portal.prorata').')',
                     'quantity' => $extraSeats,
-                    'unit_price_net' => $prorataChargeNet,
+                    'unit_price_net' => $unitPriceNet,
                     'total_net' => $prorataChargeNet,
                 ]],
             ];

@@ -101,18 +101,13 @@ new class extends Component {
                         <flux:table.row>
                             <flux:table.cell class="tabular-nums">{{ $invoice->created_at->translatedFormat('d. M Y') }}</flux:table.cell>
                             <flux:table.cell>
-                                <flux:badge size="sm" color="zinc">{{ $invoice->invoice_kind }}</flux:badge>
+                                <flux:badge size="sm" :color="$invoice->invoice_kind?->color() ?? 'zinc'">{{ $invoice->invoice_kind?->label() ?? '—' }}</flux:badge>
                             </flux:table.cell>
                             <flux:table.cell class="text-right tabular-nums">{{ $currency }}{{ number_format($invoice->amount_net / 100, 2) }}</flux:table.cell>
                             <flux:table.cell class="text-right tabular-nums text-zinc-400">{{ $currency }}{{ number_format($invoice->amount_vat / 100, 2) }}</flux:table.cell>
                             <flux:table.cell class="text-right tabular-nums font-medium">{{ $currency }}{{ number_format($invoice->amount_gross / 100, 2) }}</flux:table.cell>
                             <flux:table.cell>
-                                <flux:badge size="sm" :color="match($invoice->status) {
-                                    \GraystackIT\MollieBilling\Enums\InvoiceStatus::Paid => 'lime',
-                                    \GraystackIT\MollieBilling\Enums\InvoiceStatus::Refunded => 'amber',
-                                    \GraystackIT\MollieBilling\Enums\InvoiceStatus::Failed => 'red',
-                                    default => 'zinc',
-                                }">{{ $invoice->status->value }}</flux:badge>
+                                <flux:badge size="sm" :color="$invoice->status->color()">{{ $invoice->status->label() }}</flux:badge>
                             </flux:table.cell>
                             <flux:table.cell class="text-right">
                                 @if ($invoice->hasPdf())

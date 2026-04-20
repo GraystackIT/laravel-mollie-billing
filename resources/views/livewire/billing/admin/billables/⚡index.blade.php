@@ -87,7 +87,7 @@ new class extends Component {
             <flux:select wire:model.live="statusFilter" placeholder="All statuses" class="w-56 shrink-0">
                 <flux:select.option value="">All statuses</flux:select.option>
                 @foreach (SubscriptionStatus::cases() as $status)
-                    <flux:select.option value="{{ $status->value }}">{{ \GraystackIT\MollieBilling\Support\EnumLabels::label($status) }}</flux:select.option>
+                    <flux:select.option value="{{ $status->value }}">{{ $status->label() }}</flux:select.option>
                 @endforeach
             </flux:select>
         </div>

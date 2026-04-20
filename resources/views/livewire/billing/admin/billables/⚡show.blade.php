@@ -66,11 +66,11 @@ new class extends Component {
                 label="Plan"
                 :value="$billable->subscription_plan_code ?? '—'"
                 icon="squares-2x2"
-                :hint="$billable->subscription_interval ? \GraystackIT\MollieBilling\Support\EnumLabels::label($billable->subscription_interval) : null"
+                :hint="$billable->subscription_interval?->label()"
             />
             <x-mollie-billing::admin.stat
                 label="Status"
-                :value="\GraystackIT\MollieBilling\Support\EnumLabels::label($billable->subscription_status)"
+                :value="$billable->subscription_status->label()"
                 icon="signal"
             />
             <x-mollie-billing::admin.stat
