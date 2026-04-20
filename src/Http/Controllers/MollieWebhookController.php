@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Events\OverageCharged;
 use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
+use GraystackIT\MollieBilling\Events\PlanChangeFailed;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Exceptions\PaymentNotFoundException;
 use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
@@ -21,10 +22,12 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
+use GraystackIT\MollieBilling\Notifications\PlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\SubscriptionPaymentFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -52,12 +55,15 @@ class MollieWebhookController extends Controller
     {
         $paymentId = (string) $request->input('id', '');
 
+        Log::info('Webhook received', ['payment_id' => $paymentId]);
+
         if ($paymentId === '') {
             return response('', 200);
         }
 
         $reservation = $this->reserve($paymentId);
         if ($reservation === null) {
+            Log::info('Webhook skipped — already processed or in progress', ['payment_id' => $paymentId]);
             return response('', 200);
         }
 
@@ -144,6 +150,14 @@ class MollieWebhookController extends Controller
         $type = (string) ($metadata['type'] ?? '');
         $subscriptionId = (string) ($payment->subscriptionId ?? '');
 
+        Log::info('Webhook routing', [
+            'payment_id' => $payment->id ?? null,
+            'status' => $status,
+            'type' => $type,
+            'subscription_id' => $subscriptionId,
+            'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+        ]);
+
         if ($status === 'paid') {
             if ($billable === null) {
                 Log::warning('Paid webhook with unresolvable billable', ['id' => $payment->id]);
@@ -155,7 +169,7 @@ class MollieWebhookController extends Controller
                 return;
             }
 
-            if ($type === 'overage' || $type === 'prorata') {
+            if (in_array($type, ['overage', 'prorata', 'addon', 'seats'], true)) {
                 $this->handleSingleChargePaid($payment, $billable, $type, $metadata);
                 return;
             }
@@ -179,7 +193,7 @@ class MollieWebhookController extends Controller
                 return;
             }
 
-            if ($type === 'overage' || $type === 'prorata') {
+            if (in_array($type, ['overage', 'prorata', 'addon', 'seats'], true)) {
                 $this->handleSingleChargeFailed($payment, $billable, $type);
                 return;
             }
@@ -359,10 +373,38 @@ class MollieWebhookController extends Controller
             event(new OverageCharged($billable, $invoice, $lineItems));
         }
 
-        if ($type === 'prorata') {
+        if (in_array($type, ['prorata', 'addon', 'seats'], true)) {
             $meta = $billable->getBillingSubscriptionMeta();
             unset($meta['prorata_pending_payment_id']);
             $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            // Apply the deferred plan change now that payment succeeded.
+            $billable->refresh();
+            $pendingChange = $billable->getBillingSubscriptionMeta()['pending_plan_change'] ?? null;
+
+            Log::info('Prorata payment processed, checking for pending plan change', [
+                'billable' => $billable->getKey(),
+                'has_pending' => ! empty($pendingChange),
+                'pending_plan' => $pendingChange['plan_code'] ?? null,
+            ]);
+
+            if (! empty($pendingChange)) {
+                try {
+                    app(UpdateSubscription::class)->applyPendingPlanChange($billable);
+                } catch (\Throwable $e) {
+                    Log::error('Failed to apply pending plan change after prorata payment', [
+                        'billable' => $billable->getKey(),
+                        'error' => $e->getMessage(),
+                    ]);
+
+                    event(new PlanChangeFailed($billable, $pendingChange, (string) $payment->id, $e->getMessage()));
+
+                    $recipients = MollieBilling::notifyBillingAdmins($billable);
+                    if (! empty($recipients)) {
+                        Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+                    }
+                }
+            }
         }
 
         event(new PaymentSucceeded($billable, $invoice));
@@ -404,6 +446,27 @@ class MollieWebhookController extends Controller
                 1,
             );
             return;
+        }
+
+        if (in_array($type, ['prorata', 'addon', 'seats'], true) && $billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $pendingChange = $billable->getBillingSubscriptionMeta()['pending_plan_change'] ?? null;
+            $reason = (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown');
+
+            app(UpdateSubscription::class)->clearPendingPlanChange($billable);
+
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta['plan_change_failed_at'] = now()->toIso8601String();
+            $meta['plan_change_failed_reason'] = $reason;
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            if ($pendingChange) {
+                event(new PlanChangeFailed($billable, $pendingChange, (string) $payment->id, $reason));
+            }
+
+            $recipients = MollieBilling::notifyBillingAdmins($billable);
+            if (! empty($recipients)) {
+                Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+            }
         }
 
         event(new PaymentFailed($billable, (string) $payment->id, (string) ($payment->status ?? 'unknown')));

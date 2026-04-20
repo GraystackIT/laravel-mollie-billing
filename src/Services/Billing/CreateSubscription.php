@@ -41,7 +41,7 @@ class CreateSubscription
 
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
-        Mollie::send(new CreateSubscriptionRequest(
+        $subscription = Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
             interval: $interval === 'yearly' ? '12 months' : '1 month',
@@ -57,6 +57,7 @@ class CreateSubscription
 
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['seat_count'] = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
+        $meta['mollie_subscription_id'] = (string) ($subscription->id ?? '');
 
         $billable->forceFill([
             'subscription_source' => SubscriptionSource::Mollie,

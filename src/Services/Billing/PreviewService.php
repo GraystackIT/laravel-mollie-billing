@@ -168,13 +168,10 @@ class PreviewService
             && $periodStart !== null
             && $periodEnd !== null
         ) {
-            $prorataFactor = BillingPolicy::prorataFactor($periodStart, $periodEnd);
-            $diff = $newNet - $currentNet;
-            if ($diff > 0) {
-                $prorataChargeNet = (int) round($diff * $prorataFactor);
-            } elseif ($diff < 0) {
-                $prorataCreditNet = (int) round(-$diff * $prorataFactor);
-            }
+            $prorata = BillingPolicy::computeProrata($currentNet, $newNet, $intervalChanged, $periodStart, $periodEnd);
+            $prorataFactor = $prorata['factor'];
+            $prorataChargeNet = $prorata['charge_net'];
+            $prorataCreditNet = $prorata['credit_net'];
         }
 
         // VAT on recurring price

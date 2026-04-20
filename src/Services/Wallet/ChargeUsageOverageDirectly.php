@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
@@ -163,6 +164,7 @@ class ChargeUsageOverageDirectly
             sequenceType: 'recurring',
             mandateId: $billable->getMollieMandateId(),
             customerId: $billable->getMollieCustomerId(),
+            webhookUrl: route(BillingRoute::webhook()),
         ));
     }
 }
