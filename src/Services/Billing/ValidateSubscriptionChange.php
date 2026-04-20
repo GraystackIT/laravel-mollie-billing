@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Support\BillingPolicy;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -116,22 +117,17 @@ class ValidateSubscriptionChange
     }
 
     /**
-     * Check that wallet usage levels allow the downgrade.
+     * Check that wallet usage levels allow the plan change.
      *
-     * For each wallet (usage type), if the user has consumed more than the
-     * new plan's included quota, an overage charge is required. This check:
+     * Uses prorated excess logic: computes how much of the old plan's quota
+     * was consumed beyond the prorated entitlement, then checks whether
+     * the new plan's quota (+ rollover credits) can absorb the excess.
      *
-     * 1. Iterates all wallets on the billable.
-     * 2. Compares used quota against the new plan's included quota.
-     * 3. If overage exists and the billable has no Mollie mandate:
-     *    throws DowngradeRequiresMandateException.
-     * 4. If overage exists and a mandate is present: builds line items
-     *    and charges overage immediately via ChargeUsageOverageDirectly.
+     * If unresolvable overage remains and the billable has no Mollie mandate,
+     * throws DowngradeRequiresMandateException. The actual charging happens
+     * later in adjustWalletsForPlanChange().
      *
-     * Override: Bind your own ValidateSubscriptionChange to skip overage
-     * checks, apply different pricing, or defer the charge.
-     *
-     * @throws DowngradeRequiresMandateException When overage exists but no mandate is available
+     * @throws DowngradeRequiresMandateException When unresolvable overage exists but no mandate is available
      */
     protected function validateWalletUsage(Billable $billable, SubscriptionChangeContext $context): void
     {
@@ -139,40 +135,38 @@ class ValidateSubscriptionChange
             return;
         }
 
-        $lineItems = [];
+        $periodStart = $billable->getBillingPeriodStartsAt();
+        $periodEnd = $billable->nextBillingDate();
+        $rollover = $this->catalog->usageRollover($context->currentPlan);
 
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
-            $used = $billable->usedBillingQuota($slug);
+            $oldIncluded = $this->catalog->includedUsage($context->currentPlan, $context->currentInterval, $slug);
             $newIncluded = $this->catalog->includedUsage($context->newPlan, $context->newInterval, $slug);
+            $balance = (int) $wallet->balanceInt;
 
-            if ($used <= $newIncluded) {
+            $excess = 0;
+            if ($periodStart !== null && $periodEnd !== null && $oldIncluded > 0) {
+                $result = BillingPolicy::computeUsageOverageForPlanChange(
+                    $oldIncluded,
+                    $balance,
+                    $periodStart,
+                    $periodEnd,
+                );
+                $excess = $result['excess'];
+            }
+
+            $rolloverCredits = $rollover ? max(0, $balance - $oldIncluded) : 0;
+            $targetBalance = $newIncluded + $rolloverCredits - $excess;
+
+            if ($targetBalance >= 0) {
                 continue;
             }
 
-            $overageQty = $used - $newIncluded;
-            $overagePrice = (int) ($this->catalog->usageOveragePrice(
-                $context->currentPlan,
-                $context->currentInterval,
-                $slug,
-            ) ?? 0);
-
+            // Unresolvable overage: mandate is required to charge it.
             if (! $billable->hasMollieMandate()) {
                 throw new DowngradeRequiresMandateException($billable, $context->newPlan);
             }
-
-            if ($overagePrice > 0) {
-                $lineItems[] = [
-                    'type' => $slug,
-                    'quantity' => $overageQty,
-                    'unit_price_net' => $overagePrice,
-                    'total_net' => $overageQty * $overagePrice,
-                ];
-            }
-        }
-
-        if ($lineItems !== []) {
-            $this->overageService->handleExplicit($billable, $lineItems);
         }
     }
 

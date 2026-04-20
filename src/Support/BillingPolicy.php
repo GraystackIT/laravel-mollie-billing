@@ -26,7 +26,7 @@ class BillingPolicy
             return 0.0;
         }
 
-        $remainingDays = now()->startOfDay()->diffInDays($end, false);
+        $remainingDays = now($end->getTimezone())->startOfDay()->diffInDays($end, false);
 
         return round(max(0, $remainingDays) / $totalDays, 6);
     }
@@ -76,6 +76,43 @@ class BillingPolicy
             'charge_net' => $chargeNet,
             'credit_net' => $creditNet,
             'factor' => $factor,
+        ];
+    }
+
+    /**
+     * Compute prorated usage excess when a plan change occurs mid-period.
+     *
+     * The elapsed fraction of the current period determines how much of the
+     * old plan's quota the billable was entitled to use so far. If the
+     * current wallet balance is lower than that prorated quota, the
+     * difference is excess that must be settled (offset against the new
+     * plan's quota or charged as overage).
+     *
+     * Works identically for rollover and non-rollover modes:
+     * - Without rollover: balance ≤ oldIncluded, excess arises when more
+     *   was consumed than the prorated entitlement.
+     * - With rollover: balance may exceed oldIncluded (carried credits);
+     *   those are respected and excess only arises when even carried
+     *   credits are exhausted.
+     *
+     * @return array{prorated_old_quota: int, current_balance: int, excess: int, elapsed_fraction: float}
+     */
+    public static function computeUsageOverageForPlanChange(
+        int $oldIncluded,
+        int $currentBalance,
+        CarbonInterface $periodStart,
+        CarbonInterface $periodEnd,
+    ): array {
+        $factor = self::prorataFactor($periodStart, $periodEnd);
+        $elapsedFraction = round(1.0 - $factor, 6);
+        $proratedOldQuota = (int) round($oldIncluded * $elapsedFraction);
+        $excess = max(0, $proratedOldQuota - $currentBalance);
+
+        return [
+            'prorated_old_quota' => $proratedOldQuota,
+            'current_balance' => $currentBalance,
+            'excess' => $excess,
+            'elapsed_fraction' => $elapsedFraction,
         ];
     }
 }

@@ -226,13 +226,29 @@ trait HasBilling
     public function usedBillingQuota(string $type): int
     {
         $balance = $this->getWallet($type)?->balanceInt ?? 0;
+        $included = $this->includedBillingQuota($type);
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $rollover = $catalog->usageRollover($this->getBillingSubscriptionPlanCode() ?? '');
 
-        return max(0, $this->includedBillingQuota($type) - $balance);
+        if (! $rollover) {
+            // Without rollover, balance should never exceed included (capped).
+            return max(0, $included - min($balance, $included));
+        }
+
+        return max(0, $included - $balance);
     }
 
     public function remainingBillingQuota(string $type): int
     {
-        return max(0, $this->getWallet($type)?->balanceInt ?? 0);
+        $balance = max(0, $this->getWallet($type)?->balanceInt ?? 0);
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $rollover = $catalog->usageRollover($this->getBillingSubscriptionPlanCode() ?? '');
+
+        if (! $rollover) {
+            return min($balance, $this->includedBillingQuota($type));
+        }
+
+        return $balance;
     }
 
     public function billingOverageCount(string $type): int

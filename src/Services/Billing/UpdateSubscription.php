@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\Events\PlanChangePending;
 use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -863,10 +864,11 @@ class UpdateSubscription
     /**
      * Adjust wallet balances when the plan or interval changes.
      *
-     * Upgrade (more quota): credit the difference.
-     * Downgrade (less quota): cap the balance to the new plan's quota.
-     * Note: assertDowngradesAllowed() runs BEFORE this and charges overage
-     * for used units above the new quota.
+     * For each wallet:
+     * 1. Compute prorated excess from the old plan (anteilig überschüssiger Verbrauch).
+     * 2. Compute rollover credits (only when usage_rollover is enabled).
+     * 3. Reset wallet to the new plan's full quota + rollover credits - excess.
+     * 4. If target balance < 0, the remainder is charged as overage.
      */
     private function adjustWalletsForPlanChange(
         Billable $billable,
@@ -879,22 +881,60 @@ class UpdateSubscription
             return;
         }
 
+        $periodStart = $billable->getBillingPeriodStartsAt();
+        $periodEnd = $billable->nextBillingDate();
+        $rollover = $this->catalog->usageRollover($oldPlan);
+        $overageLineItems = [];
+
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
             $oldIncluded = $this->catalog->includedUsage($oldPlan, $oldInterval, $slug);
             $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
             $balance = (int) $wallet->balanceInt;
 
-            $diff = $newIncluded - $oldIncluded;
+            // Step 1: Compute prorated excess from old plan.
+            $excess = 0;
+            if ($periodStart !== null && $periodEnd !== null && $oldIncluded > 0) {
+                $result = BillingPolicy::computeUsageOverageForPlanChange(
+                    $oldIncluded,
+                    $balance,
+                    $periodStart,
+                    $periodEnd,
+                );
+                $excess = $result['excess'];
+            }
 
-            if ($diff > 0) {
-                $wallet->deposit($diff, ['type' => $slug, 'reason' => 'plan_change_upgrade']);
-            } elseif ($diff < 0) {
-                $newBalance = max(0, $balance + $diff);
-                $withdraw = $balance - $newBalance;
-                if ($withdraw > 0) {
-                    $wallet->forceWithdraw($withdraw, ['type' => $slug, 'reason' => 'plan_change_downgrade']);
+            // Step 2: Compute rollover credits.
+            $rolloverCredits = $rollover ? max(0, $balance - $oldIncluded) : 0;
+
+            // Step 3: Compute target balance.
+            $targetBalance = $newIncluded + $rolloverCredits - $excess;
+
+            // Step 4: If target < 0, charge the unresolvable remainder as overage.
+            if ($targetBalance < 0) {
+                $unresolvedOverage = abs($targetBalance);
+                $targetBalance = 0;
+
+                $overagePrice = (int) ($this->catalog->usageOveragePrice($oldPlan, $oldInterval, $slug) ?? 0);
+                if ($overagePrice > 0) {
+                    $overageLineItems[] = [
+                        'type' => $slug,
+                        'quantity' => $unresolvedOverage,
+                        'unit_price_net' => $overagePrice,
+                        'total_net' => $unresolvedOverage * $overagePrice,
+                    ];
                 }
+            }
+
+            // Apply: reset wallet to target balance.
+            if ($balance > 0) {
+                $wallet->forceWithdraw($balance, ['type' => $slug, 'reason' => 'plan_change']);
+            } elseif ($balance < 0) {
+                $wallet->deposit(abs($balance), ['type' => $slug, 'reason' => 'plan_change']);
+            }
+
+            if ($targetBalance > 0) {
+                $wallet->deposit($targetBalance, ['type' => $slug, 'reason' => 'plan_change']);
             }
         }
 
@@ -904,6 +944,11 @@ class UpdateSubscription
             if ((int) $quantity > 0 && $billable->getWallet($type) === null) {
                 $this->walletService->credit($billable, (string) $type, (int) $quantity);
             }
+        }
+
+        // Charge unresolvable overage if any.
+        if ($overageLineItems !== [] && $billable->hasMollieMandate()) {
+            app(ChargeUsageOverageDirectly::class)->handleExplicit($billable, $overageLineItems);
         }
     }
 }

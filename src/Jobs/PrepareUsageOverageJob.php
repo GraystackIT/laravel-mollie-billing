@@ -245,25 +245,17 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
         $interval = $billable->getBillingSubscriptionInterval();
+        $rollover = $catalog->usageRollover($planCode);
 
         $included = $catalog->includedUsages($planCode, $interval);
 
-        foreach ($billable->wallets()->get() as $wallet) {
-            $slug = (string) $wallet->slug;
-            $balance = (int) $wallet->balanceInt;
-
-            // Bring wallet to zero (negative or positive) before refilling.
-            if ($balance > 0) {
-                $wallet->forceWithdraw($balance, ['type' => $slug, 'reason' => 'period_reset']);
-            } elseif ($balance < 0) {
-                $wallet->deposit(abs($balance), ['type' => $slug, 'reason' => 'period_reset']);
-            }
-        }
-
-        // Refill from catalog.
         foreach ($included as $type => $quantity) {
             if ((int) $quantity > 0) {
-                $walletService->credit($billable, (string) $type, (int) $quantity);
+                if ($rollover) {
+                    $walletService->credit($billable, (string) $type, (int) $quantity);
+                } else {
+                    $walletService->resetAndCredit($billable, (string) $type, (int) $quantity);
+                }
             }
         }
 
