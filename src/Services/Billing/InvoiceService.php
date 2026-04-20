@@ -11,6 +11,7 @@ use Elegantly\Invoices\Support\Address;
 use Elegantly\Invoices\Support\Buyer;
 use Elegantly\Invoices\Support\Seller;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Events\CreditNoteIssued;
 use GraystackIT\MollieBilling\Events\InvoiceCreated;
@@ -97,7 +98,7 @@ class InvoiceService
         $creditNote->mollie_payment_id = $original->mollie_payment_id.':cn:'.uniqid('', true);
         $creditNote->mollie_subscription_id = $original->mollie_subscription_id;
         $creditNote->serial_number = $this->numberGenerator->generate('credit_note');
-        $creditNote->invoice_kind = 'credit_note';
+        $creditNote->invoice_kind = InvoiceKind::CreditNote;
         $creditNote->status = InvoiceStatus::Refunded;
         $creditNote->country = $original->country;
         $creditNote->vat_rate = $rate;
@@ -198,7 +199,7 @@ class InvoiceService
             email: $billable->getBillingEmail(),
         );
 
-        $isCredit = $invoice->invoice_kind === 'credit_note';
+        $isCredit = $invoice->invoice_kind === InvoiceKind::CreditNote;
 
         $items = [];
         foreach ((array) $invoice->line_items as $item) {

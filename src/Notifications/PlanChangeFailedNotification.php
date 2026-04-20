@@ -8,8 +8,9 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
+use Illuminate\Contracts\Queue\ShouldQueue;
 
-class PlanChangeFailedNotification extends Notification
+class PlanChangeFailedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 

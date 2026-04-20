@@ -108,7 +108,7 @@ new class extends Component {
                         {{ $b->subscription_plan_code ?? '—' }}
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail label="Interval">
-                        {{ \GraystackIT\MollieBilling\Support\EnumLabels::label($b->subscription_interval) }}
+                        {{ $b->subscription_interval->label() }}
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail label="Status">
                         <x-mollie-billing::admin.enum-badge :value="$b->subscription_status" />

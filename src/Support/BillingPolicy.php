@@ -18,13 +18,15 @@ class BillingPolicy
      */
     public static function prorataFactor(CarbonInterface $periodStart, CarbonInterface $periodEnd): float
     {
-        $totalDays = $periodStart->startOfDay()->diffInDays($periodEnd->startOfDay());
+        $start = $periodStart->copy()->startOfDay();
+        $end = $periodEnd->copy()->startOfDay();
+        $totalDays = $start->diffInDays($end);
 
         if ($totalDays <= 0) {
             return 0.0;
         }
 
-        $remainingDays = now()->startOfDay()->diffInDays($periodEnd->startOfDay(), false);
+        $remainingDays = now()->startOfDay()->diffInDays($end, false);
 
         return round(max(0, $remainingDays) / $totalDays, 6);
     }

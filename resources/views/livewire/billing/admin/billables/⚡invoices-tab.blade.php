@@ -107,7 +107,7 @@ new class extends Component {
                         @foreach ($invoices as $inv)
                             <flux:table.row :key="$inv->id">
                                 <flux:table.cell class="tabular-nums">{{ $inv->created_at->format('Y-m-d') }}</flux:table.cell>
-                                <flux:table.cell>{{ ucfirst(str_replace('_', ' ', (string) $inv->invoice_kind)) }}</flux:table.cell>
+                                <flux:table.cell><x-mollie-billing::admin.enum-badge :value="$inv->invoice_kind" /></flux:table.cell>
                                 <flux:table.cell align="end">
                                     <x-mollie-billing::admin.money :cents="$inv->amount_net" />
                                 </flux:table.cell>
@@ -147,7 +147,7 @@ new class extends Component {
                         />
                         <flux:select wire:model="refundReason" label="Reason">
                             @foreach (RefundReasonCode::cases() as $reason)
-                                <flux:select.option value="{{ $reason->value }}">{{ \GraystackIT\MollieBilling\Support\EnumLabels::label($reason) }}</flux:select.option>
+                                <flux:select.option value="{{ $reason->value }}">{{ $reason->label() }}</flux:select.option>
                             @endforeach
                         </flux:select>
                     </div>

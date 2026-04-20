@@ -559,12 +559,14 @@ new class extends Component {
                                     // credit for the unused portion of the old plan is refunded.
                                     $dueNowNewPlan = $preview['newPriceNet'] ?? 0;
                                     $dueNowCredit = $preview['prorataCreditNet'] ?? 0;
-                                    $dueNowNet = $dueNowNewPlan - $dueNowCredit;
+                                    $refundAmount = max(0, $dueNowCredit - $dueNowNewPlan);
+                                    $dueNowNet = max(0, $dueNowNewPlan - $dueNowCredit);
                                 } else {
                                     // Same interval: prorata charge for the price difference.
                                     $dueNowNewPlan = (int) round(($preview['newPriceNet'] ?? 0) * ($preview['prorataFactor'] ?? 0));
                                     $dueNowCredit = $preview['currentPeriodCredit'] ?? 0;
                                     $dueNowNet = $preview['prorataChargeNet'] ?? 0;
+                                    $refundAmount = 0;
                                 }
                                 $dueNowVatRate = (float) ($preview['vatRate'] ?? 0);
                                 $dueNowVat = (int) round($dueNowNet * $dueNowVatRate / 100);
@@ -601,6 +603,12 @@ new class extends Component {
                                     <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.preview_total') }}</span>
                                     <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format($dueNowGross / 100, 2) }}</span>
                                 </div>
+
+                                @if ($refundAmount > 0)
+                                    <flux:callout variant="info" icon="information-circle" class="mt-3!">
+                                        {{ __('billing::portal.preview_prorata_refund_note', ['amount' => $currencySymbol . number_format($refundAmount / 100, 2)]) }}
+                                    </flux:callout>
+                                @endif
                             </div>
                         </div>
 

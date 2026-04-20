@@ -69,7 +69,7 @@ new class extends Component {
         <flux:select wire:model.live="reasonFilter" placeholder="All reasons" class="w-56 shrink-0">
             <flux:select.option value="">All reasons</flux:select.option>
             @foreach (RefundReasonCode::cases() as $reason)
-                <flux:select.option value="{{ $reason->value }}">{{ \GraystackIT\MollieBilling\Support\EnumLabels::label($reason) }}</flux:select.option>
+                <flux:select.option value="{{ $reason->value }}">{{ $reason->label() }}</flux:select.option>
             @endforeach
         </flux:select>
     </div>
