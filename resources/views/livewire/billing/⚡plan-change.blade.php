@@ -13,6 +13,7 @@ new class extends Component {
     public array $preview = [];
     public ?string $flash = null;
     public bool $flashError = false;
+    public bool $wasPending = false;
 
     private function resolveBillable(): ?Billable
     {
@@ -42,6 +43,22 @@ new class extends Component {
         try {
             $service->cancelScheduledChange($billable);
             $this->flash = __('billing::portal.flash.scheduled_cancelled');
+            $this->flashError = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
+        }
+    }
+
+    public function cancelPendingChange(UpdateSubscription $service): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+
+        try {
+            $service->clearPendingPlanChange($billable);
+            $this->flash = __('billing::portal.flash.pending_change_cancelled');
             $this->flashError = false;
         } catch (\Throwable $e) {
             report($e);
@@ -97,6 +114,14 @@ new class extends Component {
                 'apply_at' => $applyAt,
             ]);
 
+            if (! empty($result['pendingPaymentConfirmation'])) {
+                $this->flash = __('billing::portal.flash.plan_change_pending_payment');
+                $this->flashError = false;
+                $this->preview = [];
+                $this->selectedPlan = null;
+                return;
+            }
+
             if (! empty($result['scheduledFor'])) {
                 $date = \Carbon\Carbon::parse($result['scheduledFor'])->translatedFormat('d. M Y');
                 $this->flash = __('billing::portal.flash.plan_scheduled', ['date' => $date]);
@@ -119,6 +144,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         $scheduledChange = null;
+        $pendingPlanChange = null;
+        $planChangeFailed = null;
 
         if ($billable) {
             $meta = $billable->getBillingSubscriptionMeta();
@@ -132,6 +159,30 @@ new class extends Component {
                         : null,
                 ];
             }
+
+            $pendingPlanChange = $meta['pending_plan_change'] ?? null;
+
+            if (! empty($meta['plan_change_failed_at'])) {
+                $failedAt = \Carbon\Carbon::parse($meta['plan_change_failed_at']);
+                if ($failedAt->isAfter(now()->subDay())) {
+                    $planChangeFailed = [
+                        'failed_at' => $failedAt->translatedFormat('d. M Y, H:i'),
+                        'reason' => $meta['plan_change_failed_reason'] ?? null,
+                    ];
+                }
+            }
+
+            // Detect pending → resolved transition (webhook applied the change).
+            if ($this->wasPending && $pendingPlanChange === null) {
+                if ($planChangeFailed) {
+                    $this->flash = __('billing::portal.flash.plan_change_failed');
+                    $this->flashError = true;
+                } else {
+                    $this->flash = __('billing::portal.flash.plan_changed');
+                    $this->flashError = false;
+                }
+            }
+            $this->wasPending = $pendingPlanChange !== null;
         }
 
         return [
@@ -139,13 +190,15 @@ new class extends Component {
             'plans' => app(SubscriptionCatalogInterface::class)->allPlans(),
             'catalog' => app(SubscriptionCatalogInterface::class),
             'scheduledChange' => $scheduledChange,
+            'pendingPlanChange' => $pendingPlanChange,
+            'planChangeFailed' => $planChangeFailed,
         ];
     }
 };
 
 ?>
 
-<div class="space-y-6">
+<div class="space-y-6" @if($pendingPlanChange) wire:poll.5s @endif>
     {{-- Page header --}}
     <div>
         <flux:heading size="xl">{{ __('billing::portal.plan_change') }}</flux:heading>
@@ -156,6 +209,23 @@ new class extends Component {
 
     @if ($flash)
         <flux:callout variant="{{ $flashError ? 'danger' : 'success' }}" icon="{{ $flashError ? 'exclamation-triangle' : 'check-circle' }}" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })">{{ $flash }}</flux:callout>
+    @endif
+
+    @if ($planChangeFailed)
+        <flux:callout variant="danger" icon="exclamation-triangle">
+            {{ __('billing::portal.flash.plan_change_failed') }}
+        </flux:callout>
+    @endif
+
+    @if ($pendingPlanChange)
+        <flux:callout variant="info" icon="clock">
+            {{ __('billing::portal.pending_plan_change_notice', ['plan' => $catalog->planName($pendingPlanChange['plan_code'] ?? '') ?? ($pendingPlanChange['plan_code'] ?? '')]) }}
+            <div class="mt-2">
+                <flux:button size="sm" wire:click="cancelPendingChange">
+                    {{ __('billing::portal.cancel_pending_change') }}
+                </flux:button>
+            </div>
+        </flux:callout>
     @endif
 
     {{-- Controls --}}
@@ -181,6 +251,7 @@ new class extends Component {
 
     @php
         $hasScheduled = $scheduledChange !== null;
+        $hasPending = $pendingPlanChange !== null;
         $scheduledPlanCode = $scheduledChange['plan_code'] ?? null;
         $scheduledInterval = $scheduledChange['interval'] ?? null;
     @endphp
@@ -295,7 +366,7 @@ new class extends Component {
                         <flux:button class="w-full" variant="ghost" disabled>
                             {{ __('billing::portal.current') }}
                         </flux:button>
-                    @elseif (! $hasScheduled)
+                    @elseif (! $hasScheduled && ! $hasPending)
                         <flux:button class="w-full" variant="primary" wire:click="previewFor('{{ $code }}')">
                             {{ __('billing::portal.select') }}
                         </flux:button>
@@ -468,7 +539,7 @@ new class extends Component {
             @endif
 
             {{-- Pricing --}}
-            @if ($isUpgrade && ($preview['prorataChargeNet'] ?? 0) > 0)
+            @if ($isUpgrade || $isDowngrade || $planChanged || $intervalChanged)
                 {{-- ── Upgrade: Two distinct pricing panels ── --}}
                 <div class="border-t border-zinc-200/75 dark:border-zinc-700/50">
                     <div class="grid gap-0 sm:grid-cols-2">
@@ -482,26 +553,45 @@ new class extends Component {
                                 <span class="text-xs font-semibold tracking-wide text-accent uppercase">{{ __('billing::portal.preview_due_now') }}</span>
                             </div>
 
+                            @php
+                                if ($intervalChanged) {
+                                    // Interval change: new plan is charged in full by Mollie,
+                                    // credit for the unused portion of the old plan is refunded.
+                                    $dueNowNewPlan = $preview['newPriceNet'] ?? 0;
+                                    $dueNowCredit = $preview['prorataCreditNet'] ?? 0;
+                                    $dueNowNet = $dueNowNewPlan - $dueNowCredit;
+                                } else {
+                                    // Same interval: prorata charge for the price difference.
+                                    $dueNowNewPlan = (int) round(($preview['newPriceNet'] ?? 0) * ($preview['prorataFactor'] ?? 0));
+                                    $dueNowCredit = $preview['currentPeriodCredit'] ?? 0;
+                                    $dueNowNet = $preview['prorataChargeNet'] ?? 0;
+                                }
+                                $dueNowVatRate = (float) ($preview['vatRate'] ?? 0);
+                                $dueNowVat = (int) round($dueNowNet * $dueNowVatRate / 100);
+                                $dueNowGross = $dueNowNet + $dueNowVat;
+                            @endphp
                             <div class="space-y-2">
                                 <div class="flex items-center justify-between text-sm">
                                     <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_prorata_new_plan') }}</span>
-                                    <span class="tabular-nums font-medium text-zinc-800 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format(($preview['newPriceNet'] ?? 0) * ($preview['prorataFactor'] ?? 0) / 100, 2) }}</span>
+                                    <span class="tabular-nums font-medium text-zinc-800 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($dueNowNewPlan / 100, 2) }}</span>
                                 </div>
-                                <div class="flex items-center justify-between text-sm">
-                                    <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_prorata_credit') }}</span>
-                                    <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format(($preview['currentPeriodCredit'] ?? 0) / 100, 2) }}</span>
-                                </div>
+                                @if ($dueNowCredit > 0)
+                                    <div class="flex items-center justify-between text-sm">
+                                        <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_prorata_credit') }}</span>
+                                        <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($dueNowCredit / 100, 2) }}</span>
+                                    </div>
+                                @endif
 
                                 <flux:separator class="my-2!" />
 
                                 <div class="flex items-center justify-between text-sm">
                                     <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.net') }}</span>
-                                    <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format(($preview['prorataChargeNet'] ?? 0) / 100, 2) }}</span>
+                                    <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($dueNowNet / 100, 2) }}</span>
                                 </div>
-                                @if (($preview['prorataChargeVat'] ?? 0) > 0)
+                                @if ($dueNowVat > 0)
                                     <div class="flex items-center justify-between text-sm">
-                                        <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.vat') }} ({{ number_format($preview['vatRate'] ?? 0, 0) }}%)</span>
-                                        <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($preview['prorataChargeVat'] / 100, 2) }}</span>
+                                        <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.vat') }} ({{ number_format($dueNowVatRate, 0) }}%)</span>
+                                        <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($dueNowVat / 100, 2) }}</span>
                                     </div>
                                 @endif
 
@@ -509,7 +599,7 @@ new class extends Component {
 
                                 <div class="flex items-center justify-between">
                                     <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.preview_total') }}</span>
-                                    <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($preview['prorataChargeGross'] ?? 0) / 100, 2) }}</span>
+                                    <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format($dueNowGross / 100, 2) }}</span>
                                 </div>
                             </div>
                         </div>
@@ -558,63 +648,6 @@ new class extends Component {
                                 <flux:text class="text-xs">{{ __('billing::portal.preview_recurring_from_next_period') }}</flux:text>
                             </div>
                         </div>
-                    </div>
-                </div>
-            @else
-                {{-- ── Standard: recurring price (downgrade / no change) ── --}}
-                <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-5 dark:border-zinc-700/50 dark:bg-white/[0.02]">
-                    <div class="mb-4 flex items-center gap-2">
-                        <flux:icon.arrow-path class="size-4 dark:text-white" />
-                        <span class="text-xs font-semibold tracking-wide dark:text-white uppercase">{{ __('billing::portal.preview_recurring_price') }}</span>
-                    </div>
-
-                    <div class="space-y-2">
-                        @foreach (($preview['lineItems'] ?? []) as $item)
-                            <div class="flex items-center justify-between text-sm">
-                                <span class="text-zinc-600 dark:text-zinc-300">
-                                    {{ $item['label'] }}
-                                    @if (($item['quantity'] ?? 1) > 1)
-                                        <span class="text-zinc-400">× {{ $item['quantity'] }}</span>
-                                    @endif
-                                </span>
-                                <span class="tabular-nums font-medium {{ ($item['total_net'] ?? 0) < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
-                                    {{ ($item['total_net'] ?? 0) < 0 ? '−' : '' }}{{ $currencySymbol }}{{ number_format(abs($item['total_net'] ?? 0) / 100, 2) }}
-                                </span>
-                            </div>
-                        @endforeach
-
-                        <flux:separator class="my-2!" />
-
-                        <div class="flex items-center justify-between text-sm">
-                            <span class="text-zinc-500">{{ __('billing::portal.net') }}</span>
-                            <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format(($preview['newPriceNet'] ?? 0) / 100, 2) }}</span>
-                        </div>
-                        @if (($preview['couponDiscountNet'] ?? 0) > 0)
-                            <div class="flex items-center justify-between text-sm">
-                                <span class="text-zinc-500">{{ __('billing::portal.discount') }}</span>
-                                <span class="tabular-nums text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($preview['couponDiscountNet'] / 100, 2) }}</span>
-                            </div>
-                        @endif
-                        @if (($preview['vatAmount'] ?? 0) > 0)
-                            <div class="flex items-center justify-between text-sm">
-                                <span class="text-zinc-500">{{ __('billing::portal.vat') }} ({{ number_format($preview['vatRate'] ?? 0, 0) }}%)</span>
-                                <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($preview['vatAmount'] / 100, 2) }}</span>
-                            </div>
-                        @endif
-
-                        <flux:separator class="my-2!" />
-
-                        <div class="flex items-center justify-between">
-                            <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.gross') }}</span>
-                            <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($preview['grossTotal'] ?? 0) / 100, 2) }}</span>
-                        </div>
-                        <flux:text class="text-xs">{{ __('billing::portal.preview_recurring_from_next_period') }}</flux:text>
-
-                        @if (($preview['prorataCreditNet'] ?? 0) > 0)
-                            <flux:text class="text-xs">
-                                {{ __('billing::portal.preview_prorata_refund_note', ['amount' => $currencySymbol . number_format(($preview['prorataCreditGross'] ?? 0) / 100, 2)]) }}
-                            </flux:text>
-                        @endif
                     </div>
                 </div>
             @endif

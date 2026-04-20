@@ -611,6 +611,13 @@ php artisan billing:prepare-overage
 php artisan billing:oss-export 2026
 ```
 
+## Documentation
+
+Detailed technical documentation is available in the [`docs/`](docs/) directory:
+
+- [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
+- [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
+
 ## Architecture
 
 This package wraps `mollie/laravel-mollie` ^4 and adds a VAT/OSS layer (`mpociot/vat-calculator` plus VIES), a wallet layer for metered billing (`bavix/laravel-wallet`), a coupon engine, a built-in first-checkout wizard, an admin panel and a Livewire 4 customer portal. Subscription lifecycle is split into single-purpose service classes per action (Start, Create, Activate, Change, Cancel, Resubscribe, EnableAddon, DisableAddon, SyncSeats) — the `HasBilling` trait delegates to them via the container, so apps customize behavior by rebinding services rather than subclassing models. Extension points are provided via facade callbacks (`createBillableUsing`, `beforeCheckoutUsing`, `afterCheckoutUsing`, `resolveBillableUsing`, etc.) and events.

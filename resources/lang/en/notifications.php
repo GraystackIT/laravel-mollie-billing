@@ -52,4 +52,8 @@ return [
         'subject' => '[Admin] Refund failed for invoice :invoice',
         'body' => 'A refund attempt failed: :reason. Manual intervention required.',
     ],
+    'plan_change_failed' => [
+        'subject' => 'Your plan upgrade could not be completed',
+        'body' => 'We were unable to process the payment for your plan upgrade. Please update your payment method and try again, or contact :app support.',
+    ],
 ];

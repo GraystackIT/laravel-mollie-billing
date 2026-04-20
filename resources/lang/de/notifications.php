@@ -52,4 +52,8 @@ return [
         'subject' => '[Admin] Erstattung für Rechnung :invoice fehlgeschlagen',
         'body' => 'Ein Erstattungsversuch ist fehlgeschlagen: :reason. Manuelles Eingreifen erforderlich.',
     ],
+    'plan_change_failed' => [
+        'subject' => 'Dein Plan-Upgrade konnte nicht durchgeführt werden',
+        'body' => 'Wir konnten die Zahlung für dein Plan-Upgrade nicht verarbeiten. Bitte aktualisiere deine Zahlungsmethode und versuche es erneut, oder kontaktiere den :app-Support.',
+    ],
 ];
