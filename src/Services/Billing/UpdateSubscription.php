@@ -374,7 +374,7 @@ class UpdateSubscription
         $planChanged = $newPlan !== $currentPlan;
         $intervalChanged = $newInterval !== $currentInterval;
 
-        $newSeats = $dto->seats ?? max($billable->getUsedBillingSeats(), $this->catalog->includedSeats($newPlan));
+        $newSeats = $dto->seats ?? max($billable->getBillingSeatCount(), $billable->getUsedBillingSeats(), $this->catalog->includedSeats($newPlan));
 
         $newAddons = $dto->addons !== null
             ? $this->normalizeAddonCodes($dto->addons)
@@ -529,7 +529,7 @@ class UpdateSubscription
 
         // Auto-derive seats
         $usedSeats = $billable->getUsedBillingSeats();
-        $newSeats = $dto->seats ?? max($usedSeats, $this->catalog->includedSeats($newPlan));
+        $newSeats = $dto->seats ?? max($billable->getBillingSeatCount(), $usedSeats, $this->catalog->includedSeats($newPlan));
 
         // Auto-filter incompatible addons
         $newAddons = $dto->addons !== null
