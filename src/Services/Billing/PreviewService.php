@@ -200,18 +200,59 @@ class PreviewService
             }
         }
 
-        // Usage comparison
+        // Usage comparison with prorated excess calculation
         $usageChanges = [];
+        $usageOverageChargeNet = 0;
+        $rollover = $currentPlan !== '' ? $this->catalog->usageRollover($currentPlan) : false;
+
         foreach ($this->catalog->allUsageTypes() as $usageType) {
             $currentQuota = $this->catalog->includedUsage($currentPlan, $currentInterval, $usageType);
             $newQuota = $this->catalog->includedUsage($newPlan, $newInterval, $usageType);
-            if ($currentQuota > 0 || $newQuota > 0) {
-                $usageChanges[$usageType] = [
-                    'current' => $currentQuota,
-                    'new' => $newQuota,
-                    'diff' => $newQuota - $currentQuota,
-                ];
+            if ($currentQuota <= 0 && $newQuota <= 0) {
+                continue;
             }
+
+            $walletBalance = $billable instanceof \Illuminate\Database\Eloquent\Model
+                ? (int) ($billable->getWallet($usageType)?->balanceInt ?? 0)
+                : 0;
+
+            $excess = 0;
+            $proratedOldQuota = 0;
+            $actuallyUsed = max(0, $currentQuota - $walletBalance);
+
+            if ($periodStart !== null && $periodEnd !== null && $currentQuota > 0 && $planChanged) {
+                $usageProrata = BillingPolicy::computeUsageOverageForPlanChange(
+                    $currentQuota,
+                    $walletBalance,
+                    $periodStart,
+                    $periodEnd,
+                );
+                $excess = $usageProrata['excess'];
+                $proratedOldQuota = $usageProrata['prorated_old_quota'];
+            }
+
+            $rolloverCredits = $rollover ? max(0, $walletBalance - $currentQuota) : 0;
+            $effectiveNewQuota = max(0, $newQuota + $rolloverCredits - $excess);
+            $unresolvedOverage = max(0, $excess - $newQuota - $rolloverCredits);
+
+            $overagePrice = (int) ($this->catalog->usageOveragePrice($currentPlan, $currentInterval, $usageType) ?? 0);
+            $overageTotalNet = $unresolvedOverage * $overagePrice;
+            $usageOverageChargeNet += $overageTotalNet;
+
+            $usageChanges[$usageType] = [
+                'current' => $currentQuota,
+                'new' => $newQuota,
+                'diff' => $newQuota - $currentQuota,
+                'actually_used' => $actuallyUsed,
+                'prorated_old_quota' => $proratedOldQuota,
+                'excess' => $excess,
+                'rollover_credits' => $rolloverCredits,
+                'offset_by_new_plan' => min($excess, $newQuota + $rolloverCredits),
+                'effective_new_quota' => $effectiveNewQuota,
+                'unresolved_overage' => $unresolvedOverage,
+                'overage_unit_price_net' => $overagePrice,
+                'overage_total_net' => $overageTotalNet,
+            ];
         }
 
         // Seat comparison
@@ -247,6 +288,10 @@ class PreviewService
             'prorataCreditGross' => $prorataCreditNet > 0 ? (int) $prorataVat['gross'] : 0,
             'currentPeriodCredit' => $periodStart !== null && $periodEnd !== null
                 ? (int) round($currentNet * $prorataFactor)
+                : 0,
+            'usageOverageChargeNet' => $usageOverageChargeNet,
+            'usageOverageChargeGross' => $usageOverageChargeNet > 0
+                ? (int) (($this->vatService->calculate($country, $usageOverageChargeNet, $vatNumber)['gross'] ?? $usageOverageChargeNet))
                 : 0,
             'couponDiscountNet' => $couponDiscountNet,
             'vatRate' => $vat['rate'],

@@ -323,10 +323,16 @@ class MollieWebhookController extends Controller
             // placeholder — line item construction already accounts for addons.
         }
 
-        // Recharge wallets: add included usage on top of current balance.
+        // Recharge wallets: reset or add based on rollover configuration.
+        $rollover = $this->catalog->usageRollover($planCode);
+
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
             try {
-                $this->walletService->credit($billable, (string) $type, (int) $units);
+                if ($rollover) {
+                    $this->walletService->credit($billable, (string) $type, (int) $units);
+                } else {
+                    $this->walletService->resetAndCredit($billable, (string) $type, (int) $units);
+                }
             } catch (\Throwable $e) {
                 Log::warning('Wallet credit failed during webhook', ['type' => $type, 'error' => $e->getMessage()]);
             }

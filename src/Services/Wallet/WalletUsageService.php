@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Events\UsageLimitReached;
 use GraystackIT\MollieBilling\Events\WalletCredited;
+use GraystackIT\MollieBilling\Events\WalletReset;
 use GraystackIT\MollieBilling\Exceptions\UsageLimitExceededException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\UsageThresholdNotification;
@@ -104,6 +105,36 @@ class WalletUsageService
         });
 
         event(new WalletCredited($billable, $type, $quantity, 'credit'));
+    }
+
+    /**
+     * Reset a wallet to zero then deposit the given quota. Used when
+     * usage_rollover is disabled — the wallet is brought to exactly
+     * the plan's included quota on each renewal.
+     */
+    public function resetAndCredit(Billable $billable, string $type, int $quota, string $reason = 'renewal'): void
+    {
+        $previousBalance = 0;
+
+        DB::transaction(function () use ($billable, $type, $quota, &$previousBalance): void {
+            $wallet = $this->resolveWallet($billable, $type);
+            $wallet->newQuery()->whereKey($wallet->getKey())->lockForUpdate()->first();
+            $wallet->refresh();
+
+            $previousBalance = (int) $wallet->balanceInt;
+
+            if ($previousBalance > 0) {
+                $wallet->forceWithdraw($previousBalance, ['type' => $type, 'reason' => 'period_reset']);
+            } elseif ($previousBalance < 0) {
+                $wallet->deposit(abs($previousBalance), ['type' => $type, 'reason' => 'period_reset']);
+            }
+
+            if ($quota > 0) {
+                $wallet->deposit($quota, ['type' => $type, 'reason' => 'credit']);
+            }
+        });
+
+        event(new WalletReset($billable, $type, $previousBalance, $quota, $reason));
     }
 
     private function resolveWallet(Billable $billable, string $type): WalletModel

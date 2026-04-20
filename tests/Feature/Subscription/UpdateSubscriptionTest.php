@@ -358,7 +358,8 @@ it('caps wallet balance on downgrade to plan with less usage quota', function ()
 
     $wallet->refresh();
 
-    // Old included: 100, New included: 50 → diff = -50
-    // Balance: max(0, 60 + (-50)) = 10
-    expect((int) $wallet->balanceInt)->toBe(10);
+    // With prorated plan change logic: period started 5 days ago (monthly),
+    // elapsed ≈ 5/30 ≈ 0.167, proratedOldQuota ≈ 17, balance=60 so excess=0.
+    // Wallet is reset to newIncluded (50) with no excess to deduct.
+    expect((int) $wallet->balanceInt)->toBe(50);
 });

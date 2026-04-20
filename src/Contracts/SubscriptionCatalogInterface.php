@@ -42,6 +42,8 @@ interface SubscriptionCatalogInterface
 
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 
+    public function usageRollover(string $planCode): bool;
+
     public function yearlySavingsPercent(string $planCode): float;
 
     public function featureName(string $featureKey): string;
