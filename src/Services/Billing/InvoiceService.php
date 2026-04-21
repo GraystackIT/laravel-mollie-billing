@@ -9,6 +9,7 @@ use Elegantly\Invoices\Pdf\PdfInvoice;
 use Elegantly\Invoices\Pdf\PdfInvoiceItem;
 use Elegantly\Invoices\Support\Address;
 use Elegantly\Invoices\Support\Buyer;
+use Elegantly\Invoices\Support\PaymentInstruction;
 use Elegantly\Invoices\Support\Seller;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
@@ -66,6 +67,7 @@ class InvoiceService
         $invoice->amount_vat = (int) $vat['vat'];
         $invoice->amount_gross = (int) $vat['gross'];
         $invoice->line_items = $lineItems;
+        $invoice->payment_method_details = self::extractPaymentMethodDetails($payment);
         $invoice->refunded_net = 0;
         $invoice->save();
 
@@ -82,7 +84,10 @@ class InvoiceService
      * so that refunds computed at today's rate do not drift from the rate used
      * at the time the invoice was issued.
      */
-    public function createCreditNote(BillingInvoice $original, int $amountNet): BillingInvoice
+    /**
+     * @param  array<int, array<string, mixed>>|null  $lineItems  Custom line items; if null, a generic single-line credit note is created.
+     */
+    public function createCreditNote(BillingInvoice $original, int $amountNet, ?array $lineItems = null, ?string $description = null): BillingInvoice
     {
         if ($amountNet <= 0) {
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
@@ -91,6 +96,15 @@ class InvoiceService
         $rate = (float) $original->vat_rate;
         $creditVat = (int) round($amountNet * $rate / 100);
         $creditGross = $amountNet + $creditVat;
+
+        $resolvedLineItems = $lineItems ?? [[
+            'kind' => 'credit_note',
+            'label' => 'Credit note for invoice #'.$original->serial_number,
+            'quantity' => 1,
+            'unit_price' => -$amountNet,
+            'total_net' => -$amountNet,
+            'parent_invoice_id' => $original->id,
+        ]];
 
         $creditNote = new BillingInvoice();
         $creditNote->billable_type = $original->billable_type;
@@ -106,15 +120,10 @@ class InvoiceService
         $creditNote->amount_net = -$amountNet;
         $creditNote->amount_vat = -$creditVat;
         $creditNote->amount_gross = -$creditGross;
-        $creditNote->line_items = [[
-            'kind' => 'credit_note',
-            'label' => 'Credit note for invoice #'.$original->serial_number,
-            'quantity' => 1,
-            'unit_price' => -$amountNet,
-            'total_net' => -$amountNet,
-            'parent_invoice_id' => $original->id,
-        ]];
+        $creditNote->line_items = $resolvedLineItems;
+        $creditNote->payment_method_details = $original->payment_method_details;
         $creditNote->parent_invoice_id = $original->id;
+        $creditNote->refund_reason_text = $description;
         $creditNote->refunded_net = 0;
         $creditNote->save();
 
@@ -206,20 +215,25 @@ class InvoiceService
             $qty = (int) ($item['quantity'] ?? 1);
             $netUnit = (int) ($item['unit_price_net'] ?? $item['unit_price'] ?? 0);
 
-            // For credit notes, amounts are negative — PdfInvoice expects positive values
-            // with the type set to 'Credit' to indicate the direction.
-            $absNetUnit = abs($netUnit);
+            // Per-item billing_period or description only — no fallback to global period.
+            $description = $item['description'] ?? $item['billing_period'] ?? null;
 
             $items[] = new PdfInvoiceItem(
                 label: (string) ($item['label'] ?? $item['kind'] ?? 'Line'),
-                unit_price: Money::ofMinor($absNetUnit, $currency),
+                unit_price: Money::ofMinor($netUnit, $currency),
                 tax_percentage: (float) $invoice->vat_rate,
-                quantity: abs($qty),
-                description: $item['code'] ?? null,
+                quantity: $qty,
+                description: $description,
             );
         }
 
-        $logo = config('mollie-billing.invoices.logo');
+        $logo = $this->resolveLogoPath(config('mollie-billing.invoices.logo'));
+        $paymentInstruction = $this->buildPaymentInstruction($invoice, $isCredit);
+
+        // Credit note reason as general description (below items, above payment info).
+        $description = ($isCredit && ! empty($invoice->refund_reason_text))
+            ? (string) $invoice->refund_reason_text
+            : null;
 
         return new PdfInvoice(
             type: $isCredit ? 'Credit Note' : 'Invoice',
@@ -229,9 +243,78 @@ class InvoiceService
             seller: $seller,
             buyer: $buyer,
             items: $items,
-            description: $this->buildDescription($invoice),
-            logo: $logo ? (string) $logo : null,
+            description: $description,
+            paymentInstructions: $paymentInstruction !== null ? [$paymentInstruction] : [],
+            logo: $logo,
         );
+    }
+
+    /**
+     * Resolve the logo config value to a base64 data-URI for DOMPDF.
+     *
+     * Accepts: absolute local path, public-relative path, APP_URL-based URL,
+     * or an already-encoded data-URI. The result is always a data-URI so
+     * DOMPDF renders the logo without needing isRemoteEnabled.
+     */
+    private function resolveLogoPath(mixed $value): ?string
+    {
+        if ($value === null || $value === '' || $value === false) {
+            return null;
+        }
+
+        $value = (string) $value;
+
+        // Already a data-URI — return as-is.
+        if (str_starts_with($value, 'data:')) {
+            return $value;
+        }
+
+        // Extract the file basename and build every candidate path we can think of.
+        $candidates = [];
+
+        if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
+            $appUrl = rtrim((string) config('app.url'), '/');
+            if ($appUrl !== '' && str_starts_with($value, $appUrl.'/')) {
+                $candidates[] = public_path(ltrim(substr($value, strlen($appUrl)), '/'));
+            }
+            $parsed = parse_url($value);
+            if (isset($parsed['path'])) {
+                $candidates[] = public_path(ltrim($parsed['path'], '/'));
+            }
+        } elseif (str_starts_with($value, '/')) {
+            $candidates[] = $value;
+            $candidates[] = public_path(ltrim($value, '/'));
+        } else {
+            $candidates[] = public_path($value);
+        }
+
+        // Always try base_path and resource_path as well.
+        $basename = basename($value);
+        $candidates[] = public_path($basename);
+        $candidates[] = base_path($value);
+        $candidates[] = resource_path($basename);
+
+        // Deduplicate.
+        $candidates = array_unique($candidates);
+
+        foreach ($candidates as $path) {
+            if (file_exists($path) && is_file($path)) {
+                $contents = file_get_contents($path);
+                if ($contents !== false) {
+                    $mime = mime_content_type($path) ?: 'image/png';
+
+                    return 'data:'.$mime.';base64,'.base64_encode($contents);
+                }
+            }
+        }
+
+        Log::warning('Invoice logo could not be resolved to a local file', [
+            'configured_value' => $value,
+            'tried_paths' => $candidates,
+            'public_path' => public_path(),
+        ]);
+
+        return null;
     }
 
     private function mapInvoiceState(InvoiceStatus $status): string
@@ -244,13 +327,136 @@ class InvoiceService
         };
     }
 
-    private function buildDescription(BillingInvoice $invoice): ?string
+    /**
+     * Extract payment method details from a Mollie payment object for storage.
+     *
+     * @return array{method: string, summary: string, details: array<string, mixed>}|null
+     */
+    public static function extractPaymentMethodDetails(object $payment): ?array
     {
-        if ($invoice->period_start && $invoice->period_end) {
-            return 'Billing period: '.$invoice->period_start->format('Y-m-d').' – '.$invoice->period_end->format('Y-m-d');
+        $method = $payment->method ?? null;
+        if ($method === null) {
+            return null;
         }
 
-        return null;
+        $details = is_object($payment->details ?? null)
+            ? json_decode(json_encode($payment->details), true) ?: []
+            : (array) ($payment->details ?? []);
+
+        $method = (string) $method;
+        $summary = self::buildPaymentSummary($method, $details);
+
+        return [
+            'method' => $method,
+            'summary' => $summary,
+            'details' => $details,
+        ];
+    }
+
+    /**
+     * Build a human-readable summary for a payment method (e.g. "Visa •••• 1234, 12/2027").
+     *
+     * @param  array<string, mixed>  $details
+     */
+    private static function buildPaymentSummary(string $method, array $details): ?string
+    {
+        if ($method === 'creditcard') {
+            $parts = [];
+            if (! empty($details['cardLabel'])) {
+                $parts[] = (string) $details['cardLabel'];
+            }
+            if (! empty($details['cardNumber'])) {
+                $parts[] = '**** '.(string) $details['cardNumber'];
+            }
+            $summary = implode(' ', $parts);
+            if (! empty($details['cardExpiryDate'])) {
+                try {
+                    $summary .= ', '.\Carbon\Carbon::parse((string) $details['cardExpiryDate'])->format('m/Y');
+                } catch (\Throwable) {
+                }
+            }
+
+            return $summary ?: null;
+        }
+
+        if ($method === 'directdebit') {
+            $parts = [];
+            if (! empty($details['consumerName'])) {
+                $parts[] = (string) $details['consumerName'];
+            }
+            if (! empty($details['consumerAccount'])) {
+                $parts[] = (string) $details['consumerAccount'];
+            }
+
+            return $parts !== [] ? implode(' - ', $parts) : null;
+        }
+
+        if ($method === 'paypal') {
+            return ! empty($details['consumerAccount']) ? (string) $details['consumerAccount'] : null;
+        }
+
+        return ucfirst(str_replace('_', ' ', $method));
+    }
+
+    /**
+     * Build a PaymentInstruction for the PDF footer showing payment method details.
+     */
+    private function buildPaymentInstruction(BillingInvoice $invoice, bool $isCredit): ?PaymentInstruction
+    {
+        $pmd = $invoice->payment_method_details;
+        if (! is_array($pmd) || empty($pmd['method'])) {
+            return null;
+        }
+
+        $method = (string) $pmd['method'];
+        $methodLabel = ucfirst(str_replace('_', ' ', $method));
+        $details = (array) ($pmd['details'] ?? []);
+
+        $name = $isCredit
+            ? __('billing::portal.refund_to', ['method' => $methodLabel])
+            : __('billing::portal.charged_via', ['method' => $methodLabel]);
+
+        $fields = [];
+
+        if ($method === 'creditcard') {
+            if (! empty($details['cardHolder'])) {
+                $fields[__('billing::portal.payment_method.card_holder')] = (string) $details['cardHolder'];
+            }
+            if (! empty($details['cardLabel'])) {
+                $fields[__('billing::portal.payment_method.card_brand')] = (string) $details['cardLabel'];
+            }
+            if (! empty($details['cardNumber'])) {
+                $fields[__('billing::portal.payment_method.card_number')] = '**** '.(string) $details['cardNumber'];
+            }
+            if (! empty($details['cardExpiryDate'])) {
+                try {
+                    $fields[__('billing::portal.payment_method.expires_label')] = \Carbon\Carbon::parse((string) $details['cardExpiryDate'])->format('m/Y');
+                } catch (\Throwable) {
+                }
+            }
+        } elseif ($method === 'directdebit') {
+            if (! empty($details['consumerName'])) {
+                $fields[__('billing::portal.payment_method.account_holder')] = (string) $details['consumerName'];
+            }
+            if (! empty($details['consumerAccount'])) {
+                $fields[__('billing::portal.payment_method.iban')] = (string) $details['consumerAccount'];
+            }
+            if (! empty($details['consumerBic'])) {
+                $fields[__('billing::portal.payment_method.bic')] = (string) $details['consumerBic'];
+            }
+        } elseif ($method === 'paypal') {
+            if (! empty($details['consumerName'])) {
+                $fields[__('billing::portal.payment_method.account_holder')] = (string) $details['consumerName'];
+            }
+            if (! empty($details['consumerAccount'])) {
+                $fields[__('billing::portal.payment_method.paypal_email')] = (string) $details['consumerAccount'];
+            }
+        }
+
+        return new PaymentInstruction(
+            name: $name,
+            fields: $fields,
+        );
     }
 
     /**

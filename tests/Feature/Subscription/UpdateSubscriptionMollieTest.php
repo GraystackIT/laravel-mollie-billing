@@ -49,7 +49,7 @@ class SpyUpdateSubscription extends UpdateSubscription
         }
     }
 
-    protected function refundProrataCredit(\GraystackIT\MollieBilling\Contracts\Billable $billable, int $prorataCreditNet): void
+    protected function refundProrataCredit(\GraystackIT\MollieBilling\Contracts\Billable $billable, int $prorataCreditNet, ?\GraystackIT\MollieBilling\Services\Billing\SubscriptionChangeContext $context = null): void
     {
         self::$calls[] = ['prorata_refund', $prorataCreditNet];
     }

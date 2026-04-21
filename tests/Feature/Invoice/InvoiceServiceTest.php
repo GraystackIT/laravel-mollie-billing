@@ -33,7 +33,7 @@ beforeEach(function (): void {
 
     // Use a subclass that skips actual PDF generation to avoid DOMPDF dependency in tests.
     $this->app->bind(InvoiceService::class, function ($app): InvoiceService {
-        return new class ($app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class), $app->make(InvoiceNumberGenerator::class)) extends InvoiceService {
+        return new class ($app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class), $app->make(InvoiceNumberGenerator::class), $app->make(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class)) extends InvoiceService {
             protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): void
             {
                 // Simulate successful PDF storage without actually generating a PDF.

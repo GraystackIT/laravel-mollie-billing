@@ -178,6 +178,8 @@ return [
         'bic' => 'BIC',
         'paypal_email' => 'PayPal account',
         'expires' => 'expires :date',
+        'expires_label' => 'Expires',
+        'card_number' => 'Card number',
         'status' => [
             'valid' => 'Valid',
             'pending' => 'Pending',
@@ -211,6 +213,8 @@ return [
     'pending_plan_change_notice' => 'An upgrade to the :plan plan is awaiting payment confirmation.',
     'cancel_pending_change' => 'Cancel pending change',
     'prorata' => 'pro-rata',
+    'refund_to' => 'Refund to :method',
+    'charged_via' => 'Charged via :method',
     'no_billable' => 'Unable to load your billing account. Please sign in and try again.',
     'cancel_confirm' => [
         'title' => 'Cancel subscription?',

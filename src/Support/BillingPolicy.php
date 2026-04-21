@@ -62,8 +62,26 @@ class BillingPolicy
         $creditNet = 0;
 
         if ($intervalChanged) {
-            // Interval change: credit unused portion of current period.
-            $creditNet = (int) round($currentNet * $factor);
+            // Interval change: the unused portion of the current period is
+            // credited against the full price of the new plan.
+            //
+            // Upgrade (newNet > unusedCredit): charge the difference via
+            //   Mollie as a single payment with itemised line items showing
+            //   the new plan price and the old-plan credit as a deduction.
+            //   creditNet = unusedCredit (for invoice line-item breakdown).
+            //
+            // Downgrade (newNet <= unusedCredit): refund the net difference
+            //   via Mollie. The new subscription's first payment is collected
+            //   separately by Mollie when the new subscription is created.
+            //   creditNet = unusedCredit - newNet (actual refund amount).
+            $unusedCredit = (int) round($currentNet * $factor);
+            $netDue = $newNet - $unusedCredit;
+            if ($netDue > 0) {
+                $chargeNet = $netDue;
+                $creditNet = $unusedCredit;
+            } else {
+                $creditNet = abs($netDue);
+            }
         } else {
             $diff = $newNet - $currentNet;
             if ($diff > 0) {

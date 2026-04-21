@@ -102,6 +102,13 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return $this->plan($planCode)['name'] ?? null;
     }
 
+    public function planDescription(string $planCode): ?string
+    {
+        $value = $this->plan($planCode)['description'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
     public function addonName(string $addonCode): ?string
     {
         return $this->addon($addonCode)['name'] ?? null;

@@ -38,6 +38,8 @@ interface SubscriptionCatalogInterface
 
     public function planName(string $planCode): ?string;
 
+    public function planDescription(string $planCode): ?string;
+
     public function addonName(string $addonCode): ?string;
 
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;

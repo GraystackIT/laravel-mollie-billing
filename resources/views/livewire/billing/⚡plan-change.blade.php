@@ -677,12 +677,19 @@ new class extends Component {
                             {{-- Immediate view --}}
                             <div x-show="applyAt === 'immediate'" x-cloak>
                                 @php
-                                    if ($intervalChanged) {
+                                    $prorataCharge = $preview['prorataChargeNet'] ?? 0;
+                                    $prorataCredit = $preview['prorataCreditNet'] ?? 0;
+                                    if ($prorataCharge > 0) {
+                                        // Upgrade: new plan = charge + credit, credit shown as deduction.
+                                        $dueNowNewPlan = $prorataCharge + $prorataCredit;
+                                        $dueNowCredit = $prorataCredit;
+                                    } elseif ($prorataCredit > 0) {
+                                        // Downgrade: new plan at full price, credit = refund + new plan.
                                         $dueNowNewPlan = $preview['newPriceNet'] ?? 0;
-                                        $dueNowCredit = $preview['prorataCreditNet'] ?? 0;
+                                        $dueNowCredit = $prorataCredit + $dueNowNewPlan;
                                     } else {
-                                        $dueNowNewPlan = (int) round(($preview['newPriceNet'] ?? 0) * ($preview['prorataFactor'] ?? 0));
-                                        $dueNowCredit = $preview['currentPeriodCredit'] ?? 0;
+                                        $dueNowNewPlan = 0;
+                                        $dueNowCredit = 0;
                                     }
                                     $dueNowNet = $dueNowNewPlan - $dueNowCredit + $usageOverageNet;
                                     $isCredit = $dueNowNet < 0;
@@ -832,9 +839,18 @@ new class extends Component {
                                 </flux:button>
                             @else
                                 <flux:button variant="primary" size="sm"
-                                    x-on:click="$wire.applyChange(applyAt)">
-                                    <span x-show="applyAt === 'immediate'">{{ __('billing::portal.apply_immediately') }}</span>
-                                    <span x-show="applyAt === 'end_of_period'" x-cloak>{{ __('billing::portal.schedule_end_of_period') }}</span>
+                                    x-on:click="$wire.applyChange(applyAt)"
+                                    wire:loading.attr="disabled"
+                                    wire:target="applyChange">
+                                    <flux:icon.arrow-path class="size-4 animate-spin" wire:loading wire:target="applyChange" />
+                                    <span wire:loading.remove wire:target="applyChange">
+                                        <span x-show="applyAt === 'immediate'">{{ __('billing::portal.apply_immediately') }}</span>
+                                        <span x-show="applyAt === 'end_of_period'" x-cloak>{{ __('billing::portal.schedule_end_of_period') }}</span>
+                                    </span>
+                                    <span wire:loading wire:target="applyChange">
+                                        <span x-show="applyAt === 'immediate'">{{ __('billing::portal.apply_immediately') }}</span>
+                                        <span x-show="applyAt === 'end_of_period'" x-cloak>{{ __('billing::portal.schedule_end_of_period') }}</span>
+                                    </span>
                                 </flux:button>
                             @endif
                         </div>

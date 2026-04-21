@@ -52,8 +52,12 @@ return [
         // Base path within the disk. Invoices are stored as {path}/{YYYY/MM}/{serial}.pdf.
         'path' => 'billing/invoices',
 
-        // Absolute path to a logo image displayed in the top-right corner of invoices.
-        // The file must be readable by file_get_contents (local path or data URI).
+        // Logo image displayed in the top-right corner of invoices.
+        // Supported formats:
+        //   - APP_URL-based URL: "${APP_URL}/logo.png" (resolved to public_path)
+        //   - Relative path:    "images/logo.png"      (resolved to public_path)
+        //   - Absolute path:    "/var/www/public/logo.png"
+        //   - Data URI:         "data:image/png;base64,..."
         'logo' => env('BILLING_INVOICE_LOGO'),
 
         // Seller information printed on every invoice.
