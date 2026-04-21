@@ -88,6 +88,19 @@ interface Billable
     public function billingPortalUrl(): string;
     public function billingPlanChangeUrl(): string;
 
+    // One-time orders
+    /** @return array{checkout_url:?string, payment_id:string} */
+    public function purchaseOneTimeOrder(string $productCode, array $metadata = []): array;
+
+    /** @return array<int, string> */
+    public function allBillingProducts(): array;
+
+    /** @return array<int, string> */
+    public function boughtBillingProducts(): array;
+
+    /** @return array<int, string> */
+    public function availableBillingProducts(): array;
+
     // Subscription management (actions)
     public function cancelBillingSubscription(bool $immediately = false): void;
     public function changeBillingPlan(string $planCode, string $interval): void;

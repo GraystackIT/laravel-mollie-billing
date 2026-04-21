@@ -54,4 +54,26 @@ interface SubscriptionCatalogInterface
 
     /** @return array<string, array{name: string, description: ?string}> */
     public function allFeatures(): array;
+
+    // One-time products
+
+    /** @return array<int, string> */
+    public function allProducts(): array;
+
+    /** @return array<string, mixed> */
+    public function product(string $productCode): array;
+
+    public function productName(string $productCode): ?string;
+
+    public function productDescription(string $productCode): ?string;
+
+    public function productImageUrl(string $productCode): ?string;
+
+    public function productPriceNet(string $productCode): int;
+
+    public function productUsageType(string $productCode): ?string;
+
+    public function productQuantity(string $productCode): ?int;
+
+    public function productOneTimeOnly(string $productCode): bool;
 }

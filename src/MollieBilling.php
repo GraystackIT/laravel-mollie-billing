@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Testing\MollieBillingFake;
@@ -220,6 +221,11 @@ class MollieBilling
     public static function refunds(): RefundInvoiceService
     {
         return app(RefundInvoiceService::class);
+    }
+
+    public static function orders(): StartOneTimeOrderCheckout
+    {
+        return app(StartOneTimeOrderCheckout::class);
     }
 
     public static function fake(): MollieBillingFake

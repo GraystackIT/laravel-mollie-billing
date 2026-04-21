@@ -21,6 +21,7 @@ return [
         'addon' => 'Addon',
         'seats' => 'Plätze',
         'overage' => 'Mehrverbrauch',
+        'one_time_order' => 'Einmalkauf',
         'credit_note' => 'Gutschrift',
     ],
     'subscription_source' => [

@@ -7,6 +7,7 @@
 
     $faviconUrl = config('mollie-billing.favicon_url');
     $primaryColor = config('mollie-billing.primary_color', 'teal');
+    $hasProducts = ! empty(config('mollie-billing-plans.products', []));
     $dashboardUrl = config('mollie-billing.dashboard_url');
     if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
         $dashboardUrl = route(substr($dashboardUrl, 6));
@@ -75,6 +76,11 @@
             <flux:navlist.item icon="users" href="{{ route(BillingRoute::name('seats')) }}" :current="$currentRoute === BillingRoute::name('seats')">
                 {{ __('billing::portal.nav.seats') }}
             </flux:navlist.item>
+            @if ($hasProducts)
+                <flux:navlist.item icon="shopping-bag" href="{{ route(BillingRoute::name('products')) }}" :current="$currentRoute === BillingRoute::name('products')">
+                    {{ __('billing::portal.nav.products') }}
+                </flux:navlist.item>
+            @endif
             <flux:navlist.item icon="credit-card" href="{{ route(BillingRoute::name('payment-method')) }}" :current="$currentRoute === BillingRoute::name('payment-method')">
                 {{ __('billing::portal.nav.payment_method') }}
             </flux:navlist.item>

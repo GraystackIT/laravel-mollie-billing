@@ -77,4 +77,22 @@ return [
             ],
         ],
     ],
+
+    'products' => [
+        // 'token-pack-500' => [
+        //     'name' => '500 Token Pack',
+        //     'description' => 'Top up your account with 500 tokens.',
+        //     'image_url' => null,
+        //     'price_net' => 4900,
+        //     'usage_type' => 'Tokens',    // optional — links to wallet
+        //     'quantity' => 500,            // optional — units to credit on purchase
+        // ],
+        // 'consulting-hour' => [
+        //     'name' => '1h Consulting',
+        //     'description' => 'Book a one-hour consulting session.',
+        //     'image_url' => null,
+        //     'price_net' => 14900,
+        //     'onetimeonly' => true,        // can only be purchased once (default: false)
+        // ],
+    ],
 ];

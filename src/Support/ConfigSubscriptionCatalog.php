@@ -200,6 +200,59 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return $result;
     }
 
+    public function allProducts(): array
+    {
+        return array_keys((array) config($this->configKey.'.products', []));
+    }
+
+    public function product(string $productCode): array
+    {
+        return $this->productConfig($productCode);
+    }
+
+    public function productName(string $productCode): ?string
+    {
+        return $this->productConfig($productCode)['name'] ?? null;
+    }
+
+    public function productDescription(string $productCode): ?string
+    {
+        $value = $this->productConfig($productCode)['description'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    public function productImageUrl(string $productCode): ?string
+    {
+        $value = $this->productConfig($productCode)['image_url'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    public function productPriceNet(string $productCode): int
+    {
+        return (int) ($this->productConfig($productCode)['price_net'] ?? 0);
+    }
+
+    public function productUsageType(string $productCode): ?string
+    {
+        $value = $this->productConfig($productCode)['usage_type'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    public function productQuantity(string $productCode): ?int
+    {
+        $value = $this->productConfig($productCode)['quantity'] ?? null;
+
+        return $value === null ? null : (int) $value;
+    }
+
+    public function productOneTimeOnly(string $productCode): bool
+    {
+        return (bool) ($this->productConfig($productCode)['onetimeonly'] ?? false);
+    }
+
     /** @return array<string, mixed> */
     private function feature(string $key): array
     {
@@ -216,5 +269,11 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
     private function addon(string $code): array
     {
         return (array) config($this->configKey.'.addons.'.$code, []);
+    }
+
+    /** @return array<string, mixed> */
+    private function productConfig(string $code): array
+    {
+        return (array) config($this->configKey.'.products.'.$code, []);
     }
 }

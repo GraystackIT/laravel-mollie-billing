@@ -11,6 +11,7 @@ enum InvoiceKind: string
     case Addon = 'addon';
     case Seats = 'seats';
     case Overage = 'overage';
+    case OneTimeOrder = 'one_time_order';
     case CreditNote = 'credit_note';
 
     public function label(): string
@@ -26,6 +27,7 @@ enum InvoiceKind: string
             self::Addon => 'cyan',
             self::Seats => 'amber',
             self::Overage => 'red',
+            self::OneTimeOrder => 'emerald',
             self::CreditNote => 'zinc',
         };
     }

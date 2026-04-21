@@ -82,6 +82,7 @@ return [
             'prefix' => [
                 'invoice' => 'IN',
                 'credit_note' => 'CR',
+                'one_time_order' => 'OT',
             ],
         ],
 
