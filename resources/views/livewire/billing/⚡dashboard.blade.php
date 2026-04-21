@@ -96,11 +96,14 @@ new class extends Component {
             }
         }
 
+        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
         $invoices = $b->billingInvoices()->latest()->limit(5)->get()->map(fn ($inv) => [
             'date' => $inv->created_at->translatedFormat('d. M Y'),
             'kind' => $inv->invoice_kind?->label() ?? '—',
             'kindColor' => $inv->invoice_kind?->color() ?? 'zinc',
-            'amount' => ($currency === 'EUR' ? '€' : $currency) . number_format($inv->amount_gross / 100, 2),
+            'net' => $currencySymbol . number_format($inv->amount_net / 100, 2),
+            'vat' => $currencySymbol . number_format($inv->amount_vat / 100, 2),
+            'gross' => $currencySymbol . number_format($inv->amount_gross / 100, 2),
             'status' => $inv->status->label(),
             'statusColor' => $inv->status->color(),
             'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
@@ -332,14 +335,16 @@ new class extends Component {
                 </flux:button>
             </div>
 
-            <flux:card class="p-0! overflow-hidden">
+            <flux:card class="py-0! overflow-hidden">
                 <flux:table>
                     <flux:table.columns>
                         <flux:table.column>{{ __('billing::portal.invoice.date') }}</flux:table.column>
                         <flux:table.column>{{ __('billing::portal.invoice.kind') }}</flux:table.column>
-                        <flux:table.column class="text-right">{{ __('billing::portal.invoice.amount') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::portal.invoice.net') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::portal.invoice.vat') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::portal.invoice.gross') }}</flux:table.column>
                         <flux:table.column>{{ __('billing::portal.invoice.status') }}</flux:table.column>
-                        <flux:table.column class="text-right"></flux:table.column>
+                        <flux:table.column align="end"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
                         @forelse ($d['invoices'] as $inv)
@@ -348,7 +353,9 @@ new class extends Component {
                                 <flux:table.cell>
                                     <flux:badge size="sm" :color="$inv['kindColor']">{{ $inv['kind'] }}</flux:badge>
                                 </flux:table.cell>
-                                <flux:table.cell class="text-right tabular-nums font-medium">{{ $inv['amount'] }}</flux:table.cell>
+                                <flux:table.cell class="text-right tabular-nums">{{ $inv['net'] }}</flux:table.cell>
+                                <flux:table.cell class="text-right tabular-nums text-zinc-400">{{ $inv['vat'] }}</flux:table.cell>
+                                <flux:table.cell class="text-right tabular-nums font-medium">{{ $inv['gross'] }}</flux:table.cell>
                                 <flux:table.cell>
                                     <flux:badge size="sm" :color="$inv['statusColor']">{{ $inv['status'] }}</flux:badge>
                                 </flux:table.cell>
@@ -362,7 +369,7 @@ new class extends Component {
                             </flux:table.row>
                         @empty
                             <flux:table.row>
-                                <flux:table.cell colspan="5" class="text-center text-zinc-400">{{ __('billing::portal.no_invoices') }}</flux:table.cell>
+                                <flux:table.cell colspan="7" class="text-center text-zinc-400">{{ __('billing::portal.no_invoices') }}</flux:table.cell>
                             </flux:table.row>
                         @endforelse
                     </flux:table.rows>

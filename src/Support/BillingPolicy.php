@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Support;
 
 use Carbon\CarbonInterface;
+use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 
 class BillingPolicy
 {
@@ -77,6 +78,42 @@ class BillingPolicy
             'credit_net' => $creditNet,
             'factor' => $factor,
         ];
+    }
+
+    /**
+     * Whether a plan change is an upgrade based on base plan prices.
+     *
+     * Compares base prices only (excluding seats, addons, coupons) so
+     * that a plan downgrade with many extra seats is still classified
+     * as a downgrade.
+     */
+    public static function isUpgrade(
+        SubscriptionCatalogInterface $catalog,
+        string $currentPlanCode,
+        string $currentInterval,
+        string $newPlanCode,
+        string $newInterval,
+    ): bool {
+        $currentBase = $catalog->basePriceNet($currentPlanCode, $currentInterval);
+        $newBase = $catalog->basePriceNet($newPlanCode, $newInterval);
+
+        return $newBase > $currentBase;
+    }
+
+    /**
+     * Whether a plan change is a downgrade based on base plan prices.
+     */
+    public static function isDowngrade(
+        SubscriptionCatalogInterface $catalog,
+        string $currentPlanCode,
+        string $currentInterval,
+        string $newPlanCode,
+        string $newInterval,
+    ): bool {
+        $currentBase = $catalog->basePriceNet($currentPlanCode, $currentInterval);
+        $newBase = $catalog->basePriceNet($newPlanCode, $newInterval);
+
+        return $newBase < $currentBase;
     }
 
     /**

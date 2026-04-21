@@ -56,6 +56,11 @@ return [
         'pending' => 'Pending',
         'resolved' => 'Resolved',
     ],
+    'plan_change_mode' => [
+        'immediate' => 'Immediate',
+        'end_of_period' => 'End of period',
+        'user_choice' => 'User choice',
+    ],
     'mollie_subscription_status' => [
         'pending' => 'Pending',
         'active' => 'Active',
