@@ -109,8 +109,9 @@ new class extends Component {
             \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
         } catch (\Throwable $e) {
             report($e);
+            $service->clearPendingPlanChange($billable);
             \Flux::toast(
-                config('app.debug') ? __('billing::portal.flash.error').' ('.$e->getMessage().')' : __('billing::portal.flash.error'),
+                config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
                 variant: 'danger',
             );
         }
@@ -158,8 +159,9 @@ new class extends Component {
             $this->selectedPlan = null;
         } catch (\Throwable $e) {
             report($e);
+            $service->clearPendingPlanChange($billable);
             \Flux::toast(
-                config('app.debug') ? __('billing::portal.flash.error').' ('.$e->getMessage().')' : __('billing::portal.flash.error'),
+                config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
                 variant: 'danger',
             );
         }

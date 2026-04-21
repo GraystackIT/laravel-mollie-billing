@@ -69,7 +69,7 @@ new class extends Component {
         $b = $this->billable();
         if ($b) {
             try { $service->handle($b); $this->flash = 'Resubscribed.'; }
-            catch (\Throwable $e) { $this->error = $e->getMessage(); }
+            catch (\Throwable $e) { report($e); $this->error = 'Error (Code: '.$e->getCode().')'; }
         }
     }
 
@@ -89,7 +89,8 @@ new class extends Component {
             $service->revokeGrant($redemption, 'Revoked by admin');
             $this->flash = 'Grant revoked.';
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'Error (Code: '.$e->getCode().')';
         }
     }
 };

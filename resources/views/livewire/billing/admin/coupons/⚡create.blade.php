@@ -66,7 +66,8 @@ new class extends Component {
             session()->flash('status', "Coupon {$attrs['code']} created.");
             return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\Throwable $e) {
-            $this->error = $e->getMessage();
+            report($e);
+            $this->error = 'Error (Code: '.$e->getCode().')';
         }
     }
 };
