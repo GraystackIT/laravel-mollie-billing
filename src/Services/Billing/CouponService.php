@@ -372,7 +372,7 @@ class CouponService
                         if ($qty <= 0) {
                             continue;
                         }
-                        $this->walletService->credit($billable, (string) $type, $qty);
+                        $this->walletService->credit($billable, (string) $type, $qty, 'coupon_credit');
                         $applied[$type] = $qty;
                     }
                     $redemption->credits_applied = $applied;
@@ -426,7 +426,7 @@ class CouponService
         foreach ($payload as $type => $quantity) {
             $qty = (int) $quantity;
             if ($qty > 0) {
-                $this->walletService->credit($billable, (string) $type, $qty);
+                $this->walletService->credit($billable, (string) $type, $qty, 'coupon_credit');
             }
         }
     }

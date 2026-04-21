@@ -252,9 +252,9 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         foreach ($included as $type => $quantity) {
             if ((int) $quantity > 0) {
                 if ($rollover) {
-                    $walletService->credit($billable, (string) $type, (int) $quantity);
+                    $walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_renewal_rollover');
                 } else {
-                    $walletService->resetAndCredit($billable, (string) $type, (int) $quantity);
+                    $walletService->resetAndCredit($billable, (string) $type, (int) $quantity, 'subscription_renewal');
                 }
             }
         }

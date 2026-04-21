@@ -348,6 +348,27 @@ php artisan vendor:publish --tag=mollie-billing-views
 
 Views are published to `resources/views/vendor/mollie-billing/`. SFC files use the ⚡ prefix convention (e.g. `⚡checkout.blade.php`).
 
+### Tailwind CSS content source
+
+The package's Blade views use Tailwind utility classes (including responsive breakpoints like `sm:`, `lg:`). Your host app's Tailwind build must scan the package views, otherwise these classes will be purged.
+
+**Tailwind v4** — add a `@source` directive in your `resources/css/app.css`:
+
+```css
+@source "../../vendor/graystackit/laravel-mollie-billing/resources/views/**/*.blade.php";
+```
+
+**Tailwind v3** — add the path to the `content` array in `tailwind.config.js`:
+
+```js
+content: [
+    // ...
+    './vendor/graystackit/laravel-mollie-billing/resources/views/**/*.blade.php',
+],
+```
+
+Without this, responsive grid layouts and other utility classes in the portal, checkout and admin panel may not render correctly.
+
 ## Configuration
 
 Highlights of `config/mollie-billing.php`:

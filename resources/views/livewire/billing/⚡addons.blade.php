@@ -6,8 +6,9 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use Livewire\Component;
 
 new class extends Component {
-    public ?string $flash = null;
-    public bool $flashSuccess = true;
+    public bool $polling = false;
+    public ?string $pendingAddon = null;
+    public ?string $pendingAction = null;
 
     private function resolveBillable(): ?Billable
     {
@@ -21,12 +22,12 @@ new class extends Component {
 
         try {
             $billable->enableBillingAddon($addonCode);
-            $this->flash = __('billing::portal.addons_flash.enabled', ['addon' => app(SubscriptionCatalogInterface::class)->addonName($addonCode) ?? $addonCode]);
-            $this->flashSuccess = true;
+            $this->pendingAddon = $addonCode;
+            $this->pendingAction = 'enabled';
+            $this->polling = true;
         } catch (\Throwable $e) {
             report($e);
-            $this->flash = __('billing::portal.flash.error');
-            $this->flashSuccess = false;
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
         }
     }
 
@@ -37,12 +38,33 @@ new class extends Component {
 
         try {
             $billable->disableBillingAddon($addonCode);
-            $this->flash = __('billing::portal.addons_flash.disabled', ['addon' => app(SubscriptionCatalogInterface::class)->addonName($addonCode) ?? $addonCode]);
-            $this->flashSuccess = true;
+            $this->pendingAddon = $addonCode;
+            $this->pendingAction = 'disabled';
+            $this->polling = true;
         } catch (\Throwable $e) {
             report($e);
-            $this->flash = __('billing::portal.flash.error');
-            $this->flashSuccess = false;
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+        }
+    }
+
+    public function pollForChange(): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (empty($meta['pending_plan_change'])) {
+            $this->polling = false;
+            $name = $this->pendingAddon
+                ? (app(SubscriptionCatalogInterface::class)->addonName($this->pendingAddon) ?? $this->pendingAddon)
+                : null;
+            $message = $name
+                ? __("billing::portal.addons_flash.{$this->pendingAction}", ['addon' => $name])
+                : __('billing::portal.flash.plan_changed');
+            \Flux::toast($message, variant: 'success');
+            $this->pendingAddon = null;
+            $this->pendingAction = null;
         }
     }
 
@@ -81,7 +103,7 @@ new class extends Component {
 
 ?>
 
-<div class="space-y-6">
+<div class="space-y-6" @if ($polling) wire:poll.3s="pollForChange" @endif>
     {{-- Page header --}}
     <div>
         <flux:heading size="xl">{{ __('billing::portal.addons') }}</flux:heading>
@@ -90,8 +112,8 @@ new class extends Component {
         </flux:subheading>
     </div>
 
-    @if ($flash)
-        <flux:callout icon="{{ $flashSuccess ? 'check-circle' : 'exclamation-triangle' }}" color="{{ $flashSuccess ? 'lime' : 'red' }}" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" inline>{{ $flash }}</flux:callout>
+    @if ($polling)
+        <flux:callout icon="arrow-path" color="blue" inline>{{ __('billing::portal.flash.plan_change_pending_payment') }}</flux:callout>
     @endif
 
     @if (! $billable)
@@ -105,21 +127,16 @@ new class extends Component {
     @else
         <div class="space-y-4">
             @foreach ($addons as $addon)
-                <flux:card class="relative overflow-hidden p-0! {{ $addon['isActive'] ? 'ring-2 ring-accent shadow-lg' : 'hover:shadow-md' }} transition">
-                    <div class="absolute inset-x-0 top-0 h-1 {{ $addon['isActive'] ? 'bg-accent' : 'bg-transparent' }}"></div>
-
-                    <div class="flex flex-col gap-4 px-6 pb-6 pt-8 sm:flex-row sm:items-start sm:justify-between">
+                <flux:card class="relative p-0! hover:shadow-md transition">
+                    <div class="flex flex-col gap-4 px-6 py-6 sm:flex-row sm:items-start sm:justify-between">
                         {{-- Left: info --}}
                         <div class="flex items-start gap-4">
-                            <div class="flex size-10 shrink-0 items-center justify-center rounded-full {{ $addon['isActive'] ? 'bg-accent/10' : 'bg-zinc-100 dark:bg-zinc-800' }}">
-                                <flux:icon.puzzle-piece class="size-5 {{ $addon['isActive'] ? 'text-accent' : 'text-zinc-400' }}" />
+                            <div class="flex size-10 shrink-0 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800">
+                                <flux:icon.puzzle-piece class="size-5 text-zinc-400" />
                             </div>
                             <div class="space-y-1">
                                 <div class="flex items-center gap-3">
                                     <flux:heading size="lg">{{ $addon['name'] }}</flux:heading>
-                                    @if ($addon['isActive'])
-                                        <flux:badge size="sm" color="lime">{{ __('billing::portal.active') }}</flux:badge>
-                                    @endif
                                 </div>
                                 @if (count($addon['features']) > 0)
                                     <div class="flex flex-wrap gap-1.5">
@@ -136,6 +153,9 @@ new class extends Component {
 
                         {{-- Right: price + action --}}
                         <div class="flex items-center gap-6 sm:shrink-0">
+                            @if ($addon['isActive'])
+                                <flux:badge size="sm" color="lime">{{ __('billing::portal.active') }}</flux:badge>
+                            @endif
                             <div class="text-right">
                                 <div class="flex items-baseline gap-1">
                                     <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($addon['price'] / 100, 2) }}</span>

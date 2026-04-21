@@ -329,9 +329,9 @@ class MollieWebhookController extends Controller
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
             try {
                 if ($rollover) {
-                    $this->walletService->credit($billable, (string) $type, (int) $units);
+                    $this->walletService->credit($billable, (string) $type, (int) $units, 'subscription_renewal_rollover');
                 } else {
-                    $this->walletService->resetAndCredit($billable, (string) $type, (int) $units);
+                    $this->walletService->resetAndCredit($billable, (string) $type, (int) $units, 'subscription_renewal');
                 }
             } catch (\Throwable $e) {
                 Log::warning('Wallet credit failed during webhook', ['type' => $type, 'error' => $e->getMessage()]);

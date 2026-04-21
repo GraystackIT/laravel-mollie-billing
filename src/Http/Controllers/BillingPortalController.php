@@ -39,6 +39,11 @@ class BillingPortalController extends Controller
         return $this->render('addons');
     }
 
+    public function usage(Request $request): View
+    {
+        return $this->render('usage-history');
+    }
+
     public function seats(Request $request): View
     {
         return $this->render('seats');

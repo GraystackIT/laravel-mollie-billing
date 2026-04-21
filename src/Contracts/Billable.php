@@ -50,8 +50,8 @@ interface Billable
     public function hasAnyPlanFeature(array $features): bool;
 
     // Usage / metered billing
-    public function recordBillingUsage(string $type, int $quantity = 1): void;
-    public function creditBillingUsage(string $type, int $quantity = 1): void;
+    public function recordBillingUsage(string $type, int $quantity = 1, ?string $reason = null): void;
+    public function creditBillingUsage(string $type, int $quantity = 1, ?string $reason = null): void;
     public function includedBillingQuota(string $type): int;
     public function usedBillingQuota(string $type): int;
     public function remainingBillingQuota(string $type): int;

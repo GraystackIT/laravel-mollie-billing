@@ -928,13 +928,13 @@ class UpdateSubscription
 
             // Apply: reset wallet to target balance.
             if ($balance > 0) {
-                $wallet->forceWithdraw($balance, ['type' => $slug, 'reason' => 'plan_change']);
+                $wallet->forceWithdraw($balance, ['type' => $slug, 'reason' => 'plan_change_reset']);
             } elseif ($balance < 0) {
-                $wallet->deposit(abs($balance), ['type' => $slug, 'reason' => 'plan_change']);
+                $wallet->deposit(abs($balance), ['type' => $slug, 'reason' => 'plan_change_reset']);
             }
 
             if ($targetBalance > 0) {
-                $wallet->deposit($targetBalance, ['type' => $slug, 'reason' => 'plan_change']);
+                $wallet->deposit($targetBalance, ['type' => $slug, 'reason' => 'plan_change_credit']);
             }
         }
 
@@ -942,7 +942,7 @@ class UpdateSubscription
         $newUsages = $this->catalog->includedUsages($newPlan, $newInterval);
         foreach ($newUsages as $type => $quantity) {
             if ((int) $quantity > 0 && $billable->getWallet($type) === null) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity);
+                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'plan_change_credit');
             }
         }
 

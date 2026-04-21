@@ -8,9 +8,6 @@ use Mollie\Laravel\Facades\Mollie;
 use Livewire\Component;
 
 new class extends Component {
-    public ?string $flash = null;
-    public bool $flashError = false;
-
     /** Mandate id at the time the user landed on the page — used to detect the webhook update. */
     public ?string $initialMandateId = null;
 
@@ -22,8 +19,6 @@ new class extends Component {
         $billable = $this->resolveBillable();
 
         if (request()->boolean('payment_method_updated')) {
-            $this->flash = __('billing::portal.payment_method.updated_flash');
-            $this->flashError = false;
             $this->initialMandateId = $billable?->getMollieMandateId();
             $this->awaitingMandateUpdate = true;
         }
@@ -46,6 +41,7 @@ new class extends Component {
         $current = $billable->getMollieMandateId();
         if ($current !== null && $current !== $this->initialMandateId) {
             $this->awaitingMandateUpdate = false;
+            \Flux::toast(__('billing::portal.payment_method.updated_flash'), variant: 'success');
         }
     }
 
@@ -181,8 +177,7 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if ($billable === null) {
-            $this->flash = __('billing::portal.no_billable');
-            $this->flashError = true;
+            \Flux::toast(__('billing::portal.no_billable'), variant: 'danger');
 
             return null;
         }
@@ -196,8 +191,7 @@ new class extends Component {
             $result = $checkout->handle($billable, $returnUrl);
         } catch (\Throwable $e) {
             report($e);
-            $this->flash = __('billing::portal.flash.error');
-            $this->flashError = true;
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
 
             return null;
         }
@@ -206,8 +200,7 @@ new class extends Component {
             return $this->redirect($result['checkout_url'], navigate: false);
         }
 
-        $this->flash = __('billing::portal.flash.error');
-        $this->flashError = true;
+        \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
 
         return null;
     }
@@ -232,11 +225,9 @@ new class extends Component {
     </div>
 
     @if ($awaitingMandateUpdate)
-        <flux:callout icon="arrow-path" color="amber" inline>
+        <flux:callout icon="arrow-path" color="blue" inline>
             {{ __('billing::portal.payment_method.awaiting_update') }}
         </flux:callout>
-    @elseif ($flash)
-        <flux:callout variant="{{ $flashError ? 'danger' : 'success' }}" icon="{{ $flashError ? 'exclamation-triangle' : 'check-circle' }}">{{ $flash }}</flux:callout>
     @endif
 
     @if (! $billable)

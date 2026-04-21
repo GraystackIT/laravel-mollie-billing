@@ -30,13 +30,13 @@ class WalletUsageService
      * created on first use. Negative balances are permitted to represent
      * overage that will later be charged via ChargeUsageOverageDirectly.
      */
-    public function debit(Billable $billable, string $type, int $quantity): void
+    public function debit(Billable $billable, string $type, int $quantity, ?string $reason = null): void
     {
         if ($quantity <= 0) {
             return;
         }
 
-        DB::transaction(function () use ($billable, $type, $quantity): void {
+        DB::transaction(function () use ($billable, $type, $quantity, $reason): void {
             $wallet = $this->resolveWallet($billable, $type);
 
             // Pessimistic lock for atomic balance reads.
@@ -65,7 +65,7 @@ class WalletUsageService
             // Use forceWithdraw so the wallet may go negative for overage tracking.
             $wallet->forceWithdraw($quantity, [
                 'type' => $type,
-                'reason' => 'usage',
+                'reason' => $reason ?? 'usage',
             ]);
 
             $wallet->refresh();
@@ -90,21 +90,21 @@ class WalletUsageService
      * Credit (top up) a quantity into the named usage wallet. Used to seed the
      * included quota at activation time, at each renewal and for coupon credits.
      */
-    public function credit(Billable $billable, string $type, int $quantity): void
+    public function credit(Billable $billable, string $type, int $quantity, ?string $reason = null): void
     {
         if ($quantity <= 0) {
             return;
         }
 
-        DB::transaction(function () use ($billable, $type, $quantity): void {
+        DB::transaction(function () use ($billable, $type, $quantity, $reason): void {
             $wallet = $this->resolveWallet($billable, $type);
             $wallet->deposit($quantity, [
                 'type' => $type,
-                'reason' => 'credit',
+                'reason' => $reason ?? 'credit',
             ]);
         });
 
-        event(new WalletCredited($billable, $type, $quantity, 'credit'));
+        event(new WalletCredited($billable, $type, $quantity, $reason ?? 'credit'));
     }
 
     /**

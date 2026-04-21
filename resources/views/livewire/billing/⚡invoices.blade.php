@@ -85,16 +85,16 @@ new class extends Component {
         @endif
 
         {{-- Invoice table --}}
-        <flux:card class="p-0! overflow-hidden">
+        <flux:card class="py-0! overflow-hidden">
             <flux:table>
                 <flux:table.columns>
                     <flux:table.column>{{ __('billing::portal.invoice.date') }}</flux:table.column>
                     <flux:table.column>{{ __('billing::portal.invoice.kind') }}</flux:table.column>
-                    <flux:table.column class="text-right">{{ __('billing::portal.invoice.net') }}</flux:table.column>
-                    <flux:table.column class="text-right">{{ __('billing::portal.invoice.vat') }}</flux:table.column>
-                    <flux:table.column class="text-right">{{ __('billing::portal.invoice.gross') }}</flux:table.column>
+                    <flux:table.column align="end">{{ __('billing::portal.invoice.net') }}</flux:table.column>
+                    <flux:table.column align="end">{{ __('billing::portal.invoice.vat') }}</flux:table.column>
+                    <flux:table.column align="end">{{ __('billing::portal.invoice.gross') }}</flux:table.column>
                     <flux:table.column>{{ __('billing::portal.invoice.status') }}</flux:table.column>
-                    <flux:table.column class="text-right"></flux:table.column>
+                    <flux:table.column align="end"></flux:table.column>
                 </flux:table.columns>
                 <flux:table.rows>
                     @foreach ($invoices as $invoice)
