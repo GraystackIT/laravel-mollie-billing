@@ -216,6 +216,13 @@ return [
     'pending_change_blocks_modifications' => 'Seats and addons cannot be modified while a plan change is pending.',
     'refund_to' => 'Refund to :method',
     'charged_via' => 'Charged via :method',
+    'invoice_type' => 'Invoice',
+    'credit_note_type' => 'Credit Note',
+    'credit_note_label' => 'Credit note for invoice #:serial',
+    'invoice_state_paid' => 'Paid',
+    'invoice_state_refunded' => 'Refunded',
+    'invoice_state_pending' => 'Pending',
+    'invoice_state_draft' => 'Draft',
     'no_billable' => 'Unable to load your billing account. Please sign in and try again.',
     'cancel_confirm' => [
         'title' => 'Cancel subscription?',

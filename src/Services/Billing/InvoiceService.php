@@ -99,7 +99,7 @@ class InvoiceService
 
         $resolvedLineItems = $lineItems ?? [[
             'kind' => 'credit_note',
-            'label' => 'Credit note for invoice #'.$original->serial_number,
+            'label' => __('billing::portal.credit_note_label', ['serial' => $original->serial_number]),
             'quantity' => 1,
             'unit_price' => -$amountNet,
             'total_net' => -$amountNet,
@@ -236,7 +236,7 @@ class InvoiceService
             : null;
 
         return new PdfInvoice(
-            type: $isCredit ? 'Credit Note' : 'Invoice',
+            type: $isCredit ? __('billing::portal.credit_note_type') : __('billing::portal.invoice_type'),
             state: $this->mapInvoiceState($invoice->status),
             serial_number: $invoice->serial_number,
             created_at: $invoice->created_at,
@@ -320,10 +320,10 @@ class InvoiceService
     private function mapInvoiceState(InvoiceStatus $status): string
     {
         return match ($status) {
-            InvoiceStatus::Paid => 'Paid',
-            InvoiceStatus::Refunded => 'Refunded',
-            InvoiceStatus::Open => 'Pending',
-            InvoiceStatus::Failed => 'Draft',
+            InvoiceStatus::Paid => __('billing::portal.invoice_state_paid'),
+            InvoiceStatus::Refunded => __('billing::portal.invoice_state_refunded'),
+            InvoiceStatus::Open => __('billing::portal.invoice_state_pending'),
+            InvoiceStatus::Failed => __('billing::portal.invoice_state_draft'),
         };
     }
 
