@@ -52,7 +52,7 @@ class ActivateLocalSubscription
 
         foreach ($includedUsages as $type => $quantity) {
             if ((int) $quantity > 0) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity);
+                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
             }
         }
 

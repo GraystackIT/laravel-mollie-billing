@@ -66,6 +66,9 @@
             <flux:navlist.item icon="document-text" href="{{ route(BillingRoute::name('invoices')) }}" :current="$currentRoute === BillingRoute::name('invoices')">
                 {{ __('billing::portal.nav.invoices') }}
             </flux:navlist.item>
+            <flux:navlist.item icon="chart-bar" href="{{ route(BillingRoute::name('usage')) }}" :current="$currentRoute === BillingRoute::name('usage')">
+                {{ __('billing::portal.nav.usage') }}
+            </flux:navlist.item>
             <flux:navlist.item icon="puzzle-piece" href="{{ route(BillingRoute::name('addons')) }}" :current="$currentRoute === BillingRoute::name('addons')">
                 {{ __('billing::portal.nav.addons') }}
             </flux:navlist.item>
@@ -105,6 +108,7 @@
         @livewire($livewireComponent)
     </flux:main>
 
+    <flux:toast />
     </flux:accent>
     @livewireScripts
     @fluxScripts

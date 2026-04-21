@@ -204,14 +204,14 @@ trait HasBilling
 
     // ── Usage / metered billing ──
 
-    public function recordBillingUsage(string $type, int $quantity = 1): void
+    public function recordBillingUsage(string $type, int $quantity = 1, ?string $reason = null): void
     {
-        app(WalletUsageService::class)->debit($this, $type, $quantity);
+        app(WalletUsageService::class)->debit($this, $type, $quantity, $reason);
     }
 
-    public function creditBillingUsage(string $type, int $quantity = 1): void
+    public function creditBillingUsage(string $type, int $quantity = 1, ?string $reason = null): void
     {
-        app(WalletUsageService::class)->credit($this, $type, $quantity);
+        app(WalletUsageService::class)->credit($this, $type, $quantity, $reason);
     }
 
     public function includedBillingQuota(string $type): int
