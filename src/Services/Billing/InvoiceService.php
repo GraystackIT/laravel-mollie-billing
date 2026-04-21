@@ -219,6 +219,8 @@ class InvoiceService
             );
         }
 
+        $logo = config('mollie-billing.invoices.logo');
+
         return new PdfInvoice(
             type: $isCredit ? 'Credit Note' : 'Invoice',
             state: $this->mapInvoiceState($invoice->status),
@@ -228,6 +230,7 @@ class InvoiceService
             buyer: $buyer,
             items: $items,
             description: $this->buildDescription($invoice),
+            logo: $logo ? (string) $logo : null,
         );
     }
 

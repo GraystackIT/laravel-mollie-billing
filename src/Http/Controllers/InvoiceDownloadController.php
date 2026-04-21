@@ -38,7 +38,11 @@ class InvoiceDownloadController extends Controller
         $filename = Str::slug($invoice->serial_number ?? 'invoice-'.$invoice->id).'.pdf';
 
         // S3-compatible disks: generate a temporary URL and redirect.
-        if (method_exists($disk, 'temporaryUrl')) {
+        // Local disks also have temporaryUrl() but it generates a signed route
+        // back to the same app, which is pointless here — stream directly instead.
+        $driver = config("filesystems.disks.{$invoice->pdf_disk}.driver");
+
+        if ($driver !== 'local' && method_exists($disk, 'temporaryUrl')) {
             try {
                 $expiry = (int) config('mollie-billing.invoices.temporary_url_expiry', 30);
                 $url = $disk->temporaryUrl($invoice->pdf_path, now()->addMinutes($expiry));
