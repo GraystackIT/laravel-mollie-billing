@@ -417,6 +417,7 @@ class MollieWebhookController extends Controller
 
                     // Clear pending state so the UI stops polling and shows the failure.
                     app(UpdateSubscription::class)->clearPendingPlanChange($billable);
+                    $billable->refresh();
 
                     $meta = $billable->getBillingSubscriptionMeta();
                     $meta['plan_change_failed_at'] = now()->toIso8601String();

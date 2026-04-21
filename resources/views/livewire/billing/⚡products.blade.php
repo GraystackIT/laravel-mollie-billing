@@ -27,6 +27,7 @@ new class extends Component {
             $result = $billable->purchaseOneTimeOrder($productCode);
 
             if (! empty($result['checkout_url'])) {
+                $this->processing = false;
                 $this->redirect($result['checkout_url']);
                 return;
             }
