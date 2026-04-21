@@ -6,9 +6,11 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
 use GraystackIT\MollieBilling\Events\AddonEnabled;
 use GraystackIT\MollieBilling\Events\PlanChanged;
@@ -984,12 +986,29 @@ class UpdateSubscription
         } catch (\Mollie\Api\Exceptions\ApiException $e) {
             if ($e->getCode() === 409) {
                 // Duplicate refund — Mollie already processed it (e.g. retry after
-                // a previous partial failure). Continue to create the credit note.
-                Log::info('Mollie duplicate refund detected (409), continuing with credit note', [
+                // a previous partial failure). Only create credit note if one doesn't already exist.
+                Log::info('Mollie duplicate refund detected (409), checking for existing credit note', [
                     'billable' => $billable->getKey(),
                     'payment_id' => $refundPaymentId,
                     'amount_gross' => $refundGross,
                 ]);
+
+                $existingCreditNote = BillingInvoice::query()
+                    ->where('billable_type', $billable->getMorphClass())
+                    ->where('billable_id', $billable->getKey())
+                    ->where('invoice_kind', InvoiceKind::CreditNote)
+                    ->where('mollie_payment_id', 'like', $refundPaymentId.':cn:%')
+                    ->where('amount_net', -$prorataCreditNet)
+                    ->exists();
+
+                if ($existingCreditNote) {
+                    Log::info('Credit note already exists for this refund, skipping', [
+                        'billable' => $billable->getKey(),
+                        'payment_id' => $refundPaymentId,
+                    ]);
+
+                    return;
+                }
             } else {
                 throw $e;
             }
