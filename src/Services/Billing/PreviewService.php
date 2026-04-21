@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
@@ -311,6 +312,13 @@ class PreviewService
             'appliesAt' => $dto->applyAt === 'end_of_period'
                 ? ($periodEnd ?? 'immediate')
                 : 'immediate',
+            'planChangeMode' => config('mollie-billing.plan_change_mode', PlanChangeMode::UserChoice)->value,
+            'isUpgrade' => BillingPolicy::isUpgrade(
+                $this->catalog, $currentPlan, $currentInterval, $newPlan, $newInterval,
+            ),
+            'isDowngrade' => BillingPolicy::isDowngrade(
+                $this->catalog, $currentPlan, $currentInterval, $newPlan, $newInterval,
+            ),
         ];
     }
 

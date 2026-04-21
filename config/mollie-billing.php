@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 
 return [
@@ -83,6 +84,14 @@ return [
     // Default for Billable::allowsBillingOverage() — overridable per billable.
     'allow_overage_default' => env('BILLING_ALLOW_OVERAGE', true),
 
+    // Controls how plan changes are applied:
+    // Immediate    — always applied immediately (with prorata billing)
+    // EndOfPeriod  — always scheduled for the end of the current period
+    // UserChoice   — the user decides (both options shown in the portal)
+    'plan_change_mode' => PlanChangeMode::from(
+        env('BILLING_PLAN_CHANGE_MODE', PlanChangeMode::UserChoice->value)
+    ),
+
     'mollie_locale' => env('BILLING_MOLLIE_LOCALE'),
 
     // Primary key type of the billable model — set before first migration run.
@@ -122,7 +131,4 @@ return [
         'connection' => env('BILLING_QUEUE_CONNECTION'),
         'name' => env('BILLING_QUEUE_NAME', 'billing'),
     ],
-
-    // Default subscription status when a billable is created.
-    'default_subscription_status' => SubscriptionStatus::Active->value,
 ];

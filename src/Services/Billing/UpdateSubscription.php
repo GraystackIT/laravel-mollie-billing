@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
@@ -46,24 +47,14 @@ class UpdateSubscription
     {
         $dto = SubscriptionUpdateRequest::from($request);
 
-        if ($dto->applyAt === 'end_of_period') {
-            if ($this->isUpgrade($billable, $dto)) {
-                // Upgrades cannot be scheduled — apply immediately instead.
-                $dto = new SubscriptionUpdateRequest(
-                    planCode: $dto->planCode,
-                    interval: $dto->interval,
-                    seats: $dto->seats,
-                    addons: $dto->addons,
-                    couponCode: $dto->couponCode,
-                    applyAt: 'immediate',
-                );
-            } else {
-                $this->scheduleService->schedule($billable, $dto);
+        $this->validateApplyAt($dto);
 
-                return [
-                    'scheduledFor' => $billable->nextBillingDate()?->toIso8601String(),
-                ];
-            }
+        if ($dto->applyAt === 'end_of_period') {
+            $this->scheduleService->schedule($billable, $dto);
+
+            return [
+                'scheduledFor' => $billable->nextBillingDate()?->toIso8601String(),
+            ];
         }
 
         /** @var Model&Billable $billable */
@@ -516,37 +507,17 @@ class UpdateSubscription
         return array_values($addons);
     }
 
-    private function isUpgrade(Billable $billable, SubscriptionUpdateRequest $dto): bool
+    private function validateApplyAt(SubscriptionUpdateRequest $dto): void
     {
-        $currentPlan = $billable->getBillingSubscriptionPlanCode() ?? '';
-        $currentInterval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
-        $currentSeats = $billable->getBillingSeatCount();
-        $currentAddons = $billable->getActiveBillingAddonCodes();
+        $mode = config('mollie-billing.plan_change_mode', PlanChangeMode::UserChoice);
 
-        $newPlan = $dto->planCode ?? $currentPlan;
-        $newInterval = $dto->interval ?? $currentInterval;
-        $planChanged = $newPlan !== $currentPlan;
-
-        // Auto-derive seats
-        $usedSeats = $billable->getUsedBillingSeats();
-        $newSeats = $dto->seats ?? max($billable->getBillingSeatCount(), $usedSeats, $this->catalog->includedSeats($newPlan));
-
-        // Auto-filter incompatible addons
-        $newAddons = $dto->addons !== null
-            ? $this->normalizeAddonCodes($dto->addons)
-            : $currentAddons;
-
-        if ($planChanged) {
-            $newAddons = array_values(array_filter(
-                $newAddons,
-                fn (string $code) => $this->catalog->planAllowsAddon($newPlan, $code),
-            ));
+        if ($dto->applyAt === 'end_of_period' && $mode === PlanChangeMode::Immediate) {
+            throw new \RuntimeException('Scheduled plan changes are not allowed.');
         }
 
-        $currentNet = $this->computeAmountNet($currentPlan, $currentInterval, $currentSeats, $currentAddons);
-        $newNet = $this->computeAmountNet($newPlan, $newInterval, $newSeats, $newAddons);
-
-        return $newNet > $currentNet;
+        if ($dto->applyAt !== 'end_of_period' && $mode === PlanChangeMode::EndOfPeriod) {
+            throw new \RuntimeException('Immediate plan changes are not allowed.');
+        }
     }
 
     /**
