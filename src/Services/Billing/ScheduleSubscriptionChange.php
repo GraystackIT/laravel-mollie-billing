@@ -60,15 +60,6 @@ class ScheduleSubscriptionChange
                 ));
             }
 
-            $currentNet = $this->computeAmountNet($currentPlan, $currentInterval, $currentSeats, $currentAddons);
-            $newNet = $this->computeAmountNet($newPlan, $newInterval, $newSeats, $newAddons);
-
-            if ($newNet > $currentNet) {
-                throw new \InvalidArgumentException(
-                    'Only downgrades can be scheduled; upgrades must apply immediately.'
-                );
-            }
-
             $scheduledAt = $billable->nextBillingDate() ?? now();
 
             $scheduledChange = [
@@ -174,33 +165,4 @@ class ScheduleSubscriptionChange
         }
     }
 
-    /**
-     * @param  array<int, string>  $addons
-     */
-    private function computeAmountNet(
-        string $planCode,
-        string $interval,
-        int $seats,
-        array $addons,
-    ): int {
-        if ($planCode === '') {
-            return 0;
-        }
-
-        $base = $this->catalog->basePriceNet($planCode, $interval);
-        $includedSeats = $this->catalog->includedSeats($planCode);
-        $seatPrice = $this->catalog->seatPriceNet($planCode, $interval);
-        $extraSeats = max(0, $seats - $includedSeats);
-
-        $total = $base;
-        if ($seatPrice !== null && $extraSeats > 0) {
-            $total += $seatPrice * $extraSeats;
-        }
-
-        foreach ($addons as $addonCode) {
-            $total += $this->catalog->addonPriceNet((string) $addonCode, $interval);
-        }
-
-        return $total;
-    }
 }

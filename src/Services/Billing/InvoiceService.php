@@ -323,7 +323,7 @@ class InvoiceService
             InvoiceStatus::Paid => __('billing::portal.invoice_state_paid'),
             InvoiceStatus::Refunded => __('billing::portal.invoice_state_refunded'),
             InvoiceStatus::Open => __('billing::portal.invoice_state_pending'),
-            InvoiceStatus::Failed => __('billing::portal.invoice_state_draft'),
+            InvoiceStatus::Failed => __('billing::portal.invoice_state_failed'),
         };
     }
 
