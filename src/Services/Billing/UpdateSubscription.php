@@ -38,7 +38,6 @@ class UpdateSubscription
         private readonly VatCalculationService $vatService,
         private readonly ValidateSubscriptionChange $validator,
         private readonly ScheduleSubscriptionChange $scheduleService,
-        private readonly RefundInvoiceService $refundService,
         private readonly WalletUsageService $walletService,
     ) {
     }
@@ -896,38 +895,25 @@ class UpdateSubscription
     }
 
     /**
-     * Issue a partial refund on the last subscription invoice for the prorata
-     * credit from an immediate downgrade. Creates both a Mollie refund and a
-     * local credit-note invoice.
+     * Refund the prorata credit for an immediate downgrade.
+     *
+     * Creates a Mollie refund against the most recent paid payment (preferring
+     * one linked to the current mandate) and a standalone credit-note invoice
+     * that is not tied to any parent invoice.
      */
     protected function refundProrataCredit(Billable $billable, int $prorataCreditNet, ?SubscriptionChangeContext $context = null): void
     {
-        if (! ($billable instanceof Model)) {
+        if (! ($billable instanceof Model) || ! $billable->hasMollieMandate()) {
             return;
         }
 
-        $isMollie = $billable->getBillingSubscriptionSource() === \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie->value;
+        $country = $billable->getBillingCountry() ?? 'DE';
+        $vatResult = $this->vatService->calculate($country, $prorataCreditNet, $billable->vat_number ?? null);
+        $vatRate = (float) $vatResult['rate'];
+        $refundGross = (int) $vatResult['gross'];
 
-        // Find the latest paid invoice to use as refund target. Mollie will
-        // reject the refund if the amount exceeds what is refundable — no
-        // need to pre-check remainingRefundableNet on our side.
-        $latestInvoice = $billable->billingInvoices()
-            ->where('status', 'paid')
-            ->whereNotNull('mollie_payment_id')
-            ->orderByDesc('created_at')
-            ->first();
-
-        if ($latestInvoice === null) {
-            if ($isMollie) {
-                throw new \RuntimeException('Cannot process prorata credit: no paid invoice found.');
-            }
-
-            return;
-        }
-
-        // Build detailed credit note line items when context is available.
         $reasonText = 'Pro-rata credit for plan downgrade';
-        $lineItems = null;
+        $lineItems = [];
 
         if ($context !== null) {
             $currentPlanName = $this->catalog->planName($context->currentPlan) ?? $context->currentPlan;
@@ -938,8 +924,6 @@ class UpdateSubscription
             $reasonText = $currentPlanName.' -> '.$newPlanName;
 
             if ($context->intervalChanged) {
-                // Interval downgrade: show new plan charge and old plan credit
-                // as separate line items. The refund amount = unusedCredit - newNet.
                 $unusedCredit = $prorataCreditNet + $context->newNet;
                 $lineItems = [
                     [
@@ -947,7 +931,6 @@ class UpdateSubscription
                         'label' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
                         'code' => $context->newPlan,
                         'quantity' => 1,
-                        'unit_price' => $context->newNet,
                         'unit_price_net' => $context->newNet,
                         'total_net' => $context->newNet,
                     ],
@@ -956,10 +939,8 @@ class UpdateSubscription
                         'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
                         'code' => $context->currentPlan,
                         'quantity' => 1,
-                        'unit_price' => -$unusedCredit,
                         'unit_price_net' => -$unusedCredit,
                         'total_net' => -$unusedCredit,
-                        'parent_invoice_id' => $latestInvoice->id,
                     ],
                 ];
             } else {
@@ -969,21 +950,111 @@ class UpdateSubscription
                     'code' => $context->currentPlan,
                     'description' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
                     'quantity' => 1,
-                    'unit_price' => -$prorataCreditNet,
                     'unit_price_net' => -$prorataCreditNet,
                     'total_net' => -$prorataCreditNet,
-                    'parent_invoice_id' => $latestInvoice->id,
                 ]];
             }
         }
 
-        $this->refundService->refundPartially(
-            $latestInvoice,
+        // Find a paid Mollie payment to issue the refund against.
+        // Prefer the most recent payment linked to the current mandate.
+        // The credit-note invoice itself is standalone (no parent_invoice_id).
+        $mandateId = $billable->getMollieMandateId();
+        $customerId = $billable->getMollieCustomerId();
+
+        $refundPaymentId = $this->findRefundablePaymentId($billable, $customerId, $mandateId);
+
+        if ($refundPaymentId === null) {
+            Log::warning('Prorata credit skipped — no paid Mollie payment found to refund against', [
+                'billable' => $billable->getKey(),
+                'prorata_credit_net' => $prorataCreditNet,
+            ]);
+
+            return;
+        }
+
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+
+        try {
+            Mollie::send(new \Mollie\Api\Http\Requests\CreatePaymentRefundRequest(
+                paymentId: $refundPaymentId,
+                description: 'Pro-rata credit: '.$reasonText,
+                amount: new Money($currency, number_format($refundGross / 100, 2, '.', '')),
+            ));
+        } catch (\Mollie\Api\Exceptions\ApiException $e) {
+            if ($e->getCode() === 409) {
+                // Duplicate refund — Mollie already processed it (e.g. retry after
+                // a previous partial failure). Continue to create the credit note.
+                Log::info('Mollie duplicate refund detected (409), continuing with credit note', [
+                    'billable' => $billable->getKey(),
+                    'payment_id' => $refundPaymentId,
+                    'amount_gross' => $refundGross,
+                ]);
+            } else {
+                throw $e;
+            }
+        }
+
+        // Create a standalone credit-note invoice (no parent invoice).
+        $invoiceService = app(InvoiceService::class);
+        $creditNote = $invoiceService->createStandaloneCreditNote(
+            $billable,
             $prorataCreditNet,
-            RefundReasonCode::PlanDowngrade,
-            $reasonText,
+            $vatRate,
             $lineItems,
+            $reasonText,
+            $refundPaymentId,
         );
+        $creditNote->refund_reason_code = RefundReasonCode::PlanDowngrade;
+        $creditNote->save();
+    }
+
+    /**
+     * Find the best Mollie payment ID to refund against.
+     *
+     * Strategy: use the Mollie API to list the customer's payments and pick
+     * the most recent paid one that belongs to the current mandate. Falls
+     * back to any paid payment if no mandate-specific one is found.
+     */
+    private function findRefundablePaymentId(Billable $billable, ?string $customerId, ?string $mandateId): ?string
+    {
+        if ($customerId === null || $customerId === '') {
+            return null;
+        }
+
+        try {
+            $payments = Mollie::send(new \Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest(
+                customerId: $customerId,
+                limit: 50,
+            ));
+        } catch (\Throwable $e) {
+            Log::warning('Failed to list Mollie payments for refund target', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        $fallback = null;
+
+        foreach ($payments as $payment) {
+            if (($payment->status ?? '') !== 'paid') {
+                continue;
+            }
+
+            // Prefer a payment linked to the current mandate.
+            if ($mandateId !== null && ($payment->mandateId ?? null) === $mandateId) {
+                return (string) $payment->id;
+            }
+
+            // Track first paid payment as fallback.
+            if ($fallback === null) {
+                $fallback = (string) $payment->id;
+            }
+        }
+
+        return $fallback;
     }
 
     /**
