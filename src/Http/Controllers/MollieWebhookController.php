@@ -598,7 +598,7 @@ class MollieWebhookController extends Controller
             $qty = $billable->getBillingAddonQuantity($code) ?: 1;
             $items[] = [
                 'kind' => 'addon',
-                'label' => $code,
+                'label' => $this->catalog->addonName($code) ?? $code,
                 'code' => $code,
                 'quantity' => $qty,
                 'unit_price' => $price,

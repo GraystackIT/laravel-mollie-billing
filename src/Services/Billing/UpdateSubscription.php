@@ -147,7 +147,7 @@ class UpdateSubscription
             if ($context->prorataChargeNet > 0) {
                 $this->chargeProrataImmediate($billable, $context->prorataChargeNet, $context);
             } elseif ($context->prorataCreditNet > 0 && $dto->applyAt === 'immediate') {
-                $this->refundProrataCredit($billable, $context->prorataCreditNet);
+                $this->refundProrataCredit($billable, $context->prorataCreditNet, $context);
             }
 
             $mollieSubscriptionPatched = false;
@@ -671,7 +671,7 @@ class UpdateSubscription
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountValue = number_format($vat['gross'] / 100, 2, '.', '');
 
-        $chargeInfo = $this->resolveChargeInfo($prorataChargeNet, $context);
+        $chargeInfo = $this->resolveChargeInfo($prorataChargeNet, $context, $billable);
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: $chargeInfo['description'],
@@ -698,7 +698,7 @@ class UpdateSubscription
      *
      * @return array{type: string, description: string, line_items: array}
      */
-    private function resolveChargeInfo(int $prorataChargeNet, ?SubscriptionChangeContext $context): array
+    private function resolveChargeInfo(int $prorataChargeNet, ?SubscriptionChangeContext $context, ?Billable $billable = null): array
     {
         if ($context === null) {
             return [
@@ -774,16 +774,124 @@ class UpdateSubscription
             ];
         }
 
-        return [
-            'type' => 'prorata',
-            'description' => 'Pro-rata plan upgrade',
-            'line_items' => [[
+        // Plan/interval change: build detailed line items mirroring the preview.
+        //
+        // The preview shows two lines:
+        //   "Neuer Plan (verbleibende Periode)"  →  newPlanProrata
+        //   "Gutschrift aktueller Plan"          → -creditProrata
+        // Their difference equals $prorataChargeNet.
+        //
+        // For same-interval changes:
+        //   newPlanProrata  = newNet * factor
+        //   creditProrata   = currentNet * factor
+        //   charge          = (newNet - currentNet) * factor  ← $prorataChargeNet
+        //
+        // For interval changes:
+        //   newPlanProrata  = newNet  (full price, new subscription starts fresh)
+        //   creditProrata   = currentNet * factor  (unused portion of old period)
+        //   charge          = newNet - creditProrata  ← $prorataChargeNet (only when positive)
+        $currentPlanName = $this->catalog->planName($context->currentPlan) ?? $context->currentPlan;
+        $newPlanName = $this->catalog->planName($context->newPlan) ?? $context->newPlan;
+
+        $currentLabel = $currentPlanName.' ('.__('billing::enums.subscription_interval.'.$context->currentInterval).')';
+        $newLabel = $newPlanName.' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
+
+        $description = $currentPlanName.' -> '.$newPlanName;
+        if ($context->intervalChanged) {
+            $description .= ' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
+        }
+
+        // Compute billing periods for line-item descriptions.
+        $currentPeriod = null;
+        $newPeriod = null;
+        if ($billable instanceof Model) {
+            $periodStart = $billable->getBillingPeriodStartsAt();
+            $periodEnd = $billable->nextBillingDate();
+            if ($periodStart !== null && $periodEnd !== null) {
+                $currentPeriod = $periodStart->format('d.m.Y').' - '.$periodEnd->format('d.m.Y');
+            }
+            if ($context->intervalChanged) {
+                $newStart = now();
+                $newEnd = $context->newInterval === 'yearly' ? now()->addYear() : now()->addMonth();
+                $newPeriod = $newStart->format('d.m.Y').' - '.$newEnd->format('d.m.Y');
+            } else {
+                $newPeriod = $currentPeriod;
+            }
+        }
+
+        $lineItems = [];
+
+        if ($context->intervalChanged) {
+            // Interval change: new plan at full price, credit for unused old period.
+            $newPlanProrata = $context->newNet;
+            $creditProrata = $newPlanProrata - $prorataChargeNet;
+        } else {
+            // Same interval: both amounts are prorated by the same factor.
+            // factor = prorataChargeNet / (newNet - currentNet) when diff ≠ 0.
+            $diff = $context->newNet - $context->currentNet;
+            if ($diff !== 0) {
+                $factor = $prorataChargeNet / $diff;
+            } else {
+                $factor = 0.0;
+            }
+            $newPlanProrata = (int) round($context->newNet * $factor);
+            $creditProrata = (int) round($context->currentNet * $factor);
+        }
+
+        // Line 1: New plan charge (remaining period).
+        if ($newPlanProrata > 0) {
+            $lineItems[] = [
+                'kind' => 'plan',
+                'label' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
+                'code' => $context->newPlan,
+                'quantity' => 1,
+                'unit_price_net' => $newPlanProrata,
+                'total_net' => $newPlanProrata,
+                'billing_period' => $newPeriod,
+            ];
+        }
+
+        // Line 2: Credit for unused portion of current plan.
+        if ($creditProrata > 0) {
+            $lineItems[] = [
+                'kind' => 'plan_credit',
+                'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
+                'code' => $context->currentPlan,
+                'quantity' => 1,
+                'unit_price_net' => -$creditProrata,
+                'total_net' => -$creditProrata,
+                'billing_period' => $currentPeriod,
+            ];
+        }
+
+        // If we couldn't build detailed items (edge case), fall back to single line.
+        if (empty($lineItems)) {
+            $lineItems[] = [
                 'kind' => 'prorata',
-                'label' => 'Pro-rata upgrade charge',
+                'label' => __('billing::portal.preview_prorata_new_plan').': '.$description,
                 'quantity' => 1,
                 'unit_price_net' => $prorataChargeNet,
                 'total_net' => $prorataChargeNet,
-            ]],
+            ];
+        }
+
+        // Ensure line items sum matches the charge amount (guard against rounding).
+        $lineItemSum = array_sum(array_column($lineItems, 'total_net'));
+        if ($lineItemSum !== $prorataChargeNet) {
+            $diff = $prorataChargeNet - $lineItemSum;
+            $lineItems[] = [
+                'kind' => 'adjustment',
+                'label' => __('billing::portal.prorata').' — '.$description,
+                'quantity' => 1,
+                'unit_price_net' => $diff,
+                'total_net' => $diff,
+            ];
+        }
+
+        return [
+            'type' => 'prorata',
+            'description' => $description,
+            'line_items' => $lineItems,
         ];
     }
 
@@ -792,44 +900,90 @@ class UpdateSubscription
      * credit from an immediate downgrade. Creates both a Mollie refund and a
      * local credit-note invoice.
      */
-    protected function refundProrataCredit(Billable $billable, int $prorataCreditNet): void
+    protected function refundProrataCredit(Billable $billable, int $prorataCreditNet, ?SubscriptionChangeContext $context = null): void
     {
         if (! ($billable instanceof Model)) {
             return;
         }
 
+        $isMollie = $billable->getBillingSubscriptionSource() === \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie->value;
+
+        // Find the latest paid invoice to use as refund target. Mollie will
+        // reject the refund if the amount exceeds what is refundable — no
+        // need to pre-check remainingRefundableNet on our side.
         $latestInvoice = $billable->billingInvoices()
-            ->where('invoice_kind', 'subscription')
             ->where('status', 'paid')
             ->whereNotNull('mollie_payment_id')
+            ->orderByDesc('created_at')
             ->first();
 
         if ($latestInvoice === null) {
+            if ($isMollie) {
+                throw new \RuntimeException('Cannot process prorata credit: no paid invoice found.');
+            }
+
             return;
         }
 
-        if ($prorataCreditNet > $latestInvoice->remainingRefundableNet()) {
-            $prorataCreditNet = $latestInvoice->remainingRefundableNet();
+        // Build detailed credit note line items when context is available.
+        $reasonText = 'Pro-rata credit for plan downgrade';
+        $lineItems = null;
+
+        if ($context !== null) {
+            $currentPlanName = $this->catalog->planName($context->currentPlan) ?? $context->currentPlan;
+            $newPlanName = $this->catalog->planName($context->newPlan) ?? $context->newPlan;
+            $currentLabel = $currentPlanName.' ('.__('billing::enums.subscription_interval.'.$context->currentInterval).')';
+            $newLabel = $newPlanName.' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
+
+            $reasonText = $currentPlanName.' -> '.$newPlanName;
+
+            if ($context->intervalChanged) {
+                // Interval downgrade: show new plan charge and old plan credit
+                // as separate line items. The refund amount = unusedCredit - newNet.
+                $unusedCredit = $prorataCreditNet + $context->newNet;
+                $lineItems = [
+                    [
+                        'kind' => 'plan',
+                        'label' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
+                        'code' => $context->newPlan,
+                        'quantity' => 1,
+                        'unit_price' => $context->newNet,
+                        'unit_price_net' => $context->newNet,
+                        'total_net' => $context->newNet,
+                    ],
+                    [
+                        'kind' => 'plan_credit',
+                        'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
+                        'code' => $context->currentPlan,
+                        'quantity' => 1,
+                        'unit_price' => -$unusedCredit,
+                        'unit_price_net' => -$unusedCredit,
+                        'total_net' => -$unusedCredit,
+                        'parent_invoice_id' => $latestInvoice->id,
+                    ],
+                ];
+            } else {
+                $lineItems = [[
+                    'kind' => 'plan_credit',
+                    'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
+                    'code' => $context->currentPlan,
+                    'description' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
+                    'quantity' => 1,
+                    'unit_price' => -$prorataCreditNet,
+                    'unit_price_net' => -$prorataCreditNet,
+                    'total_net' => -$prorataCreditNet,
+                    'parent_invoice_id' => $latestInvoice->id,
+                ]];
+            }
         }
 
-        if ($prorataCreditNet <= 0) {
-            return;
-        }
-
-        try {
-            $this->refundService->refundPartially(
-                $latestInvoice,
-                $prorataCreditNet,
-                RefundReasonCode::PlanDowngrade,
-                'Pro-rata credit for plan downgrade',
-            );
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::warning('Prorata refund failed', [
-                'billable' => $billable->getKey(),
-                'invoice' => $latestInvoice->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
+        $this->refundService->refundPartially(
+            $latestInvoice,
+            $prorataCreditNet,
+            RefundReasonCode::PlanDowngrade,
+            $reasonText,
+            $lineItems,
+        );
     }
 
     /**

@@ -27,6 +27,7 @@ class BillingInvoice extends Model
             'invoice_kind' => InvoiceKind::class,
             'refund_reason_code' => RefundReasonCode::class,
             'line_items' => 'array',
+            'payment_method_details' => 'array',
             'vat_rate' => 'decimal:2',
             'period_start' => 'datetime',
             'period_end' => 'datetime',

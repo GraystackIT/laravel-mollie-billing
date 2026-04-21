@@ -41,6 +41,7 @@ class RefundInvoiceService
         $reasonText = $request['reason_text'] ?? null;
         $walletCredits = $request['wallet_credits'] ?? [];
         $notifyUser = $request['notify_user'] ?? true;
+        $lineItems = $request['line_items'] ?? null;
 
         if ($reasonCode === RefundReasonCode::Other && ($reasonText === null || trim($reasonText) === '')) {
             throw new \InvalidArgumentException('reason_text is required when reason_code is Other.');
@@ -54,7 +55,7 @@ class RefundInvoiceService
             throw new InvalidRefundTargetException('Invoice has no Mollie payment id.');
         }
 
-        return DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser): BillingInvoice {
+        return DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems): BillingInvoice {
             $invoice = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
             $refundAmountNet = $request['amount_net'] ?? $invoice->remainingRefundableNet();
@@ -89,9 +90,8 @@ class RefundInvoiceService
                 throw $e;
             }
 
-            $creditNote = $this->invoices->createCreditNote($invoice, $refundAmountNet);
+            $creditNote = $this->invoices->createCreditNote($invoice, $refundAmountNet, $lineItems, $reasonText);
             $creditNote->refund_reason_code = $reasonCode;
-            $creditNote->refund_reason_text = $reasonText;
             $creditNote->save();
 
             $invoice->refunded_net = (int) $invoice->refunded_net + $refundAmountNet;
@@ -139,13 +139,17 @@ class RefundInvoiceService
         ]);
     }
 
-    public function refundPartially(BillingInvoice $invoice, int $amountNet, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
+    /**
+     * @param  array<int, array<string, mixed>>|null  $lineItems  Custom line items for the credit note.
+     */
+    public function refundPartially(BillingInvoice $invoice, int $amountNet, RefundReasonCode $reason, ?string $reasonText = null, ?array $lineItems = null): BillingInvoice
     {
         return $this->refund($invoice, [
             'amount_net' => $amountNet,
             'wallet_credits' => [],
             'reason_code' => $reason,
             'reason_text' => $reasonText,
+            'line_items' => $lineItems,
         ]);
     }
 

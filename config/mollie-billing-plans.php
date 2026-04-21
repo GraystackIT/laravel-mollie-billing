@@ -6,6 +6,7 @@ return [
     'plans' => [
         'free' => [
             'name' => 'Free',
+            'description' => null,
             'tier' => 1,
             'trial_days' => 0,
             'included_seats' => 1,
@@ -28,6 +29,7 @@ return [
         ],
         'pro' => [
             'name' => 'Pro',
+            'description' => null,
             'tier' => 2,
             'trial_days' => 14,
             'included_seats' => 3,

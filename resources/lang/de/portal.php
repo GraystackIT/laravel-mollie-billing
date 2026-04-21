@@ -178,6 +178,8 @@ return [
         'bic' => 'BIC',
         'paypal_email' => 'PayPal-Konto',
         'expires' => 'gültig bis :date',
+        'expires_label' => 'Gültig bis',
+        'card_number' => 'Kartennummer',
         'status' => [
             'valid' => 'Gültig',
             'pending' => 'Ausstehend',
@@ -211,6 +213,8 @@ return [
     'pending_plan_change_notice' => 'Ein Upgrade auf den :plan-Plan wartet auf Zahlungsbestätigung.',
     'cancel_pending_change' => 'Ausstehende Änderung abbrechen',
     'prorata' => 'anteilig',
+    'refund_to' => 'Rückerstattung auf :method',
+    'charged_via' => 'Abgebucht via :method',
     'no_billable' => 'Dein Abrechnungskonto konnte nicht geladen werden. Bitte melde dich an und versuche es erneut.',
     'cancel_confirm' => [
         'title' => 'Abo kündigen?',
