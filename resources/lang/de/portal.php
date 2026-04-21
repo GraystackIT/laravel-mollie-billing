@@ -213,6 +213,7 @@ return [
     'pending_plan_change_notice' => 'Ein Upgrade auf den :plan-Plan wartet auf Zahlungsbestätigung.',
     'cancel_pending_change' => 'Ausstehende Änderung abbrechen',
     'prorata' => 'anteilig',
+    'pending_change_blocks_modifications' => 'Sitze und Addons können nicht geändert werden, solange ein Planwechsel ansteht.',
     'refund_to' => 'Rückerstattung auf :method',
     'charged_via' => 'Abgebucht via :method',
     'no_billable' => 'Dein Abrechnungskonto konnte nicht geladen werden. Bitte melde dich an und versuche es erneut.',

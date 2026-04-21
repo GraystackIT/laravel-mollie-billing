@@ -97,6 +97,7 @@ new class extends Component {
             'interval' => $interval,
             'currencySymbol' => $currencySymbol,
             'catalog' => $catalog,
+            'hasPendingPlanChange' => $billable?->hasPendingBillingPlanChange() ?? false,
         ];
     }
 };
@@ -114,6 +115,12 @@ new class extends Component {
 
     @if ($polling)
         <flux:callout icon="arrow-path" color="blue" inline>{{ __('billing::portal.flash.plan_change_pending_payment') }}</flux:callout>
+    @endif
+
+    @if ($hasPendingPlanChange)
+        <flux:callout icon="arrow-path" color="blue" inline>
+            {{ __('billing::portal.pending_change_blocks_modifications') }}
+        </flux:callout>
     @endif
 
     @if (! $billable)
@@ -165,7 +172,11 @@ new class extends Component {
                             </div>
 
                             <div class="w-32">
-                                @if ($addon['isActive'])
+                                @if ($hasPendingPlanChange)
+                                    <flux:button class="w-full" size="sm" variant="ghost" disabled>
+                                        {{ $addon['isActive'] ? __('billing::portal.addons_disable') : __('billing::portal.addons_enable') }}
+                                    </flux:button>
+                                @elseif ($addon['isActive'])
                                     <flux:modal.trigger name="disable-addon-{{ $addon['code'] }}">
                                         <flux:button class="w-full" size="sm" variant="ghost" icon="x-circle">
                                             {{ __('billing::portal.addons_disable') }}
