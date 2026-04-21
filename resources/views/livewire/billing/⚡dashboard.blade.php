@@ -80,13 +80,15 @@ new class extends Component {
                 $used = $b->usedBillingQuota((string) $type);
                 $remaining = $b->remainingBillingQuota((string) $type);
                 $overage = $b->billingOverageCount((string) $type);
-                $percent = $included > 0 ? min(100, (int) round($used / $included * 100)) : 0;
+                $totalQuota = max($included, $remaining + $used);
+                $percent = $totalQuota > 0 ? min(100, (int) round($used / $totalQuota * 100)) : 0;
                 $threshold = (int) config('mollie-billing.usage_threshold_percent', 80);
 
                 $usageTypes[] = [
                     'label' => ucfirst((string) $type),
                     'used' => $used,
                     'included' => $included,
+                    'total_quota' => $totalQuota,
                     'remaining' => $remaining,
                     'overage' => $overage,
                     'percent' => $percent,
@@ -298,7 +300,7 @@ new class extends Component {
         @if (count($d['usageTypes']) > 0)
             <div class="space-y-4">
                 <flux:heading size="lg">{{ __('billing::portal.usage') }}</flux:heading>
-                <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-{{ min(count($d['usageTypes']), 4) }}">
                     @foreach ($d['usageTypes'] as $usage)
                         <flux:card class="p-5!">
                             <div class="flex items-start justify-between gap-2">
@@ -311,7 +313,7 @@ new class extends Component {
                             </div>
                             <div class="mt-3 flex items-baseline gap-1.5">
                                 <span class="text-2xl font-bold tabular-nums tracking-tight">{{ number_format($usage['used']) }}</span>
-                                <span class="text-sm text-zinc-400">/ {{ number_format($usage['included']) }}</span>
+                                <span class="text-sm text-zinc-400">/ {{ number_format($usage['total_quota']) }}</span>
                             </div>
                             <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                                 <div

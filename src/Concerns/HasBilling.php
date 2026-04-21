@@ -21,6 +21,7 @@ use GraystackIT\MollieBilling\Services\Billing\ChangePlan;
 use GraystackIT\MollieBilling\Services\Billing\DisableAddon;
 use GraystackIT\MollieBilling\Services\Billing\EnableAddon;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
+use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Services\Billing\SyncSeats;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
@@ -234,28 +235,19 @@ trait HasBilling
     {
         $balance = $this->getWallet($type)?->balanceInt ?? 0;
         $included = $this->includedBillingQuota($type);
-        $catalog = app(SubscriptionCatalogInterface::class);
-        $rollover = $catalog->usageRollover($this->getBillingSubscriptionPlanCode() ?? '');
 
-        if (! $rollover) {
-            // Without rollover, balance should never exceed included (capped).
-            return max(0, $included - min($balance, $included));
-        }
-
+        // Balance represents remaining credits. If balance >= included, nothing
+        // from the included quota has been consumed yet (extra credits may come
+        // from one-time purchases). If balance < included, the difference is
+        // how much of the included quota has been used.
         return max(0, $included - $balance);
     }
 
     public function remainingBillingQuota(string $type): int
     {
-        $balance = max(0, $this->getWallet($type)?->balanceInt ?? 0);
-        $catalog = app(SubscriptionCatalogInterface::class);
-        $rollover = $catalog->usageRollover($this->getBillingSubscriptionPlanCode() ?? '');
-
-        if (! $rollover) {
-            return min($balance, $this->includedBillingQuota($type));
-        }
-
-        return $balance;
+        // The full positive balance is available — this includes both the plan's
+        // included quota and any extra credits from one-time product purchases.
+        return max(0, $this->getWallet($type)?->balanceInt ?? 0);
     }
 
     public function billingOverageCount(string $type): int
@@ -405,6 +397,60 @@ trait HasBilling
     {
         /** @var \GraystackIT\MollieBilling\Contracts\Billable $this */
         return MollieBilling::resolveUrlParameters($this);
+    }
+
+    // ── One-time orders ──
+
+    /** @return array{checkout_url:?string, payment_id:string} */
+    public function purchaseOneTimeOrder(string $productCode, array $metadata = []): array
+    {
+        return app(StartOneTimeOrderCheckout::class)->handle($this, [
+            'product_code' => $productCode,
+            'metadata' => $metadata,
+        ]);
+    }
+
+    /** @return array<int, string> All configured product codes. */
+    public function allBillingProducts(): array
+    {
+        return app(SubscriptionCatalogInterface::class)->allProducts();
+    }
+
+    /** @return array<int, string> Product codes this billable has purchased (paid invoices). */
+    public function boughtBillingProducts(): array
+    {
+        $invoices = $this->billingInvoices()
+            ->where('invoice_kind', 'one_time_order')
+            ->where('status', 'paid')
+            ->pluck('line_items');
+
+        $codes = [];
+        foreach ($invoices as $lineItems) {
+            foreach ((array) $lineItems as $item) {
+                if (! empty($item['code'])) {
+                    $codes[] = (string) $item['code'];
+                }
+            }
+        }
+
+        return array_values(array_unique($codes));
+    }
+
+    /** @return array<int, string> Product codes available for purchase (excludes onetimeonly already bought). */
+    public function availableBillingProducts(): array
+    {
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $bought = $this->boughtBillingProducts();
+
+        $available = [];
+        foreach ($catalog->allProducts() as $code) {
+            if ($catalog->productOneTimeOnly($code) && in_array($code, $bought, true)) {
+                continue;
+            }
+            $available[] = $code;
+        }
+
+        return $available;
     }
 
     // ── Subscription management ──

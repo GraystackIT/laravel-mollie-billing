@@ -152,16 +152,16 @@ it('computes excess at period start (factor = 1.0, elapsed = 0)', function (): v
 
 // ── remainingBillingQuota capping ───────────────────────────────────────────
 
-it('caps remainingBillingQuota when rollover is disabled', function (): void {
+it('does not cap remainingBillingQuota for extra credits when rollover is disabled', function (): void {
     config()->set('mollie-billing.usage_rollover', false);
 
     $billable = makeTestBillable();
     $service = app(WalletUsageService::class);
-    // Deposit more than included (simulating a bug or edge case)
+    // Deposit more than included (e.g. via one-time order purchase)
     $service->credit($billable, 'Tokens', 150);
 
-    // Without rollover, remaining should be capped at included (100)
-    expect($billable->remainingBillingQuota('Tokens'))->toBe(100);
+    // Extra credits from purchases are always available, regardless of rollover
+    expect($billable->remainingBillingQuota('Tokens'))->toBe(150);
 });
 
 it('does not cap remainingBillingQuota when rollover is enabled', function (): void {

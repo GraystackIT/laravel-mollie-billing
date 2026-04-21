@@ -10,6 +10,8 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
+use GraystackIT\MollieBilling\Events\OneTimeOrderCompleted;
+use GraystackIT\MollieBilling\Events\OneTimeOrderFailed;
 use GraystackIT\MollieBilling\Events\OverageCharged;
 use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
@@ -169,6 +171,11 @@ class MollieWebhookController extends Controller
                 return;
             }
 
+            if ($type === 'one_time_order') {
+                $this->handleOneTimeOrderPaid($payment, $billable, $metadata);
+                return;
+            }
+
             if (in_array($type, ['overage', 'prorata', 'addon', 'seats'], true)) {
                 $this->handleSingleChargePaid($payment, $billable, $type, $metadata);
                 return;
@@ -190,6 +197,11 @@ class MollieWebhookController extends Controller
 
         if (in_array($status, ['failed', 'canceled', 'expired'], true)) {
             if ($billable === null) {
+                return;
+            }
+
+            if ($type === 'one_time_order') {
+                $this->handleOneTimeOrderFailed($payment, $billable, $metadata);
                 return;
             }
 
@@ -634,6 +646,65 @@ class MollieWebhookController extends Controller
         }
 
         return false;
+    }
+
+    protected function handleOneTimeOrderPaid(object $payment, Billable $billable, array $metadata): void
+    {
+        $productCode = (string) ($metadata['product_code'] ?? '');
+        if ($productCode === '') {
+            Log::warning('One-time order webhook with missing product_code', ['id' => $payment->id]);
+
+            return;
+        }
+
+        $priceNet = $this->catalog->productPriceNet($productCode);
+        $lineItems = [[
+            'kind' => 'one_time_order',
+            'code' => $productCode,
+            'label' => $this->catalog->productName($productCode) ?? $productCode,
+            'quantity' => 1,
+            'unit_price' => $priceNet,
+            'unit_price_net' => $priceNet,
+            'total_net' => $priceNet,
+        ]];
+
+        $invoice = $this->salesInvoiceService->createForPayment($payment, 'one_time_order', $lineItems, $billable);
+
+        $usageType = $this->catalog->productUsageType($productCode);
+        $quantity = $this->catalog->productQuantity($productCode);
+
+        Log::info('One-time order: checking wallet credit', [
+            'product_code' => $productCode,
+            'usage_type' => $usageType,
+            'quantity' => $quantity,
+            'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+        ]);
+
+        if ($usageType !== null && $quantity !== null && $quantity > 0) {
+            $this->walletService->credit($billable, $usageType, $quantity, 'one_time_order:'.$productCode);
+
+            Log::info('One-time order: wallet credited', [
+                'product_code' => $productCode,
+                'usage_type' => $usageType,
+                'quantity' => $quantity,
+            ]);
+        }
+
+        event(new OneTimeOrderCompleted($billable, $invoice, $productCode, $metadata));
+        event(new PaymentSucceeded($billable, $invoice));
+        $this->notifyInvoiceAvailable($billable, $invoice);
+    }
+
+    protected function handleOneTimeOrderFailed(object $payment, Billable $billable, array $metadata): void
+    {
+        $productCode = (string) ($metadata['product_code'] ?? '');
+
+        event(new OneTimeOrderFailed(
+            $billable,
+            $productCode,
+            (string) ($payment->id ?? ''),
+            (string) ($payment->status ?? 'unknown'),
+        ));
     }
 
     protected function notifyInvoiceAvailable(Billable $billable, BillingInvoice $invoice): void

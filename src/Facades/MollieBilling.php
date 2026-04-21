@@ -22,6 +22,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static \GraystackIT\MollieBilling\Services\Billing\UpdateSubscription subscriptions()
  * @method static \GraystackIT\MollieBilling\Services\Billing\PreviewService preview()
  * @method static \GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService refunds()
+ * @method static \GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout orders()
  * @method static \GraystackIT\MollieBilling\Testing\MollieBillingFake fake()
  * @method static void routes()
  * @method static void checkoutRoutes()

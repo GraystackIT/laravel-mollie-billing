@@ -21,6 +21,7 @@ return [
         'addon' => 'Addon',
         'seats' => 'Seats',
         'overage' => 'Overage',
+        'one_time_order' => 'One-time order',
         'credit_note' => 'Credit note',
     ],
     'subscription_source' => [
