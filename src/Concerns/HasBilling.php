@@ -98,6 +98,13 @@ trait HasBilling
         return $this->subscription_meta ?? [];
     }
 
+    public function hasPendingBillingPlanChange(): bool
+    {
+        $meta = $this->getBillingSubscriptionMeta();
+
+        return ! empty($meta['pending_plan_change']) || ! empty($meta['scheduled_change']);
+    }
+
     public function getBillingPeriodStartsAt(): ?CarbonInterface
     {
         return $this->subscription_period_starts_at;

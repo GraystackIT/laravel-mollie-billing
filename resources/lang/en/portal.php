@@ -213,6 +213,7 @@ return [
     'pending_plan_change_notice' => 'An upgrade to the :plan plan is awaiting payment confirmation.',
     'cancel_pending_change' => 'Cancel pending change',
     'prorata' => 'pro-rata',
+    'pending_change_blocks_modifications' => 'Seats and addons cannot be modified while a plan change is pending.',
     'refund_to' => 'Refund to :method',
     'charged_via' => 'Charged via :method',
     'no_billable' => 'Unable to load your billing account. Please sign in and try again.',

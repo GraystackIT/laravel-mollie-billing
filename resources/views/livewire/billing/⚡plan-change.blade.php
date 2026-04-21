@@ -291,7 +291,7 @@ new class extends Component {
             @endphp
 
             <flux:card
-                class="relative flex flex-col overflow-hidden transition {{ $isSelected ? 'ring-2 ring-accent shadow-lg' : ($isScheduledTarget ? 'ring-2 ring-amber-400 shadow-lg' : 'hover:shadow-md') }}"
+                class="relative flex flex-col overflow-hidden transition {{ $isSelected ? 'ring-2 ring-accent shadow-lg' : 'hover:shadow-md' }}"
             >
                 {{-- Top accent strip --}}
                 @if ($isCurrent || $isScheduledTarget || $isSelected)
