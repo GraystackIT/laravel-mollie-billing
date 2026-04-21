@@ -216,6 +216,13 @@ return [
     'pending_change_blocks_modifications' => 'Sitze und Addons können nicht geändert werden, solange ein Planwechsel ansteht.',
     'refund_to' => 'Rückerstattung auf :method',
     'charged_via' => 'Abgebucht via :method',
+    'invoice_type' => 'Rechnung',
+    'credit_note_type' => 'Gutschrift',
+    'credit_note_label' => 'Gutschrift zu Rechnung #:serial',
+    'invoice_state_paid' => 'Bezahlt',
+    'invoice_state_refunded' => 'Erstattet',
+    'invoice_state_pending' => 'Ausstehend',
+    'invoice_state_draft' => 'Entwurf',
     'no_billable' => 'Dein Abrechnungskonto konnte nicht geladen werden. Bitte melde dich an und versuche es erneut.',
     'cancel_confirm' => [
         'title' => 'Abo kündigen?',
