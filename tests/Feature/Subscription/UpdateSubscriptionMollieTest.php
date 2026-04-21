@@ -13,7 +13,6 @@ use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\ValidateSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
-use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\Event;
@@ -66,7 +65,6 @@ beforeEach(function (): void {
             $app->make(VatCalculationService::class),
             $app->make(ValidateSubscriptionChange::class),
             $app->make(ScheduleSubscriptionChange::class),
-            $app->make(RefundInvoiceService::class),
             $app->make(WalletUsageService::class),
         );
     });

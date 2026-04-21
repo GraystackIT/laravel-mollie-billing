@@ -108,6 +108,16 @@ new class extends Component {
             ]);
             \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
         } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Scheduled plan change (apply now) failed', [
+                'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                'scheduled_change' => $sc,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+                'code' => $e->getCode(),
+                'file' => $e->getFile().':'.$e->getLine(),
+                'previous' => $e->getPrevious() ? $e->getPrevious()->getMessage() : null,
+                'trace' => collect(explode("\n", $e->getTraceAsString()))->take(15)->implode("\n"),
+            ]);
             report($e);
             $service->clearPendingPlanChange($billable);
             \Flux::toast(
@@ -158,6 +168,18 @@ new class extends Component {
             $this->preview = [];
             $this->selectedPlan = null;
         } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Plan change failed', [
+                'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                'selected_plan' => $this->selectedPlan,
+                'selected_interval' => $this->selectedInterval,
+                'apply_at' => $applyAt,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+                'code' => $e->getCode(),
+                'file' => $e->getFile().':'.$e->getLine(),
+                'previous' => $e->getPrevious() ? $e->getPrevious()->getMessage() : null,
+                'trace' => collect(explode("\n", $e->getTraceAsString()))->take(15)->implode("\n"),
+            ]);
             report($e);
             $service->clearPendingPlanChange($billable);
             \Flux::toast(

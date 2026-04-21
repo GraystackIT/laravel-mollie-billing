@@ -139,6 +139,57 @@ class InvoiceService
     }
 
     /**
+     * Create a standalone credit-note invoice for a prorata refund.
+     *
+     * Unlike {@see createCreditNote()}, this is NOT tied to a parent invoice.
+     * It represents an independent refund (e.g. prorata credit on plan downgrade)
+     * that is issued via the billable's Mollie mandate.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     */
+    public function createStandaloneCreditNote(
+        Billable $billable,
+        int $amountNet,
+        float $vatRate,
+        array $lineItems,
+        ?string $description = null,
+        ?string $molliePaymentId = null,
+    ): BillingInvoice {
+        /** @var Model&Billable $billable */
+        if ($amountNet <= 0) {
+            throw new \InvalidArgumentException('Credit-note net amount must be positive.');
+        }
+
+        $creditVat = (int) round($amountNet * $vatRate / 100);
+        $creditGross = $amountNet + $creditVat;
+
+        $creditNote = new BillingInvoice();
+        $creditNote->billable_type = $billable->getMorphClass();
+        $creditNote->billable_id = $billable->getKey();
+        $creditNote->mollie_payment_id = $molliePaymentId !== null
+            ? $molliePaymentId.':cn:'.uniqid('', true)
+            : 'cn:'.uniqid('', true);
+        $creditNote->serial_number = $this->numberGenerator->generate('credit_note');
+        $creditNote->invoice_kind = InvoiceKind::CreditNote;
+        $creditNote->status = InvoiceStatus::Refunded;
+        $creditNote->country = strtoupper($billable->getBillingCountry() ?? '');
+        $creditNote->vat_rate = $vatRate;
+        $creditNote->currency = (string) config('mollie-billing.currency', 'EUR');
+        $creditNote->amount_net = -$amountNet;
+        $creditNote->amount_vat = -$creditVat;
+        $creditNote->amount_gross = -$creditGross;
+        $creditNote->line_items = $lineItems;
+        $creditNote->refund_reason_text = $description;
+        $creditNote->refunded_net = 0;
+        $creditNote->save();
+
+        $this->generateAndStorePdf($creditNote, $billable);
+        event(new CreditNoteIssued($billable, $creditNote, null));
+
+        return $creditNote;
+    }
+
+    /**
      * Generate a PDF from the BillingInvoice data and store it on the configured disk.
      * Failures are logged but do not prevent the invoice from being persisted.
      */

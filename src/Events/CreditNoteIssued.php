@@ -17,7 +17,7 @@ class CreditNoteIssued
     public function __construct(
         public readonly Billable $billable,
         public readonly BillingInvoice $creditNote,
-        public readonly BillingInvoice $originalInvoice,
+        public readonly ?BillingInvoice $originalInvoice,
     ) {
     }
 }
