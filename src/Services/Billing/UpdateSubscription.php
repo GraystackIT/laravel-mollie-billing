@@ -30,6 +30,7 @@ use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
+use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class UpdateSubscription
@@ -158,17 +159,18 @@ class UpdateSubscription
                 $meta = $billable->getBillingSubscriptionMeta();
 
                 if ($context->isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-                    $mollieSubscriptionPatched = $this->cancelAndRecreateMollieSubscription(
+                    $mollieSubscriptionPatched = $this->syncMollieSubscription(
                         $billable,
                         $context->newPlan,
                         $context->newInterval,
                         array_values($newAddons),
                         max(0, $newSeats - $this->catalog->includedSeats($context->newPlan)),
                         $newNet,
+                        $context->planChanged || $context->intervalChanged,
                     );
 
                     if (! $mollieSubscriptionPatched) {
-                        Log::warning('Mollie subscription was not patched — cancelAndRecreate returned false', [
+                        Log::warning('Mollie subscription sync failed', [
                             'billable' => $billable->getKey(),
                         ]);
                     }
@@ -258,13 +260,14 @@ class UpdateSubscription
             $mollieSubscriptionPatched = false;
 
             if ($isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-                $mollieSubscriptionPatched = $this->cancelAndRecreateMollieSubscription(
+                $mollieSubscriptionPatched = $this->syncMollieSubscription(
                     $billable,
                     $context->newPlan,
                     $context->newInterval,
                     array_values($newAddons),
                     max(0, $newSeats - $this->catalog->includedSeats($context->newPlan)),
                     $newNet,
+                    $context->planChanged || $context->intervalChanged,
                 );
             }
 
@@ -558,6 +561,30 @@ class UpdateSubscription
     }
 
     /**
+     * Route to the correct Mollie subscription sync strategy.
+     *
+     * - Plan or interval change: cancel+recreate (new subscription, starts immediately).
+     * - Seat or addon change only: PATCH the existing subscription (preserves ID, no new payment).
+     *
+     * @param  array<int, string>  $addons
+     */
+    protected function syncMollieSubscription(
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        int $amountNet,
+        bool $requiresRecreate,
+    ): bool {
+        if ($requiresRecreate) {
+            return $this->cancelAndRecreateMollieSubscription($billable, $planCode, $interval, $addons, $extraSeats, $amountNet);
+        }
+
+        return $this->updateMollieSubscription($billable, $planCode, $interval, $addons, $extraSeats, $amountNet);
+    }
+
+    /**
      * Cancel the current Mollie subscription and immediately create a new one with the
      * updated amount. Returns true on success.
      *
@@ -650,6 +677,90 @@ class UpdateSubscription
             description: (string) $payload['description'],
             metadata: $payload['metadata'] ?? null,
             webhookUrl: $payload['webhookUrl'] ?? null,
+        ));
+    }
+
+    /**
+     * Update the amount and metadata on an existing Mollie subscription in-place.
+     *
+     * Used for seat and addon changes within the same plan/interval. Unlike
+     * cancelAndRecreateMollieSubscription this preserves the subscription ID,
+     * avoids creating an immediate first payment, and keeps invoice history
+     * linked to the same subscription.
+     *
+     * @param  array<int, string>  $addons
+     */
+    protected function updateMollieSubscription(
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        int $amountNet,
+    ): bool {
+        if (! ($billable instanceof Model)) {
+            return false;
+        }
+
+        $customerId = $billable->getMollieCustomerId();
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+
+        if ($customerId === null || $subscriptionId === '') {
+            Log::warning('updateMollieSubscription skipped — missing Mollie identifiers', [
+                'billable' => $billable->getKey(),
+                'mollie_customer_id' => $customerId,
+                'mollie_subscription_id' => $subscriptionId ?: '(empty)',
+            ]);
+
+            return false;
+        }
+
+        try {
+            $vat = $this->vatService->calculate(
+                (string) ($billable->getBillingCountry() ?? ''),
+                $amountNet,
+                $billable->vat_number,
+            );
+
+            $currency = (string) config('mollie-billing.currency', 'EUR');
+
+            $this->mollieUpdateSubscription($customerId, $subscriptionId, [
+                'amount' => [
+                    'currency' => $currency,
+                    'value' => number_format(((int) $vat['gross']) / 100, 2, '.', ''),
+                ],
+                'metadata' => [
+                    'billable_type' => $billable->getMorphClass(),
+                    'billable_id' => (string) $billable->getKey(),
+                    'plan_code' => $planCode,
+                    'interval' => $interval,
+                    'addon_codes' => $addons,
+                    'extra_seats' => $extraSeats,
+                ],
+            ]);
+
+            return true;
+        } catch (\Throwable $e) {
+            Log::error('Mollie subscription update (PATCH) failed', [
+                'billable' => $billable->getKey(),
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw $e;
+        }
+    }
+
+    protected function mollieUpdateSubscription(string $customerId, string $subscriptionId, array $payload): object
+    {
+        return Mollie::send(new MollieUpdateSubscriptionRequest(
+            customerId: $customerId,
+            subscriptionId: $subscriptionId,
+            amount: new Money(
+                (string) $payload['amount']['currency'],
+                (string) $payload['amount']['value'],
+            ),
+            metadata: $payload['metadata'] ?? null,
         ));
     }
 
@@ -929,9 +1040,24 @@ class UpdateSubscription
             $currentLabel = $currentPlanName.' ('.__('billing::enums.subscription_interval.'.$context->currentInterval).')';
             $newLabel = $newPlanName.' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
 
-            $reasonText = $currentPlanName.' -> '.$newPlanName;
+            $onlySeatsChanged = ! $context->planChanged
+                && ! $context->intervalChanged
+                && $context->newSeats !== $context->currentSeats;
 
-            if ($context->intervalChanged) {
+            if ($onlySeatsChanged) {
+                $seatsRemoved = $context->currentSeats - $context->newSeats;
+                $reasonText = $currentPlanName.': '.$context->currentSeats.' -> '.$context->newSeats.' '.__('billing::portal.seats');
+                $lineItems = [[
+                    'kind' => 'seat_credit',
+                    'label' => __('billing::portal.preview_prorata_credit').': '.$seatsRemoved.' × '.__('billing::portal.seats'),
+                    'code' => $context->currentPlan,
+                    'description' => $currentLabel,
+                    'quantity' => $seatsRemoved,
+                    'unit_price_net' => $seatsRemoved > 0 ? (int) round(-$prorataCreditNet / $seatsRemoved) : -$prorataCreditNet,
+                    'total_net' => -$prorataCreditNet,
+                ]];
+            } elseif ($context->intervalChanged) {
+                $reasonText = $currentPlanName.' -> '.$newPlanName;
                 $unusedCredit = $prorataCreditNet + $context->newNet;
                 $lineItems = [
                     [
@@ -952,6 +1078,7 @@ class UpdateSubscription
                     ],
                 ];
             } else {
+                $reasonText = $currentPlanName.' -> '.$newPlanName;
                 $lineItems = [[
                     'kind' => 'plan_credit',
                     'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
@@ -1034,19 +1161,53 @@ class UpdateSubscription
     }
 
     /**
-     * Find the Mollie payment ID for the current subscription's most recent paid invoice.
+     * Find the Mollie payment ID for the billable's most recent paid
+     * subscription invoice that has not already been refunded.
+     *
+     * Search order:
+     * 1. Invoice matching the current mollie_subscription_id.
+     * 2. Any paid subscription invoice for this billable (covers the first
+     *    checkout payment which has no subscriptionId, and old invoices
+     *    from prior cancel+recreate cycles).
+     *
+     * Invoices that already have a credit note are excluded to avoid
+     * duplicate refund attempts against Mollie.
      */
     private function findSubscriptionPaymentId(Billable $billable, string $subscriptionId): ?string
     {
-        if ($subscriptionId === '') {
-            return null;
+        $alreadyRefundedPaymentIds = BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->where('invoice_kind', InvoiceKind::CreditNote)
+            ->pluck('mollie_payment_id')
+            ->map(fn (string $id) => explode(':cn:', $id)[0])
+            ->unique()
+            ->all();
+
+        // Try the current subscription ID first.
+        if ($subscriptionId !== '') {
+            $paymentId = BillingInvoice::query()
+                ->where('billable_type', $billable->getMorphClass())
+                ->where('billable_id', $billable->getKey())
+                ->where('mollie_subscription_id', $subscriptionId)
+                ->where('status', InvoiceStatus::Paid)
+                ->when($alreadyRefundedPaymentIds, fn ($q) => $q->whereNotIn('mollie_payment_id', $alreadyRefundedPaymentIds))
+                ->latest()
+                ->value('mollie_payment_id');
+
+            if ($paymentId !== null) {
+                return $paymentId;
+            }
         }
 
+        // Fallback: covers the first checkout payment (no subscriptionId on
+        // the invoice) and invoices from prior cancel+recreate cycles.
         return BillingInvoice::query()
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
-            ->where('mollie_subscription_id', $subscriptionId)
             ->where('status', InvoiceStatus::Paid)
+            ->where('invoice_kind', InvoiceKind::Subscription)
+            ->when($alreadyRefundedPaymentIds, fn ($q) => $q->whereNotIn('mollie_payment_id', $alreadyRefundedPaymentIds))
             ->latest()
             ->value('mollie_payment_id');
     }

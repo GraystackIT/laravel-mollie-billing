@@ -88,8 +88,13 @@ class ValidateSubscriptionChange
             throw new SeatDowngradeRequiredException($billable, $usedSeats, $newIncludedSeats);
         }
 
-        // Auto-derive: if no explicit seats were set, use max(used, included).
-        $context->newSeats = max($usedSeats, $newIncludedSeats);
+        // Auto-derive: preserve existing seat count across plan changes.
+        // Without this, a billable with 14 seats switching plans would be
+        // reset to max(usedSeats, includedSeats) — losing paid extra seats.
+        // When the caller explicitly sets seats (e.g. dropExtraSeats),
+        // seatsExplicit is true and this code is not reached.
+        $currentSeatCount = $billable->getBillingSeatCount();
+        $context->newSeats = max($currentSeatCount, $usedSeats, $newIncludedSeats);
     }
 
     /**
