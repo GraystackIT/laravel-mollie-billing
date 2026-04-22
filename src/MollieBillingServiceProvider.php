@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling;
 
 use GraystackIT\MollieBilling\Commands\OssExportCommand;
 use GraystackIT\MollieBilling\Commands\PrepareOverageCommand;
+use GraystackIT\MollieBilling\Commands\SyncPurchasedBalanceCommand;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Features\FeatureAccess;
@@ -182,6 +183,7 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->commands([
             PrepareOverageCommand::class,
             OssExportCommand::class,
+            SyncPurchasedBalanceCommand::class,
         ]);
     }
 

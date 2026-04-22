@@ -1,7 +1,7 @@
 <?php
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
-use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Livewire\Component;
 
 new class extends Component {
@@ -29,7 +29,7 @@ new class extends Component {
         return $class ? $class::find($this->billableId) : null;
     }
 
-    public function credit(RefundInvoiceService $service): void
+    public function credit(WalletUsageService $service): void
     {
         $this->flash = $this->error = null;
         $b = $this->billable();
@@ -42,7 +42,7 @@ new class extends Component {
             $this->error = 'Units must be greater than zero.';
             return;
         }
-        $service->creditWalletOnly($b, $this->creditType, $this->creditUnits, $this->creditReason ?: 'admin credit');
+        $service->credit($b, $this->creditType, $this->creditUnits, $this->creditReason ?: 'admin credit');
         $this->flash = "Credited {$this->creditUnits} {$this->creditType}.";
         $this->reset(['creditUnits', 'creditReason']);
     }

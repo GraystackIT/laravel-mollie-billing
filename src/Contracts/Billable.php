@@ -55,6 +55,7 @@ interface Billable
     public function includedBillingQuota(string $type): int;
     public function usedBillingQuota(string $type): int;
     public function remainingBillingQuota(string $type): int;
+    public function purchasedBillingCredits(string $type): int;
     public function billingOverageCount(string $type): int;
     public function billingOveragePrice(string $type): ?int;
     public function hasBillingQuotaLeft(string $type): bool;

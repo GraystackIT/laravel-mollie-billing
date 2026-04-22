@@ -2,7 +2,7 @@
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
-use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Livewire\Component;
 
 new class extends Component {
@@ -32,7 +32,7 @@ new class extends Component {
         ];
     }
 
-    public function creditWallets(RefundInvoiceService $service): void
+    public function creditWallets(WalletUsageService $service): void
     {
         $this->flash = $this->error = null;
         $class = config('mollie-billing.billable_model');
@@ -42,7 +42,7 @@ new class extends Component {
 
         $count = 0;
         $class::query()->where('subscription_plan_code', $this->planFilter)->each(function ($b) use ($service, &$count): void {
-            $service->creditWalletOnly($b, $this->creditType, $this->creditUnits, 'bulk credit');
+            $service->credit($b, $this->creditType, $this->creditUnits, 'bulk credit');
             $count++;
         });
         $this->flash = "Credited {$count} billables.";

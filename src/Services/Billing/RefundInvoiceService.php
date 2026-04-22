@@ -9,7 +9,6 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
-use GraystackIT\MollieBilling\Events\WalletCredited;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\MollieBilling;
@@ -24,6 +23,16 @@ use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
 
+/**
+ * Issue refunds against paid Mollie invoices.
+ *
+ * This is the primary entry point for programmatic refunds. Each public method
+ * delegates to {@see refund()}, which handles the Mollie API call, credit-note
+ * creation, cumulative refund tracking, events, and notifications.
+ *
+ * For wallet-only credits (no Mollie refund, no credit note), use
+ * {@see \GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::credit()} directly.
+ */
 class RefundInvoiceService
 {
     public function __construct(
@@ -33,7 +42,17 @@ class RefundInvoiceService
     }
 
     /**
-     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool}  $request
+     * Core refund method. Validates the invoice, calls the Mollie refund API,
+     * creates a credit note, updates cumulative refund tracking on the original,
+     * optionally credits wallet units, and dispatches events + notifications.
+     *
+     * All other public methods on this service delegate here.
+     *
+     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
+     *
+     * @throws InvalidRefundTargetException        Invoice is not paid or has no Mollie payment.
+     * @throws RefundExceedsInvoiceAmountException  Requested amount exceeds remaining refundable balance.
+     * @throws \InvalidArgumentException            Missing reason_code, or reason_text required for Other.
      */
     public function refund(BillingInvoice $invoice, array $request): BillingInvoice
     {
@@ -121,6 +140,10 @@ class RefundInvoiceService
         });
     }
 
+    /**
+     * Refund the full remaining amount of an invoice. For overage invoices,
+     * wallet units are automatically credited back based on the line items.
+     */
     public function refundFully(BillingInvoice $invoice, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
         $walletCredits = [];
@@ -145,6 +168,10 @@ class RefundInvoiceService
     }
 
     /**
+     * Refund a specific net amount. Use this for any partial refund where
+     * wallet units do not need to be credited back (e.g. billing errors,
+     * goodwill credits, or overage money-only refunds).
+     *
      * @param  array<int, array<string, mixed>>|null  $lineItems  Custom line items for the credit note.
      */
     public function refundPartially(BillingInvoice $invoice, int $amountNet, RefundReasonCode $reason, ?string $reasonText = null, ?array $lineItems = null): BillingInvoice
@@ -158,6 +185,13 @@ class RefundInvoiceService
         ]);
     }
 
+    /**
+     * Refund a specific number of overage units for a single usage type.
+     * The refund amount is computed from the unit price on the invoice.
+     * The corresponding wallet units are credited back automatically.
+     *
+     * @throws InvalidRefundTargetException  Invoice is not an overage invoice or usage type not found.
+     */
     public function refundOverageUnits(BillingInvoice $invoice, string $usageType, int $units, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
         if ($invoice->invoice_kind !== InvoiceKind::Overage) {
@@ -175,7 +209,13 @@ class RefundInvoiceService
     }
 
     /**
-     * @param  array<string,int>  $unitsPerType
+     * Refund overage units across multiple usage types in a single call.
+     * The refund amount is the sum of (unit price * units) per type.
+     * All corresponding wallet units are credited back automatically.
+     *
+     * @param  array<string,int>  $unitsPerType  Map of usage type => units to refund.
+     *
+     * @throws InvalidRefundTargetException  Invoice is not an overage invoice or usage type not found.
      */
     public function refundOverageUnitsBulk(BillingInvoice $invoice, array $unitsPerType, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
@@ -194,22 +234,6 @@ class RefundInvoiceService
             'reason_code' => $reason,
             'reason_text' => $reasonText,
         ]);
-    }
-
-    public function refundOverageMoneyOnly(BillingInvoice $invoice, ?int $amountNet, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
-    {
-        return $this->refund($invoice, [
-            'amount_net' => $amountNet,
-            'wallet_credits' => [],
-            'reason_code' => $reason,
-            'reason_text' => $reasonText,
-        ]);
-    }
-
-    public function creditWalletOnly(Billable $billable, string $usageType, int $units, string $reasonText): void
-    {
-        $this->wallet->credit($billable, $usageType, $units);
-        event(new WalletCredited($billable, $usageType, $units, $reasonText));
     }
 
     private function unitPriceFor(BillingInvoice $invoice, string $usageType): int

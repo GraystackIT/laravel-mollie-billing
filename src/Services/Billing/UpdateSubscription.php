@@ -190,6 +190,10 @@ class UpdateSubscription
                 ])->save();
             }
 
+            // Wallet adjustment only runs on plan/interval changes because
+            // addons do not contribute included usages. If addon-based quotas
+            // are ever added, this condition must include addon changes too.
+            // See SubscriptionCatalogInterface::includedUsage() for details.
             if ($context->planChanged || $context->intervalChanged) {
                 $this->adjustWalletsForPlanChange($billable, $context->currentPlan, $context->currentInterval, $context->newPlan, $context->newInterval);
             }
@@ -280,6 +284,7 @@ class UpdateSubscription
                 'subscription_meta' => $meta,
             ])->save();
 
+            // See update() — addons don't carry included usages.
             if ($context->planChanged || $context->intervalChanged) {
                 $this->adjustWalletsForPlanChange(
                     $billable,
@@ -1077,25 +1082,33 @@ class UpdateSubscription
             $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
             $balance = (int) $wallet->balanceInt;
 
-            // Step 1: Compute prorated excess from old plan.
+            // Step 1: Separate purchased credits from plan credits.
+            // Purchased credits (one-time orders, coupon credits) are consumed
+            // last — plan quota is consumed first. The remaining purchased
+            // balance is preserved across the plan change.
+            $purchasedBalance = WalletUsageService::getPurchasedBalance($wallet);
+            $purchasedRemaining = WalletUsageService::computePurchasedRemaining($purchasedBalance, $balance);
+            $planOnlyBalance = $balance - $purchasedRemaining;
+
+            // Step 2: Compute prorated excess from old plan (excluding purchased credits).
             $excess = 0;
             if ($periodStart !== null && $periodEnd !== null && $oldIncluded > 0) {
                 $result = BillingPolicy::computeUsageOverageForPlanChange(
                     $oldIncluded,
-                    $balance,
+                    $planOnlyBalance,
                     $periodStart,
                     $periodEnd,
                 );
                 $excess = $result['excess'];
             }
 
-            // Step 2: Compute rollover credits.
-            $rolloverCredits = $rollover ? max(0, $balance - $oldIncluded) : 0;
+            // Step 3: Compute rollover credits (only from plan balance, not purchased).
+            $rolloverCredits = $rollover ? max(0, $planOnlyBalance - $oldIncluded) : 0;
 
-            // Step 3: Compute target balance.
-            $targetBalance = $newIncluded + $rolloverCredits - $excess;
+            // Step 4: Compute target balance.
+            $targetBalance = $newIncluded + $rolloverCredits + $purchasedRemaining - $excess;
 
-            // Step 4: If target < 0, charge the unresolvable remainder as overage.
+            // Step 5: If target < 0, charge the unresolvable remainder as overage.
             if ($targetBalance < 0) {
                 $unresolvedOverage = abs($targetBalance);
                 $targetBalance = 0;
@@ -1121,6 +1134,9 @@ class UpdateSubscription
             if ($targetBalance > 0) {
                 $wallet->deposit($targetBalance, ['type' => $slug, 'reason' => 'plan_change_credit']);
             }
+
+            // purchased_balance must not exceed the actual wallet balance.
+            WalletUsageService::setPurchasedBalance($wallet, min($purchasedRemaining, max(0, $targetBalance)));
         }
 
         // Create wallets for usage types that are new in the target plan.

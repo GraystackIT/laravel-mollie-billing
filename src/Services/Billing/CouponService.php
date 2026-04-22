@@ -373,6 +373,12 @@ class CouponService
                             continue;
                         }
                         $this->walletService->credit($billable, (string) $type, $qty, 'coupon_credit');
+                        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+                            $wallet = $billable->getWallet((string) $type);
+                            if ($wallet !== null) {
+                                WalletUsageService::addPurchasedBalance($wallet, $qty);
+                            }
+                        }
                         $applied[$type] = $qty;
                     }
                     $redemption->credits_applied = $applied;
@@ -427,6 +433,12 @@ class CouponService
             $qty = (int) $quantity;
             if ($qty > 0) {
                 $this->walletService->credit($billable, (string) $type, $qty, 'coupon_credit');
+                if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+                    $wallet = $billable->getWallet((string) $type);
+                    if ($wallet !== null) {
+                        WalletUsageService::addPurchasedBalance($wallet, $qty);
+                    }
+                }
             }
         }
     }

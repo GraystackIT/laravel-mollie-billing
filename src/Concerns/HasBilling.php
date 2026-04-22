@@ -233,14 +233,20 @@ trait HasBilling
 
     public function usedBillingQuota(string $type): int
     {
-        $balance = $this->getWallet($type)?->balanceInt ?? 0;
+        $wallet = $this->getWallet($type);
+        $balance = (int) ($wallet?->balanceInt ?? 0);
         $included = $this->includedBillingQuota($type);
+        $purchased = $wallet !== null
+            ? WalletUsageService::getPurchasedBalance($wallet)
+            : 0;
 
-        // Balance represents remaining credits. If balance >= included, nothing
-        // from the included quota has been consumed yet (extra credits may come
-        // from one-time purchases). If balance < included, the difference is
-        // how much of the included quota has been used.
-        return max(0, $included - $balance);
+        // Plan credits are consumed first. The plan-only balance is the wallet
+        // balance minus any surviving purchased credits. Used = how much of the
+        // plan quota has been consumed.
+        $purchasedRemaining = WalletUsageService::computePurchasedRemaining($purchased, $balance);
+        $planOnlyBalance = $balance - $purchasedRemaining;
+
+        return max(0, $included - $planOnlyBalance);
     }
 
     public function remainingBillingQuota(string $type): int
@@ -248,6 +254,19 @@ trait HasBilling
         // The full positive balance is available — this includes both the plan's
         // included quota and any extra credits from one-time product purchases.
         return max(0, $this->getWallet($type)?->balanceInt ?? 0);
+    }
+
+    public function purchasedBillingCredits(string $type): int
+    {
+        $wallet = $this->getWallet($type);
+        if ($wallet === null) {
+            return 0;
+        }
+
+        return WalletUsageService::computePurchasedRemaining(
+            WalletUsageService::getPurchasedBalance($wallet),
+            (int) $wallet->balanceInt,
+        );
     }
 
     public function billingOverageCount(string $type): int
