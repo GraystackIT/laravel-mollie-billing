@@ -20,7 +20,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ $portalTitle }}</title>
     @if ($faviconUrl)
-        <link rel="icon" href="{{ $faviconUrl }}">
+        <link rel="icon" href="{{ str_starts_with($faviconUrl, 'http') || str_starts_with($faviconUrl, '/') ? $faviconUrl : asset($faviconUrl) }}">
     @endif
     @vite(['resources/css/app.css', 'resources/js/app.js'])
     @livewireStyles
