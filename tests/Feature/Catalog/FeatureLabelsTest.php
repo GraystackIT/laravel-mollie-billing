@@ -33,10 +33,10 @@ it('falls back to config name when no translation', function (): void {
     expect($catalog->featureName('no_desc'))->toBe('Only Name');
 });
 
-it('falls back to headline of key when neither translation nor config', function (): void {
+it('returns null when neither translation nor config name exists', function (): void {
     $catalog = app(SubscriptionCatalogInterface::class);
 
-    expect($catalog->featureName('some-unknown_key'))->toBe('Some Unknown Key');
+    expect($catalog->featureName('some-unknown_key'))->toBeNull();
 });
 
 it('returns description from config when present', function (): void {

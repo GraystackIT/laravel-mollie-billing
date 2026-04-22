@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Support;
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
-use Illuminate\Support\Str;
 
 class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
 {
@@ -99,11 +98,23 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
 
     public function planName(string $planCode): ?string
     {
+        $transKey = 'billing::plans.'.$planCode.'.name';
+        if (trans()->has($transKey)) {
+            return (string) trans($transKey);
+        }
+
         return $this->plan($planCode)['name'] ?? null;
     }
 
     public function planDescription(string $planCode): ?string
     {
+        $transKey = 'billing::plans.'.$planCode.'.description';
+        if (trans()->has($transKey)) {
+            $value = (string) trans($transKey);
+
+            return $value === '' ? null : $value;
+        }
+
         $value = $this->plan($planCode)['description'] ?? null;
 
         return is_string($value) && $value !== '' ? $value : null;
@@ -111,7 +122,26 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
 
     public function addonName(string $addonCode): ?string
     {
+        $transKey = 'billing::addons.'.$addonCode.'.name';
+        if (trans()->has($transKey)) {
+            return (string) trans($transKey);
+        }
+
         return $this->addon($addonCode)['name'] ?? null;
+    }
+
+    public function addonDescription(string $addonCode): ?string
+    {
+        $transKey = 'billing::addons.'.$addonCode.'.description';
+        if (trans()->has($transKey)) {
+            $value = (string) trans($transKey);
+
+            return $value === '' ? null : $value;
+        }
+
+        $value = $this->addon($addonCode)['description'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
     }
 
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int
@@ -155,19 +185,14 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return round(($monthlyAnnualized - $yearly) / $monthlyAnnualized * 100, 2);
     }
 
-    public function featureName(string $featureKey): string
+    public function featureName(string $featureKey): ?string
     {
         $transKey = 'billing::features.'.$featureKey.'.name';
         if (trans()->has($transKey)) {
             return (string) trans($transKey);
         }
 
-        $configName = $this->feature($featureKey)['name'] ?? null;
-        if (is_string($configName) && $configName !== '') {
-            return $configName;
-        }
-
-        return Str::headline($featureKey);
+        return $this->feature($featureKey)['name'] ?? null;
     }
 
     public function featureDescription(string $featureKey): ?string
@@ -212,11 +237,23 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
 
     public function productName(string $productCode): ?string
     {
+        $transKey = 'billing::products.'.$productCode.'.name';
+        if (trans()->has($transKey)) {
+            return (string) trans($transKey);
+        }
+
         return $this->productConfig($productCode)['name'] ?? null;
     }
 
     public function productDescription(string $productCode): ?string
     {
+        $transKey = 'billing::products.'.$productCode.'.description';
+        if (trans()->has($transKey)) {
+            $value = (string) trans($transKey);
+
+            return $value === '' ? null : $value;
+        }
+
         $value = $this->productConfig($productCode)['description'] ?? null;
 
         return is_string($value) && $value !== '' ? $value : null;
@@ -253,6 +290,28 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return (bool) ($this->productConfig($productCode)['onetimeonly'] ?? false);
     }
 
+    public function productGroup(string $productCode): ?string
+    {
+        $value = $this->productConfig($productCode)['group'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    public function productGroupName(string $groupKey): ?string
+    {
+        $transKey = 'billing::product_groups.'.$groupKey;
+        if (trans()->has($transKey)) {
+            return (string) trans($transKey);
+        }
+
+        return $this->productGroupConfig($groupKey)['name'] ?? null;
+    }
+
+    public function productGroupSort(string $groupKey): int
+    {
+        return (int) ($this->productGroupConfig($groupKey)['sort'] ?? 0);
+    }
+
     /** @return array<string, mixed> */
     private function feature(string $key): array
     {
@@ -275,5 +334,11 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
     private function productConfig(string $code): array
     {
         return (array) config($this->configKey.'.products.'.$code, []);
+    }
+
+    /** @return array<string, mixed> */
+    private function productGroupConfig(string $key): array
+    {
+        return (array) config($this->configKey.'.product_groups.'.$key, []);
     }
 }
