@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
+use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -958,13 +959,12 @@ class UpdateSubscription
             }
         }
 
-        // Find a paid Mollie payment to issue the refund against.
-        // Prefer the most recent payment linked to the current mandate.
-        // The credit-note invoice itself is standalone (no parent_invoice_id).
-        $mandateId = $billable->getMollieMandateId();
-        $customerId = $billable->getMollieCustomerId();
+        // Find the Mollie payment ID of the current subscription's most recent
+        // paid invoice. Since we're refunding a prorata credit for the current
+        // subscription, its last payment is the correct refund target.
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
 
-        $refundPaymentId = $this->findRefundablePaymentId($billable, $customerId, $mandateId);
+        $refundPaymentId = $this->findSubscriptionPaymentId($billable, $subscriptionId);
 
         if ($refundPaymentId === null) {
             Log::warning('Prorata credit skipped — no paid Mollie payment found to refund against', [
@@ -1029,51 +1029,21 @@ class UpdateSubscription
     }
 
     /**
-     * Find the best Mollie payment ID to refund against.
-     *
-     * Strategy: use the Mollie API to list the customer's payments and pick
-     * the most recent paid one that belongs to the current mandate. Falls
-     * back to any paid payment if no mandate-specific one is found.
+     * Find the Mollie payment ID for the current subscription's most recent paid invoice.
      */
-    private function findRefundablePaymentId(Billable $billable, ?string $customerId, ?string $mandateId): ?string
+    private function findSubscriptionPaymentId(Billable $billable, string $subscriptionId): ?string
     {
-        if ($customerId === null || $customerId === '') {
+        if ($subscriptionId === '') {
             return null;
         }
 
-        try {
-            $payments = Mollie::send(new \Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest(
-                customerId: $customerId,
-                limit: 50,
-            ));
-        } catch (\Throwable $e) {
-            Log::warning('Failed to list Mollie payments for refund target', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'error' => $e->getMessage(),
-            ]);
-
-            return null;
-        }
-
-        $fallback = null;
-
-        foreach ($payments as $payment) {
-            if (($payment->status ?? '') !== 'paid') {
-                continue;
-            }
-
-            // Prefer a payment linked to the current mandate.
-            if ($mandateId !== null && ($payment->mandateId ?? null) === $mandateId) {
-                return (string) $payment->id;
-            }
-
-            // Track first paid payment as fallback.
-            if ($fallback === null) {
-                $fallback = (string) $payment->id;
-            }
-        }
-
-        return $fallback;
+        return BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->where('mollie_subscription_id', $subscriptionId)
+            ->where('status', InvoiceStatus::Paid)
+            ->latest()
+            ->value('mollie_payment_id');
     }
 
     /**

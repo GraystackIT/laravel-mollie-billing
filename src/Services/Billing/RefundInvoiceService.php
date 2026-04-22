@@ -77,8 +77,13 @@ class RefundInvoiceService
             /** @var Billable|null $billable */
             $billable = $invoice->billable()->first();
 
+            $description = 'Refund: '.$reasonCode->label();
+            if ($reasonText !== null && trim($reasonText) !== '') {
+                $description .= ' — '.$reasonText;
+            }
+
             try {
-                $this->callMollieRefund($invoice->mollie_payment_id, $refundGross);
+                $this->callMollieRefund($invoice->mollie_payment_id, $refundGross, $description);
             } catch (\Throwable $e) {
                 Log::warning('Mollie refund failed for invoice '.$invoice->id, ['exception' => $e->getMessage()]);
 
@@ -219,11 +224,11 @@ class RefundInvoiceService
         throw new InvalidRefundTargetException("Usage type {$usageType} not found in invoice line items.");
     }
 
-    protected function callMollieRefund(string $paymentId, int $grossCents): void
+    protected function callMollieRefund(string $paymentId, int $grossCents, string $description): void
     {
         Mollie::send(new CreatePaymentRefundRequest(
             paymentId: $paymentId,
-            description: 'Prorata refund',
+            description: $description,
             amount: new Money(
                 (string) config('mollie-billing.currency', 'EUR'),
                 number_format($grossCents / 100, 2, '.', ''),
