@@ -42,13 +42,15 @@ interface SubscriptionCatalogInterface
 
     public function addonName(string $addonCode): ?string;
 
+    public function addonDescription(string $addonCode): ?string;
+
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 
     public function usageRollover(string $planCode): bool;
 
     public function yearlySavingsPercent(string $planCode): float;
 
-    public function featureName(string $featureKey): string;
+    public function featureName(string $featureKey): ?string;
 
     public function featureDescription(string $featureKey): ?string;
 
@@ -76,4 +78,10 @@ interface SubscriptionCatalogInterface
     public function productQuantity(string $productCode): ?int;
 
     public function productOneTimeOnly(string $productCode): bool;
+
+    public function productGroup(string $productCode): ?string;
+
+    public function productGroupName(string $groupKey): ?string;
+
+    public function productGroupSort(string $groupKey): int;
 }

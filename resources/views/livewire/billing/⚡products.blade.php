@@ -61,10 +61,32 @@ new class extends Component {
                 'usage_type' => $catalog->productUsageType($code),
                 'quantity' => $catalog->productQuantity($code),
                 'onetimeonly' => $catalog->productOneTimeOnly($code),
+                'group' => $catalog->productGroup($code),
             ];
         };
 
         $available = array_map($buildProduct, $availableCodes);
+
+        // Group available products by group key, sorted by group sort
+        $groupProducts = function (array $products) use ($catalog): array {
+            $groups = [];
+            foreach ($products as $product) {
+                $groupKey = $product['group'] ?? '__ungrouped__';
+                if (! isset($groups[$groupKey])) {
+                    $groups[$groupKey] = [
+                        'key' => $groupKey,
+                        'name' => $groupKey === '__ungrouped__' ? null : $catalog->productGroupName($groupKey),
+                        'sort' => $groupKey === '__ungrouped__' ? PHP_INT_MAX : $catalog->productGroupSort($groupKey),
+                        'products' => [],
+                    ];
+                }
+                $groups[$groupKey]['products'][] = $product;
+            }
+            usort($groups, fn ($a, $b) => $a['sort'] <=> $b['sort']);
+            return $groups;
+        };
+
+        $availableGroups = $groupProducts($available);
 
         // Build purchase stats per product code (count + last purchase date)
         $purchaseStats = [];
@@ -100,10 +122,12 @@ new class extends Component {
             }
         }
 
+        $boughtGroups = $groupProducts($bought);
+
         return [
             'billable' => $billable,
-            'available' => $available,
-            'bought' => $bought,
+            'availableGroups' => $availableGroups,
+            'boughtGroups' => $boughtGroups,
             'currencySymbol' => $currencySymbol,
         ];
     }
@@ -122,18 +146,23 @@ new class extends Component {
         <flux:callout variant="warning" icon="exclamation-triangle">
             {{ __('billing::portal.no_billable') }}
         </flux:callout>
-    @elseif (empty($available) && empty($bought))
+    @elseif (empty($availableGroups) && empty($boughtGroups))
         <flux:callout icon="information-circle" color="zinc" inline>
             {{ __('billing::portal.products.none_available') }}
         </flux:callout>
     @else
         {{-- Available products --}}
-        @if (! empty($available))
-            <div class="space-y-4">
+        @if (! empty($availableGroups))
+            <div class="space-y-6">
                 <flux:heading size="lg">{{ __('billing::portal.products.available_heading') }}</flux:heading>
 
+                @foreach ($availableGroups as $group)
                 <div class="space-y-3">
-                    @foreach ($available as $product)
+                    @if ($group['name'])
+                        <flux:subheading size="lg">{{ $group['name'] }}</flux:subheading>
+                    @endif
+
+                    @foreach ($group['products'] as $product)
                         <flux:card class="relative p-0! hover:shadow-md transition">
                             <div class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
                                 {{-- Left: icon + info --}}
@@ -213,16 +242,22 @@ new class extends Component {
                         </flux:modal>
                     @endforeach
                 </div>
+                @endforeach
             </div>
         @endif
 
         {{-- Bought products --}}
-        @if (! empty($bought))
-            <div class="space-y-4">
+        @if (! empty($boughtGroups))
+            <div class="space-y-6">
                 <flux:heading size="lg">{{ __('billing::portal.products.bought_heading') }}</flux:heading>
 
+                @foreach ($boughtGroups as $group)
                 <div class="space-y-3">
-                    @foreach ($bought as $product)
+                    @if ($group['name'])
+                        <flux:subheading size="lg">{{ $group['name'] }}</flux:subheading>
+                    @endif
+
+                    @foreach ($group['products'] as $product)
                         <flux:card class="relative p-0!">
                             <div class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
                                 {{-- Left: icon + info --}}
@@ -262,6 +297,7 @@ new class extends Component {
                         </flux:card>
                     @endforeach
                 </div>
+                @endforeach
             </div>
         @endif
     @endif

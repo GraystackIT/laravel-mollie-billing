@@ -78,6 +78,11 @@ return [
         ],
     ],
 
+    'product_groups' => [
+        // 'top-ups'  => ['name' => 'Top-Ups',  'sort' => 1],
+        // 'services' => ['name' => 'Services', 'sort' => 2],
+    ],
+
     'products' => [
         // 'token-pack-500' => [
         //     'name' => '500 Token Pack',
@@ -86,6 +91,7 @@ return [
         //     'price_net' => 4900,
         //     'usage_type' => 'Tokens',    // optional — links to wallet
         //     'quantity' => 500,            // optional — units to credit on purchase
+        //     'group' => 'top-ups',         // optional — references key in product_groups
         // ],
         // 'consulting-hour' => [
         //     'name' => '1h Consulting',
@@ -93,6 +99,7 @@ return [
         //     'image_url' => null,
         //     'price_net' => 14900,
         //     'onetimeonly' => true,        // can only be purchased once (default: false)
+        //     'group' => 'services',
         // ],
     ],
 ];
