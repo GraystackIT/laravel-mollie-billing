@@ -50,7 +50,7 @@ class InvoiceService
         }
 
         $country = (string) ($billable->getBillingCountry() ?? '');
-        $vat = $this->vat->calculate($country, $summedNet);
+        $vat = $this->vat->calculate($country, $summedNet, $billable->vat_number ?? null);
 
         $invoice = new BillingInvoice();
         $invoice->billable_type = $billable->getMorphClass();
