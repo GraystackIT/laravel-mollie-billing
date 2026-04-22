@@ -52,6 +52,13 @@ class SpyUpdateSubscription extends UpdateSubscription
     {
         self::$calls[] = ['prorata_refund', $prorataCreditNet];
     }
+
+    protected function mollieUpdateSubscription(string $customerId, string $subscriptionId, array $payload): object
+    {
+        self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
+
+        return (object) ['id' => $subscriptionId];
+    }
 }
 
 beforeEach(function (): void {
@@ -213,4 +220,114 @@ it('applies downgrade immediately without pending state', function (): void {
     // Prorata refund should have been called.
     $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
     expect($callTypes)->toContain('prorata_refund');
+});
+
+it('issues prorata refund when seats are reduced', function (): void {
+    $b = makeMollieSubBillable('pro', 'monthly');
+
+    // Set 3 seats so reducing to 1 produces a credit.
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['seat_count'] = 3;
+    $b->forceFill(['subscription_meta' => $meta])->save();
+    $b->refresh();
+
+    $result = app(UpdateSubscription::class)->update($b, ['seats' => 1]);
+
+    expect($result['seatsChanged'])->toBeTrue();
+    expect($result['prorataCreditNet'])->toBeGreaterThan(0);
+
+    $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
+    expect($callTypes)->toContain('prorata_refund');
+});
+
+it('uses PATCH for seat changes instead of cancel+recreate', function (): void {
+    $b = makeMollieSubBillable('pro', 'monthly');
+
+    // Seat downgrade: 3 → 1 (no prorata charge, immediate apply).
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['seat_count'] = 3;
+    $b->forceFill(['subscription_meta' => $meta])->save();
+    $b->refresh();
+
+    app(UpdateSubscription::class)->update($b, ['seats' => 1]);
+
+    $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
+
+    // PATCH (update), not cancel+create.
+    expect($callTypes)->toContain('update');
+    expect($callTypes)->not->toContain('cancel');
+    expect($callTypes)->not->toContain('create');
+
+    // Subscription ID unchanged.
+    $b->refresh();
+    expect($b->getBillingSubscriptionMeta()['mollie_subscription_id'])->toBe('sub_old_999');
+});
+
+it('uses cancel+recreate for plan changes', function (): void {
+    $b = makeMollieSubBillable('free', 'monthly');
+
+    // Simulate applying a pending plan change (skips the deferred payment flow).
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['pending_plan_change'] = [
+        'current_plan' => 'free',
+        'current_interval' => 'monthly',
+        'current_seats' => 1,
+        'current_addons' => [],
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'seats' => 1,
+        'addons' => [],
+        'new_net' => 2900,
+        'prorata_charge_net' => 0,
+        'coupon_code' => null,
+        'requested_at' => now()->toIso8601String(),
+    ];
+    $meta['prorata_pending_payment_id'] = 'tr_test_456';
+    $b->forceFill(['subscription_meta' => $meta])->save();
+
+    app(UpdateSubscription::class)->applyPendingPlanChange($b);
+
+    $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
+
+    // cancel+create, not PATCH.
+    expect($callTypes)->toContain('cancel');
+    expect($callTypes)->toContain('create');
+    expect($callTypes)->not->toContain('update');
+});
+
+it('uses PATCH when applying pending seat upgrade', function (): void {
+    $b = makeMollieSubBillable('pro', 'monthly');
+
+    // Pending seat upgrade: 1 → 5, same plan.
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['seat_count'] = 1;
+    $meta['pending_plan_change'] = [
+        'current_plan' => 'pro',
+        'current_interval' => 'monthly',
+        'current_seats' => 1,
+        'current_addons' => [],
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'seats' => 5,
+        'addons' => [],
+        'new_net' => 2900 + 990 * 4,
+        'prorata_charge_net' => 0,
+        'coupon_code' => null,
+        'requested_at' => now()->toIso8601String(),
+    ];
+    $meta['prorata_pending_payment_id'] = 'tr_test_789';
+    $b->forceFill(['subscription_meta' => $meta])->save();
+
+    app(UpdateSubscription::class)->applyPendingPlanChange($b);
+
+    $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
+
+    // PATCH, not cancel+create.
+    expect($callTypes)->toContain('update');
+    expect($callTypes)->not->toContain('cancel');
+    expect($callTypes)->not->toContain('create');
+
+    // Subscription ID unchanged.
+    $b->refresh();
+    expect($b->getBillingSubscriptionMeta()['mollie_subscription_id'])->toBe('sub_old_999');
 });
