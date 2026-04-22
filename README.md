@@ -545,13 +545,16 @@ Three convenience methods cover the common cases:
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 
 // Refund a full invoice and issue a credit note:
-MollieBilling::refunds()->refundFully($invoice, reason: 'duplicate_payment');
+MollieBilling::refunds()->refundFully($invoice, RefundReasonCode::BillingError);
 
-// Refund just the overage units billed for a period:
-MollieBilling::refunds()->refundOverageUnits($invoice, units: 1_000);
+// Partial refund of a specific net amount (in cents):
+MollieBilling::refunds()->refundPartially($invoice, 500, RefundReasonCode::Goodwill, 'customer request');
 
-// Wallet-only refund — credits the wallet without touching Mollie:
-MollieBilling::refunds()->creditWalletOnly($organization, cents: 500, reason: 'goodwill');
+// Refund specific overage units (auto-calculates amount from unit price, credits wallet):
+MollieBilling::refunds()->refundOverageUnits($invoice, 'tokens', 1_000, RefundReasonCode::Goodwill);
+
+// Wallet-only credit without touching Mollie — use WalletUsageService directly:
+app(WalletUsageService::class)->credit($organization, 'tokens', 500, 'goodwill bonus');
 ```
 
 ## Admin panel

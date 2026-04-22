@@ -126,13 +126,14 @@ it('requires reason_text when reason_code is Other', function (): void {
         ->toThrow(\InvalidArgumentException::class);
 });
 
-it('creditWalletOnly dispatches WalletCredited and does not call Mollie', function (): void {
+it('wallet credit dispatches WalletCredited without Mollie call', function (): void {
     Event::fake([WalletCredited::class]);
 
     $billable = makeBillable();
     $billable->createWallet(['name' => 'tokens', 'slug' => 'tokens']);
 
-    app(RefundInvoiceService::class)->creditWalletOnly($billable, 'tokens', 10, 'Goodwill bonus');
+    app(\GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::class)
+        ->credit($billable, 'tokens', 10, 'Goodwill bonus');
 
     Event::assertDispatched(WalletCredited::class, function (WalletCredited $event): bool {
         return $event->usageType === 'tokens' && $event->units === 10;

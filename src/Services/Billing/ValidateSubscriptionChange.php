@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use Illuminate\Database\Eloquent\Model;
 
@@ -145,19 +146,24 @@ class ValidateSubscriptionChange
             $newIncluded = $this->catalog->includedUsage($context->newPlan, $context->newInterval, $slug);
             $balance = (int) $wallet->balanceInt;
 
+            // Separate purchased credits from plan credits.
+            $purchasedBalance = WalletUsageService::getPurchasedBalance($wallet);
+            $purchasedRemaining = WalletUsageService::computePurchasedRemaining($purchasedBalance, $balance);
+            $planOnlyBalance = $balance - $purchasedRemaining;
+
             $excess = 0;
             if ($periodStart !== null && $periodEnd !== null && $oldIncluded > 0) {
                 $result = BillingPolicy::computeUsageOverageForPlanChange(
                     $oldIncluded,
-                    $balance,
+                    $planOnlyBalance,
                     $periodStart,
                     $periodEnd,
                 );
                 $excess = $result['excess'];
             }
 
-            $rolloverCredits = $rollover ? max(0, $balance - $oldIncluded) : 0;
-            $targetBalance = $newIncluded + $rolloverCredits - $excess;
+            $rolloverCredits = $rollover ? max(0, $planOnlyBalance - $oldIncluded) : 0;
+            $targetBalance = $newIncluded + $rolloverCredits + $purchasedRemaining - $excess;
 
             if ($targetBalance >= 0) {
                 continue;

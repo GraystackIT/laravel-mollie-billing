@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
@@ -77,23 +78,15 @@ new class extends Component {
         if ($planCode) {
             $catalog = app(SubscriptionCatalogInterface::class);
             foreach ($catalog->includedUsages($planCode, $interval) as $type => $included) {
-                $used = $b->usedBillingQuota((string) $type);
-                $remaining = $b->remainingBillingQuota((string) $type);
-                $overage = $b->billingOverageCount((string) $type);
-                $totalQuota = max($included, $remaining + $used);
-                $percent = $totalQuota > 0 ? min(100, (int) round($used / $totalQuota * 100)) : 0;
-                $threshold = (int) config('mollie-billing.usage_threshold_percent', 80);
-
+                $wallet = $b->getWallet((string) $type);
                 $usageTypes[] = [
-                    'label' => ucfirst((string) $type),
-                    'used' => $used,
+                    'type' => (string) $type,
+                    'label' => $catalog->usageTypeName((string) $type),
                     'included' => $included,
-                    'total_quota' => $totalQuota,
-                    'remaining' => $remaining,
-                    'overage' => $overage,
-                    'percent' => $percent,
-                    'isWarning' => $percent >= $threshold && $percent < 100,
-                    'isDanger' => $percent >= 100,
+                    'balance' => (int) ($wallet?->balanceInt ?? 0),
+                    'purchased_balance' => $wallet !== null
+                        ? WalletUsageService::getPurchasedBalance($wallet)
+                        : 0,
                 ];
             }
         }
@@ -302,27 +295,14 @@ new class extends Component {
                 <flux:heading size="lg">{{ __('billing::portal.usage') }}</flux:heading>
                 <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-{{ min(count($d['usageTypes']), 4) }}">
                     @foreach ($d['usageTypes'] as $usage)
-                        <flux:card class="p-5!">
-                            <div class="flex items-start justify-between gap-2">
-                                <flux:subheading>{{ $usage['label'] }}</flux:subheading>
-                                @if ($usage['overage'] > 0)
-                                    <flux:badge size="sm" color="red">+{{ number_format($usage['overage']) }} {{ __('billing::portal.overage') }}</flux:badge>
-                                @elseif ($usage['isWarning'])
-                                    <flux:badge size="sm" color="amber">{{ $usage['percent'] }}%</flux:badge>
-                                @endif
-                            </div>
-                            <div class="mt-3 flex items-baseline gap-1.5">
-                                <span class="text-2xl font-bold tabular-nums tracking-tight">{{ number_format($usage['used']) }}</span>
-                                <span class="text-sm text-zinc-400">/ {{ number_format($usage['total_quota']) }}</span>
-                            </div>
-                            <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
-                                <div
-                                    class="h-full rounded-full transition-all duration-500 {{ $usage['isDanger'] ? 'bg-red-500' : ($usage['isWarning'] ? 'bg-amber-400' : 'bg-emerald-500') }}"
-                                    style="width: {{ $usage['percent'] }}%"
-                                ></div>
-                            </div>
-                            <flux:text class="mt-2 text-xs text-zinc-400">{{ number_format($usage['remaining']) }} {{ __('billing::portal.remaining') }}</flux:text>
-                        </flux:card>
+                        <livewire:mollie-billing::components.usage-meter
+                            :type="$usage['type']"
+                            :label="$usage['label']"
+                            :included="$usage['included']"
+                            :balance="$usage['balance']"
+                            :purchased-balance="$usage['purchased_balance']"
+                            :key="'usage-'.$loop->index"
+                        />
                     @endforeach
                 </div>
             </div>

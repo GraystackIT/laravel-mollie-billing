@@ -6,9 +6,25 @@ namespace GraystackIT\MollieBilling\Contracts;
 
 interface SubscriptionCatalogInterface
 {
+    /**
+     * Included usage quota for a specific type within a plan+interval.
+     *
+     * Note: usage quotas are plan-scoped only. Addons do not contribute
+     * included usages. If addon-based quotas are needed in the future,
+     * a dedicated method (e.g. addonIncludedUsages) should be added, and
+     * UpdateSubscription::adjustWalletsForPlanChange() must be updated to
+     * call it when addons change — currently wallet adjustment only runs
+     * on plan or interval changes.
+     */
     public function includedUsage(string $planCode, ?string $interval, string $usageType): int;
 
-    /** @return array<string, int> */
+    /**
+     * All included usage quotas for a plan+interval.
+     *
+     * @see includedUsage() for scoping notes — addons are excluded.
+     *
+     * @return array<string, int>
+     */
     public function includedUsages(string $planCode, ?string $interval): array;
 
     public function planAllowsAddon(string $planCode, string $addonCode): bool;
@@ -43,6 +59,8 @@ interface SubscriptionCatalogInterface
     public function addonName(string $addonCode): ?string;
 
     public function addonDescription(string $addonCode): ?string;
+
+    public function usageTypeName(string $usageType): string;
 
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 

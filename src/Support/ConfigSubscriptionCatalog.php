@@ -144,6 +144,16 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return is_string($value) && $value !== '' ? $value : null;
     }
 
+    public function usageTypeName(string $usageType): string
+    {
+        $transKey = 'billing::usages.'.$usageType;
+        if (trans()->has($transKey)) {
+            return (string) trans($transKey);
+        }
+
+        return ucfirst($usageType);
+    }
+
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int
     {
         if ($interval === null) {

@@ -111,6 +111,10 @@ class WalletUsageService
      * Reset a wallet to zero then deposit the given quota. Used when
      * usage_rollover is disabled — the wallet is brought to exactly
      * the plan's included quota on each renewal.
+     *
+     * Purchased credits (from one-time orders / coupons) survive the
+     * reset: the remaining purchased balance is computed and added on
+     * top of the new plan quota.
      */
     public function resetAndCredit(Billable $billable, string $type, int $quota, string $reason = 'renewal'): void
     {
@@ -122,6 +126,10 @@ class WalletUsageService
             $wallet->refresh();
 
             $previousBalance = (int) $wallet->balanceInt;
+            $purchasedRemaining = self::computePurchasedRemaining(
+                self::getPurchasedBalance($wallet),
+                $previousBalance,
+            );
 
             if ($previousBalance > 0) {
                 $wallet->forceWithdraw($previousBalance, ['type' => $type, 'reason' => 'period_reset']);
@@ -129,12 +137,71 @@ class WalletUsageService
                 $wallet->deposit(abs($previousBalance), ['type' => $type, 'reason' => 'period_reset']);
             }
 
-            if ($quota > 0) {
-                $wallet->deposit($quota, ['type' => $type, 'reason' => 'credit']);
+            $newBalance = $quota + $purchasedRemaining;
+            if ($newBalance > 0) {
+                $wallet->deposit($newBalance, ['type' => $type, 'reason' => 'credit']);
             }
+
+            self::setPurchasedBalance($wallet, $purchasedRemaining);
         });
 
         event(new WalletReset($billable, $type, $previousBalance, $quota, $reason));
+    }
+
+    // ── Purchased balance tracking ────────────────────────────────────────────
+    //
+    // One-time order and coupon credits are tracked separately from plan quotas
+    // via a `purchased_balance` key in the wallet's meta JSON. This ensures
+    // purchased credits survive period resets and plan changes — plan quotas
+    // are consumed first, purchased credits are only depleted once the plan
+    // quota is exhausted.
+
+    /**
+     * Read the purchased-credits balance from the wallet meta.
+     */
+    public static function getPurchasedBalance(WalletModel $wallet): int
+    {
+        return (int) (((array) $wallet->meta)['purchased_balance'] ?? 0);
+    }
+
+    /**
+     * Write the purchased-credits balance into the wallet meta.
+     */
+    public static function setPurchasedBalance(WalletModel $wallet, int $amount): void
+    {
+        $meta = (array) $wallet->meta;
+        $meta['purchased_balance'] = max(0, $amount);
+        $wallet->meta = $meta;
+        $wallet->save();
+    }
+
+    /**
+     * Increment the purchased-credits balance (e.g. after a one-time order or coupon credit).
+     */
+    public static function addPurchasedBalance(WalletModel $wallet, int $amount): void
+    {
+        if ($amount <= 0) {
+            return;
+        }
+
+        self::setPurchasedBalance($wallet, self::getPurchasedBalance($wallet) + $amount);
+    }
+
+    /**
+     * Compute how many purchased credits remain after consumption this period.
+     *
+     * Plan credits are consumed first. Purchased credits are only consumed
+     * once the plan quota is exhausted:
+     *
+     *   purchasedRemaining = max(0, min(purchasedBalance, currentBalance))
+     *
+     * - If balance >= purchased: all purchased credits survive (plan covered everything).
+     * - If 0 < balance < purchased: some purchased credits were consumed.
+     * - If balance <= 0: all purchased credits are consumed.
+     */
+    public static function computePurchasedRemaining(int $purchasedBalance, int $currentBalance): int
+    {
+        return max(0, min($purchasedBalance, $currentBalance));
     }
 
     private function resolveWallet(Billable $billable, string $type): WalletModel

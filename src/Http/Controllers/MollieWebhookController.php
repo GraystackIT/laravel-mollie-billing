@@ -17,6 +17,8 @@ use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\PlanChangeFailed;
+use GraystackIT\MollieBilling\Enums\RefundReasonCode;
+use GraystackIT\MollieBilling\Events\InvoiceRefunded;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Exceptions\PaymentNotFoundException;
 use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
@@ -178,20 +180,20 @@ class MollieWebhookController extends Controller
 
             if (in_array($type, ['overage', 'prorata', 'addon', 'seats'], true)) {
                 $this->handleSingleChargePaid($payment, $billable, $type, $metadata);
-                return;
+                // Fall through to check for refunds on the same payment below.
+            } elseif ($subscriptionId !== '') {
+                $this->handleSubscriptionPaymentPaid($payment, $billable, $metadata);
+            } else {
+                $this->handleFirstPaymentPaid($payment, $billable, $metadata);
             }
 
+            // Sync any refunds that were issued via the Mollie dashboard.
+            // This runs *after* the normal paid-flow so that a payment that
+            // is both paid and partially refunded is fully processed.
             if ($this->hasRefunds($payment)) {
                 $this->handleRefundWebhook($payment, $billable);
-                return;
             }
 
-            if ($subscriptionId !== '') {
-                $this->handleSubscriptionPaymentPaid($payment, $billable, $metadata);
-                return;
-            }
-
-            $this->handleFirstPaymentPaid($payment, $billable, $metadata);
             return;
         }
 
@@ -341,8 +343,20 @@ class MollieWebhookController extends Controller
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
             try {
                 if ($rollover) {
+                    // Update purchased balance before adding new plan quota — the
+                    // current balance reflects consumption from the past period.
+                    $wallet = $billable->getWallet((string) $type);
+                    if ($wallet !== null) {
+                        $purchasedRemaining = WalletUsageService::computePurchasedRemaining(
+                            WalletUsageService::getPurchasedBalance($wallet),
+                            (int) $wallet->balanceInt,
+                        );
+                        WalletUsageService::setPurchasedBalance($wallet, $purchasedRemaining);
+                    }
+
                     $this->walletService->credit($billable, (string) $type, (int) $units, 'subscription_renewal_rollover');
                 } else {
+                    // resetAndCredit handles purchased balance internally.
                     $this->walletService->resetAndCredit($billable, (string) $type, (int) $units, 'subscription_renewal');
                 }
             } catch (\Throwable $e) {
@@ -499,6 +513,14 @@ class MollieWebhookController extends Controller
         event(new PaymentFailed($billable, (string) $payment->id, (string) ($payment->status ?? 'unknown')));
     }
 
+    /**
+     * Sync refunds initiated via the Mollie dashboard into local credit notes.
+     *
+     * Each Mollie refund has a unique ID (e.g. re_xxx). We store it in the
+     * credit note's mollie_payment_id as "{paymentId}:re:{refundId}" so we
+     * can deduplicate by refund ID rather than by amount (which would fail
+     * for multiple partial refunds of the same value).
+     */
     protected function handleRefundWebhook(object $payment, Billable $billable): void
     {
         $refunds = [];
@@ -509,26 +531,33 @@ class MollieWebhookController extends Controller
             return;
         }
 
+        $original = BillingInvoice::query()
+            ->where('mollie_payment_id', (string) $payment->id)
+            ->first();
+
+        if ($original === null) {
+            return;
+        }
+
         foreach ($refunds as $refund) {
-            $refundAmountCents = (int) round(((float) ($refund->amount->value ?? 0)) * 100);
+            $refundId = (string) ($refund->id ?? '');
+            if ($refundId === '') {
+                continue;
+            }
+
+            // Deduplicate by Mollie refund ID — safe for multiple partial
+            // refunds of the same amount on the same payment.
+            $creditNotePaymentId = $payment->id.':re:'.$refundId;
 
             $exists = BillingInvoice::query()
-                ->where('invoice_kind', 'credit_note')
-                ->where('amount_gross', -$refundAmountCents)
-                ->whereHas('parent', fn ($q) => $q->where('mollie_payment_id', (string) $payment->id))
+                ->where('mollie_payment_id', $creditNotePaymentId)
                 ->exists();
 
             if ($exists) {
                 continue;
             }
 
-            $original = BillingInvoice::query()
-                ->where('mollie_payment_id', (string) $payment->id)
-                ->first();
-
-            if ($original === null) {
-                continue;
-            }
+            $refundAmountCents = (int) round(((float) ($refund->amount->value ?? 0)) * 100);
 
             // Convert gross refund to net using the original invoice rate.
             $rate = (float) $original->vat_rate;
@@ -537,12 +566,19 @@ class MollieWebhookController extends Controller
                 : $refundAmountCents;
 
             $creditNote = $this->salesInvoiceService->createCreditNote($original, $netAmount);
-            $creditNote->refund_reason_code = \GraystackIT\MollieBilling\Enums\RefundReasonCode::Other;
+            $creditNote->mollie_payment_id = $creditNotePaymentId;
+            $creditNote->refund_reason_code = RefundReasonCode::Other;
             $creditNote->refund_reason_text = 'synced from Mollie dashboard';
             $creditNote->save();
 
             $original->refunded_net = (int) $original->refunded_net + $netAmount;
             $original->save();
+
+            event(new InvoiceRefunded($billable, $original, $creditNote, [
+                'reason_code' => RefundReasonCode::Other,
+                'reason_text' => 'synced from Mollie dashboard',
+                'mollie_refund_id' => $refundId,
+            ]));
         }
     }
 
@@ -691,6 +727,14 @@ class MollieWebhookController extends Controller
 
         if ($usageType !== null && $quantity !== null && $quantity > 0) {
             $this->walletService->credit($billable, $usageType, $quantity, 'one_time_order:'.$productCode);
+
+            // Track purchased credits separately so they survive period resets and plan changes.
+            if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+                $wallet = $billable->getWallet($usageType);
+                if ($wallet !== null) {
+                    WalletUsageService::addPurchasedBalance($wallet, $quantity);
+                }
+            }
 
             Log::info('One-time order: wallet credited', [
                 'product_code' => $productCode,

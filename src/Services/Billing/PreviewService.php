@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 
 class PreviewService
@@ -213,18 +214,24 @@ class PreviewService
                 continue;
             }
 
-            $walletBalance = $billable instanceof \Illuminate\Database\Eloquent\Model
-                ? (int) ($billable->getWallet($usageType)?->balanceInt ?? 0)
-                : 0;
+            $wallet = $billable instanceof \Illuminate\Database\Eloquent\Model
+                ? $billable->getWallet($usageType)
+                : null;
+            $walletBalance = (int) ($wallet?->balanceInt ?? 0);
+
+            // Separate purchased credits from plan credits.
+            $purchasedBalance = $wallet !== null ? WalletUsageService::getPurchasedBalance($wallet) : 0;
+            $purchasedRemaining = WalletUsageService::computePurchasedRemaining($purchasedBalance, $walletBalance);
+            $planOnlyBalance = $walletBalance - $purchasedRemaining;
 
             $excess = 0;
             $proratedOldQuota = 0;
-            $actuallyUsed = max(0, $currentQuota - $walletBalance);
+            $actuallyUsed = max(0, $currentQuota - $planOnlyBalance);
 
             if ($periodStart !== null && $periodEnd !== null && $currentQuota > 0 && $planChanged) {
                 $usageProrata = BillingPolicy::computeUsageOverageForPlanChange(
                     $currentQuota,
-                    $walletBalance,
+                    $planOnlyBalance,
                     $periodStart,
                     $periodEnd,
                 );
@@ -232,9 +239,9 @@ class PreviewService
                 $proratedOldQuota = $usageProrata['prorated_old_quota'];
             }
 
-            $rolloverCredits = $rollover ? max(0, $walletBalance - $currentQuota) : 0;
-            $effectiveNewQuota = max(0, $newQuota + $rolloverCredits - $excess);
-            $unresolvedOverage = max(0, $excess - $newQuota - $rolloverCredits);
+            $rolloverCredits = $rollover ? max(0, $planOnlyBalance - $currentQuota) : 0;
+            $effectiveNewQuota = max(0, $newQuota + $rolloverCredits + $purchasedRemaining - $excess);
+            $unresolvedOverage = max(0, $excess - $newQuota - $rolloverCredits - $purchasedRemaining);
 
             $overagePrice = (int) ($this->catalog->usageOveragePrice($currentPlan, $currentInterval, $usageType) ?? 0);
             $overageTotalNet = $unresolvedOverage * $overagePrice;
@@ -248,7 +255,8 @@ class PreviewService
                 'prorated_old_quota' => $proratedOldQuota,
                 'excess' => $excess,
                 'rollover_credits' => $rolloverCredits,
-                'offset_by_new_plan' => min($excess, $newQuota + $rolloverCredits),
+                'purchased_remaining' => $purchasedRemaining,
+                'offset_by_new_plan' => min($excess, $newQuota + $rolloverCredits + $purchasedRemaining),
                 'effective_new_quota' => $effectiveNewQuota,
                 'unresolved_overage' => $unresolvedOverage,
                 'overage_unit_price_net' => $overagePrice,
