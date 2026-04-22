@@ -103,7 +103,7 @@ trait HasBilling
     {
         $meta = $this->getBillingSubscriptionMeta();
 
-        return ! empty($meta['pending_plan_change']) || ! empty($meta['scheduled_change']);
+        return ! empty($meta['scheduled_change']);
     }
 
     public function getBillingPeriodStartsAt(): ?CarbonInterface
