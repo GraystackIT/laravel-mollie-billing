@@ -2,16 +2,20 @@
 
 declare(strict_types=1);
 
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
+use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Testing\TestBillable;
+use Mollie\Laravel\Facades\Mollie;
 
 beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.free', [
@@ -229,6 +233,28 @@ it('allows the same change when seats are explicitly set (drop-extras path)', fu
         'subscription_meta' => ['seat_count' => 5, 'mollie_subscription_id' => 'sub_test_seat2'],
     ])->save();
     $billable->refresh();
+
+    // Period invoice the prorata refund will derive its VAT rate from.
+    BillingInvoice::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'mollie_payment_id' => 'tr_period_seat2',
+        'mollie_subscription_id' => 'sub_test_seat2',
+        'invoice_kind' => InvoiceKind::Subscription,
+        'status' => InvoiceStatus::Paid,
+        'country' => 'AT',
+        'vat_rate' => 20.00,
+        'currency' => 'EUR',
+        'amount_net' => 3000,
+        'amount_vat' => 600,
+        'amount_gross' => 3600,
+        'line_items' => [],
+        'period_start' => now()->subDays(5),
+        'period_end' => now()->addDays(25),
+    ]);
+
+    // The downgrade triggers a Mollie subscription cancel + a refund call.
+    Mollie::shouldReceive('send')->andReturn(new \stdClass);
 
     $result = app(UpdateSubscription::class)->update($billable, [
         'plan_code' => 'free',

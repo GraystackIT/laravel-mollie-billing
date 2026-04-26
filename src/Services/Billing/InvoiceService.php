@@ -154,6 +154,7 @@ class InvoiceService
         array $lineItems,
         ?string $description = null,
         ?string $molliePaymentId = null,
+        ?string $country = null,
     ): BillingInvoice {
         /** @var Model&Billable $billable */
         if ($amountNet <= 0) {
@@ -172,7 +173,7 @@ class InvoiceService
         $creditNote->serial_number = $this->numberGenerator->generate('credit_note');
         $creditNote->invoice_kind = InvoiceKind::CreditNote;
         $creditNote->status = InvoiceStatus::Refunded;
-        $creditNote->country = strtoupper($billable->getBillingCountry() ?? '');
+        $creditNote->country = strtoupper($country ?? $billable->getBillingCountry() ?? '');
         $creditNote->vat_rate = $vatRate;
         $creditNote->currency = (string) config('mollie-billing.currency', 'EUR');
         $creditNote->amount_net = -$amountNet;

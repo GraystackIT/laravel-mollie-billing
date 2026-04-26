@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
@@ -204,19 +205,29 @@ class PreviewService
             $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
         }
 
-        // VAT on prorata amount (due now)
+        // VAT on prorata amount (due now). Always derived from the invoice that
+        // paid for the current period — see UpdateSubscription::prorataVat().
+        // Falls back to the live billable VAT only when no period invoice exists
+        // yet (e.g. local→Mollie upgrade where no payment has been made).
         $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $vat['rate']];
-        if ($prorataChargeNet > 0) {
-            try {
-                $prorataVat = $this->vatService->calculate($country, $prorataChargeNet, $vatNumber);
-            } catch (\Throwable) {
-                $prorataVat = ['net' => $prorataChargeNet, 'vat' => 0, 'gross' => $prorataChargeNet, 'rate' => 0.0];
-            }
-        } elseif ($prorataCreditNet > 0) {
-            try {
-                $prorataVat = $this->vatService->calculate($country, $prorataCreditNet, $vatNumber);
-            } catch (\Throwable) {
-                $prorataVat = ['net' => $prorataCreditNet, 'vat' => 0, 'gross' => $prorataCreditNet, 'rate' => 0.0];
+        $prorataNet = $prorataChargeNet > 0 ? $prorataChargeNet : ($prorataCreditNet > 0 ? $prorataCreditNet : 0);
+        if ($prorataNet > 0) {
+            $periodInvoice = BillingInvoice::currentPeriodSubscriptionInvoice($billable);
+            if ($periodInvoice !== null) {
+                $rate = (float) $periodInvoice->vat_rate;
+                $vatAmount = (int) round($prorataNet * $rate / 100);
+                $prorataVat = [
+                    'net' => $prorataNet,
+                    'vat' => $vatAmount,
+                    'gross' => $prorataNet + $vatAmount,
+                    'rate' => $rate,
+                ];
+            } else {
+                try {
+                    $prorataVat = $this->vatService->calculate($country, $prorataNet, $vatNumber);
+                } catch (\Throwable) {
+                    $prorataVat = ['net' => $prorataNet, 'vat' => 0, 'gross' => $prorataNet, 'rate' => 0.0];
+                }
             }
         }
 
