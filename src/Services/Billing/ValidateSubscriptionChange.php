@@ -9,6 +9,8 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
+use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
+use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -52,6 +54,7 @@ class ValidateSubscriptionChange
     {
         $this->validateSeats($billable, $context);
         $this->validateAddons($billable, $context);
+        $this->validateLocalSubscriptionExtras($billable, $context);
         $this->validateWalletUsage($billable, $context);
         $this->validateMollieReadiness($billable, $context);
     }
@@ -59,19 +62,23 @@ class ValidateSubscriptionChange
     /**
      * Validate seat count for the target plan.
      *
-     * If the user currently uses more seats than the new plan includes,
-     * AND the new plan supports extra seats (seat_price_net !== null),
-     * the seat count is automatically increased to cover the used seats.
-     * This means the user will be charged for extra seats on the new plan.
+     * Two block conditions when the new plan does not support extra seats
+     * (`seat_price_net === null`) and the caller did not pass `seats` explicitly:
      *
-     * If the new plan does NOT support extra seats (seat_price_net === null)
-     * and the user uses more seats than included, a SeatDowngradeRequiredException
-     * is thrown — the user must remove team members before downgrading.
+     * - `usedSeats > newIncludedSeats` — real team members exceed the quota.
+     *   The user must remove members before downgrading.
+     * - `currentSeatCount > newIncludedSeats` — paid (but unused) extra seats
+     *   exist that the new plan cannot host. The user must explicitly drop
+     *   them via the UI's "drop extra seats" toggle (which sets
+     *   `seats` and bypasses this check).
+     *
+     * If extra seats are supported on the new plan (`seat_price_net !== null`),
+     * the count is auto-derived to preserve seats across the change.
      *
      * Override: Bind your own ValidateSubscriptionChange to change this behavior,
      * e.g. to always block downgrades or to allow grace periods.
      *
-     * @throws SeatDowngradeRequiredException When the new plan cannot accommodate the used seats
+     * @throws SeatDowngradeRequiredException When the new plan cannot accommodate the existing seat count
      */
     protected function validateSeats(Billable $billable, SubscriptionChangeContext $context): void
     {
@@ -81,11 +88,17 @@ class ValidateSubscriptionChange
         }
 
         $usedSeats = $billable->getUsedBillingSeats();
+        $currentSeatCount = $billable->getBillingSeatCount();
         $newIncludedSeats = $this->catalog->includedSeats($context->newPlan);
         $seatPriceNet = $this->catalog->seatPriceNet($context->newPlan, $context->newInterval);
 
-        if ($usedSeats > $newIncludedSeats && $seatPriceNet === null) {
-            throw new SeatDowngradeRequiredException($billable, $usedSeats, $newIncludedSeats);
+        if ($seatPriceNet === null) {
+            if ($usedSeats > $newIncludedSeats) {
+                throw new SeatDowngradeRequiredException($billable, $usedSeats, $newIncludedSeats);
+            }
+            if ($currentSeatCount > $newIncludedSeats) {
+                throw new SeatDowngradeRequiredException($billable, $currentSeatCount, $newIncludedSeats);
+            }
         }
 
         // Auto-derive: preserve existing seat count across plan changes.
@@ -93,8 +106,52 @@ class ValidateSubscriptionChange
         // reset to max(usedSeats, includedSeats) — losing paid extra seats.
         // When the caller explicitly sets seats (e.g. dropExtraSeats),
         // seatsExplicit is true and this code is not reached.
-        $currentSeatCount = $billable->getBillingSeatCount();
         $context->newSeats = max($currentSeatCount, $usedSeats, $newIncludedSeats);
+    }
+
+    /**
+     * Block paid add-ons / paid extra seats and pseudo-upgrades on local subscriptions.
+     *
+     * A free / Local subscription has no payment flow attached. Paid extras must be
+     * acquired via the UpgradeLocalToMollie path (which obtains a mandate and creates
+     * a real Mollie subscription). Two cases:
+     *
+     * 1. **Pseudo-upgrade** — the caller switches the plan from free to paid.
+     *    Without a Mollie mandate this would silently set the new plan code with no
+     *    money flow. Block with `LocalSubscriptionUpgradeRequiresMolliePathException`.
+     * 2. **Paid extras on free plan** — adding paid add-ons or buying extra seats.
+     *    Block with `LocalSubscriptionDoesNotSupportPaidExtrasException`.
+     *
+     * Free add-ons (price 0) and the included-seat count remain available.
+     */
+    protected function validateLocalSubscriptionExtras(Billable $billable, SubscriptionChangeContext $context): void
+    {
+        if (! $billable->isLocalBillingSubscription()) {
+            return;
+        }
+
+        if ($context->planChanged && ! $this->catalog->isFreePlan($context->newPlan, $context->newInterval)) {
+            throw new LocalSubscriptionUpgradeRequiresMolliePathException($billable, $context->newPlan);
+        }
+
+        $addonsAdded = array_values(array_diff($context->newAddons, $context->currentAddons));
+        $paidAddons = array_values(array_filter(
+            $addonsAdded,
+            fn (string $code) => $this->catalog->addonPriceNet($code, $context->newInterval) > 0,
+        ));
+
+        $includedSeats = $this->catalog->includedSeats($context->newPlan);
+        $extraSeats = max(0, $context->newSeats - $includedSeats);
+        $seatPriceNet = $this->catalog->seatPriceNet($context->newPlan, $context->newInterval) ?? 0;
+        $paidExtraSeats = ($seatPriceNet > 0 && $extraSeats > 0) ? $extraSeats : 0;
+
+        if ($paidAddons !== [] || $paidExtraSeats > 0) {
+            throw new LocalSubscriptionDoesNotSupportPaidExtrasException(
+                $billable,
+                $paidAddons,
+                $paidExtraSeats,
+            );
+        }
     }
 
     /**

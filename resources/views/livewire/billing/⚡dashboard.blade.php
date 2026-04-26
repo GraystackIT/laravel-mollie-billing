@@ -260,7 +260,11 @@ new class extends Component {
                     <div class="grid grid-cols-2 gap-x-8 gap-y-5 sm:grid-cols-4">
                         <div class="mb-3">
                             <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.next_billing') }}</flux:subheading>
-                            <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
+                            @if ($billable && $billable->isLocalBillingSubscription() && $d['status']?->value !== 'cancelled')
+                                <flux:text class="mt-1 font-semibold text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.free_plan_recurring_charge') }}</flux:text>
+                            @else
+                                <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
+                            @endif
                         </div>
                         <div class="mb-3">
                             <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.period_start') }}</flux:subheading>

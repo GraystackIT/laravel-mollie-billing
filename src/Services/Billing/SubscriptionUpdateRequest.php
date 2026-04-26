@@ -13,6 +13,7 @@ class SubscriptionUpdateRequest
         public readonly ?array $addons = null,
         public readonly ?string $couponCode = null,
         public readonly string $applyAt = 'immediate', // 'immediate' | 'end_of_period'
+        public readonly bool $internal = false,
     ) {
     }
 
@@ -29,9 +30,17 @@ class SubscriptionUpdateRequest
             addons: $request['addons'] ?? null,
             couponCode: $request['coupon_code'] ?? $request['couponCode'] ?? null,
             applyAt: $request['apply_at'] ?? $request['applyAt'] ?? 'immediate',
+            internal: (bool) ($request['internal'] ?? false),
         );
     }
 
+    /**
+     * Serialised representation for persistence (e.g. subscription_meta).
+     *
+     * The `internal` flag is intentionally omitted — it is a transient marker
+     * for the `ScheduleSubscriptionChange::apply()` re-entry path and must not
+     * be carried back through stored payloads.
+     */
     public function toArray(): array
     {
         return array_filter([

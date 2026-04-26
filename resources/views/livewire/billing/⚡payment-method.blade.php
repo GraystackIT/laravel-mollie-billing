@@ -234,6 +234,14 @@ new class extends Component {
         <flux:callout variant="warning" icon="exclamation-triangle">
             {{ __('billing::portal.no_billable') }}
         </flux:callout>
+    @elseif ($billable->isLocalBillingSubscription())
+        {{-- Local subscription: no Mollie mandate is collected for free plans. --}}
+        <flux:callout icon="information-circle" color="blue">
+            <span>{{ __('billing::portal.free_plan_no_payment') }}</span>
+            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                {{ __('billing::portal.plan_change') }}
+            </flux:button>
+        </flux:callout>
     @elseif ($mandate === null)
         {{-- No mandate yet --}}
         <flux:card class="space-y-4">

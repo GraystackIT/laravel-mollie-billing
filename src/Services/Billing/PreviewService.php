@@ -82,12 +82,24 @@ class PreviewService
         $errors = [];
 
         // Seat validation: block if plan doesn't support extra seats.
-        if ($dto->seats === null && $usedSeats > $newIncludedSeats) {
-            if ($seatPriceNet === null) {
+        if ($dto->seats === null && $seatPriceNet === null) {
+            if ($usedSeats > $newIncludedSeats) {
+                // Real team members exceed the new plan's quota — caller must
+                // remove members manually before downgrading.
                 $errors[] = [
                     'type' => 'seats_exceed_plan',
                     'used' => $usedSeats,
                     'included' => $newIncludedSeats,
+                ];
+            } elseif ($currentSeats > $newIncludedSeats) {
+                // Paid (but unused) extra seats would be lost on a plan that
+                // can't sell them. Resolvable by activating the drop-extra-seats
+                // toggle in the UI (sets `seats` explicitly).
+                $errors[] = [
+                    'type' => 'paid_seats_lost',
+                    'current' => $currentSeats,
+                    'included' => $newIncludedSeats,
+                    'lost' => $currentSeats - $newIncludedSeats,
                 ];
             }
         }
@@ -161,6 +173,8 @@ class PreviewService
         $prorataFactor = 0.0;
         $prorataChargeNet = 0;
         $prorataCreditNet = 0;
+        $prorataRemainingDays = 0;
+        $prorataTotalDays = 0;
 
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
@@ -174,6 +188,10 @@ class PreviewService
             $prorataFactor = $prorata['factor'];
             $prorataChargeNet = $prorata['charge_net'];
             $prorataCreditNet = $prorata['credit_net'];
+
+            $days = BillingPolicy::prorataPeriodDays($periodStart, $periodEnd);
+            $prorataRemainingDays = $days['remaining'];
+            $prorataTotalDays = $days['total'];
         }
 
         // VAT on recurring price
@@ -300,6 +318,8 @@ class PreviewService
             'newPriceNet' => $newNet,
             'diffNet' => $newNet - $currentNet,
             'prorataFactor' => $prorataFactor,
+            'prorataRemainingDays' => $prorataRemainingDays,
+            'prorataTotalDays' => $prorataTotalDays,
             'prorataChargeNet' => $prorataChargeNet,
             'prorataChargeGross' => $prorataChargeNet > 0 ? (int) $prorataVat['gross'] : 0,
             'prorataChargeVat' => $prorataChargeNet > 0 ? (int) $prorataVat['vat'] : 0,

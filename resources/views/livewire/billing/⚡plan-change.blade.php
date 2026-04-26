@@ -5,6 +5,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
+use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
 use Livewire\Component;
 
 new class extends Component {
@@ -13,6 +14,7 @@ new class extends Component {
     public array $preview = [];
     public bool $wasPending = false;
     public bool $dropExtraSeats = false;
+    public bool $showLocalUpgradeConfirmation = false;
 
     private function resolveBillable(): ?Billable
     {
@@ -136,6 +138,19 @@ new class extends Component {
             return;
         }
 
+        // Local → paid: divert to the dedicated UpgradeLocalToMollie path.
+        // The regular UpdateSubscription would (correctly) refuse this transition
+        // via LocalSubscriptionUpgradeRequiresMolliePathException — instead we
+        // ask the user to confirm and then redirect to a Mollie checkout.
+        $catalog = app(SubscriptionCatalogInterface::class);
+        if (
+            $billable->isLocalBillingSubscription()
+            && ! $catalog->isFreePlan($this->selectedPlan, $this->selectedInterval)
+        ) {
+            $this->showLocalUpgradeConfirmation = true;
+            return;
+        }
+
         try {
             $updateData = [
                 'plan_code' => $this->selectedPlan,
@@ -186,6 +201,48 @@ new class extends Component {
                 config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
                 variant: 'danger',
             );
+        }
+    }
+
+    public function backToPlanSelection(): void
+    {
+        $this->showLocalUpgradeConfirmation = false;
+    }
+
+    public function confirmAndPay(UpgradeLocalToMollie $service)
+    {
+        $billable = $this->resolveBillable();
+
+        if (! $billable || ! $this->selectedPlan) {
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            return null;
+        }
+
+        $grossAmount = (int) ($this->preview['grossTotal'] ?? 0);
+        if ($grossAmount <= 0) {
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            return null;
+        }
+
+        try {
+            $result = $service->handle($billable, [
+                'plan_code' => $this->selectedPlan,
+                'interval' => $this->selectedInterval,
+                'addon_codes' => $billable->getActiveBillingAddonCodes(),
+                'extra_seats' => max(0, $billable->getBillingSeatCount() - app(SubscriptionCatalogInterface::class)->includedSeats($this->selectedPlan)),
+                'amount_gross' => $grossAmount,
+            ]);
+
+            if (! empty($result['checkout_url'])) {
+                return $this->redirect($result['checkout_url'], navigate: false);
+            }
+
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            return null;
+        } catch (\Throwable $e) {
+            report($e);
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            return null;
         }
     }
 
@@ -269,6 +326,70 @@ new class extends Component {
                 </flux:button>
             </div>
         </flux:callout>
+    @endif
+
+    @if ($showLocalUpgradeConfirmation && $billable && $selectedPlan)
+        @php
+            $currency = config('mollie-billing.currency', 'EUR');
+            $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+            $upgradePlanName = $catalog->planName($selectedPlan) ?? $selectedPlan;
+            $previewNet = (int) ($preview['newNet'] ?? 0);
+            $previewVat = (int) ($preview['vatAmount'] ?? 0);
+            $previewGross = (int) ($preview['grossTotal'] ?? 0);
+        @endphp
+
+        <flux:card class="space-y-4">
+            <flux:heading size="lg">{{ __('billing::portal.upgrade_confirm_title', ['plan' => $upgradePlanName]) }}</flux:heading>
+            <flux:subheading>
+                {{ __('billing::portal.upgrade_confirm_subtitle') }}
+            </flux:subheading>
+
+            <div class="grid gap-4 sm:grid-cols-2">
+                <div>
+                    <flux:text class="text-sm font-medium">{{ __('billing::portal.billing_address') }}</flux:text>
+                    <div class="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                        @if ($billable->getBillingName())
+                            <div>{{ $billable->getBillingName() }}</div>
+                        @endif
+                        @if ($billable->vat_number)
+                            <div>{{ __('billing::portal.vat_number') }}: {{ $billable->vat_number }}</div>
+                        @endif
+                        @if ($billable->getBillingCountry())
+                            <div>{{ $billable->getBillingCountry() }}</div>
+                        @endif
+                    </div>
+                </div>
+
+                <div>
+                    <flux:text class="text-sm font-medium">{{ __('billing::portal.summary') }}</flux:text>
+                    <div class="text-sm mt-1 space-y-1">
+                        <div class="flex justify-between">
+                            <span class="text-zinc-600 dark:text-zinc-400">{{ $upgradePlanName }} ({{ __('billing::enums.subscription_interval.'.$selectedInterval) }})</span>
+                            <span>{{ $currencySymbol }}{{ number_format($previewNet / 100, 2) }}</span>
+                        </div>
+                        @if ($previewVat > 0)
+                            <div class="flex justify-between">
+                                <span class="text-zinc-600 dark:text-zinc-400">{{ __('billing::portal.vat') }}</span>
+                                <span>{{ $currencySymbol }}{{ number_format($previewVat / 100, 2) }}</span>
+                            </div>
+                        @endif
+                        <div class="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-700 pt-1">
+                            <span>{{ __('billing::portal.total') }}</span>
+                            <span>{{ $currencySymbol }}{{ number_format($previewGross / 100, 2) }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex gap-2 justify-end">
+                <flux:button wire:click="backToPlanSelection" variant="ghost">
+                    {{ __('billing::portal.back') }}
+                </flux:button>
+                <flux:button wire:click="confirmAndPay" variant="primary" icon="credit-card">
+                    {{ __('billing::portal.confirm_and_pay') }}
+                </flux:button>
+            </div>
+        </flux:card>
     @endif
 
     {{-- Controls --}}
@@ -665,6 +786,21 @@ new class extends Component {
                                     'remove' => $error['used'] - $error['included'],
                                 ]) }}
                             </flux:callout>
+                        @elseif (($error['type'] ?? '') === 'paid_seats_lost')
+                            <flux:callout variant="warning" icon="exclamation-triangle">
+                                <div class="space-y-2">
+                                    <div>
+                                        {{ __('billing::portal.error_paid_seats_lost', [
+                                            'current' => $error['current'],
+                                            'included' => $error['included'],
+                                            'lost' => $error['lost'],
+                                        ]) }}
+                                    </div>
+                                    <flux:button size="xs" wire:click="toggleDropExtraSeats" icon="check">
+                                        {{ __('billing::portal.error_paid_seats_lost_confirm') }}
+                                    </flux:button>
+                                </div>
+                            </flux:callout>
                         @endif
                     @endforeach
 
@@ -725,10 +861,24 @@ new class extends Component {
                                         <span class="tabular-nums font-medium text-zinc-800 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($dueNowNewPlan / 100, 2) }}</span>
                                     </div>
                                     @if ($dueNowCredit > 0)
+                                        @php
+                                            $remainingDays = (int) ($preview['prorataRemainingDays'] ?? 0);
+                                            $paidSeatsLost = collect($previewErrors)->firstWhere('type', 'paid_seats_lost');
+                                        @endphp
                                         <div class="flex items-center justify-between text-sm">
-                                            <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_prorata_credit') }}</span>
+                                            <span class="text-zinc-600 dark:text-zinc-300">
+                                                {{ __('billing::portal.preview_prorata_credit') }}
+                                                @if ($remainingDays > 0)
+                                                    <span class="text-xs text-zinc-400 dark:text-zinc-500">({{ __('billing::portal.preview_prorata_days_'.($remainingDays === 1 ? 'one' : 'many'), ['count' => $remainingDays]) }})</span>
+                                                @endif
+                                            </span>
                                             <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($dueNowCredit / 100, 2) }}</span>
                                         </div>
+                                        @if ($paidSeatsLost)
+                                            <div class="text-xs text-zinc-400 dark:text-zinc-500 italic">
+                                                {{ __('billing::portal.preview_prorata_credit_includes_seats_'.($paidSeatsLost['lost'] === 1 ? 'one' : 'many'), ['count' => $paidSeatsLost['lost']]) }}
+                                            </div>
+                                        @endif
                                     @endif
 
                                     @if ($usageOverageNet > 0)

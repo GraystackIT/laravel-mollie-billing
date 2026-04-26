@@ -44,6 +44,47 @@ it('returns correct factor for yearly period at quarter mark', function (): void
     expect($factor)->toBeLessThan(0.76);
 });
 
+// ── prorataPeriodDays ──────────────────────────────────────────────────────────
+
+it('returns total and remaining days for a full period', function (): void {
+    $start = now()->startOfDay();
+    $end = now()->addDays(30)->startOfDay();
+
+    expect(BillingPolicy::prorataPeriodDays($start, $end))->toBe([
+        'total' => 30,
+        'remaining' => 30,
+    ]);
+});
+
+it('returns half remaining at the midpoint', function (): void {
+    $start = now()->subDays(15)->startOfDay();
+    $end = now()->addDays(15)->startOfDay();
+
+    expect(BillingPolicy::prorataPeriodDays($start, $end))->toBe([
+        'total' => 30,
+        'remaining' => 15,
+    ]);
+});
+
+it('returns zero remaining at the period end', function (): void {
+    $start = now()->subDays(30)->startOfDay();
+    $end = now()->startOfDay();
+
+    expect(BillingPolicy::prorataPeriodDays($start, $end))->toBe([
+        'total' => 30,
+        'remaining' => 0,
+    ]);
+});
+
+it('returns zero days for a zero-length period', function (): void {
+    $date = now()->startOfDay();
+
+    expect(BillingPolicy::prorataPeriodDays($date, $date))->toBe([
+        'total' => 0,
+        'remaining' => 0,
+    ]);
+});
+
 // ── computeProrata: same interval ──────────────────────────────────────────────
 
 it('computes upgrade charge for same-interval plan change', function (): void {

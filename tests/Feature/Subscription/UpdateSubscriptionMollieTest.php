@@ -12,54 +12,11 @@ use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\ValidateSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
-use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Testing\TestBillable;
+use GraystackIT\MollieBilling\Tests\Support\SpyUpdateSubscription;
 use Illuminate\Support\Facades\Event;
-
-/**
- * Subclass that spies on Mollie cancel+create calls without hitting the API.
- */
-class SpyUpdateSubscription extends UpdateSubscription
-{
-    public static array $calls = [];
-
-    protected function mollieCancelSubscription(string $customerId, string $subscriptionId): void
-    {
-        self::$calls[] = ['cancel', $customerId, $subscriptionId];
-    }
-
-    protected function mollieCreateSubscription(string $customerId, array $payload): object
-    {
-        self::$calls[] = ['create', $customerId, $payload];
-
-        return (object) ['id' => 'sub_new_'.uniqid()];
-    }
-
-    protected function chargeProrataImmediate(\GraystackIT\MollieBilling\Contracts\Billable $billable, int $prorataChargeNet, ?\GraystackIT\MollieBilling\Services\Billing\SubscriptionChangeContext $context = null): void
-    {
-        self::$calls[] = ['prorata_charge', $prorataChargeNet];
-
-        // Simulate storing the prorata_pending_payment_id like the real method does.
-        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['prorata_pending_payment_id'] = 'tr_test_'.uniqid();
-            $billable->forceFill(['subscription_meta' => $meta])->save();
-        }
-    }
-
-    protected function refundProrataCredit(\GraystackIT\MollieBilling\Contracts\Billable $billable, int $prorataCreditNet, ?\GraystackIT\MollieBilling\Services\Billing\SubscriptionChangeContext $context = null): void
-    {
-        self::$calls[] = ['prorata_refund', $prorataCreditNet];
-    }
-
-    protected function mollieUpdateSubscription(string $customerId, string $subscriptionId, array $payload): object
-    {
-        self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
-
-        return (object) ['id' => $subscriptionId];
-    }
-}
 
 beforeEach(function (): void {
     SpyUpdateSubscription::$calls = [];
@@ -72,7 +29,7 @@ beforeEach(function (): void {
             $app->make(VatCalculationService::class),
             $app->make(ValidateSubscriptionChange::class),
             $app->make(ScheduleSubscriptionChange::class),
-            $app->make(WalletUsageService::class),
+            $app->make(WalletPlanChangeAdjuster::class),
         );
     });
 

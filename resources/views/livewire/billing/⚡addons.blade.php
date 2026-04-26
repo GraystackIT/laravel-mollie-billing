@@ -123,6 +123,15 @@ new class extends Component {
         </flux:callout>
     @endif
 
+    @if ($billable && $billable->isLocalBillingSubscription())
+        <flux:callout icon="information-circle" color="blue">
+            <span>{{ __('billing::portal.free_plan_no_paid_extras') }}</span>
+            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                {{ __('billing::portal.plan_change') }}
+            </flux:button>
+        </flux:callout>
+    @endif
+
     @if (! $billable)
         <flux:callout variant="warning" icon="exclamation-triangle">
             {{ __('billing::portal.no_billable') }}
@@ -171,6 +180,9 @@ new class extends Component {
                                 <flux:text class="text-xs text-zinc-400">{{ __('billing::portal.prices_excl_vat') }}</flux:text>
                             </div>
 
+                            @php
+                                $localBlocksThisAddon = $billable && $billable->isLocalBillingSubscription() && $addon['price'] > 0;
+                            @endphp
                             <div class="w-32">
                                 @if ($hasPendingPlanChange)
                                     <flux:button class="w-full" size="sm" variant="ghost" disabled>
@@ -182,6 +194,10 @@ new class extends Component {
                                             {{ __('billing::portal.addons_disable') }}
                                         </flux:button>
                                     </flux:modal.trigger>
+                                @elseif ($localBlocksThisAddon)
+                                    <flux:button class="w-full" size="sm" variant="ghost" disabled>
+                                        {{ __('billing::portal.addons_enable') }}
+                                    </flux:button>
                                 @elseif ($addon['isAllowed'])
                                     <flux:modal.trigger name="enable-addon-{{ $addon['code'] }}">
                                         <flux:button class="w-full" size="sm" variant="primary">
