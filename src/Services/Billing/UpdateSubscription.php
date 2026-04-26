@@ -19,8 +19,8 @@ use GraystackIT\MollieBilling\Events\PlanChangePending;
 use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
-use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
-use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
@@ -42,7 +42,7 @@ class UpdateSubscription
         private readonly VatCalculationService $vatService,
         private readonly ValidateSubscriptionChange $validator,
         private readonly ScheduleSubscriptionChange $scheduleService,
-        private readonly WalletUsageService $walletService,
+        private readonly WalletPlanChangeAdjuster $walletAdjuster,
     ) {
     }
 
@@ -154,11 +154,20 @@ class UpdateSubscription
             }
 
             $mollieSubscriptionPatched = false;
+            $downgradeToLocal = $context->isMollie
+                && $context->planChanged
+                && $this->catalog->isFreePlan($context->newPlan, $context->newInterval);
 
             if ($billable instanceof Model) {
                 $meta = $billable->getBillingSubscriptionMeta();
 
-                if ($context->isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
+                if ($downgradeToLocal) {
+                    // Mollie → Free: cancel the Mollie subscription, switch source
+                    // to Local. The wallet is adjusted further down by the regular
+                    // plan-change adjuster.
+                    $this->cancelMollieSubscriptionForFreeDowngrade($billable);
+                    unset($meta['mollie_subscription_id'], $meta['pending_amount_net'], $meta['pending_amount_recorded_at']);
+                } elseif ($context->isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
                     $mollieSubscriptionPatched = $this->syncMollieSubscription(
                         $billable,
                         $context->newPlan,
@@ -189,6 +198,11 @@ class UpdateSubscription
                     'subscription_interval' => $context->newInterval,
                     'active_addon_codes' => array_values($newAddons),
                     'subscription_meta' => $meta,
+                    ...($downgradeToLocal ? [
+                        'subscription_source' => SubscriptionSource::Local,
+                        'subscription_period_starts_at' => now(),
+                        'subscription_ends_at' => null,
+                    ] : []),
                 ])->save();
             }
 
@@ -197,7 +211,7 @@ class UpdateSubscription
             // are ever added, this condition must include addon changes too.
             // See SubscriptionCatalogInterface::includedUsage() for details.
             if ($context->planChanged || $context->intervalChanged) {
-                $this->adjustWalletsForPlanChange($billable, $context->currentPlan, $context->currentInterval, $context->newPlan, $context->newInterval);
+                $this->walletAdjuster->adjust($billable, $context->currentPlan, $context->currentInterval, $context->newPlan, $context->newInterval);
             }
 
             return $this->dispatchEventsAndBuildResult(
@@ -289,7 +303,7 @@ class UpdateSubscription
 
             // See update() — addons don't carry included usages.
             if ($context->planChanged || $context->intervalChanged) {
-                $this->adjustWalletsForPlanChange(
+                $this->walletAdjuster->adjust(
                     $billable,
                     $context->currentPlan,
                     $context->currentInterval,
@@ -381,8 +395,8 @@ class UpdateSubscription
             ? $this->normalizeAddonCodes($dto->addons)
             : $currentAddons;
 
-        $newNet = $this->computeAmountNet($newPlan, $newInterval, $newSeats, $newAddons);
-        $currentNet = $this->computeAmountNet($currentPlan, $currentInterval, $currentSeats, $currentAddons);
+        $newNet = SubscriptionAmount::net($this->catalog, $billable, $newPlan, $newInterval, $newSeats, $newAddons);
+        $currentNet = SubscriptionAmount::net($this->catalog, $billable, $currentPlan, $currentInterval, $currentSeats, $currentAddons);
 
         $isMollie = $billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value;
 
@@ -519,6 +533,13 @@ class UpdateSubscription
 
     private function validateApplyAt(SubscriptionUpdateRequest $dto): void
     {
+        // Internal re-entries (e.g. ScheduleSubscriptionChange::apply() at period
+        // end) bypass the user-input mode check — they need to call update()
+        // with apply_at=immediate even when the configured mode is EndOfPeriod.
+        if ($dto->internal) {
+            return;
+        }
+
         $mode = config('mollie-billing.plan_change_mode', PlanChangeMode::UserChoice);
 
         if ($dto->applyAt === 'end_of_period' && $mode === PlanChangeMode::Immediate) {
@@ -528,36 +549,6 @@ class UpdateSubscription
         if ($dto->applyAt !== 'end_of_period' && $mode === PlanChangeMode::EndOfPeriod) {
             throw new \RuntimeException('Immediate plan changes are not allowed.');
         }
-    }
-
-    /**
-     * @param  array<int, string>  $addons
-     */
-    private function computeAmountNet(
-        string $planCode,
-        string $interval,
-        int $seats,
-        array $addons,
-    ): int {
-        if ($planCode === '') {
-            return 0;
-        }
-
-        $base = $this->catalog->basePriceNet($planCode, $interval);
-        $includedSeats = $this->catalog->includedSeats($planCode);
-        $seatPrice = $this->catalog->seatPriceNet($planCode, $interval);
-        $extraSeats = max(0, $seats - $includedSeats);
-
-        $total = $base;
-        if ($seatPrice !== null && $extraSeats > 0) {
-            $total += $seatPrice * $extraSeats;
-        }
-
-        foreach ($addons as $addonCode) {
-            $total += $this->catalog->addonPriceNet((string) $addonCode, $interval);
-        }
-
-        return $total;
     }
 
     /**
@@ -660,6 +651,31 @@ class UpdateSubscription
     protected function mollieCancelSubscription(string $customerId, string $subscriptionId): void
     {
         Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
+    }
+
+    /**
+     * Cancel the Mollie subscription as part of a downgrade to a free plan.
+     * Tolerant of API failures — Mollie may already have cancelled it; the
+     * local state transition still goes through.
+     */
+    protected function cancelMollieSubscriptionForFreeDowngrade(Billable $billable): void
+    {
+        $customerId = $billable->getMollieCustomerId();
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+
+        if ($customerId === null || $subscriptionId === '') {
+            return;
+        }
+
+        try {
+            $this->mollieCancelSubscription($customerId, $subscriptionId);
+        } catch (\Throwable $e) {
+            Log::warning('Mollie subscription cancel during free-downgrade failed', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -1212,105 +1228,4 @@ class UpdateSubscription
             ->value('mollie_payment_id');
     }
 
-    /**
-     * Adjust wallet balances when the plan or interval changes.
-     *
-     * For each wallet:
-     * 1. Compute prorated excess from the old plan (anteilig überschüssiger Verbrauch).
-     * 2. Compute rollover credits (only when usage_rollover is enabled).
-     * 3. Reset wallet to the new plan's full quota + rollover credits - excess.
-     * 4. If target balance < 0, the remainder is charged as overage.
-     */
-    private function adjustWalletsForPlanChange(
-        Billable $billable,
-        string $oldPlan,
-        string $oldInterval,
-        string $newPlan,
-        string $newInterval,
-    ): void {
-        if (! ($billable instanceof Model)) {
-            return;
-        }
-
-        $periodStart = $billable->getBillingPeriodStartsAt();
-        $periodEnd = $billable->nextBillingDate();
-        $rollover = $this->catalog->usageRollover($oldPlan);
-        $overageLineItems = [];
-
-        foreach ($billable->wallets()->get() as $wallet) {
-            $slug = (string) $wallet->slug;
-            $oldIncluded = $this->catalog->includedUsage($oldPlan, $oldInterval, $slug);
-            $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
-            $balance = (int) $wallet->balanceInt;
-
-            // Step 1: Separate purchased credits from plan credits.
-            // Purchased credits (one-time orders, coupon credits) are consumed
-            // last — plan quota is consumed first. The remaining purchased
-            // balance is preserved across the plan change.
-            $purchasedBalance = WalletUsageService::getPurchasedBalance($wallet);
-            $purchasedRemaining = WalletUsageService::computePurchasedRemaining($purchasedBalance, $balance);
-            $planOnlyBalance = $balance - $purchasedRemaining;
-
-            // Step 2: Compute prorated excess from old plan (excluding purchased credits).
-            $excess = 0;
-            if ($periodStart !== null && $periodEnd !== null && $oldIncluded > 0) {
-                $result = BillingPolicy::computeUsageOverageForPlanChange(
-                    $oldIncluded,
-                    $planOnlyBalance,
-                    $periodStart,
-                    $periodEnd,
-                );
-                $excess = $result['excess'];
-            }
-
-            // Step 3: Compute rollover credits (only from plan balance, not purchased).
-            $rolloverCredits = $rollover ? max(0, $planOnlyBalance - $oldIncluded) : 0;
-
-            // Step 4: Compute target balance.
-            $targetBalance = $newIncluded + $rolloverCredits + $purchasedRemaining - $excess;
-
-            // Step 5: If target < 0, charge the unresolvable remainder as overage.
-            if ($targetBalance < 0) {
-                $unresolvedOverage = abs($targetBalance);
-                $targetBalance = 0;
-
-                $overagePrice = (int) ($this->catalog->usageOveragePrice($oldPlan, $oldInterval, $slug) ?? 0);
-                if ($overagePrice > 0) {
-                    $overageLineItems[] = [
-                        'type' => $slug,
-                        'quantity' => $unresolvedOverage,
-                        'unit_price_net' => $overagePrice,
-                        'total_net' => $unresolvedOverage * $overagePrice,
-                    ];
-                }
-            }
-
-            // Apply: reset wallet to target balance.
-            if ($balance > 0) {
-                $wallet->forceWithdraw($balance, ['type' => $slug, 'reason' => 'plan_change_reset']);
-            } elseif ($balance < 0) {
-                $wallet->deposit(abs($balance), ['type' => $slug, 'reason' => 'plan_change_reset']);
-            }
-
-            if ($targetBalance > 0) {
-                $wallet->deposit($targetBalance, ['type' => $slug, 'reason' => 'plan_change_credit']);
-            }
-
-            // purchased_balance must not exceed the actual wallet balance.
-            WalletUsageService::setPurchasedBalance($wallet, min($purchasedRemaining, max(0, $targetBalance)));
-        }
-
-        // Create wallets for usage types that are new in the target plan.
-        $newUsages = $this->catalog->includedUsages($newPlan, $newInterval);
-        foreach ($newUsages as $type => $quantity) {
-            if ((int) $quantity > 0 && $billable->getWallet($type) === null) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'plan_change_credit');
-            }
-        }
-
-        // Charge unresolvable overage if any.
-        if ($overageLineItems !== [] && $billable->hasMollieMandate()) {
-            app(ChargeUsageOverageDirectly::class)->handleExplicit($billable, $overageLineItems);
-        }
-    }
 }

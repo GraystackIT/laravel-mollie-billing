@@ -8,9 +8,12 @@ Plan changes are handled by `UpdateSubscription::update()` and come in three fla
 
 | Type | Trigger | Timing |
 |------|---------|--------|
-| **Upgrade** (higher price) | User selects a more expensive plan | Deferred until payment confirmed |
+| **Upgrade** (higher price, Mollie) | User selects a more expensive plan on a Mollie subscription | Deferred until prorata payment confirmed |
+| **Local → Mollie upgrade** | Free-plan user selects a paid plan | Routed to `UpgradeLocalToMollie`, applied via webhook |
 | **Downgrade** (lower price) | User selects a cheaper plan | Immediate or scheduled to end of period |
+| **Mollie → Free downgrade** | Paid user selects a free plan | Cancels Mollie subscription, switches source to Local |
 | **Zero-cost change** | Same price, different plan/interval | Immediate |
+| **Free → Free change** | Both source and target are free plans | Immediate, source stays Local |
 
 ## Deferred Upgrade Flow
 
@@ -75,6 +78,15 @@ All validation is centralized in `ValidateSubscriptionChange`. It runs in both P
 - `mollie_subscription_id` must exist in `subscription_meta`
 - No `pending_plan_change` may already exist (only one deferred upgrade at a time)
 
+### Local Subscription Guards
+
+When the current source is `local`, `validateLocalSubscriptionExtras()` enforces:
+
+- **Pseudo-upgrade block:** switching to a paid plan via `UpdateSubscription` throws `LocalSubscriptionUpgradeRequiresMolliePathException`. The correct path is `UpgradeLocalToMollie` (the bundled plan-change UI does this automatically).
+- **Paid-extras block:** adding paid add-ons (`addonPriceNet > 0`) or paid extra seats (`seat_price_net > 0`) throws `LocalSubscriptionDoesNotSupportPaidExtrasException`. Free add-ons (price 0) and the included seat count remain available.
+
+These guards make the legacy bug where a free plan could be silently flipped to a paid one (without any payment) impossible to reproduce — including from admin tooling.
+
 ## Prorata Calculation
 
 All prorata calculations are centralized in `BillingPolicy::computeProrata()`. Both `UpdateSubscription` and `PreviewService` delegate to this single method.
@@ -120,6 +132,40 @@ Each subscription change creates an invoice with a specific `invoice_kind` depen
 
 The webhook controller routes all these types (`prorata`, `addon`, `seats`, `overage`) through `handleSingleChargePaid()` / `handleSingleChargeFailed()`.
 
+## Local → Mollie Upgrade
+
+A free-plan user selecting a paid plan in the bundled UI is diverted to `UpgradeLocalToMollie` instead of going through the regular `UpdateSubscription` deferred flow:
+
+```
+User selects paid plan in plan-change UI
+  -> applyChange() detects (isLocal && ! isFreePlan(target))
+  -> Show confirmation step (read-only billing data + previewed gross)
+  -> UpgradeLocalToMollie::handle()
+     - Reuse / create Mollie customer (MollieCustomerResolver)
+     - Create Mollie first payment with metadata.upgrade_from_local=true
+  -> Redirect to Mollie checkout
+  -> Webhook -> handleLocalToMollieUpgrade()
+     - persistFirstPaymentArtifacts() (mandate, customer, invoice)
+     - CreateSubscription::handle() (Mollie subscription + state)
+     - WalletPlanChangeAdjuster::adjust() (rebalance, preserve purchased_balance)
+     - SubscriptionUpgradedFromLocal event
+```
+
+The wallet is **not** seeded fresh — `WalletPlanChangeAdjuster` rebalances plan credits while preserving any purchased balance the user already had.
+
+## Mollie → Free Downgrade
+
+When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::update()`:
+
+1. Cancels the Mollie subscription via `CancelSubscriptionRequest` (tolerant of API failures).
+2. Removes `mollie_subscription_id` from `subscription_meta`.
+3. Sets `subscription_source = local`, `subscription_status = active`, `subscription_ends_at = null`, `subscription_period_starts_at = now()`.
+4. Skips `syncMollieSubscription()`.
+5. Runs `WalletPlanChangeAdjuster` to reduce plan credits to the free-plan quota; `purchased_balance` is preserved.
+6. Refunds any prorata credit via `refundProrataCredit()` if `apply_at = immediate` and a mandate is still available.
+
+`config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` with `internal=true` to bypass the user-input mode check).
+
 ## Events
 
 | Event | When |
@@ -127,6 +173,7 @@ The webhook controller routes all these types (`prorata`, `addon`, `seats`, `ove
 | `PlanChangePending` | Phase 1: prorata payment created, plan not yet changed |
 | `PlanChanged` | Phase 2a or immediate: plan actually changed |
 | `PlanChangeFailed` | Phase 2b: prorata payment failed, or Phase 2a validation failed |
+| `SubscriptionUpgradedFromLocal` | Local → Mollie upgrade completed via webhook |
 | `SeatsChanged` | Seat count changed |
 | `AddonEnabled` | Addon added |
 | `AddonDisabled` | Addon removed (or stripped as incompatible) |
@@ -169,5 +216,7 @@ Plan definitions, pricing, quotas, and addon compatibility all come from `Subscr
 | User cancels pending change, then payment succeeds | Invoice is created (money was collected), but no `pending_plan_change` exists, so plan stays unchanged. Admin must refund manually. |
 | Webhook arrives before Phase 1 transaction commits | Row lock blocks the webhook until commit. |
 | Phase 2 validation fails after payment | Logged, pending stays in meta for admin review. `PlanChangeFailed` event + notification sent. |
-| Local subscriptions | Never enter the deferred path. Changes apply immediately. |
+| Local → Local plan switch | Never enters the deferred path. Applies immediately, source stays Local. |
+| Local → Mollie via `UpdateSubscription` (no UI) | Throws `LocalSubscriptionUpgradeRequiresMolliePathException`. Use `UpgradeLocalToMollie` instead. |
+| Paid extras on a Local subscription | Throws `LocalSubscriptionDoesNotSupportPaidExtrasException`. UI surfaces this as a callout that links to the plan-change page. |
 | Second plan change while one is pending | `InvalidSubscriptionStateException` thrown. |

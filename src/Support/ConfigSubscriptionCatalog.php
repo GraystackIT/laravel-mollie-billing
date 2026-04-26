@@ -49,6 +49,12 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return $value === null ? null : (int) $value;
     }
 
+    public function isFreePlan(string $planCode, string $interval): bool
+    {
+        return $this->basePriceNet($planCode, $interval) === 0
+            && $this->seatPriceNet($planCode, $interval) === null;
+    }
+
     public function addonPriceNet(string $addonCode, string $interval): int
     {
         return (int) ($this->addon($addonCode)['intervals'][$interval]['price_net'] ?? 0);

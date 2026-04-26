@@ -131,6 +131,15 @@ new class extends Component {
         </flux:callout>
     @endif
 
+    @if ($billable && $billable->isLocalBillingSubscription())
+        <flux:callout icon="information-circle" color="blue">
+            <span>{{ __('billing::portal.free_plan_no_paid_extras') }}</span>
+            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                {{ __('billing::portal.plan_change') }}
+            </flux:button>
+        </flux:callout>
+    @endif
+
     @if (! $billable)
         <flux:callout variant="warning" icon="exclamation-triangle">
             {{ __('billing::portal.no_billable') }}
@@ -222,6 +231,10 @@ new class extends Component {
                 </div>
             </div>
 
+            @php
+                $localBlocksPaidSeats = $billable && $billable->isLocalBillingSubscription() && ($seatPrice ?? null) !== null && $seatPrice > 0;
+            @endphp
+
             <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-6 dark:border-zinc-700/50 dark:bg-white/[0.02]">
                 <div class="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
                     {{-- Stepper --}}
@@ -230,13 +243,13 @@ new class extends Component {
                         <div class="flex items-center gap-1">
                             <flux:button size="sm" variant="ghost" icon="minus"
                                 wire:click="decrement"
-                                :disabled="$currentSeats <= $includedSeats || $hasPendingPlanChange"
+                                :disabled="$currentSeats <= $includedSeats || $hasPendingPlanChange || $localBlocksPaidSeats"
                                 class="rounded-r-none"
                             />
-                            <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" :disabled="$hasPendingPlanChange" class="w-20 text-center tabular-nums rounded-none! border-x-0!" x-on:blur="if (!$el.value || parseInt($el.value) < {{ $includedSeats }}) { $wire.set('seatCount', {{ $includedSeats }}) }" />
+                            <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" :disabled="$hasPendingPlanChange || $localBlocksPaidSeats" class="w-20 text-center tabular-nums rounded-none! border-x-0!" x-on:blur="if (!$el.value || parseInt($el.value) < {{ $includedSeats }}) { $wire.set('seatCount', {{ $includedSeats }}) }" />
                             <flux:button size="sm" variant="ghost" icon="plus"
                                 wire:click="increment"
-                                :disabled="$hasPendingPlanChange"
+                                :disabled="$hasPendingPlanChange || $localBlocksPaidSeats"
                                 class="rounded-l-none"
                             />
                         </div>
@@ -279,7 +292,7 @@ new class extends Component {
 
                 {{-- Action --}}
                 <div class="mt-5 flex justify-end">
-                    <flux:button variant="primary" size="sm" wire:click="syncSeats" :disabled="! $hasChanges || $hasPendingPlanChange">
+                    <flux:button variant="primary" size="sm" wire:click="syncSeats" :disabled="! $hasChanges || $hasPendingPlanChange || $localBlocksPaidSeats">
                         {{ __('billing::portal.seats_save') }}
                     </flux:button>
                 </div>

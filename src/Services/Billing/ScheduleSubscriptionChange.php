@@ -132,6 +132,7 @@ class ScheduleSubscriptionChange
 
         $payload = (array) $scheduledChange;
         $payload['apply_at'] = 'immediate';
+        $payload['internal'] = true;
         unset($payload['scheduled_at']);
 
         try {

@@ -35,6 +35,7 @@ use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
@@ -183,6 +184,8 @@ class MollieWebhookController extends Controller
                 // Fall through to check for refunds on the same payment below.
             } elseif ($subscriptionId !== '') {
                 $this->handleSubscriptionPaymentPaid($payment, $billable, $metadata);
+            } elseif (($metadata['upgrade_from_local'] ?? false) === true) {
+                $this->handleLocalToMollieUpgrade($payment, $billable, $metadata);
             } else {
                 $this->handleFirstPaymentPaid($payment, $billable, $metadata);
             }
@@ -264,23 +267,7 @@ class MollieWebhookController extends Controller
             return;
         }
 
-        $billable->forceFill([
-            'mollie_customer_id' => (string) ($payment->customerId ?? $billable->mollie_customer_id),
-            'mollie_mandate_id' => (string) ($payment->mandateId ?? $billable->mollie_mandate_id),
-            'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),
-        ])->save();
-
-        try {
-            $this->countryMatchService->check($billable);
-        } catch (\Throwable $e) {
-            Log::warning('Country match check failed', ['error' => $e->getMessage()]);
-        }
-
-        $lineItems = $this->buildSubscriptionLineItems($planCode, $interval, $addonCodes, $extraSeats, $billable);
-
-        $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
-
-        $amountGrossNet = $this->amountFromMolliePayment($payment);
+        $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
 
         try {
             $this->createSubscription->handle($billable, [
@@ -288,7 +275,7 @@ class MollieWebhookController extends Controller
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'amount_gross' => $amountGrossNet,
+                'amount_gross' => $this->amountFromMolliePayment($payment),
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
@@ -301,6 +288,16 @@ class MollieWebhookController extends Controller
             'subscription_period_starts_at' => now(),
         ])->save();
 
+        // Hydrate wallets with the new plan's included usages. CreateSubscription
+        // intentionally does not touch the wallet — that responsibility belongs
+        // to the caller, since first-payment, Local→Mollie upgrade and resubscribe
+        // each need different hydration semantics.
+        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $quantity) {
+            if ((int) $quantity > 0) {
+                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
+            }
+        }
+
         $this->applyPendingCreditsCoupons($billable);
 
         event(new SubscriptionCreated($billable, $planCode, $interval));
@@ -309,6 +306,97 @@ class MollieWebhookController extends Controller
         $this->notifyInvoiceAvailable($billable, $invoice);
 
         MollieBilling::runAfterCheckout($billable, true);
+    }
+
+    /**
+     * Convert a local subscription to a Mollie subscription after the first
+     * payment has been confirmed. Reuses the local plan/interval as the *old*
+     * state and rebalances the wallet so purchased credits and any remaining
+     * plan quota are preserved across the conversion.
+     */
+    protected function handleLocalToMollieUpgrade(object $payment, Billable $billable, array $metadata): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $planCode = (string) ($metadata['plan_code'] ?? '');
+        $interval = (string) ($metadata['interval'] ?? 'monthly');
+        $addonCodes = (array) ($metadata['addon_codes'] ?? []);
+        $extraSeats = (int) ($metadata['extra_seats'] ?? 0);
+
+        if ($planCode === '') {
+            return;
+        }
+
+        $oldPlan = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $oldInterval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
+
+        $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
+
+        try {
+            $this->createSubscription->handle($billable, [
+                'plan_code' => $planCode,
+                'interval' => $interval,
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'amount_gross' => $this->amountFromMolliePayment($payment),
+                'mandate_id' => $billable->mollie_mandate_id,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('CreateSubscription during local upgrade failed', ['error' => $e->getMessage()]);
+        }
+
+        // Rebalance wallets: plan credits proratised against actual usage,
+        // purchased credits preserved, overage charged via mandate if needed.
+        if ($oldPlan !== '') {
+            app(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class)
+                ->adjust($billable, $oldPlan, $oldInterval, $planCode, $interval);
+        }
+
+        $this->applyPendingCreditsCoupons($billable);
+
+        event(new \GraystackIT\MollieBilling\Events\SubscriptionUpgradedFromLocal(
+            $billable,
+            $oldPlan,
+            $oldInterval,
+            $planCode,
+            $interval,
+        ));
+        event(new PaymentSucceeded($billable, $invoice));
+
+        $this->notifyInvoiceAvailable($billable, $invoice);
+
+        MollieBilling::runAfterCheckout($billable, true);
+    }
+
+    /**
+     * Persist mandate, customer ID, country, and create the invoice for a first
+     * payment (real first-time activation or local→Mollie upgrade).
+     */
+    protected function persistFirstPaymentArtifacts(
+        object $payment,
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addonCodes,
+        int $extraSeats,
+    ): \GraystackIT\MollieBilling\Models\BillingInvoice {
+        $billable->forceFill([
+            'mollie_customer_id' => (string) ($payment->customerId ?? $billable->mollie_customer_id),
+            'mollie_mandate_id' => (string) ($payment->mandateId ?? $billable->mollie_mandate_id),
+            'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),
+        ])->save();
+
+        try {
+            $this->countryMatchService->check($billable);
+        } catch (\Throwable $e) {
+            Log::warning('Country match check failed', ['error' => $e->getMessage()]);
+        }
+
+        $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
+
+        return $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
     }
 
     protected function handleSubscriptionPaymentPaid(object $payment, Billable $billable, array $metadata): void
@@ -322,7 +410,8 @@ class MollieWebhookController extends Controller
         $addonCodes = $billable->getActiveBillingAddonCodes();
         $extraSeats = $billable->getExtraBillingSeats();
 
-        $expectedNet = $this->computeNet($planCode, $interval, $addonCodes, $extraSeats, $billable);
+        $seats = $this->catalog->includedSeats($planCode) + $extraSeats;
+        $expectedNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
         $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $expectedNet, $billable->vat_number);
         $actualGross = $this->amountFromMolliePayment($payment);
 
@@ -330,7 +419,7 @@ class MollieWebhookController extends Controller
             event(new PaymentAmountMismatch($billable, (string) $payment->id, (int) $vat['gross'], $actualGross));
         }
 
-        $lineItems = $this->buildSubscriptionLineItems($planCode, $interval, $addonCodes, $extraSeats, $billable);
+        $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
 
         foreach ($addonCodes as $ignored) {
@@ -616,67 +705,6 @@ class MollieWebhookController extends Controller
                 }
             }
         }
-    }
-
-    /**
-     * @param  array<int, string>  $addonCodes
-     * @return array<int, array<string, mixed>>
-     */
-    protected function buildSubscriptionLineItems(string $planCode, string $interval, array $addonCodes, int $extraSeats, Billable $billable): array
-    {
-        $items = [];
-
-        $base = $this->catalog->basePriceNet($planCode, $interval);
-        $items[] = [
-            'kind' => 'plan',
-            'label' => $this->catalog->planName($planCode) ?? $planCode,
-            'code' => $planCode,
-            'quantity' => 1,
-            'unit_price' => $base,
-            'unit_price_net' => $base,
-            'total_net' => $base,
-        ];
-
-        if ($extraSeats > 0) {
-            $seat = (int) ($this->catalog->seatPriceNet($planCode, $interval) ?? 0);
-            $items[] = [
-                'kind' => 'seat',
-                'label' => 'Extra seats',
-                'code' => null,
-                'quantity' => $extraSeats,
-                'unit_price' => $seat,
-                'unit_price_net' => $seat,
-                'total_net' => $seat * $extraSeats,
-            ];
-        }
-
-        foreach ($addonCodes as $code) {
-            $price = $this->catalog->addonPriceNet($code, $interval);
-            $qty = $billable->getBillingAddonQuantity($code) ?: 1;
-            $items[] = [
-                'kind' => 'addon',
-                'label' => $this->catalog->addonName($code) ?? $code,
-                'code' => $code,
-                'quantity' => $qty,
-                'unit_price' => $price,
-                'unit_price_net' => $price,
-                'total_net' => $price * $qty,
-            ];
-        }
-
-        return $items;
-    }
-
-    protected function computeNet(string $planCode, string $interval, array $addonCodes, int $extraSeats, Billable $billable): int
-    {
-        $sum = $this->catalog->basePriceNet($planCode, $interval);
-        $sum += $extraSeats * (int) ($this->catalog->seatPriceNet($planCode, $interval) ?? 0);
-        foreach ($addonCodes as $code) {
-            $qty = $billable->getBillingAddonQuantity($code) ?: 1;
-            $sum += $qty * $this->catalog->addonPriceNet($code, $interval);
-        }
-
-        return $sum;
     }
 
     protected function amountFromMolliePayment(object $payment): int

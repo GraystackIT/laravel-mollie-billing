@@ -524,6 +524,58 @@ MollieBilling::subscriptions()->update($organization, [
 ]);
 ```
 
+## Local subscriptions
+
+The package distinguishes two subscription sources via the `subscription_source` column:
+
+- `mollie` — a real Mollie subscription with mandate, recurring charges and invoices.
+- `local` — a free / coupon-granted subscription with no Mollie mandate. The wallet receives the included usages on activation (and at scheduled renewals via `PrepareUsageOverageJob`), but no money flows.
+
+### When does a Local subscription arise?
+
+| Trigger | Service | Notes |
+|---|---|---|
+| Free plan checkout | `StartSubscriptionCheckout` → `ActivateLocalSubscription` | Mollie returns no `checkout_url` for a 0 € first payment; the app activates the plan locally. |
+| `AccessGrant` coupon | `CouponService::applyAccessGrant` → `ActivateLocalSubscription` | Coupon-granted plans (timed or unlimited) live as Local. |
+| Mollie → Free downgrade | `UpdateSubscription` | Cancels the Mollie subscription, sets `subscription_source = local`, status remains `active`, wallets are rebalanced (purchased credits preserved). |
+
+### What is allowed on a Local subscription?
+
+| Operation | Allowed? |
+|---|---|
+| Free addons (price 0) | yes |
+| Paid addons | **no** — `LocalSubscriptionDoesNotSupportPaidExtrasException` |
+| Extra seats on a plan with `seat_price_net > 0` | **no** — same exception |
+| Switch to another free plan | yes |
+| Switch directly to a paid plan via `UpdateSubscription` | **no** — `LocalSubscriptionUpgradeRequiresMolliePathException`. Use `UpgradeLocalToMollie` instead (the bundled plan-change UI does this automatically). |
+| Cancel | yes — status switches to `cancelled`, wallets are kept until `subscription_ends_at`. |
+
+### Local → Mollie upgrade
+
+```php
+use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
+
+['checkout_url' => $url, 'payment_id' => $id] = app(UpgradeLocalToMollie::class)->handle($organization, [
+    'plan_code'   => 'pro',
+    'interval'    => 'monthly',
+    'addon_codes' => [],
+    'extra_seats' => 0,
+    'amount_gross' => $previewedGross, // pre-computed by PreviewService
+]);
+
+return redirect()->away($url);
+```
+
+The webhook on the resulting first payment carries `metadata.upgrade_from_local = true` and routes through `MollieWebhookController::handleLocalToMollieUpgrade()`, which reuses the existing wallet (purchased balance preserved) instead of seeding a fresh one.
+
+The bundled plan-change UI (`resources/views/livewire/billing/⚡plan-change.blade.php`) detects `Local → paid plan` automatically and shows a confirmation step before the Mollie redirect — no second checkout wizard.
+
+### Mollie → Free behaviour
+
+A user-initiated downgrade follows whatever `config('mollie-billing.plan_change_mode')` is set to (`Immediate`, `EndOfPeriod`, `UserChoice`). For `EndOfPeriod`, `ScheduleSubscriptionChange` queues the change and `PrepareUsageOverageJob` applies it at the period boundary — the same Mollie cancel + Source=Local flip happens then.
+
+`purchased_balance` (one-time orders, coupon credits) is preserved across every plan change, including downgrades to free.
+
 ## Preview
 
 Preview the financial impact of an update before applying it:

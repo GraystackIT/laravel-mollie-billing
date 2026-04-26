@@ -33,6 +33,14 @@ interface SubscriptionCatalogInterface
 
     public function seatPriceNet(string $planCode, string $interval): ?int;
 
+    /**
+     * Whether the plan is free in the given interval — base price 0 and no extra seats sold.
+     *
+     * Used to decide whether a Mollie subscription is needed at all (free → Local source)
+     * and to gate the Local→Mollie upgrade path in the plan-change UI.
+     */
+    public function isFreePlan(string $planCode, string $interval): bool;
+
     public function addonPriceNet(string $addonCode, string $interval): int;
 
     public function includedSeats(string $planCode): int;

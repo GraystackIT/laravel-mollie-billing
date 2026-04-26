@@ -12,17 +12,28 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
-use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
 
+/**
+ * Creates a Mollie subscription and updates the billable to reflect the new
+ * Mollie-source state. Wallet hydration is the caller's responsibility — see
+ * the three call sites for the right hydration strategy in each context:
+ *
+ *  - First-time activation (MollieWebhookController::handleFirstPaymentPaid):
+ *    credit `included_usages` directly into the wallet.
+ *  - Local→Mollie upgrade (MollieWebhookController::handleLocalToMollieUpgrade):
+ *    use WalletPlanChangeAdjuster to rebalance plan credits while preserving
+ *    purchased balance.
+ *  - Resubscribe in grace period (ResubscribeSubscription): do nothing — the
+ *    wallet already holds the current period's credits.
+ */
 class CreateSubscription
 {
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
-        private readonly WalletUsageService $walletService,
     ) {
     }
 
@@ -69,14 +80,6 @@ class CreateSubscription
             'subscription_period_starts_at' => now(),
             'subscription_ends_at' => null,
         ])->save();
-
-        $includedUsages = $this->catalog->includedUsages($planCode, $interval);
-
-        foreach ($includedUsages as $type => $quantity) {
-            if ((int) $quantity > 0) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
-            }
-        }
 
         SubscriptionCreated::dispatch($billable, $planCode, $interval);
     }

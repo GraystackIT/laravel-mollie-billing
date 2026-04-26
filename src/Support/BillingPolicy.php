@@ -10,26 +10,46 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 class BillingPolicy
 {
     /**
-     * Remaining fraction of the period from now to periodEnd, in [0, 1].
+     * Whole-day breakdown of a billing period: total length and days left from
+     * now to periodEnd. Used as the basis for prorata factor and for surfacing
+     * "X of Y days remaining" in preview UIs.
      *
-     * Uses whole calendar days (startOfDay) so that a change made on the
-     * same day as the period start yields a factor of exactly 1.0. The
-     * current day counts as a full remaining day — billing granularity
-     * is per-day, not per-second.
+     * Granularity is per day (`startOfDay`): a change on the same day as the
+     * period start counts the full period as remaining; the current day always
+     * counts as a full remaining day.
+     *
+     * @return array{total:int, remaining:int}
      */
-    public static function prorataFactor(CarbonInterface $periodStart, CarbonInterface $periodEnd): float
+    public static function prorataPeriodDays(CarbonInterface $periodStart, CarbonInterface $periodEnd): array
     {
         $start = $periodStart->copy()->startOfDay();
         $end = $periodEnd->copy()->startOfDay();
-        $totalDays = $start->diffInDays($end);
+        $totalDays = (int) $start->diffInDays($end);
 
         if ($totalDays <= 0) {
+            return ['total' => 0, 'remaining' => 0];
+        }
+
+        $remainingDays = (int) now($end->getTimezone())->startOfDay()->diffInDays($end, false);
+
+        return [
+            'total' => $totalDays,
+            'remaining' => max(0, $remainingDays),
+        ];
+    }
+
+    /**
+     * Remaining fraction of the period from now to periodEnd, in [0, 1].
+     */
+    public static function prorataFactor(CarbonInterface $periodStart, CarbonInterface $periodEnd): float
+    {
+        $days = self::prorataPeriodDays($periodStart, $periodEnd);
+
+        if ($days['total'] <= 0) {
             return 0.0;
         }
 
-        $remainingDays = now($end->getTimezone())->startOfDay()->diffInDays($end, false);
-
-        return round(max(0, $remainingDays) / $totalDays, 6);
+        return round($days['remaining'] / $days['total'], 6);
     }
 
     /**
