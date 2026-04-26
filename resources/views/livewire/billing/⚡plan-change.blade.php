@@ -1,20 +1,37 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\CountryResolver;
+use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use Livewire\Component;
 
 new class extends Component {
+    use ValidatesVatNumber;
+
     public string $selectedInterval = 'monthly';
     public ?string $selectedPlan = null;
     public array $preview = [];
     public bool $wasPending = false;
     public bool $dropExtraSeats = false;
     public bool $showLocalUpgradeConfirmation = false;
+
+    // Edit-billing modal state — also used by ValidatesVatNumber trait (vat_number + billing_country)
+    public bool $showEditBillingModal = false;
+    public string $company_name = '';
+    public string $billing_street = '';
+    public string $billing_postal_code = '';
+    public string $billing_city = '';
+    public string $billing_country = 'AT';
+    public ?string $vat_number = null;
+    public ?bool $vatNumberValid = null;
+    public ?string $vatStatusMessage = null;
 
     private function resolveBillable(): ?Billable
     {
@@ -246,6 +263,87 @@ new class extends Component {
         }
     }
 
+    public function openEditBillingModal(): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) {
+            return;
+        }
+
+        $this->company_name = $billable->getBillingName();
+        $this->billing_street = (string) $billable->getBillingStreet();
+        $this->billing_postal_code = (string) $billable->getBillingPostalCode();
+        $this->billing_city = (string) $billable->getBillingCity();
+        $this->billing_country = (string) ($billable->getBillingCountry() ?? 'AT');
+        $this->vat_number = $billable instanceof \Illuminate\Database\Eloquent\Model ? ($billable->vat_number ?? null) : null;
+        $this->vatNumberValid = null;
+        $this->vatStatusMessage = null;
+        $this->resetErrorBag();
+
+        $this->showEditBillingModal = true;
+    }
+
+    public function updatedVatNumber(VatCalculationService $vat): void
+    {
+        $this->validateVatNumberLive($vat);
+    }
+
+    public function updatedBillingCountry(VatCalculationService $vat): void
+    {
+        if (filled($this->vat_number)) {
+            $this->validateVatNumberLive($vat);
+        }
+    }
+
+    public function saveBillingDetails(MollieCustomerResolver $customerResolver, PreviewService $previewService): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable || ! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $validCountries = array_keys(CountryResolver::resolve());
+
+        $this->validate([
+            'company_name' => ['required', 'string', 'max:255'],
+            'billing_street' => ['required', 'string', 'max:255'],
+            'billing_postal_code' => ['required', 'string', 'max:20'],
+            'billing_city' => ['required', 'string', 'max:255'],
+            'billing_country' => ['required', 'string', 'in:'.implode(',', $validCountries)],
+            'vat_number' => ['nullable', 'string', 'max:50'],
+        ]);
+
+        if ($this->vatNumberValid === false) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'vat_number' => __('billing::checkout.vat_correct_or_clear'),
+            ]);
+        }
+
+        $billable->forceFill([
+            'name' => $this->company_name,
+            'billing_street' => $this->billing_street,
+            'billing_postal_code' => $this->billing_postal_code,
+            'billing_city' => $this->billing_city,
+            'billing_country' => $this->billing_country,
+            'vat_number' => $this->vat_number ?: null,
+        ])->save();
+
+        try {
+            $customerResolver->sync($billable);
+        } catch (\Throwable $e) {
+            // Non-fatal: local data is saved, Mollie name/email sync can be retried later.
+            report($e);
+        }
+
+        $this->showEditBillingModal = false;
+
+        if ($this->selectedPlan) {
+            $this->refreshPreview($previewService);
+        }
+
+        \Flux::toast(__('billing::portal.flash.billing_details_saved'), variant: 'success');
+    }
+
     public function with(): array
     {
         $billable = $this->resolveBillable();
@@ -336,6 +434,9 @@ new class extends Component {
             $previewNet = (int) ($preview['newNet'] ?? 0);
             $previewVat = (int) ($preview['vatAmount'] ?? 0);
             $previewGross = (int) ($preview['grossTotal'] ?? 0);
+            $countryNames = \GraystackIT\MollieBilling\Support\CountryResolver::resolve();
+            $billingCountryIso = $billable->getBillingCountry();
+            $billingCountryName = $billingCountryIso ? ($countryNames[$billingCountryIso] ?? $billingCountryIso) : null;
         @endphp
 
         <flux:card class="space-y-4">
@@ -346,16 +447,27 @@ new class extends Component {
 
             <div class="grid gap-4 sm:grid-cols-2">
                 <div>
-                    <flux:text class="text-sm font-medium">{{ __('billing::portal.billing_address') }}</flux:text>
+                    <div class="flex items-start justify-between gap-2">
+                        <flux:text class="text-sm font-medium">{{ __('billing::portal.billing_address') }}</flux:text>
+                        <flux:button size="xs" variant="subtle" icon="pencil-square" wire:click="openEditBillingModal">
+                            {{ __('billing::portal.edit_billing_data') }}
+                        </flux:button>
+                    </div>
                     <div class="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
                         @if ($billable->getBillingName())
                             <div>{{ $billable->getBillingName() }}</div>
                         @endif
-                        @if ($billable->vat_number)
-                            <div>{{ __('billing::portal.vat_number') }}: {{ $billable->vat_number }}</div>
+                        @if ($billable->getBillingStreet())
+                            <div>{{ $billable->getBillingStreet() }}</div>
                         @endif
-                        @if ($billable->getBillingCountry())
-                            <div>{{ $billable->getBillingCountry() }}</div>
+                        @if ($billable->getBillingPostalCode() || $billable->getBillingCity())
+                            <div>{{ trim($billable->getBillingPostalCode().' '.$billable->getBillingCity()) }}</div>
+                        @endif
+                        @if ($billingCountryName)
+                            <div>{{ $billingCountryName }}</div>
+                        @endif
+                        @if ($billable->vat_number)
+                            <div class="mt-1">{{ __('billing::portal.vat_number') }}: {{ $billable->vat_number }}</div>
                         @endif
                     </div>
                 </div>
@@ -1048,4 +1160,62 @@ new class extends Component {
             @endif
         </flux:card>
     @endif
+
+    {{-- Edit billing details modal --}}
+    <flux:modal name="edit-billing-modal" wire:model.self="showEditBillingModal" class="md:w-[36rem]">
+        <div class="space-y-5">
+            <div>
+                <flux:heading size="lg">{{ __('billing::portal.edit_billing_data') }}</flux:heading>
+                <flux:subheading>{{ __('billing::portal.edit_billing_data_subtitle') }}</flux:subheading>
+            </div>
+
+            <div class="flex flex-col gap-4">
+                <flux:input wire:model.live.debounce.500ms="company_name" :label="__('billing::checkout.company_name')" type="text" required autofocus />
+                <flux:input wire:model.live.debounce.500ms="billing_street" :label="__('billing::checkout.street')" type="text" required />
+
+                <div class="error-reserve grid gap-4 sm:grid-cols-[1fr_2fr]">
+                    <flux:input wire:model.live.debounce.500ms="billing_postal_code" :label="__('billing::checkout.postal_code')" type="text" required />
+                    <flux:input wire:model.live.debounce.500ms="billing_city" :label="__('billing::checkout.city')" type="text" required />
+                </div>
+
+                <div class="error-reserve grid gap-4 sm:grid-cols-2">
+                    <flux:select wire:model.live="billing_country" :label="__('billing::checkout.country')" required>
+                        @foreach (\GraystackIT\MollieBilling\Support\CountryResolver::resolve() as $iso => $name)
+                            <flux:select.option value="{{ $iso }}">{{ $name }}</flux:select.option>
+                        @endforeach
+                    </flux:select>
+
+                    <flux:field>
+                        <flux:label>{{ __('billing::checkout.vat_number') }}</flux:label>
+                        <flux:input.group>
+                            <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" />
+                            @if ($vatNumberValid === true)
+                                <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
+                                    <flux:icon.check-circle class="size-4" />
+                                </flux:input.group.suffix>
+                            @elseif ($vatNumberValid === false)
+                                <flux:input.group.suffix class="text-red-600 dark:text-red-400">
+                                    <flux:icon.x-circle class="size-4" />
+                                </flux:input.group.suffix>
+                            @endif
+                        </flux:input.group>
+                        <flux:error name="vat_number" />
+                        @if ($vatStatusMessage)
+                            <flux:description>{{ $vatStatusMessage }}</flux:description>
+                        @endif
+                    </flux:field>
+                </div>
+            </div>
+
+            <div class="flex justify-end gap-2 pt-2">
+                <flux:modal.close>
+                    <flux:button variant="ghost">{{ __('billing::portal.cancel') }}</flux:button>
+                </flux:modal.close>
+                <flux:button variant="primary" wire:click="saveBillingDetails" wire:loading.attr="disabled" wire:target="saveBillingDetails">
+                    <flux:icon.arrow-path class="size-4 animate-spin" wire:loading wire:target="saveBillingDetails" />
+                    <span>{{ __('billing::portal.save') }}</span>
+                </flux:button>
+            </div>
+        </div>
+    </flux:modal>
 </div>

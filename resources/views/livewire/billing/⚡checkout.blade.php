@@ -1,10 +1,10 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Events\CheckoutStarted;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
-use GraystackIT\MollieBilling\Exceptions\ViesUnavailableException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -17,6 +17,8 @@ use Livewire\Attributes\Layout;
 use Livewire\Component;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
+    use ValidatesVatNumber;
+
     public int $step = 1;
 
     // Step 1: billing address
@@ -394,56 +396,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function updatedVatNumber(VatCalculationService $vat): void
     {
-        $this->resetErrorBag('vat_number');
-        $this->vatNumberValid = null;
-        $this->vatStatusMessage = null;
-
-        $value = trim((string) $this->vat_number);
-        if ($value === '') {
-            return;
-        }
-
-        $normalized = strtoupper(preg_replace('/\s+/', '', $value) ?? '');
-        $this->vat_number = $normalized;
-
-        if (! preg_match('/^[A-Z]{2}[A-Z0-9]{2,12}$/', $normalized)) {
-            $this->addError('vat_number', __('billing::checkout.vat_invalid_format'));
-            $this->vatNumberValid = false;
-
-            return;
-        }
-
-        if (substr($normalized, 0, 2) !== strtoupper($this->billing_country)) {
-            $this->addError('vat_number', __('billing::checkout.vat_country_mismatch'));
-            $this->vatNumberValid = false;
-
-            return;
-        }
-
-        try {
-            $isValid = $vat->validateVatNumber($normalized);
-        } catch (ViesUnavailableException) {
-            $this->vatNumberValid = null;
-            $this->vatStatusMessage = __('billing::checkout.vies_unavailable');
-
-            return;
-        }
-
-        if (! $isValid) {
-            $this->addError('vat_number', __('billing::checkout.vies_validation_failed'));
-            $this->vatNumberValid = false;
-
-            return;
-        }
-
-        $this->vatNumberValid = true;
-        $this->vatStatusMessage = __('billing::checkout.vat_verified');
+        $this->validateVatNumberLive($vat);
     }
 
     public function updatedBillingCountry(VatCalculationService $vat): void
     {
         if (filled($this->vat_number)) {
-            $this->updatedVatNumber($vat);
+            $this->validateVatNumberLive($vat);
         }
     }
 

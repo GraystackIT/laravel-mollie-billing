@@ -799,8 +799,7 @@ class UpdateSubscription
             return;
         }
 
-        $country = $billable->getBillingCountry() ?? 'DE';
-        $vat = $this->vatService->calculate($country, $prorataChargeNet, $billable->vat_number ?? null);
+        $vat = $this->prorataVat($billable, $prorataChargeNet);
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountValue = number_format($vat['gross'] / 100, 2, '.', '');
@@ -1042,10 +1041,10 @@ class UpdateSubscription
             return;
         }
 
-        $country = $billable->getBillingCountry() ?? 'DE';
-        $vatResult = $this->vatService->calculate($country, $prorataCreditNet, $billable->vat_number ?? null);
+        $vatResult = $this->prorataVat($billable, $prorataCreditNet);
         $vatRate = (float) $vatResult['rate'];
         $refundGross = (int) $vatResult['gross'];
+        $country = (string) $vatResult['country'];
 
         $reasonText = 'Pro-rata credit for plan downgrade';
         $lineItems = [];
@@ -1163,6 +1162,9 @@ class UpdateSubscription
         }
 
         // Create a standalone credit-note invoice (no parent invoice).
+        // Country is taken from the original-period VAT snapshot, not the live
+        // billable, so a mid-period country/VAT-status change cannot retroactively
+        // alter how this refund is booked.
         $invoiceService = app(InvoiceService::class);
         $creditNote = $invoiceService->createStandaloneCreditNote(
             $billable,
@@ -1171,6 +1173,7 @@ class UpdateSubscription
             $lineItems,
             $reasonText,
             $refundPaymentId,
+            $country,
         );
         $creditNote->refund_reason_code = RefundReasonCode::PlanDowngrade;
         $creditNote->save();
@@ -1226,6 +1229,45 @@ class UpdateSubscription
             ->when($alreadyRefundedPaymentIds, fn ($q) => $q->whereNotIn('mollie_payment_id', $alreadyRefundedPaymentIds))
             ->latest()
             ->value('mollie_payment_id');
+    }
+
+    /**
+     * Compute VAT for a prorata charge or refund using the original period's tax
+     * treatment — never the live billable's current VAT status.
+     *
+     * Tax law requires reverse-charge / B2C-VAT decisions on a refund to mirror
+     * the original invoice exactly. A customer who registers a VAT ID mid-period
+     * (or has theirs invalidated) must still be refunded with the rate originally
+     * charged; otherwise the package would either eat VAT it has already remitted
+     * or refund VAT it never collected.
+     *
+     * @return array{net:int, vat:int, gross:int, rate:float, country:string, vat_number:?string}
+     *
+     * @throws \RuntimeException When no Subscription invoice exists for the current period.
+     */
+    protected function prorataVat(Billable $billable, int $netAmount): array
+    {
+        $invoice = BillingInvoice::currentPeriodSubscriptionInvoice($billable);
+
+        if ($invoice === null) {
+            throw new \RuntimeException(
+                'Cannot determine prorata VAT: no paid Subscription invoice found for the current period of billable '
+                .($billable instanceof Model ? $billable->getKey() : 'unknown')
+                .'. Refunds and prorata charges must reuse the original period\'s VAT rate.',
+            );
+        }
+
+        $rate = (float) $invoice->vat_rate;
+        $vat = (int) round($netAmount * $rate / 100);
+
+        return [
+            'net' => $netAmount,
+            'vat' => $vat,
+            'gross' => $netAmount + $vat,
+            'rate' => $rate,
+            'country' => (string) $invoice->country,
+            'vat_number' => null,
+        ];
     }
 
 }

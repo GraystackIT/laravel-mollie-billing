@@ -47,7 +47,7 @@ beforeEach(function (): void {
         'allowed_addons' => [],
         'intervals' => [
             'monthly' => ['base_price_net' => 0, 'seat_price_net' => null, 'included_usages' => []],
-            'yearly' => ['base_price_net' => 0, 'seat_price_net' => null, 'included_usages' => []],
+            'yearly' => ['base_price_net' => 0, 'seat_price_net' => null, 'included_usages' => []],  
         ],
     ]);
 
