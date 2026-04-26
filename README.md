@@ -639,6 +639,7 @@ php artisan billing:oss-export 2026
 
 Detailed technical documentation is available in the [`docs/`](docs/) directory:
 
+- [Configuration](docs/configuration.md) — `mollie-billing.php` and `mollie-billing-plans.php` reference
 - [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
 
