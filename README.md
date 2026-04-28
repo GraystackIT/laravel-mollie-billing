@@ -57,10 +57,10 @@ composer require graystackit/laravel-mollie-billing
 Publish the config and migrations:
 
 ```bash
-php artisan vendor:publish --tag=mollie-billing-config
+php artisan vendor:publish --tag=mollie-billing-config       # mollie-billing.php + mollie-billing-plans.php
 php artisan vendor:publish --tag=mollie-billing-migrations
-php artisan vendor:publish --tag=mollie-billing-plans
-php artisan vendor:publish --tag=mollie-billing-lang
+php artisan vendor:publish --tag=mollie-billing-views        # optional: override Blade/Livewire views
+php artisan vendor:publish --tag=billing-lang                # optional: override translations
 ```
 
 Edit `config/mollie-billing.php` and set the billable model:
