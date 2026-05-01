@@ -83,6 +83,15 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         }
 
         // Hard-Limit: 7 Tage.
+        if (! isset($pending['created_at'])) {
+            // Fehlt durch Datenkorruption oder manuellen Edit — InvoiceService schreibt created_at immer mit.
+            // Wir behandeln den Eintrag als alt genug zum Aufräumen, loggen aber laut, weil das auf einen
+            // Bug an der Schreibstelle hindeutet.
+            Log::warning('CleanupStalePendingProrataChangeJob: pending_prorata_change ohne created_at — behandle als >7 Tage alt', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+            ]);
+        }
         $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse($pending['created_at']) : now()->subDays(8);
         if ($createdAt->diffInDays(now()) >= 7) {
             unset($meta['pending_prorata_change']);

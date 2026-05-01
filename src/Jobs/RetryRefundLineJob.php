@@ -13,6 +13,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Throwable;
 
@@ -125,6 +126,23 @@ class RetryRefundLineJob implements ShouldQueue
 
     private function lineSignature(array $line): string
     {
-        return ($line['parent_invoice_id'] ?? '?').':'.($line['parent_line_item_index'] ?? '?').':'.($line['amount_net'] ?? 0);
+        $invoiceId = $line['parent_invoice_id'] ?? null;
+        $lineIndex = $line['parent_line_item_index'] ?? null;
+
+        // Refund-Lines haben per Design immer parent_invoice_id + parent_line_item_index (siehe ProrataLine).
+        // Fehlt eines davon, deutet das auf manuell editiertes oder fehlerhaft serialisiertes Meta hin —
+        // wir bauen dann eine garantiert eindeutige Signatur, damit verschiedene kaputte Einträge nicht
+        // kollabieren, und loggen laut.
+        if ($invoiceId === null || $lineIndex === null) {
+            Log::warning('RetryRefundLineJob: pending_refund_retries-Line ohne parent_invoice_id oder parent_line_item_index', [
+                'billable_class' => $this->billableClass,
+                'billable_id' => $this->billableId,
+                'line' => $line,
+            ]);
+
+            return 'malformed:'.hash('sha256', serialize($line));
+        }
+
+        return $invoiceId.':'.$lineIndex.':'.($line['amount_net'] ?? 0);
     }
 }
