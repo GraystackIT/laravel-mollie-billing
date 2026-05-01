@@ -15,16 +15,17 @@ return new class extends Migration
             $table->string('billable_type');
             $this->morphIdColumn($table);
 
-            $table->string('mollie_payment_id')->unique();
+            // Charge-Invoices: gesetzt. Refund-Invoices: null.
+            // UNIQUE-Index erlaubt mehrere NULL-Werte (MySQL/SQLite/Postgres).
+            $table->string('mollie_payment_id')->nullable()->unique();
             $table->string('mollie_subscription_id')->nullable();
             $table->string('serial_number')->nullable()->unique();
             $table->string('pdf_disk')->nullable();
             $table->string('pdf_path')->nullable();
 
-            $table->string('invoice_kind'); // subscription | overage | prorata | credit_note
+            $table->string('invoice_kind'); // subscription | overage | one_time_order | refund
             $table->string('status');       // InvoiceStatus enum
             $table->string('country', 2);
-            $table->decimal('vat_rate', 5, 2);
             $table->string('currency', 3)->default('EUR');
             $table->integer('amount_net');
             $table->integer('amount_vat');
@@ -33,8 +34,6 @@ return new class extends Migration
             $table->timestamp('period_start')->nullable();
             $table->timestamp('period_end')->nullable();
 
-            // Refund fields (populated for credit notes)
-            $table->unsignedBigInteger('parent_invoice_id')->nullable();
             $table->integer('refunded_net')->default(0);
             $table->string('refund_reason_code')->nullable();
             $table->text('refund_reason_text')->nullable();
@@ -43,7 +42,6 @@ return new class extends Migration
 
             $table->index(['billable_type', 'billable_id']);
             $table->index(['billable_type', 'billable_id', 'created_at']);
-            $table->foreign('parent_invoice_id')->references('id')->on('billing_invoices')->nullOnDelete();
         });
     }
 

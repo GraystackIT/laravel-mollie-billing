@@ -17,12 +17,9 @@ return [
     ],
     'invoice_kind' => [
         'subscription' => 'Subscription',
-        'prorata' => 'Pro-rata',
-        'addon' => 'Addon',
-        'seats' => 'Seats',
         'overage' => 'Overage',
         'one_time_order' => 'One-time order',
-        'credit_note' => 'Credit note',
+        'refund' => 'Refund',
     ],
     'subscription_source' => [
         'none' => 'None',

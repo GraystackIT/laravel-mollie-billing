@@ -18,7 +18,9 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
             return 0;
         }
 
-        return (int) ($this->plan($planCode)['intervals'][$interval]['included_usages'][$usageType] ?? 0);
+        $usages = (array) ($this->plan($planCode)['intervals'][$interval]['included_usages'] ?? []);
+
+        return (int) ($this->lookupCaseInsensitive($usages, $usageType) ?? 0);
     }
 
     public function includedUsages(string $planCode, ?string $interval): array
@@ -166,9 +168,33 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
             return null;
         }
 
-        $value = $this->plan($planCode)['intervals'][$interval]['usage_overage_prices'][$usageType] ?? null;
+        $prices = (array) ($this->plan($planCode)['intervals'][$interval]['usage_overage_prices'] ?? []);
+        $value = $this->lookupCaseInsensitive($prices, $usageType);
 
         return $value === null ? null : (int) $value;
+    }
+
+    /**
+     * Case-insensitive array lookup. Returns the first value whose key matches
+     * `$needle` regardless of casing, or null if nothing matches. Lets callers
+     * use any consistent casing (`tokens` / `Tokens` / `TOKENS`) without forcing
+     * the package config to a specific style.
+     *
+     * @param  array<string, mixed>  $haystack
+     */
+    private function lookupCaseInsensitive(array $haystack, string $needle): mixed
+    {
+        if (array_key_exists($needle, $haystack)) {
+            return $haystack[$needle];
+        }
+
+        foreach ($haystack as $key => $value) {
+            if (strcasecmp((string) $key, $needle) === 0) {
+                return $value;
+            }
+        }
+
+        return null;
     }
 
     public function usageRollover(string $planCode): bool

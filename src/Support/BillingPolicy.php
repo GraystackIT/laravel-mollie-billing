@@ -154,21 +154,22 @@ class BillingPolicy
         return $newBase < $currentBase;
     }
 
-    /**
+/**
      * Compute prorated usage excess when a plan change occurs mid-period.
      *
      * The elapsed fraction of the current period determines how much of the
-     * old plan's quota the billable was entitled to use so far. If the
-     * current wallet balance is lower than that prorated quota, the
-     * difference is excess that must be settled (offset against the new
-     * plan's quota or charged as overage).
+     * old plan's quota the billable was entitled to use so far. Anything
+     * consumed beyond that prorated entitlement is excess that must be
+     * settled (offset against the new plan's quota or charged as overage).
+     *
+     * Used = oldIncluded − currentBalance (works for negative balances too,
+     * which represent existing overage).
      *
      * Works identically for rollover and non-rollover modes:
-     * - Without rollover: balance ≤ oldIncluded, excess arises when more
-     *   was consumed than the prorated entitlement.
-     * - With rollover: balance may exceed oldIncluded (carried credits);
-     *   those are respected and excess only arises when even carried
-     *   credits are exhausted.
+     * - Without rollover: balance ≤ oldIncluded; excess arises when more was
+     *   consumed than the prorated entitlement allowed by now.
+     * - With rollover: balance may exceed oldIncluded (carried credits); used
+     *   becomes negative, so excess naturally collapses to 0.
      *
      * @return array{prorated_old_quota: int, current_balance: int, excess: int, elapsed_fraction: float}
      */
@@ -181,7 +182,9 @@ class BillingPolicy
         $factor = self::prorataFactor($periodStart, $periodEnd);
         $elapsedFraction = round(1.0 - $factor, 6);
         $proratedOldQuota = (int) round($oldIncluded * $elapsedFraction);
-        $excess = max(0, $proratedOldQuota - $currentBalance);
+
+        $used = $oldIncluded - $currentBalance;
+        $excess = max(0, $used - $proratedOldQuota);
 
         return [
             'prorated_old_quota' => $proratedOldQuota,

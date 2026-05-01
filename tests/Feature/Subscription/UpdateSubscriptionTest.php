@@ -27,15 +27,19 @@ use Illuminate\Support\Facades\Event;
 beforeEach(function (): void {
     // Spy out Mollie API calls — same pattern as UpdateSubscriptionMollieTest.
     // SpyUpdateSubscription is defined in that file and loaded globally by Pest.
+    $this->app->singleton(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class, \GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher::class);
+    \GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher::$calls = [];
+    SpyUpdateSubscription::$calls = [];
+
     $this->app->bind(UpdateSubscription::class, function ($app): UpdateSubscription {
         return new SpyUpdateSubscription(
             $app->make(CouponService::class),
-            $app->make(PreviewService::class),
             $app->make(SubscriptionCatalogInterface::class),
-            $app->make(VatCalculationService::class),
             $app->make(ValidateSubscriptionChange::class),
             $app->make(ScheduleSubscriptionChange::class),
             $app->make(WalletPlanChangeAdjuster::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\ProrataExecutor::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class),
         );
     });
     config()->set('mollie-billing-plans.plans.free', [
@@ -381,8 +385,11 @@ it('caps wallet balance on downgrade to plan with less usage quota', function ()
 
     $wallet->refresh();
 
-    // With prorated plan change logic: period started 5 days ago (monthly),
-    // elapsed ≈ 5/30 ≈ 0.167, proratedOldQuota ≈ 17, balance=60 so excess=0.
-    // Wallet is reset to newIncluded (50) with no excess to deduct.
-    expect((int) $wallet->balanceInt)->toBe(50);
+    // Prorated plan-change accounting:
+    //   period started 5 days ago (monthly), elapsed ≈ 5/30 ≈ 0.167
+    //   oldIncluded = 100, prorated entitlement so far = 17
+    //   used = oldIncluded − balance = 100 − 60 = 40
+    //   excess = used − prorated = 40 − 17 = 23
+    //   targetBalance = newIncluded (50) − excess (23) = 27
+    expect((int) $wallet->balanceInt)->toBe(27);
 });

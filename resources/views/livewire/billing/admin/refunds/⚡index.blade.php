@@ -34,7 +34,7 @@ new class extends Component {
 
     public function with(): array
     {
-        $q = BillingInvoice::query()->where('invoice_kind', 'credit_note');
+        $q = BillingInvoice::query()->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund);
 
         if ($this->reasonFilter !== '') {
             $q->where('refund_reason_code', $this->reasonFilter);
@@ -103,7 +103,7 @@ new class extends Component {
                             <flux:table.cell>
                                 <x-mollie-billing::admin.enum-badge :value="$n->refund_reason_code" />
                             </flux:table.cell>
-                            <flux:table.cell class="font-mono text-sm">#{{ $n->parent_invoice_id ?? '—' }}</flux:table.cell>
+                            <flux:table.cell class="font-mono text-sm">#{{ $n->line_items[0]['parent_invoice_id'] ?? '—' }}</flux:table.cell>
                         </flux:table.row>
                     @endforeach
                 </flux:table.rows>

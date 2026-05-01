@@ -71,7 +71,7 @@ it('returns line items for plan + extra seats + addons', function (): void {
     expect($items)->toHaveCount(3);
     expect($items[0]['kind'])->toBe('plan');
     expect($items[0]['total_net'])->toBe(2900);
-    expect($items[1]['kind'])->toBe('seat');
+    expect($items[1]['kind'])->toBe('seats');
     expect($items[1]['quantity'])->toBe(2);
     expect($items[1]['total_net'])->toBe(1980);
     expect($items[2]['kind'])->toBe('addon');

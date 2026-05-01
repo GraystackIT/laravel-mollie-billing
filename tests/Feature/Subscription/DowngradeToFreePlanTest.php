@@ -19,16 +19,19 @@ use GraystackIT\MollieBilling\Tests\Support\SpyUpdateSubscription;
 
 beforeEach(function (): void {
     SpyUpdateSubscription::$calls = [];
+    \GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher::$calls = [];
+
+    $this->app->singleton(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class, \GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher::class);
 
     $this->app->bind(UpdateSubscription::class, function ($app): UpdateSubscription {
         return new SpyUpdateSubscription(
             $app->make(CouponService::class),
-            $app->make(PreviewService::class),
             $app->make(SubscriptionCatalogInterface::class),
-            $app->make(VatCalculationService::class),
             $app->make(ValidateSubscriptionChange::class),
             $app->make(ScheduleSubscriptionChange::class),
             $app->make(WalletPlanChangeAdjuster::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\ProrataExecutor::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class),
         );
     });
 

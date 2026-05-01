@@ -64,6 +64,21 @@ return [
 
 Resolved by `SubscriptionCatalogInterface::usageTypeName()` with `ucfirst($type)` as fallback.
 
+### Casing of usage-type identifiers
+
+Usage-type strings (`tokens`, `Tokens`, `TOKENS`, `sms`, `SMS`, …) are resolved **case-insensitively** throughout the package. You can pick whatever casing reads best in your config and stay consistent on the call site -- the package will not create duplicate wallets or miss quota lookups when callers use a different casing.
+
+Where the case-insensitive layer lives:
+
+| Layer | Method | Behaviour |
+|-------|--------|-----------|
+| `HasBilling` trait | `getWallet($slug)`, `hasWallet($slug)`, `createWallet($data)` | Wraps the bavix defaults. First tries an exact slug match, then falls back to `strcasecmp` against existing wallet rows. `createWallet` reuses an existing case-insensitive match instead of inserting a duplicate row. |
+| `ConfigSubscriptionCatalog` | `includedUsage($plan, $interval, $type)`, `usageOveragePrice($plan, $interval, $type)` | Looks up `included_usages` / `usage_overage_prices` first by exact key, then case-insensitively. |
+
+Why a wrapper, not a bavix setting: `bavix/laravel-wallet` does not ship a case-insensitive option -- its `HasWallets` trait does a strict `where('slug', $slug)` lookup. The trait override in `HasBilling` is the single point that normalises the behaviour for the whole package.
+
+Recommendation: **pick one casing per project and keep it consistent in `config/mollie-billing-plans.php`**. The case-insensitive layer is a safety net for mixed call sites (e.g. UI passing `tokens` while config has `Tokens`); it is not an excuse for inconsistent naming.
+
 ## Credit Sources
 
 A wallet balance can come from three sources:

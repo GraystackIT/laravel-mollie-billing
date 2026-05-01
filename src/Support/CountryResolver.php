@@ -103,4 +103,34 @@ class CountryResolver
     {
         return array_keys(self::EU_COUNTRIES);
     }
+
+    /**
+     * Resolve a single ISO alpha-2 country code to its localised name.
+     *
+     * Lookup chain:
+     *   1. billing::countries.{ISO} translation
+     *   2. additional_countries.{ISO}.name from config
+     *   3. EU_COUNTRIES English short name
+     *   4. The ISO code itself as last resort
+     */
+    public static function name(?string $iso): ?string
+    {
+        if ($iso === null || $iso === '') {
+            return null;
+        }
+
+        $iso = strtoupper($iso);
+        $key = "billing::countries.{$iso}";
+        $translated = __($key);
+        if ($translated !== $key && $translated !== '') {
+            return $translated;
+        }
+
+        $additional = config('mollie-billing.additional_countries', []);
+        if (isset($additional[$iso]['name'])) {
+            return (string) $additional[$iso]['name'];
+        }
+
+        return self::EU_COUNTRIES[$iso] ?? $iso;
+    }
 }

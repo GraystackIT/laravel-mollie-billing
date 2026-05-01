@@ -20,16 +20,19 @@ use Illuminate\Support\Facades\Event;
 
 beforeEach(function (): void {
     SpyUpdateSubscription::$calls = [];
+    \GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher::$calls = [];
+
+    $this->app->singleton(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class, \GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher::class);
 
     $this->app->bind(UpdateSubscription::class, function ($app): UpdateSubscription {
         return new SpyUpdateSubscription(
             $app->make(CouponService::class),
-            $app->make(PreviewService::class),
             $app->make(SubscriptionCatalogInterface::class),
-            $app->make(VatCalculationService::class),
             $app->make(ValidateSubscriptionChange::class),
             $app->make(ScheduleSubscriptionChange::class),
             $app->make(WalletPlanChangeAdjuster::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\ProrataExecutor::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class),
         );
     });
 
@@ -121,16 +124,14 @@ it('applies pending plan change and cancels+recreates Mollie subscription', func
     expect($b->subscription_plan_code)->toBe('pro');
     expect($result['planChanged'])->toBeTrue();
 
-    // cancel+create should have been called.
+    // PATCH (in-place update) should have been used — no cancel+create.
     $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
-    expect($callTypes)->toContain('cancel');
-    expect($callTypes)->toContain('create');
+    expect($callTypes)->toContain('update');
 
     // Pending state should be cleared.
     $meta = $b->getBillingSubscriptionMeta();
     expect($meta['pending_plan_change'] ?? null)->toBeNull();
     expect($meta['prorata_pending_payment_id'] ?? null)->toBeNull();
-    expect($meta['mollie_subscription_id'])->toStartWith('sub_new_');
 });
 
 it('clears pending plan change without applying', function (): void {
@@ -220,7 +221,7 @@ it('uses PATCH for seat changes instead of cancel+recreate', function (): void {
     expect($b->getBillingSubscriptionMeta()['mollie_subscription_id'])->toBe('sub_old_999');
 });
 
-it('uses cancel+recreate for plan changes', function (): void {
+it('uses in-place PATCH for plan changes (no cancel+recreate)', function (): void {
     $b = makeMollieSubBillable('free', 'monthly');
 
     // Simulate applying a pending plan change (skips the deferred payment flow).
@@ -246,10 +247,10 @@ it('uses cancel+recreate for plan changes', function (): void {
 
     $callTypes = array_column(SpyUpdateSubscription::$calls, 0);
 
-    // cancel+create, not PATCH.
-    expect($callTypes)->toContain('cancel');
-    expect($callTypes)->toContain('create');
-    expect($callTypes)->not->toContain('update');
+    // The new MollieSubscriptionPatcher tries PATCH first; cancel+create only as fallback on failure.
+    expect($callTypes)->toContain('update');
+    expect($callTypes)->not->toContain('cancel');
+    expect($callTypes)->not->toContain('create');
 });
 
 it('uses PATCH when applying pending seat upgrade', function (): void {

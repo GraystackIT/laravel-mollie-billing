@@ -52,7 +52,7 @@ it('returns bought product codes from paid invoices', function (): void {
         'status' => InvoiceStatus::Paid,
         'country' => 'DE',
         'currency' => 'EUR',
-        'vat_rate' => 19.00,
+
         'amount_net' => 14900,
         'amount_vat' => 2831,
         'amount_gross' => 17731,
@@ -80,7 +80,7 @@ it('excludes onetimeonly products already purchased from available', function ()
         'status' => InvoiceStatus::Paid,
         'country' => 'DE',
         'currency' => 'EUR',
-        'vat_rate' => 19.00,
+
         'amount_net' => 14900,
         'amount_vat' => 2831,
         'amount_gross' => 17731,
@@ -106,7 +106,7 @@ it('keeps non-onetimeonly products available even when bought', function (): voi
         'status' => InvoiceStatus::Paid,
         'country' => 'DE',
         'currency' => 'EUR',
-        'vat_rate' => 19.00,
+
         'amount_net' => 4900,
         'amount_vat' => 931,
         'amount_gross' => 5831,
@@ -128,7 +128,7 @@ it('ignores non-paid invoices for bought products', function (): void {
         'status' => InvoiceStatus::Failed,
         'country' => 'DE',
         'currency' => 'EUR',
-        'vat_rate' => 19.00,
+
         'amount_net' => 14900,
         'amount_vat' => 2831,
         'amount_gross' => 17731,

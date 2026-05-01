@@ -108,7 +108,7 @@ it('throws LineItemTotalsMismatchException when line totals disagree', function 
         ->toThrow(LineItemTotalsMismatchException::class);
 });
 
-it('credit note uses original VAT rate, not current', function (): void {
+it('credit note uses original VAT rate from line_items, not current', function (): void {
     Event::fake([CreditNoteIssued::class]);
 
     $b = freshBillableForInvoice();
@@ -121,22 +121,36 @@ it('credit note uses original VAT rate, not current', function (): void {
     $original->invoice_kind = 'subscription';
     $original->status = InvoiceStatus::Paid;
     $original->country = 'DE';
-    $original->vat_rate = 16.0; // pretend old reduced rate
     $original->currency = 'EUR';
     $original->amount_net = 1000;
     $original->amount_vat = 160;
     $original->amount_gross = 1160;
-    $original->line_items = [];
+    // Per-Item-VAT (16% old reduced rate) lebt in line_items.
+    $original->line_items = [[
+        'kind' => 'plan',
+        'code' => 'pro',
+        'label' => 'Pro',
+        'quantity' => 1,
+        'unit_price_net' => 1000,
+        'amount_net' => 1000,
+        'vat_rate' => 16.0,
+        'vat_amount' => 160,
+        'amount_gross' => 1160,
+        'period_start' => now()->toIso8601String(),
+        'period_end' => now()->addMonth()->toIso8601String(),
+    ]];
     $original->refunded_net = 0;
     $original->save();
 
     $cn = app(InvoiceService::class)->createCreditNote($original, 1000);
 
-    expect((float) $cn->vat_rate)->toBe(16.0);
+    // VAT-Rate lebt ausschließlich in line_items[0].vat_rate (Invoice-Spalte vat_rate gibt es nicht mehr).
+    expect((float) $cn->line_items[0]['vat_rate'])->toBe(16.0);
     expect($cn->amount_net)->toBe(-1000);
     expect($cn->amount_vat)->toBe(-160);
     expect($cn->amount_gross)->toBe(-1160);
-    expect($cn->parent_invoice_id)->toBe($original->id);
+    // parent_invoice_id-Spalte existiert nicht mehr — Verweis lebt in line_items[0].parent_invoice_id.
+    expect($cn->line_items[0]['parent_invoice_id'])->toBe($original->id);
     expect($cn->serial_number)->toStartWith('CR');
     expect($cn->hasPdf())->toBeTrue();
 

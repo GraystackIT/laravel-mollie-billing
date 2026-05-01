@@ -15,7 +15,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - Mollie subscriptions, mandates and webhooks (built on Mollie's official Laravel SDK v4 with typed request objects)
 - VAT calculation, VIES validation and OSS export (`mpociot/vat-calculator`)
 - Country-mismatch reconciliation across declared / IP / payment country
-- Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`)
+- Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`), with case-insensitive usage-type lookups
 - Direct overage charging with retry and `past_due` state
 - Five coupon types — `FirstPayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
 - Access Grants for full-plan or addon-only complimentary access
@@ -474,6 +474,7 @@ The seat count is used during plan-change previews to calculate whether extra se
 - `cancelBillingSubscription()`, `changeBillingPlan(...)`, `enableBillingAddon(...)`
 - `billingPortalUrl()`, `billingPlanChangeUrl()`
 - `latestBillingInvoice()` and `billingInvoices()` morph relation
+- `getWallet($type)` / `hasWallet($type)` / `createWallet($data)` — overridden bavix wrappers that resolve usage-type slugs **case-insensitively** (so `tokens`, `Tokens`, and `TOKENS` all hit the same wallet, and `createWallet` will not insert a duplicate row when a casing variant already exists). Catalog lookups (`includedUsage`, `usageOveragePrice`) follow the same case-insensitive rule. See [Usage Billing — Casing of usage-type identifiers](docs/usage-billing.md#casing-of-usage-type-identifiers).
 
 ## Coupon types
 
