@@ -32,7 +32,61 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
  */
 trait HasBilling
 {
-    use HasWallets;
+    use HasWallets {
+        getWallet as protected bavixGetWallet;
+        hasWallet as protected bavixHasWallet;
+        createWallet as protected bavixCreateWallet;
+    }
+
+    /**
+     * Case-insensitive wallet lookup. Walks the loaded wallets and matches by
+     * slug regardless of casing — so callers can use `tokens` and the DB row
+     * with slug `Tokens` is still returned. Falls back to the bavix default for
+     * exact-match lookups.
+     */
+    public function getWallet(string $slug): ?\Bavix\Wallet\Models\Wallet
+    {
+        $exact = $this->bavixGetWallet($slug);
+        if ($exact !== null) {
+            return $exact;
+        }
+
+        foreach ($this->wallets as $wallet) {
+            if (strcasecmp((string) $wallet->slug, $slug) === 0) {
+                return $wallet;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Case-insensitive existence check.
+     */
+    public function hasWallet(string $slug): bool
+    {
+        return $this->getWallet($slug) !== null;
+    }
+
+    /**
+     * Reuse an existing case-insensitive wallet if one matches the requested slug,
+     * otherwise create a fresh wallet via the bavix default. Prevents duplicate
+     * wallets when the same usage type is referenced with different casings.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    public function createWallet(array $data): \Bavix\Wallet\Models\Wallet
+    {
+        $slug = (string) ($data['slug'] ?? $data['name'] ?? '');
+        if ($slug !== '') {
+            $existing = $this->getWallet($slug);
+            if ($existing !== null) {
+                return $existing;
+            }
+        }
+
+        return $this->bavixCreateWallet($data);
+    }
 
     public function getBillingEmail(): string
     {

@@ -5,53 +5,66 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Tests\Support;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
+use GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent;
 use GraystackIT\MollieBilling\Services\Billing\SubscriptionChangeContext;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
-use Illuminate\Database\Eloquent\Model;
 
 /**
- * Subclass that intercepts every Mollie API call and prorata side-effect so
- * that subscription-update tests can run against an in-memory database
- * without booting the real Mollie HTTP client. Calls are recorded in
- * `self::$calls` for assertions.
+ * Subclass that intercepts the new pro-rata side-effects so that subscription-update
+ * tests can run against an in-memory database without booting the real Mollie HTTP
+ * client. Calls are recorded in `self::$calls` for assertions.
+ *
+ * The Mollie-Subscription-PATCH/Cancel side-effects are handled by SpyMollieSubscriptionPatcher,
+ * which is bound separately in the test bootstrap.
+ *
+ * Recorded shapes:
+ *   ['prorata_charge', $chargeNet]
+ *   ['prorata_refund', $refundNet]
+ *   plus everything SpyMollieSubscriptionPatcher records (cancel/update/create).
  */
 class SpyUpdateSubscription extends UpdateSubscription
 {
     /** @var array<int, array<int, mixed>> */
     public static array $calls = [];
 
-    protected function mollieCancelSubscription(string $customerId, string $subscriptionId): void
+    protected function applyProrata(Billable $billable, SubscriptionChangeContext $context): void
     {
-        self::$calls[] = ['cancel', $customerId, $subscriptionId];
-    }
+        if ($context->prorataChargeNet > 0) {
+            self::$calls[] = ['prorata_charge', $context->prorataChargeNet];
 
-    protected function mollieCreateSubscription(string $customerId, array $payload): object
-    {
-        self::$calls[] = ['create', $customerId, $payload];
+            // Mirror the real ProrataExecutor behavior for charge-flows: persist a pending state
+            // marker so the UpdateSubscription::update() path can detect a deferred upgrade
+            // and short-circuit before flipping the local plan.
+            if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+                $meta = $billable->getBillingSubscriptionMeta();
+                $meta['pending_prorata_change'] = [
+                    'charge_payment_id' => 'tr_test_'.uniqid(),
+                ];
+                $billable->forceFill(['subscription_meta' => $meta])->save();
+            }
 
-        return (object) ['id' => 'sub_new_'.uniqid()];
-    }
-
-    protected function chargeProrataImmediate(Billable $billable, int $prorataChargeNet, ?SubscriptionChangeContext $context = null): void
-    {
-        self::$calls[] = ['prorata_charge', $prorataChargeNet];
-
-        if ($billable instanceof Model) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['prorata_pending_payment_id'] = 'tr_test_'.uniqid();
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            return;
         }
-    }
 
-    protected function refundProrataCredit(Billable $billable, int $prorataCreditNet, ?SubscriptionChangeContext $context = null): void
-    {
-        self::$calls[] = ['prorata_refund', $prorataCreditNet];
-    }
+        if ($context->prorataCreditNet > 0) {
+            self::$calls[] = ['prorata_refund', $context->prorataCreditNet];
+        }
 
-    protected function mollieUpdateSubscription(string $customerId, string $subscriptionId, array $payload): object
-    {
-        self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
+        // Trigger the MollieSubscriptionPatcher for the new plan/seats/addons,
+        // so that downstream test assertions ("cancel"/"update") can fire via the SpyPatcher.
+        $intent = new PlanChangeIntent(
+            billable: $billable,
+            currentPlan: $context->currentPlan,
+            newPlan: $context->newPlan,
+            currentInterval: $context->currentInterval,
+            newInterval: $context->newInterval,
+            currentSeats: $context->currentSeats,
+            newSeats: $context->newSeats,
+            currentAddons: array_fill_keys($context->currentAddons, 1),
+            newAddons: array_fill_keys($context->newAddons, 1),
+        );
 
-        return (object) ['id' => $subscriptionId];
+        app(MollieSubscriptionPatcher::class)->updateForIntent($billable, $intent);
     }
 }

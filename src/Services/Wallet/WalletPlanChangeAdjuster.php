@@ -76,7 +76,12 @@ class WalletPlanChangeAdjuster
                 $overagePrice = (int) ($this->catalog->usageOveragePrice($oldPlan, $oldInterval, $slug) ?? 0);
                 if ($overagePrice > 0) {
                     $overageLineItems[] = [
+                        'kind' => 'overage',
+                        'code' => $slug,
                         'type' => $slug,
+                        'label' => (string) __('billing::portal.invoice_line_overage', [
+                            'type' => $this->catalog->usageTypeName($slug),
+                        ]),
                         'quantity' => $unresolvedOverage,
                         'unit_price_net' => $overagePrice,
                         'total_net' => $unresolvedOverage * $overagePrice,

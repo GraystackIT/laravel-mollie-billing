@@ -12,6 +12,9 @@ class OssProtocolService
     /**
      * Generate an OSS quarterly export CSV for the given calendar year.
      *
+     * Aggregiert pro line_item nach (quarter, country, vat_rate). Eine Multi-VAT-Invoice
+     * trägt zu mehreren Buckets bei (eine pro line_item.vat_rate).
+     *
      * Columns: quarter, country, sales_count, net_amount_eur, vat_amount_eur, vat_rate
      *
      * Returns the absolute path to the written CSV file.
@@ -23,9 +26,10 @@ class OssProtocolService
 
         $invoices = BillingInvoice::query()
             ->whereBetween('created_at', [$start, $end])
-            ->get(['country', 'vat_rate', 'amount_net', 'amount_vat', 'created_at']);
+            ->get(['country', 'line_items', 'created_at']);
 
         // Aggregate: quarter|country|vat_rate => [count, net, vat]
+        // sales_count zählt einmalig pro Invoice-Bucket-Vorkommen.
         $buckets = [];
         foreach ($invoices as $invoice) {
             $createdAt = $invoice->created_at instanceof Carbon
@@ -33,23 +37,36 @@ class OssProtocolService
                 : Carbon::parse($invoice->created_at);
             $quarter = (int) ceil(((int) $createdAt->month) / 3);
             $country = strtoupper((string) $invoice->country);
-            $rate = number_format((float) $invoice->vat_rate, 2, '.', '');
-            $key = "{$quarter}|{$country}|{$rate}";
 
-            if (! isset($buckets[$key])) {
-                $buckets[$key] = [
-                    'quarter' => $quarter,
-                    'country' => $country,
-                    'sales_count' => 0,
-                    'net_amount_cents' => 0,
-                    'vat_amount_cents' => 0,
-                    'vat_rate' => $rate,
-                ];
+            // Sammle Lines nach VAT-Rate, damit eine Invoice pro Rate genau einmal als sale zählt.
+            $linesByRate = [];
+            foreach ((array) ($invoice->line_items ?? []) as $line) {
+                $rate = number_format((float) ($line['vat_rate'] ?? 0), 2, '.', '');
+                if (! isset($linesByRate[$rate])) {
+                    $linesByRate[$rate] = ['net' => 0, 'vat' => 0];
+                }
+                $linesByRate[$rate]['net'] += (int) ($line['amount_net'] ?? 0);
+                $linesByRate[$rate]['vat'] += (int) ($line['vat_amount'] ?? 0);
             }
 
-            $buckets[$key]['sales_count']++;
-            $buckets[$key]['net_amount_cents'] += (int) $invoice->amount_net;
-            $buckets[$key]['vat_amount_cents'] += (int) $invoice->amount_vat;
+            foreach ($linesByRate as $rate => $totals) {
+                $key = "{$quarter}|{$country}|{$rate}";
+
+                if (! isset($buckets[$key])) {
+                    $buckets[$key] = [
+                        'quarter' => $quarter,
+                        'country' => $country,
+                        'sales_count' => 0,
+                        'net_amount_cents' => 0,
+                        'vat_amount_cents' => 0,
+                        'vat_rate' => $rate,
+                    ];
+                }
+
+                $buckets[$key]['sales_count']++;
+                $buckets[$key]['net_amount_cents'] += $totals['net'];
+                $buckets[$key]['vat_amount_cents'] += $totals['vat'];
+            }
         }
 
         // Sort by quarter, country, rate for stable output.
@@ -57,7 +74,6 @@ class OssProtocolService
 
         $path = storage_path("app/oss-export-{$year}.csv");
 
-        // Ensure target directory exists.
         $dir = dirname($path);
         if (! is_dir($dir)) {
             @mkdir($dir, 0755, true);

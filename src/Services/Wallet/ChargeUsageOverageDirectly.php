@@ -88,7 +88,10 @@ class ChargeUsageOverageDirectly
             }
 
             $items[] = [
+                'kind' => 'overage',
+                'code' => $slug,
                 'type' => $slug,
+                'label' => $this->overageLabel($slug),
                 'quantity' => $quantity,
                 'unit_price_net' => $unitPrice,
                 'total_net' => $quantity * $unitPrice,
@@ -96,6 +99,18 @@ class ChargeUsageOverageDirectly
         }
 
         return $items;
+    }
+
+    /**
+     * Localised, human-readable overage line label, e.g. "Mehrverbrauch: SMS".
+     * Quantity is intentionally not included — it is rendered separately in the
+     * invoice's "Menge" column.
+     */
+    private function overageLabel(string $usageType): string
+    {
+        return (string) __('billing::portal.invoice_line_overage', [
+            'type' => $this->catalog->usageTypeName($usageType),
+        ]);
     }
 
     /**

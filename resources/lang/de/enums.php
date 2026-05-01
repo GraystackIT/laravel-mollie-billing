@@ -17,12 +17,9 @@ return [
     ],
     'invoice_kind' => [
         'subscription' => 'Abonnement',
-        'prorata' => 'Anteilig',
-        'addon' => 'Addon',
-        'seats' => 'Plätze',
         'overage' => 'Mehrverbrauch',
         'one_time_order' => 'Einmalkauf',
-        'credit_note' => 'Gutschrift',
+        'refund' => 'Refund',
     ],
     'subscription_source' => [
         'none' => 'Keine',

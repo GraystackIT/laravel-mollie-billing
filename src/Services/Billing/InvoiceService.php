@@ -19,6 +19,13 @@ use GraystackIT\MollieBilling\Events\InvoiceCreated;
 use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\CountryResolver;
+use GraystackIT\MollieBilling\Support\ProrataLine;
+use Mollie\Api\Http\Data\Money as MollieMoney;
+use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
+use Mollie\Api\Http\Requests\CreatePaymentRequest;
+use Mollie\Laravel\Facades\Mollie;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -30,6 +37,22 @@ class InvoiceService
         private readonly VatCalculationService $vat,
         private readonly InvoiceNumberGenerator $numberGenerator,
     ) {}
+
+    /**
+     * Mappt einen Mollie-`metadata.type`-String auf den passenden InvoiceKind.
+     * Subtypen (`'prorata'`, `'addon'`, `'seats'`) werden alle als `Subscription` klassifiziert —
+     * der Subtyp ist via line_items[*].kind ablesbar.
+     */
+    public static function mapTypeToInvoiceKind(string $type): InvoiceKind
+    {
+        return match ($type) {
+            'subscription', 'prorata', 'addon', 'seats', 'prorata_charge', 'mid_cycle_addon', 'mid_cycle_seats' => InvoiceKind::Subscription,
+            'overage' => InvoiceKind::Overage,
+            'one_time_order' => InvoiceKind::OneTimeOrder,
+            'refund' => InvoiceKind::Refund,
+            default => throw new \InvalidArgumentException("Unknown metadata.type: {$type}"),
+        };
+    }
 
     /**
      * Build a BillingInvoice from a Mollie payment + line items. VAT is recomputed
@@ -57,16 +80,48 @@ class InvoiceService
         $invoice->billable_id = $billable->getKey();
         $invoice->mollie_payment_id = (string) $payment->id;
         $invoice->mollie_subscription_id = $payment->subscriptionId ?? null;
-        $invoice->serial_number = $this->numberGenerator->generate($invoiceKind);
-        $invoice->invoice_kind = $invoiceKind;
+        // Mapping vom Mollie-metadata-type-String auf InvoiceKind. Heute-Werte (`'prorata'`,
+        // `'addon'`, `'seats'`) werden alle als Subscription-Buchung klassifiziert. Der Subtyp
+        // ist aus den line_items[*].kind ablesbar.
+        $invoiceKindEnum = self::mapTypeToInvoiceKind($invoiceKind);
+        $invoice->serial_number = $this->numberGenerator->generate($invoiceKindEnum->value);
+        $invoice->invoice_kind = $invoiceKindEnum;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper($country);
-        $invoice->vat_rate = (float) $vat['rate'];
         $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
         $invoice->amount_net = (int) $vat['net'];
         $invoice->amount_vat = (int) $vat['vat'];
         $invoice->amount_gross = (int) $vat['gross'];
-        $invoice->line_items = $lineItems;
+        $rate = (float) $vat['rate'];
+
+        // Period for line items: prefer the billable's current subscription period
+        // (so currentPeriodLines() can later locate them for refunds), else fall back
+        // to "now → now+1 month" as a defensive default for one-off charges.
+        $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? now();
+        $linePeriodEnd = $billable->nextBillingDate() ?? now()->addMonth();
+
+        $invoice->period_start = $linePeriodStart;
+        $invoice->period_end = $linePeriodEnd;
+
+        $invoice->line_items = array_map(function (array $line) use ($rate, $linePeriodStart, $linePeriodEnd): array {
+            // Normalize legacy kind alias.
+            if (($line['kind'] ?? null) === 'seat') {
+                $line['kind'] = 'seats';
+            }
+
+            $netLine = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+            $lineRate = (float) ($line['vat_rate'] ?? $rate);
+            $vatLine = (int) round($netLine * $lineRate / 100);
+
+            $line['vat_rate'] = $lineRate;
+            $line['amount_net'] = $netLine;
+            $line['vat_amount'] = $vatLine;
+            $line['amount_gross'] = $netLine + $vatLine;
+            $line['period_start'] = $line['period_start'] ?? $linePeriodStart->toIso8601String();
+            $line['period_end'] = $line['period_end'] ?? $linePeriodEnd->toIso8601String();
+
+            return $line;
+        }, $lineItems);
         $invoice->payment_method_details = self::extractPaymentMethodDetails($payment);
         $invoice->refunded_net = 0;
         $invoice->save();
@@ -93,36 +148,51 @@ class InvoiceService
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
         }
 
-        $rate = (float) $original->vat_rate;
+        // VAT-Rate aus dem ersten Original-Line-Item lesen (Per-Item-VAT als Source of Truth).
+        $originalLines = (array) ($original->line_items ?? []);
+        $firstLine = $originalLines[0] ?? null;
+        $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
         $creditVat = (int) round($amountNet * $rate / 100);
         $creditGross = $amountNet + $creditVat;
 
-        $resolvedLineItems = $lineItems ?? [[
-            'kind' => 'credit_note',
-            'label' => __('billing::portal.credit_note_label', ['serial' => $original->serial_number]),
-            'quantity' => 1,
-            'unit_price' => -$amountNet,
-            'total_net' => -$amountNet,
-            'parent_invoice_id' => $original->id,
-        ]];
+        // Bei Custom-line_items: User übergibt komplette Lines (mit eigenen vat_rate-Feldern).
+        // Bei null: ein generischer Refund-Line-Eintrag mit Verweis auf Original-Line[0].
+        if ($lineItems !== null) {
+            $resolvedLineItems = $lineItems;
+        } else {
+            $resolvedLineItems = [[
+                'kind' => 'refund',
+                'code' => null,
+                'label' => __('billing::portal.credit_note_label', ['serial' => $original->serial_number]),
+                'quantity' => 1,
+                'unit_price_net' => -$amountNet,
+                'amount_net' => -$amountNet,
+                'vat_rate' => $rate,
+                'vat_amount' => -$creditVat,
+                'amount_gross' => -$creditGross,
+                'period_start' => ($original->period_start ?? now())->toIso8601String(),
+                'period_end' => ($original->period_end ?? now())->toIso8601String(),
+                'parent_invoice_id' => $original->id,
+                'parent_line_item_index' => 0,
+                'mollie_refund_id' => null, // wird vom Aufrufer gesetzt falls Mollie-Refund-ID bekannt ist
+            ]];
+        }
 
-        $creditNote = new BillingInvoice();
+        $creditNote = new BillingInvoice;
         $creditNote->billable_type = $original->billable_type;
         $creditNote->billable_id = $original->billable_id;
-        $creditNote->mollie_payment_id = $original->mollie_payment_id.':cn:'.uniqid('', true);
+        $creditNote->mollie_payment_id = null;
         $creditNote->mollie_subscription_id = $original->mollie_subscription_id;
-        $creditNote->serial_number = $this->numberGenerator->generate('credit_note');
-        $creditNote->invoice_kind = InvoiceKind::CreditNote;
+        $creditNote->serial_number = $this->numberGenerator->generate('refund');
+        $creditNote->invoice_kind = InvoiceKind::Refund;
         $creditNote->status = InvoiceStatus::Refunded;
         $creditNote->country = $original->country;
-        $creditNote->vat_rate = $rate;
         $creditNote->currency = $original->currency ?: (string) config('mollie-billing.currency', 'EUR');
         $creditNote->amount_net = -$amountNet;
         $creditNote->amount_vat = -$creditVat;
         $creditNote->amount_gross = -$creditGross;
         $creditNote->line_items = $resolvedLineItems;
         $creditNote->payment_method_details = $original->payment_method_details;
-        $creditNote->parent_invoice_id = $original->id;
         $creditNote->refund_reason_text = $description;
         $creditNote->refunded_net = 0;
         $creditNote->save();
@@ -134,58 +204,6 @@ class InvoiceService
             $this->generateAndStorePdf($creditNote, $billable);
             event(new CreditNoteIssued($billable, $creditNote, $original));
         }
-
-        return $creditNote;
-    }
-
-    /**
-     * Create a standalone credit-note invoice for a prorata refund.
-     *
-     * Unlike {@see createCreditNote()}, this is NOT tied to a parent invoice.
-     * It represents an independent refund (e.g. prorata credit on plan downgrade)
-     * that is issued via the billable's Mollie mandate.
-     *
-     * @param  array<int, array<string, mixed>>  $lineItems
-     */
-    public function createStandaloneCreditNote(
-        Billable $billable,
-        int $amountNet,
-        float $vatRate,
-        array $lineItems,
-        ?string $description = null,
-        ?string $molliePaymentId = null,
-        ?string $country = null,
-    ): BillingInvoice {
-        /** @var Model&Billable $billable */
-        if ($amountNet <= 0) {
-            throw new \InvalidArgumentException('Credit-note net amount must be positive.');
-        }
-
-        $creditVat = (int) round($amountNet * $vatRate / 100);
-        $creditGross = $amountNet + $creditVat;
-
-        $creditNote = new BillingInvoice();
-        $creditNote->billable_type = $billable->getMorphClass();
-        $creditNote->billable_id = $billable->getKey();
-        $creditNote->mollie_payment_id = $molliePaymentId !== null
-            ? $molliePaymentId.':cn:'.uniqid('', true)
-            : 'cn:'.uniqid('', true);
-        $creditNote->serial_number = $this->numberGenerator->generate('credit_note');
-        $creditNote->invoice_kind = InvoiceKind::CreditNote;
-        $creditNote->status = InvoiceStatus::Refunded;
-        $creditNote->country = strtoupper($country ?? $billable->getBillingCountry() ?? '');
-        $creditNote->vat_rate = $vatRate;
-        $creditNote->currency = (string) config('mollie-billing.currency', 'EUR');
-        $creditNote->amount_net = -$amountNet;
-        $creditNote->amount_vat = -$creditVat;
-        $creditNote->amount_gross = -$creditGross;
-        $creditNote->line_items = $lineItems;
-        $creditNote->refund_reason_text = $description;
-        $creditNote->refunded_net = 0;
-        $creditNote->save();
-
-        $this->generateAndStorePdf($creditNote, $billable);
-        event(new CreditNoteIssued($billable, $creditNote, null));
 
         return $creditNote;
     }
@@ -241,7 +259,7 @@ class InvoiceService
                 city: $addressConfig['city'] ?? null,
                 postal_code: $addressConfig['postal_code'] ?? null,
                 state: $addressConfig['state'] ?? null,
-                country: $addressConfig['country'] ?? null,
+                country: CountryResolver::name($addressConfig['country'] ?? null),
             ),
             tax_number: $sellerConfig['tax_number'] ?? null,
             email: $sellerConfig['email'] ?? null,
@@ -254,13 +272,13 @@ class InvoiceService
                 street: $billable->getBillingStreet(),
                 city: $billable->getBillingCity(),
                 postal_code: $billable->getBillingPostalCode(),
-                country: $billable->getBillingCountry(),
+                country: CountryResolver::name($billable->getBillingCountry()),
             ),
             tax_number: $billable->vat_number ?? null,
             email: $billable->getBillingEmail(),
         );
 
-        $isCredit = $invoice->invoice_kind === InvoiceKind::CreditNote;
+        $isCredit = $invoice->invoice_kind === InvoiceKind::Refund;
 
         $items = [];
         foreach ((array) $invoice->line_items as $item) {
@@ -270,10 +288,13 @@ class InvoiceService
             // Per-item billing_period or description only — no fallback to global period.
             $description = $item['description'] ?? $item['billing_period'] ?? null;
 
+            // Per-Item-VAT: line_item.vat_rate ist Source of Truth.
+            $taxPercentage = (float) ($item['vat_rate'] ?? 0);
+
             $items[] = new PdfInvoiceItem(
                 label: (string) ($item['label'] ?? $item['kind'] ?? 'Line'),
                 unit_price: Money::ofMinor($netUnit, $currency),
-                tax_percentage: (float) $invoice->vat_rate,
+                tax_percentage: $taxPercentage,
                 quantity: $qty,
                 description: $description,
             );
@@ -543,5 +564,311 @@ class InvoiceService
         }
 
         return $sum;
+    }
+
+    // ========================================================================
+    // Neue API für Plan-Change-Sammel-Charges/Refunds (Multi-VAT-Lines)
+    // ========================================================================
+
+    /**
+     * Generische Charge-Invoice-Persistierung für Webhook-Routing.
+     * Wird vom Webhook gerufen für alle paid-Events (Recurring-Subscription, Mid-cycle,
+     * Plan-Change-Sammel-Charges, Overage, OneTimeOrder).
+     *
+     * KEIN Mollie-Call hier — der ist vorher passiert (Webhook reagiert nur auf paid).
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems  jedes mit kind/code/label/quantity/
+     *   unit_price_net/amount_net/vat_rate/vat_amount/amount_gross/period_start/period_end
+     */
+    public function createInvoice(
+        Billable $billable,
+        InvoiceKind $kind,
+        string $molliePaymentId,
+        ?string $mollieSubscriptionId,
+        array $lineItems,
+        ?\Carbon\CarbonInterface $periodStart = null,
+        ?\Carbon\CarbonInterface $periodEnd = null,
+    ): BillingInvoice {
+        /** @var Model&Billable $billable */
+        $sumNet = 0;
+        $sumVat = 0;
+        $sumGross = 0;
+        foreach ($lineItems as $line) {
+            $sumNet += (int) ($line['amount_net'] ?? 0);
+            $sumVat += (int) ($line['vat_amount'] ?? 0);
+            $sumGross += (int) ($line['amount_gross'] ?? 0);
+        }
+
+        $country = (string) ($billable->getBillingCountry() ?? '');
+
+        $invoice = new BillingInvoice;
+        $invoice->billable_type = $billable->getMorphClass();
+        $invoice->billable_id = $billable->getKey();
+        $invoice->mollie_payment_id = $molliePaymentId;
+        $invoice->mollie_subscription_id = $mollieSubscriptionId;
+        $invoice->serial_number = $this->numberGenerator->generate($kind->value);
+        $invoice->invoice_kind = $kind;
+        $invoice->status = InvoiceStatus::Paid;
+        $invoice->country = strtoupper($country);
+        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
+        $invoice->amount_net = $sumNet;
+        $invoice->amount_vat = $sumVat;
+        $invoice->amount_gross = $sumGross;
+        $invoice->line_items = $lineItems;
+        $invoice->period_start = $periodStart;
+        $invoice->period_end = $periodEnd;
+        $invoice->refunded_net = 0;
+        $invoice->save();
+
+        $this->generateAndStorePdf($invoice, $billable);
+        event(new InvoiceCreated($billable, $invoice));
+
+        return $invoice;
+    }
+
+    /**
+     * Phase 1 für Plan-Change: schickt CreatePaymentRequest mit metadata.type='prorata_charge'
+     * und persistiert Pending-State in subscription_meta.pending_prorata_change.
+     *
+     * Persistierung der Charge-Invoice geschieht später im Webhook via createInvoice().
+     *
+     * @param  list<ProrataLine>  $chargeLines
+     * @param  list<ProrataLine>  $pendingRefundLines  Werden nach Charge-Webhook-OK ausgeführt
+     */
+    public function createCharge(
+        Billable $billable,
+        array $chargeLines,
+        array $pendingRefundLines,
+        PlanChangeIntent $intent,
+    ): void {
+        /** @var Model&Billable $billable */
+        if (! $billable->hasMollieMandate()) {
+            throw new \LogicException('Cannot create charge: billable has no Mollie mandate.');
+        }
+
+        $grossTotal = array_sum(array_map(fn (ProrataLine $l) => $l->amountGross, $chargeLines));
+        if ($grossTotal <= 0) {
+            return; // Coupon-covered or zero — no Mollie charge
+        }
+
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+        $value = number_format($grossTotal / 100, 2, '.', '');
+
+        // Mollie metadata is hard-capped at 1024 bytes — keep it to a minimal correlation
+        // payload. The full charge/refund line list lives in subscription_meta.pending_prorata_change
+        // and is read back by the Phase-2 webhook.
+        $payment = Mollie::send(new CreatePaymentRequest(
+            description: "Plan change for {$intent->newPlan}",
+            amount: new MollieMoney($currency, $value),
+            metadata: [
+                'type' => 'prorata_charge',
+                'billable_type' => $billable->getMorphClass(),
+                'billable_id' => (string) $billable->getKey(),
+            ],
+            sequenceType: 'recurring',
+            mandateId: $billable->getMollieMandateId(),
+            customerId: $billable->getMollieCustomerId(),
+            webhookUrl: route(BillingRoute::webhook()),
+        ));
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['pending_prorata_change'] = [
+            'charge_payment_id' => is_object($payment) ? ($payment->id ?? null) : null,
+            'charge_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $chargeLines),
+            'refund_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $pendingRefundLines),
+            'intent' => $intent->toArray(),
+            'created_at' => now()->toIso8601String(),
+        ];
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Macht intern N Mollie-Refund-Calls (gegen originalInvoice.mollie_payment_id pro Line)
+     * und persistiert das Ergebnis als BillingInvoice mit invoice_kind=Refund.
+     *
+     * Mollie-409-Idempotenz pro Line: existiert bereits ein Refund-line_item mit
+     * (parent_invoice_id, parent_line_item_index, amount_net) → übersprungen.
+     *
+     * Coupon-covered Lines werden gefiltert.
+     *
+     * Fehlgeschlagene Lines kommen in subscription_meta.pending_refund_retries.
+     *
+     * @param  list<ProrataLine>  $refundLines  alle direction='refund'
+     * @return BillingInvoice|null  null wenn alle Lines coupon-covered oder fehlgeschlagen
+     */
+    public function createRefund(
+        Billable $billable,
+        array $refundLines,
+        ?string $description = null,
+    ): ?BillingInvoice {
+        /** @var Model&Billable $billable */
+        $effective = array_values(array_filter($refundLines, fn (ProrataLine $l) => ! $l->isCouponCovered && $l->amountGross < 0));
+        if (empty($effective)) {
+            return null;
+        }
+
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+        $persistedLines = [];
+        $failedLines = [];
+
+        foreach ($effective as $line) {
+            $original = $line->originalInvoice;
+            if ($original === null || $original->mollie_payment_id === null) {
+                $failedLines[] = ['line' => $line->toArray(), 'error' => 'Missing original invoice or payment_id'];
+                continue;
+            }
+
+            // Idempotenz-Check: gibt es schon eine Refund-Line für (parent_invoice_id, parent_line_item_index, amount_net)?
+            if ($this->refundLineExists($billable, $original->getKey(), $line->originalLineItemIndex, $line->amountNet)) {
+                continue; // schon refundiert — überspringen
+            }
+
+            $absGross = abs($line->amountGross);
+            $value = number_format($absGross / 100, 2, '.', '');
+
+            try {
+                $refund = Mollie::send(new CreatePaymentRefundRequest(
+                    paymentId: $original->mollie_payment_id,
+                    description: $description ?? "Plan change refund: {$line->label}",
+                    amount: new MollieMoney($currency, $value),
+                ));
+                $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
+                $persistedLines[] = $line;
+            } catch (\Throwable $e) {
+                $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => now()->toIso8601String()];
+            }
+        }
+
+        // Failed Lines in pending_refund_retries für Retry-Job.
+        if (! empty($failedLines)) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $existing = (array) ($meta['pending_refund_retries'] ?? []);
+            $meta['pending_refund_retries'] = array_merge($existing, $failedLines);
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
+
+        if (empty($persistedLines)) {
+            return null;
+        }
+
+        // Sammel-Refund-Invoice persistieren.
+        $sumNet = 0;
+        $sumVat = 0;
+        $sumGross = 0;
+        $lineItemsForPersist = [];
+        $countryFromOriginal = null;
+
+        foreach ($persistedLines as $line) {
+            $sumNet += $line->amountNet;
+            $sumVat += $line->amountVat;
+            $sumGross += $line->amountGross;
+            $lineItemsForPersist[] = $line->toArray();
+            if ($countryFromOriginal === null && $line->originalInvoice !== null) {
+                $countryFromOriginal = (string) $line->originalInvoice->country;
+            }
+        }
+
+        $invoice = new BillingInvoice;
+        $invoice->billable_type = $billable->getMorphClass();
+        $invoice->billable_id = $billable->getKey();
+        $invoice->mollie_payment_id = null;
+        $invoice->mollie_subscription_id = null;
+        $invoice->serial_number = $this->numberGenerator->generate('refund');
+        $invoice->invoice_kind = InvoiceKind::Refund;
+        $invoice->status = InvoiceStatus::Refunded;
+        $invoice->country = strtoupper($countryFromOriginal ?? (string) ($billable->getBillingCountry() ?? ''));
+        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
+        $invoice->amount_net = $sumNet;
+        $invoice->amount_vat = $sumVat;
+        $invoice->amount_gross = $sumGross;
+        $invoice->line_items = $lineItemsForPersist;
+        $invoice->refund_reason_text = $description;
+        $invoice->refunded_net = 0;
+        $invoice->save();
+
+        $this->generateAndStorePdf($invoice, $billable);
+        event(new CreditNoteIssued($billable, $invoice, null));
+
+        return $invoice;
+    }
+
+    /**
+     * Saldo-0-Sidegrade: lokale Plan-Switch-Invoice mit Charge- und Refund-Lines (Saldo=0).
+     * KEIN Mollie-Call. Nur lokale Buchhaltungs-Invoice für den Audit-Trail.
+     *
+     * @param  list<ProrataLine>  $chargeLines
+     * @param  list<ProrataLine>  $refundLines
+     */
+    public function createPlanSwitchInvoice(
+        Billable $billable,
+        array $chargeLines,
+        array $refundLines,
+    ): BillingInvoice {
+        /** @var Model&Billable $billable */
+        $allLines = array_merge($chargeLines, $refundLines);
+
+        $sumNet = 0;
+        $sumVat = 0;
+        $sumGross = 0;
+        $lineItemsForPersist = [];
+
+        foreach ($allLines as $line) {
+            $sumNet += $line->amountNet;
+            $sumVat += $line->amountVat;
+            $sumGross += $line->amountGross;
+            $lineItemsForPersist[] = $line->toArray();
+        }
+
+        $invoice = new BillingInvoice;
+        $invoice->billable_type = $billable->getMorphClass();
+        $invoice->billable_id = $billable->getKey();
+        $invoice->mollie_payment_id = null;
+        $invoice->mollie_subscription_id = null;
+        $invoice->serial_number = $this->numberGenerator->generate('subscription');
+        $invoice->invoice_kind = InvoiceKind::Subscription;
+        $invoice->status = InvoiceStatus::Paid;
+        $invoice->country = strtoupper((string) ($billable->getBillingCountry() ?? ''));
+        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
+        $invoice->amount_net = $sumNet;
+        $invoice->amount_vat = $sumVat;
+        $invoice->amount_gross = $sumGross;
+        $invoice->line_items = $lineItemsForPersist;
+        $invoice->refunded_net = 0;
+        $invoice->save();
+
+        $this->generateAndStorePdf($invoice, $billable);
+        event(new InvoiceCreated($billable, $invoice));
+
+        return $invoice;
+    }
+
+    /**
+     * Idempotenz-Check für Refund-Lines.
+     */
+    private function refundLineExists(Billable $billable, int|string $parentInvoiceId, ?int $parentLineItemIndex, int $amountNet): bool
+    {
+        if ($parentLineItemIndex === null) {
+            return false;
+        }
+
+        $candidates = BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get();
+
+        foreach ($candidates as $invoice) {
+            foreach ((array) ($invoice->line_items ?? []) as $line) {
+                if (
+                    ($line['parent_invoice_id'] ?? null) == $parentInvoiceId
+                    && ($line['parent_line_item_index'] ?? null) === $parentLineItemIndex
+                    && ((int) ($line['amount_net'] ?? 0)) === $amountNet
+                ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

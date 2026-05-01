@@ -98,7 +98,7 @@ it('computes zero excess when usage is within prorated quota', function (): void
     $periodEnd = now()->addDays(15);
 
     // 1000 included, 300 used (balance=700), elapsed 50%, prorated=500
-    // excess = max(0, 500 - 700) = 0
+    // used (300) <= prorated (500) → excess = 0
     $result = BillingPolicy::computeUsageOverageForPlanChange(1000, 700, $periodStart, $periodEnd);
 
     expect($result['excess'])->toBe(0);
@@ -110,7 +110,7 @@ it('computes excess when usage exceeds prorated quota', function (): void {
     $periodEnd = now()->addDays(15);
 
     // 1000 included, all used (balance=0), elapsed 50%, prorated=500
-    // excess = max(0, 500 - 0) = 500
+    // used (1000) - prorated (500) = excess 500
     $result = BillingPolicy::computeUsageOverageForPlanChange(1000, 0, $periodStart, $periodEnd);
 
     expect($result['excess'])->toBe(500);
@@ -122,7 +122,7 @@ it('computes excess for negative balance (overage)', function (): void {
     $periodEnd = now()->addDays(15);
 
     // 1000 included, 1100 used (balance=-100), elapsed 50%, prorated=500
-    // excess = max(0, 500 - (-100)) = 600
+    // used (1100) - prorated (500) = excess 600
     $result = BillingPolicy::computeUsageOverageForPlanChange(1000, -100, $periodStart, $periodEnd);
 
     expect($result['excess'])->toBe(600);
@@ -132,22 +132,48 @@ it('computes zero excess when rollover credits cover the prorated quota', functi
     $periodStart = now()->subDays(15);
     $periodEnd = now()->addDays(15);
 
-    // 100 included, balance=250 (rollover credits), elapsed 50%, prorated=50
-    // excess = max(0, 50 - 250) = 0
+    // 100 included, balance=250 (rollover credits → balance > included), elapsed 50%, prorated=50
+    // used (100 − 250 = −150) → excess = max(0, −150 − 50) = 0
     $result = BillingPolicy::computeUsageOverageForPlanChange(100, 250, $periodStart, $periodEnd);
 
     expect($result['excess'])->toBe(0);
 });
 
-it('computes excess at period start (factor = 1.0, elapsed = 0)', function (): void {
+it('computes full quota as excess at period start when balance is zero', function (): void {
     $periodStart = now();
     $periodEnd = now()->addDays(30);
 
-    // elapsed = 0, prorated = 0, excess always 0 (nothing was owed yet)
+    // elapsed = 0, prorated = 0; but used = 1000 − 0 = 1000 → excess = 1000.
+    // (Realistic only if a brand-new period was somehow already fully consumed —
+    // sanity-check that the formula does not silently zero out used quota.)
     $result = BillingPolicy::computeUsageOverageForPlanChange(1000, 0, $periodStart, $periodEnd);
+
+    expect($result['prorated_old_quota'])->toBe(0);
+    expect($result['excess'])->toBe(1000);
+});
+
+it('computes zero excess at period start when nothing has been consumed', function (): void {
+    $periodStart = now();
+    $periodEnd = now()->addDays(30);
+
+    // Brand-new period, balance still equals included → used = 0 → excess = 0.
+    $result = BillingPolicy::computeUsageOverageForPlanChange(1000, 1000, $periodStart, $periodEnd);
 
     expect($result['excess'])->toBe(0);
     expect($result['prorated_old_quota'])->toBe(0);
+});
+
+it('computes excess when usage burned far more than the early-period prorated entitlement', function (): void {
+    // Day 2 of a 30-day period: prorated entitlement = ~7 of a 100-quota,
+    // but the user already burned 70 → excess = 63 must be charged on plan-change.
+    $periodStart = now()->subDays(2);
+    $periodEnd = now()->addDays(28);
+
+    $result = BillingPolicy::computeUsageOverageForPlanChange(100, 30, $periodStart, $periodEnd);
+
+    expect($result['prorated_old_quota'])->toBe(7);
+    // used = 100 − 30 = 70; excess = 70 − 7 = 63
+    expect($result['excess'])->toBe(63);
 });
 
 // ── remainingBillingQuota capping ───────────────────────────────────────────

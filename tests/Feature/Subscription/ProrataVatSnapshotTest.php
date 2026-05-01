@@ -67,6 +67,7 @@ function makeMolliePeriodBillable(string $country, ?string $vatNumber = null): T
 
 function makePeriodInvoice(TestBillable $billable, float $vatRate, string $country): BillingInvoice
 {
+    $vatAmount = (int) round(3000 * $vatRate / 100);
     return BillingInvoice::create([
         'billable_type' => $billable->getMorphClass(),
         'billable_id' => $billable->getKey(),
@@ -75,18 +76,29 @@ function makePeriodInvoice(TestBillable $billable, float $vatRate, string $count
         'invoice_kind' => InvoiceKind::Subscription,
         'status' => InvoiceStatus::Paid,
         'country' => $country,
-        'vat_rate' => $vatRate,
         'currency' => 'EUR',
         'amount_net' => 3000,
-        'amount_vat' => (int) round(3000 * $vatRate / 100),
-        'amount_gross' => 3000 + (int) round(3000 * $vatRate / 100),
-        'line_items' => [],
+        'amount_vat' => $vatAmount,
+        'amount_gross' => 3000 + $vatAmount,
+        'line_items' => [[
+            'kind' => 'plan',
+            'code' => 'pro',
+            'label' => 'Pro',
+            'quantity' => 1,
+            'unit_price_net' => 3000,
+            'amount_net' => 3000,
+            'vat_rate' => $vatRate,
+            'vat_amount' => $vatAmount,
+            'amount_gross' => 3000 + $vatAmount,
+            'period_start' => now()->subDays(15)->toIso8601String(),
+            'period_end' => now()->addDays(15)->toIso8601String(),
+        ]],
         'period_start' => now()->subDays(15),
         'period_end' => now()->addDays(15),
     ]);
 }
 
-it('refunds with the original VAT rate even when the customer has since registered a VAT ID', function (): void {
+it('snapshots the original VAT rate in the pending refund lines even when the customer has since registered a VAT ID', function (): void {
     // Original period: B2C in AT → 20% VAT charged.
     $billable = makeMolliePeriodBillable('AT');
     makePeriodInvoice($billable, 20.00, 'AT');
@@ -95,37 +107,26 @@ it('refunds with the original VAT rate even when the customer has since register
     $billable->forceFill(['vat_number' => 'ATU12345678'])->save();
     $billable->refresh();
 
-    $capturedRefund = null;
-    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$capturedRefund) {
-        if ($request instanceof CreatePaymentRefundRequest) {
-            $capturedRefund = $request;
-        }
-        return new \stdClass;
-    });
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 'tr_'.uniqid()]);
 
-    // Downgrade triggers a prorata refund.
     app(UpdateSubscription::class)->update($billable, [
         'plan_code' => 'starter',
         'interval' => 'monthly',
         'apply_at' => 'immediate',
     ]);
 
-    expect($capturedRefund)->not->toBeNull('Mollie refund call should have been issued');
+    $billable->refresh();
+    $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
 
-    // Refund gross must reflect the period's 20% rate, not the now-active 0% reverse-charge.
-    $reflection = new ReflectionObject($capturedRefund);
-    $amountProp = $reflection->getProperty('amount');
-    $amountProp->setAccessible(true);
-    /** @var Money $money */
-    $money = $amountProp->getValue($capturedRefund);
+    expect($pending)->not->toBeNull('Pending prorata change should be persisted');
+    $refundLines = $pending['refund_lines'] ?? [];
+    expect($refundLines)->not->toBeEmpty();
 
-    // Prorata credit_net is roughly (3000 - 1000) * 15/30 = 1000. With 20% VAT → 1200 gross = "12.00".
-    // We assert the gross is non-zero AND > the net (proves VAT was applied).
-    $value = (float) $money->value;
-    expect($value)->toBeGreaterThan(10.00, 'Refund must include the original 20% VAT, not 0%');
+    // The first refund-line carries the snapshot vat_rate from the original invoice — 20%, not 0%.
+    expect((float) $refundLines[0]['vat_rate'])->toEqualWithDelta(20.0, 0.01, 'Refund-line must carry the original 20% VAT rate, not the now-active 0% reverse-charge');
 });
 
-it('refunds with the original 0% reverse-charge rate even when the customer has since lost their VAT ID', function (): void {
+it('snapshots the original 0% reverse-charge rate in the pending refund lines even when the customer has since lost their VAT ID', function (): void {
     // Original period: B2B reverse-charge → 0% VAT.
     $billable = makeMolliePeriodBillable('DE', 'DE123456789');
     makePeriodInvoice($billable, 0.00, 'DE');
@@ -134,13 +135,7 @@ it('refunds with the original 0% reverse-charge rate even when the customer has 
     $billable->forceFill(['vat_number' => null])->save();
     $billable->refresh();
 
-    $capturedRefund = null;
-    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$capturedRefund) {
-        if ($request instanceof CreatePaymentRefundRequest) {
-            $capturedRefund = $request;
-        }
-        return new \stdClass;
-    });
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 'tr_'.uniqid()]);
 
     app(UpdateSubscription::class)->update($billable, [
         'plan_code' => 'starter',
@@ -148,16 +143,14 @@ it('refunds with the original 0% reverse-charge rate even when the customer has 
         'apply_at' => 'immediate',
     ]);
 
-    expect($capturedRefund)->not->toBeNull();
+    $billable->refresh();
+    $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
 
-    $reflection = new ReflectionObject($capturedRefund);
-    $amountProp = $reflection->getProperty('amount');
-    $amountProp->setAccessible(true);
-    /** @var Money $money */
-    $money = $amountProp->getValue($capturedRefund);
+    expect($pending)->not->toBeNull();
+    $refundLines = $pending['refund_lines'] ?? [];
+    expect($refundLines)->not->toBeEmpty();
 
-    // Prorata credit_net ≈ 1000 cents, with 0% VAT → 1000 gross = "10.00" exactly.
-    expect((float) $money->value)->toEqualWithDelta(10.00, 0.10, 'Refund must use original 0% rate, not the now-active B2C rate');
+    expect((float) $refundLines[0]['vat_rate'])->toEqualWithDelta(0.0, 0.01, 'Refund-line must carry the original 0% rate, not the now-active B2C rate');
 });
 
 it('preview shows prorata VAT from the period invoice, not the live billable', function (): void {
@@ -188,5 +181,5 @@ it('throws when no period invoice exists for a Mollie subscription on prorata re
         'plan_code' => 'starter',
         'interval' => 'monthly',
         'apply_at' => 'immediate',
-    ]))->toThrow(\RuntimeException::class, 'no paid Subscription invoice found');
+    ]))->toThrow(\RuntimeException::class, 'Kein Original-Plan-Line-Item');
 });

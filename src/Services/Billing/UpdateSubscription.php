@@ -6,43 +6,30 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
-use GraystackIT\MollieBilling\Enums\InvoiceKind;
-use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
-use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
-use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
 use GraystackIT\MollieBilling\Events\AddonEnabled;
 use GraystackIT\MollieBilling\Events\PlanChanged;
-use GraystackIT\MollieBilling\Events\PlanChangePending;
 use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
-use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
-use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
-use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Mollie\Api\Http\Data\Money;
-use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
-use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
-use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
 
 class UpdateSubscription
 {
     public function __construct(
         private readonly CouponService $couponService,
-        private readonly PreviewService $previewService,
         private readonly SubscriptionCatalogInterface $catalog,
-        private readonly VatCalculationService $vatService,
         private readonly ValidateSubscriptionChange $validator,
         private readonly ScheduleSubscriptionChange $scheduleService,
         private readonly WalletPlanChangeAdjuster $walletAdjuster,
+        private readonly ProrataExecutor $prorataExecutor,
+        private readonly MollieSubscriptionPatcher $subscriptionPatcher,
     ) {
     }
 
@@ -102,40 +89,7 @@ class UpdateSubscription
                 $couponDiscountNet = $this->couponService->computeRecurringDiscount($coupon, $newNet);
             }
 
-            // ── Deferred upgrade: Mollie subscription with prorata charge ──
-            // Store pending change, create payment, return without modifying the plan.
-            if ($context->prorataChargeNet > 0 && $context->isMollie) {
-                $meta = $billable->getBillingSubscriptionMeta();
-                $meta['pending_plan_change'] = $context->toPendingArray();
-                $billable->forceFill(['subscription_meta' => $meta])->save();
-
-                $this->chargeProrataImmediate($billable, $context->prorataChargeNet, $context);
-
-                $billable->refresh();
-                $paymentId = (string) ($billable->getBillingSubscriptionMeta()['prorata_pending_payment_id'] ?? '');
-
-                event(new PlanChangePending($billable, $meta['pending_plan_change'], $paymentId));
-
-                return [
-                    'planChanged' => false,
-                    'intervalChanged' => false,
-                    'seatsChanged' => false,
-                    'addonsAdded' => [],
-                    'addonsRemoved' => [],
-                    'couponApplied' => null,
-                    'prorataChargeNet' => $context->prorataChargeNet,
-                    'prorataCreditNet' => 0,
-                    'mollieSubscriptionPatched' => false,
-                    'appliedAt' => null,
-                    'pendingPaymentConfirmation' => true,
-                    'scheduledFor' => null,
-                    'events' => [PlanChangePending::class],
-                ];
-            }
-
-            // ── Immediate apply (downgrades, zero-cost, local subscriptions) ──
-
-            // Redeem coupon now (only for immediate applies).
+            // Redeem coupon now.
             if ($dto->couponCode !== null && $dto->couponCode !== '' && isset($coupon)) {
                 $this->couponService->redeem($coupon, $billable, [
                     'planCode' => $context->newPlan,
@@ -146,47 +100,98 @@ class UpdateSubscription
                 $couponApplied = (string) $coupon->code;
             }
 
-            // Prorata: refund for immediate downgrade.
-            if ($context->prorataChargeNet > 0) {
-                $this->chargeProrataImmediate($billable, $context->prorataChargeNet, $context);
-            } elseif ($context->prorataCreditNet > 0 && $dto->applyAt === 'immediate') {
-                $this->refundProrataCredit($billable, $context->prorataCreditNet, $context);
-            }
-
-            $mollieSubscriptionPatched = false;
             $downgradeToLocal = $context->isMollie
                 && $context->planChanged
                 && $this->catalog->isFreePlan($context->newPlan, $context->newInterval);
+
+            // Pro-rata: ProrataExecutor handles charge/refund/sidegrade + Mollie-Subscription-PATCH.
+            // For Mollie → Free, the patcher cancels the subscription.
+            $hasProrata = ($context->prorataChargeNet > 0 || $context->prorataCreditNet > 0)
+                && $context->isMollie;
+
+            if ($hasProrata) {
+                $this->applyProrata($billable, $context);
+                $billable->refresh();
+
+                // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
+                $hasPendingCharge = ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
+
+                // Only echte Plan-Wechsel (plan or interval) defer the local switch and surface
+                // the legacy `pending_plan_change` marker that the plan-change-modal cancel-button
+                // operates on. Sitz-/Addon-Änderungen laufen synchron weiter — sie kommen ohnehin
+                // sofort in Mollie an und der Webhook räumt das `pending_prorata_change`-Marker auf.
+                if ($hasPendingCharge && ($context->planChanged || $context->intervalChanged)) {
+                    $meta = $billable->getBillingSubscriptionMeta();
+                    $meta['pending_plan_change'] = [
+                        'current_plan' => $context->currentPlan,
+                        'current_interval' => $context->currentInterval,
+                        'current_seats' => $context->currentSeats,
+                        'current_addons' => $context->currentAddons,
+                        'plan_code' => $context->newPlan,
+                        'interval' => $context->newInterval,
+                        'seats' => $newSeats,
+                        'addons' => array_values($newAddons),
+                        'new_net' => $newNet,
+                        'prorata_charge_net' => $context->prorataChargeNet,
+                        'coupon_code' => $dto->couponCode,
+                        'requested_at' => now()->toIso8601String(),
+                    ];
+                    $meta['prorata_pending_payment_id'] = $billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
+                    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+                    event(new \GraystackIT\MollieBilling\Events\PlanChangePending($billable, $meta['pending_plan_change'], (string) $meta['prorata_pending_payment_id']));
+
+                    return [
+                        'planChanged' => false,
+                        'intervalChanged' => false,
+                        'seatsChanged' => false,
+                        'addonsAdded' => [],
+                        'addonsRemoved' => [],
+                        'couponApplied' => null,
+                        'prorataChargeNet' => $context->prorataChargeNet,
+                        'prorataCreditNet' => 0,
+                        'mollieSubscriptionPatched' => false,
+                        'appliedAt' => null,
+                        'pendingPaymentConfirmation' => true,
+                        'scheduledFor' => null,
+                        'events' => [\GraystackIT\MollieBilling\Events\PlanChangePending::class],
+                    ];
+                }
+            }
+
+            $mollieSubscriptionPatched = false;
 
             if ($billable instanceof Model) {
                 $meta = $billable->getBillingSubscriptionMeta();
 
                 if ($downgradeToLocal) {
-                    // Mollie → Free: cancel the Mollie subscription, switch source
-                    // to Local. The wallet is adjusted further down by the regular
-                    // plan-change adjuster.
-                    $this->cancelMollieSubscriptionForFreeDowngrade($billable);
+                    if (! $hasProrata) {
+                        $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
+                    }
                     unset($meta['mollie_subscription_id'], $meta['pending_amount_net'], $meta['pending_amount_recorded_at']);
-                } elseif ($context->isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-                    $mollieSubscriptionPatched = $this->syncMollieSubscription(
-                        $billable,
-                        $context->newPlan,
-                        $context->newInterval,
-                        array_values($newAddons),
-                        max(0, $newSeats - $this->catalog->includedSeats($context->newPlan)),
-                        $newNet,
-                        $context->planChanged || $context->intervalChanged,
-                    );
-
-                    if (! $mollieSubscriptionPatched) {
-                        Log::warning('Mollie subscription sync failed', [
+                } elseif ($context->isMollie && ! $hasProrata && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
+                    // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
+                    // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
+                    $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+                    try {
+                        $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                        $mollieSubscriptionPatched = true;
+                    } catch (\Throwable $e) {
+                        Log::warning('Mollie-Subscription PATCH failed — queued for retry', [
                             'billable' => $billable->getKey(),
+                            'error' => $e->getMessage(),
                         ]);
+                        $meta['pending_subscription_patch'] = [
+                            'intent' => $intent->toArray(),
+                            'first_attempt_at' => now()->toIso8601String(),
+                            'last_error' => $e->getMessage(),
+                        ];
                     }
 
-                    $billable->refresh();
-                    $meta = $billable->getBillingSubscriptionMeta();
-
+                    $meta['pending_amount_net'] = $newNet;
+                    $meta['pending_amount_recorded_at'] = now()->toIso8601String();
+                } elseif ($context->isMollie && $hasProrata) {
+                    $mollieSubscriptionPatched = true;
                     $meta['pending_amount_net'] = $newNet;
                     $meta['pending_amount_recorded_at'] = now()->toIso8601String();
                 }
@@ -206,10 +211,6 @@ class UpdateSubscription
                 ])->save();
             }
 
-            // Wallet adjustment only runs on plan/interval changes because
-            // addons do not contribute included usages. If addon-based quotas
-            // are ever added, this condition must include addon changes too.
-            // See SubscriptionCatalogInterface::includedUsage() for details.
             if ($context->planChanged || $context->intervalChanged) {
                 $this->walletAdjuster->adjust($billable, $context->currentPlan, $context->currentInterval, $context->newPlan, $context->newInterval);
             }
@@ -219,6 +220,42 @@ class UpdateSubscription
                 $seatsChanged, $couponApplied, $mollieSubscriptionPatched,
             );
         });
+    }
+
+    /**
+     * Trampoline: build PlanChangeIntent + invoke the new ProrataExecutor pipeline.
+     */
+    protected function applyProrata(Billable $billable, SubscriptionChangeContext $context): void
+    {
+        $intent = $this->buildIntent(
+            $billable,
+            $context,
+            $context->newSeats,
+            $context->newAddons,
+        );
+
+        $composer = app(ProrataComposer::class);
+        $lines = $composer->compose($intent);
+
+        $this->prorataExecutor->execute($billable, $intent, $lines);
+    }
+
+    /**
+     * @param  array<int, string>  $newAddons
+     */
+    private function buildIntent(Billable $billable, SubscriptionChangeContext $context, int $newSeats, array $newAddons): PlanChangeIntent
+    {
+        return new PlanChangeIntent(
+            billable: $billable,
+            currentPlan: $context->currentPlan,
+            newPlan: $context->newPlan,
+            currentInterval: $context->currentInterval,
+            newInterval: $context->newInterval,
+            currentSeats: $context->currentSeats,
+            newSeats: $newSeats,
+            currentAddons: array_fill_keys($context->currentAddons, 1),
+            newAddons: array_fill_keys(array_values($newAddons), 1),
+        );
     }
 
     public function cancelScheduledChange(Billable $billable): void
@@ -274,15 +311,23 @@ class UpdateSubscription
             $mollieSubscriptionPatched = false;
 
             if ($isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-                $mollieSubscriptionPatched = $this->syncMollieSubscription(
-                    $billable,
-                    $context->newPlan,
-                    $context->newInterval,
-                    array_values($newAddons),
-                    max(0, $newSeats - $this->catalog->includedSeats($context->newPlan)),
-                    $newNet,
-                    $context->planChanged || $context->intervalChanged,
-                );
+                $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+                try {
+                    $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                    $mollieSubscriptionPatched = true;
+                } catch (\Throwable $e) {
+                    Log::warning('Mollie-Subscription PATCH failed in applyPendingPlanChange — queued for retry', [
+                        'billable' => $billable->getKey(),
+                        'error' => $e->getMessage(),
+                    ]);
+                    $meta = $billable->getBillingSubscriptionMeta();
+                    $meta['pending_subscription_patch'] = [
+                        'intent' => $intent->toArray(),
+                        'first_attempt_at' => now()->toIso8601String(),
+                        'last_error' => $e->getMessage(),
+                    ];
+                    $billable->forceFill(['subscription_meta' => $meta])->save();
+                }
             }
 
             // Clear pending state.
@@ -370,7 +415,7 @@ class UpdateSubscription
         }
 
         $meta = $billable->getBillingSubscriptionMeta();
-        unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
+        unset($meta['pending_plan_change'], $meta['pending_prorata_change'], $meta['prorata_pending_payment_id']);
         $billable->forceFill(['subscription_meta' => $meta])->save();
     }
 
@@ -551,723 +596,15 @@ class UpdateSubscription
         }
     }
 
-    /**
-     * Route to the correct Mollie subscription sync strategy.
-     *
-     * - Plan or interval change: cancel+recreate (new subscription, starts immediately).
-     * - Seat or addon change only: PATCH the existing subscription (preserves ID, no new payment).
-     *
-     * @param  array<int, string>  $addons
-     */
-    protected function syncMollieSubscription(
-        Billable $billable,
-        string $planCode,
-        string $interval,
-        array $addons,
-        int $extraSeats,
-        int $amountNet,
-        bool $requiresRecreate,
-    ): bool {
-        if ($requiresRecreate) {
-            return $this->cancelAndRecreateMollieSubscription($billable, $planCode, $interval, $addons, $extraSeats, $amountNet);
-        }
 
-        return $this->updateMollieSubscription($billable, $planCode, $interval, $addons, $extraSeats, $amountNet);
-    }
+    // ── REMOVED: cancelAndRecreateMollieSubscription, mollieCancelSubscription,
+    //    cancelMollieSubscriptionForFreeDowngrade, mollieCreateSubscription,
+    //    updateMollieSubscription, mollieUpdateSubscription —
+    //    Logic lives in MollieSubscriptionPatcher.
+    //
+    // ── REMOVED: chargeProrataImmediate, refundProrataCredit, resolveChargeInfo,
+    //    findSubscriptionPaymentId, prorataVat —
+    //    Logic lives in ProrataComposer + ProrataExecutor + InvoiceService.
 
-    /**
-     * Cancel the current Mollie subscription and immediately create a new one with the
-     * updated amount. Returns true on success.
-     *
-     * @param  array<int, string>  $addons
-     */
-    protected function cancelAndRecreateMollieSubscription(
-        Billable $billable,
-        string $planCode,
-        string $interval,
-        array $addons,
-        int $extraSeats,
-        int $amountNet,
-    ): bool {
-        if (! ($billable instanceof Model)) {
-            return false;
-        }
-
-        $customerId = $billable->getMollieCustomerId();
-        $currentSubId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
-
-        if ($customerId === null || $currentSubId === '') {
-            Log::warning('cancelAndRecreateMollieSubscription skipped — missing Mollie identifiers', [
-                'billable' => $billable->getKey(),
-                'mollie_customer_id' => $customerId,
-                'mollie_subscription_id' => $currentSubId ?: '(empty)',
-            ]);
-
-            return false;
-        }
-
-        try {
-            $vat = $this->vatService->calculate(
-                (string) ($billable->getBillingCountry() ?? ''),
-                $amountNet,
-                $billable->vat_number,
-            );
-
-            $this->mollieCancelSubscription($customerId, $currentSubId);
-
-            $newSubscription = $this->mollieCreateSubscription($customerId, [
-                'amount' => [
-                    'currency' => (string) config('mollie-billing.currency', 'EUR'),
-                    'value' => number_format(((int) $vat['gross']) / 100, 2, '.', ''),
-                ],
-                'interval' => $interval === 'yearly' ? '12 months' : '1 month',
-                'description' => "{$planCode} subscription",
-                'webhookUrl' => route(BillingRoute::webhook()),
-                'metadata' => [
-                    'billable_type' => $billable->getMorphClass(),
-                    'billable_id' => (string) $billable->getKey(),
-                    'plan_code' => $planCode,
-                    'interval' => $interval,
-                    'addon_codes' => $addons,
-                    'extra_seats' => $extraSeats,
-                ],
-            ]);
-
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['mollie_subscription_id'] = (string) ($newSubscription->id ?? '');
-            $billable->forceFill(['subscription_meta' => $meta])->save();
-
-            return true;
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error('Mollie cancel+create failed', [
-                'billable' => $billable->getKey(),
-                'error' => $e->getMessage(),
-            ]);
-
-            throw $e;
-        }
-    }
-
-    protected function mollieCancelSubscription(string $customerId, string $subscriptionId): void
-    {
-        Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
-    }
-
-    /**
-     * Cancel the Mollie subscription as part of a downgrade to a free plan.
-     * Tolerant of API failures — Mollie may already have cancelled it; the
-     * local state transition still goes through.
-     */
-    protected function cancelMollieSubscriptionForFreeDowngrade(Billable $billable): void
-    {
-        $customerId = $billable->getMollieCustomerId();
-        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
-
-        if ($customerId === null || $subscriptionId === '') {
-            return;
-        }
-
-        try {
-            $this->mollieCancelSubscription($customerId, $subscriptionId);
-        } catch (\Throwable $e) {
-            Log::warning('Mollie subscription cancel during free-downgrade failed', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'subscription_id' => $subscriptionId,
-                'error' => $e->getMessage(),
-            ]);
-        }
-    }
-
-    /**
-     * @param  array<string, mixed>  $payload
-     */
-    protected function mollieCreateSubscription(string $customerId, array $payload): object
-    {
-        return Mollie::send(new CreateSubscriptionRequest(
-            customerId: $customerId,
-            amount: new Money(
-                (string) $payload['amount']['currency'],
-                (string) $payload['amount']['value'],
-            ),
-            interval: (string) $payload['interval'],
-            description: (string) $payload['description'],
-            metadata: $payload['metadata'] ?? null,
-            webhookUrl: $payload['webhookUrl'] ?? null,
-        ));
-    }
-
-    /**
-     * Update the amount and metadata on an existing Mollie subscription in-place.
-     *
-     * Used for seat and addon changes within the same plan/interval. Unlike
-     * cancelAndRecreateMollieSubscription this preserves the subscription ID,
-     * avoids creating an immediate first payment, and keeps invoice history
-     * linked to the same subscription.
-     *
-     * @param  array<int, string>  $addons
-     */
-    protected function updateMollieSubscription(
-        Billable $billable,
-        string $planCode,
-        string $interval,
-        array $addons,
-        int $extraSeats,
-        int $amountNet,
-    ): bool {
-        if (! ($billable instanceof Model)) {
-            return false;
-        }
-
-        $customerId = $billable->getMollieCustomerId();
-        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
-
-        if ($customerId === null || $subscriptionId === '') {
-            Log::warning('updateMollieSubscription skipped — missing Mollie identifiers', [
-                'billable' => $billable->getKey(),
-                'mollie_customer_id' => $customerId,
-                'mollie_subscription_id' => $subscriptionId ?: '(empty)',
-            ]);
-
-            return false;
-        }
-
-        try {
-            $vat = $this->vatService->calculate(
-                (string) ($billable->getBillingCountry() ?? ''),
-                $amountNet,
-                $billable->vat_number,
-            );
-
-            $currency = (string) config('mollie-billing.currency', 'EUR');
-
-            $this->mollieUpdateSubscription($customerId, $subscriptionId, [
-                'amount' => [
-                    'currency' => $currency,
-                    'value' => number_format(((int) $vat['gross']) / 100, 2, '.', ''),
-                ],
-                'metadata' => [
-                    'billable_type' => $billable->getMorphClass(),
-                    'billable_id' => (string) $billable->getKey(),
-                    'plan_code' => $planCode,
-                    'interval' => $interval,
-                    'addon_codes' => $addons,
-                    'extra_seats' => $extraSeats,
-                ],
-            ]);
-
-            return true;
-        } catch (\Throwable $e) {
-            Log::error('Mollie subscription update (PATCH) failed', [
-                'billable' => $billable->getKey(),
-                'subscription_id' => $subscriptionId,
-                'error' => $e->getMessage(),
-            ]);
-
-            throw $e;
-        }
-    }
-
-    protected function mollieUpdateSubscription(string $customerId, string $subscriptionId, array $payload): object
-    {
-        return Mollie::send(new MollieUpdateSubscriptionRequest(
-            customerId: $customerId,
-            subscriptionId: $subscriptionId,
-            amount: new Money(
-                (string) $payload['amount']['currency'],
-                (string) $payload['amount']['value'],
-            ),
-            metadata: $payload['metadata'] ?? null,
-        ));
-    }
-
-    /**
-     * Create a one-off Mollie payment for a prorata upgrade charge.
-     *
-     * The invoice kind and line items are derived from the change context:
-     * - Plan/interval change → kind 'prorata', label 'Pro-rata plan upgrade'
-     * - Addon added → kind 'addon', label per addon
-     * - Seats increased → kind 'prorata', label 'Extra seats (pro-rata)'
-     */
-    protected function chargeProrataImmediate(Billable $billable, int $prorataChargeNet, ?SubscriptionChangeContext $context = null): void
-    {
-        if (! ($billable instanceof Model) || ! $billable->hasMollieMandate()) {
-            Log::warning('chargeProrataImmediate skipped — no Mollie mandate', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'has_mandate' => $billable instanceof Model ? $billable->hasMollieMandate() : false,
-            ]);
-
-            return;
-        }
-
-        $vat = $this->prorataVat($billable, $prorataChargeNet);
-
-        $currency = (string) config('mollie-billing.currency', 'EUR');
-        $amountValue = number_format($vat['gross'] / 100, 2, '.', '');
-
-        $chargeInfo = $this->resolveChargeInfo($prorataChargeNet, $context, $billable);
-
-        $payment = Mollie::send(new CreatePaymentRequest(
-            description: $chargeInfo['description'],
-            amount: new Money($currency, $amountValue),
-            metadata: [
-                'type' => $chargeInfo['type'],
-                'billable_type' => $billable->getMorphClass(),
-                'billable_id' => (string) $billable->getKey(),
-                'line_items' => $chargeInfo['line_items'],
-            ],
-            sequenceType: 'recurring',
-            mandateId: $billable->getMollieMandateId(),
-            customerId: $billable->getMollieCustomerId(),
-            webhookUrl: route(BillingRoute::webhook()),
-        ));
-
-        $meta = $billable->getBillingSubscriptionMeta();
-        $meta['prorata_pending_payment_id'] = is_object($payment) ? ($payment->id ?? null) : null;
-        $billable->forceFill(['subscription_meta' => $meta])->save();
-    }
-
-    /**
-     * Derive the payment type, description, and line items from the change context.
-     *
-     * @return array{type: string, description: string, line_items: array}
-     */
-    private function resolveChargeInfo(int $prorataChargeNet, ?SubscriptionChangeContext $context, ?Billable $billable = null): array
-    {
-        if ($context === null) {
-            return [
-                'type' => 'prorata',
-                'description' => 'Pro-rata upgrade charge',
-                'line_items' => [[
-                    'kind' => 'prorata',
-                    'label' => 'Pro-rata upgrade charge',
-                    'quantity' => 1,
-                    'unit_price_net' => $prorataChargeNet,
-                    'total_net' => $prorataChargeNet,
-                ]],
-            ];
-        }
-
-        $addonsAdded = array_values(array_diff($context->newAddons, $context->currentAddons));
-        $seatsChanged = $context->newSeats !== $context->currentSeats;
-
-        $onlyAddonsChanged = ! $context->planChanged
-            && ! $context->intervalChanged
-            && ! $seatsChanged
-            && ! empty($addonsAdded);
-
-        $onlySeatsChanged = ! $context->planChanged
-            && ! $context->intervalChanged
-            && $seatsChanged
-            && empty($addonsAdded);
-
-        if ($onlyAddonsChanged) {
-            $addonCount = count($addonsAdded);
-            $perAddonNet = $addonCount > 0 ? intdiv($prorataChargeNet, $addonCount) : $prorataChargeNet;
-            $lineItems = [];
-            foreach ($addonsAdded as $i => $code) {
-                $addonName = $this->catalog->addonName($code) ?? $code;
-                $isLast = $i === $addonCount - 1;
-                $lineTotal = $isLast
-                    ? $prorataChargeNet - $perAddonNet * ($addonCount - 1)
-                    : $perAddonNet;
-                $lineItems[] = [
-                    'kind' => 'addon',
-                    'label' => $addonName.' ('.__('billing::portal.prorata').')',
-                    'code' => $code,
-                    'quantity' => 1,
-                    'unit_price_net' => $lineTotal,
-                    'total_net' => $lineTotal,
-                ];
-            }
-
-            return [
-                'type' => 'addon',
-                'description' => 'Addon: '.implode(', ', array_map(
-                    fn (string $c) => $this->catalog->addonName($c) ?? $c,
-                    $addonsAdded,
-                )),
-                'line_items' => $lineItems,
-            ];
-        }
-
-        if ($onlySeatsChanged) {
-            $extraSeats = $context->newSeats - $context->currentSeats;
-            $unitPriceNet = $extraSeats > 0 ? intdiv($prorataChargeNet, $extraSeats) : $prorataChargeNet;
-
-            return [
-                'type' => 'seats',
-                'description' => 'Extra seats ('.$extraSeats.')',
-                'line_items' => [[
-                    'kind' => 'seat',
-                    'label' => 'Extra seats ('.__('billing::portal.prorata').')',
-                    'quantity' => $extraSeats,
-                    'unit_price_net' => $unitPriceNet,
-                    'total_net' => $prorataChargeNet,
-                ]],
-            ];
-        }
-
-        // Plan/interval change: build detailed line items mirroring the preview.
-        //
-        // The preview shows two lines:
-        //   "Neuer Plan (verbleibende Periode)"  →  newPlanProrata
-        //   "Gutschrift aktueller Plan"          → -creditProrata
-        // Their difference equals $prorataChargeNet.
-        //
-        // For same-interval changes:
-        //   newPlanProrata  = newNet * factor
-        //   creditProrata   = currentNet * factor
-        //   charge          = (newNet - currentNet) * factor  ← $prorataChargeNet
-        //
-        // For interval changes:
-        //   newPlanProrata  = newNet  (full price, new subscription starts fresh)
-        //   creditProrata   = currentNet * factor  (unused portion of old period)
-        //   charge          = newNet - creditProrata  ← $prorataChargeNet (only when positive)
-        $currentPlanName = $this->catalog->planName($context->currentPlan) ?? $context->currentPlan;
-        $newPlanName = $this->catalog->planName($context->newPlan) ?? $context->newPlan;
-
-        $currentLabel = $currentPlanName.' ('.__('billing::enums.subscription_interval.'.$context->currentInterval).')';
-        $newLabel = $newPlanName.' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
-
-        $description = $currentPlanName.' -> '.$newPlanName;
-        if ($context->intervalChanged) {
-            $description .= ' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
-        }
-
-        // Compute billing periods for line-item descriptions.
-        $currentPeriod = null;
-        $newPeriod = null;
-        if ($billable instanceof Model) {
-            $periodStart = $billable->getBillingPeriodStartsAt();
-            $periodEnd = $billable->nextBillingDate();
-            if ($periodStart !== null && $periodEnd !== null) {
-                $currentPeriod = $periodStart->format('d.m.Y').' - '.$periodEnd->format('d.m.Y');
-            }
-            if ($context->intervalChanged) {
-                $newStart = now();
-                $newEnd = $context->newInterval === 'yearly' ? now()->addYear() : now()->addMonth();
-                $newPeriod = $newStart->format('d.m.Y').' - '.$newEnd->format('d.m.Y');
-            } else {
-                $newPeriod = $currentPeriod;
-            }
-        }
-
-        $lineItems = [];
-
-        if ($context->intervalChanged) {
-            // Interval change: new plan at full price, credit for unused old period.
-            $newPlanProrata = $context->newNet;
-            $creditProrata = $newPlanProrata - $prorataChargeNet;
-        } else {
-            // Same interval: both amounts are prorated by the same factor.
-            // factor = prorataChargeNet / (newNet - currentNet) when diff ≠ 0.
-            $diff = $context->newNet - $context->currentNet;
-            if ($diff !== 0) {
-                $factor = $prorataChargeNet / $diff;
-            } else {
-                $factor = 0.0;
-            }
-            $newPlanProrata = (int) round($context->newNet * $factor);
-            $creditProrata = (int) round($context->currentNet * $factor);
-        }
-
-        // Line 1: New plan charge (remaining period).
-        if ($newPlanProrata > 0) {
-            $lineItems[] = [
-                'kind' => 'plan',
-                'label' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
-                'code' => $context->newPlan,
-                'quantity' => 1,
-                'unit_price_net' => $newPlanProrata,
-                'total_net' => $newPlanProrata,
-                'billing_period' => $newPeriod,
-            ];
-        }
-
-        // Line 2: Credit for unused portion of current plan.
-        if ($creditProrata > 0) {
-            $lineItems[] = [
-                'kind' => 'plan_credit',
-                'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
-                'code' => $context->currentPlan,
-                'quantity' => 1,
-                'unit_price_net' => -$creditProrata,
-                'total_net' => -$creditProrata,
-                'billing_period' => $currentPeriod,
-            ];
-        }
-
-        // If we couldn't build detailed items (edge case), fall back to single line.
-        if (empty($lineItems)) {
-            $lineItems[] = [
-                'kind' => 'prorata',
-                'label' => __('billing::portal.preview_prorata_new_plan').': '.$description,
-                'quantity' => 1,
-                'unit_price_net' => $prorataChargeNet,
-                'total_net' => $prorataChargeNet,
-            ];
-        }
-
-        // Ensure line items sum matches the charge amount (guard against rounding).
-        $lineItemSum = array_sum(array_column($lineItems, 'total_net'));
-        if ($lineItemSum !== $prorataChargeNet) {
-            $diff = $prorataChargeNet - $lineItemSum;
-            $lineItems[] = [
-                'kind' => 'adjustment',
-                'label' => __('billing::portal.prorata').' — '.$description,
-                'quantity' => 1,
-                'unit_price_net' => $diff,
-                'total_net' => $diff,
-            ];
-        }
-
-        return [
-            'type' => 'prorata',
-            'description' => $description,
-            'line_items' => $lineItems,
-        ];
-    }
-
-    /**
-     * Refund the prorata credit for an immediate downgrade.
-     *
-     * Creates a Mollie refund against the most recent paid payment (preferring
-     * one linked to the current mandate) and a standalone credit-note invoice
-     * that is not tied to any parent invoice.
-     */
-    protected function refundProrataCredit(Billable $billable, int $prorataCreditNet, ?SubscriptionChangeContext $context = null): void
-    {
-        if (! ($billable instanceof Model) || ! $billable->hasMollieMandate()) {
-            return;
-        }
-
-        $vatResult = $this->prorataVat($billable, $prorataCreditNet);
-        $vatRate = (float) $vatResult['rate'];
-        $refundGross = (int) $vatResult['gross'];
-        $country = (string) $vatResult['country'];
-
-        $reasonText = 'Pro-rata credit for plan downgrade';
-        $lineItems = [];
-
-        if ($context !== null) {
-            $currentPlanName = $this->catalog->planName($context->currentPlan) ?? $context->currentPlan;
-            $newPlanName = $this->catalog->planName($context->newPlan) ?? $context->newPlan;
-            $currentLabel = $currentPlanName.' ('.__('billing::enums.subscription_interval.'.$context->currentInterval).')';
-            $newLabel = $newPlanName.' ('.__('billing::enums.subscription_interval.'.$context->newInterval).')';
-
-            $onlySeatsChanged = ! $context->planChanged
-                && ! $context->intervalChanged
-                && $context->newSeats !== $context->currentSeats;
-
-            if ($onlySeatsChanged) {
-                $seatsRemoved = $context->currentSeats - $context->newSeats;
-                $reasonText = $currentPlanName.': '.$context->currentSeats.' -> '.$context->newSeats.' '.__('billing::portal.seats');
-                $lineItems = [[
-                    'kind' => 'seat_credit',
-                    'label' => __('billing::portal.preview_prorata_credit').': '.$seatsRemoved.' × '.__('billing::portal.seats'),
-                    'code' => $context->currentPlan,
-                    'description' => $currentLabel,
-                    'quantity' => $seatsRemoved,
-                    'unit_price_net' => $seatsRemoved > 0 ? (int) round(-$prorataCreditNet / $seatsRemoved) : -$prorataCreditNet,
-                    'total_net' => -$prorataCreditNet,
-                ]];
-            } elseif ($context->intervalChanged) {
-                $reasonText = $currentPlanName.' -> '.$newPlanName;
-                $unusedCredit = $prorataCreditNet + $context->newNet;
-                $lineItems = [
-                    [
-                        'kind' => 'plan',
-                        'label' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
-                        'code' => $context->newPlan,
-                        'quantity' => 1,
-                        'unit_price_net' => $context->newNet,
-                        'total_net' => $context->newNet,
-                    ],
-                    [
-                        'kind' => 'plan_credit',
-                        'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
-                        'code' => $context->currentPlan,
-                        'quantity' => 1,
-                        'unit_price_net' => -$unusedCredit,
-                        'total_net' => -$unusedCredit,
-                    ],
-                ];
-            } else {
-                $reasonText = $currentPlanName.' -> '.$newPlanName;
-                $lineItems = [[
-                    'kind' => 'plan_credit',
-                    'label' => __('billing::portal.preview_prorata_credit').': '.$currentLabel,
-                    'code' => $context->currentPlan,
-                    'description' => __('billing::portal.preview_prorata_new_plan').': '.$newLabel,
-                    'quantity' => 1,
-                    'unit_price_net' => -$prorataCreditNet,
-                    'total_net' => -$prorataCreditNet,
-                ]];
-            }
-        }
-
-        // Find the Mollie payment ID of the current subscription's most recent
-        // paid invoice. Since we're refunding a prorata credit for the current
-        // subscription, its last payment is the correct refund target.
-        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
-
-        $refundPaymentId = $this->findSubscriptionPaymentId($billable, $subscriptionId);
-
-        if ($refundPaymentId === null) {
-            Log::warning('Prorata credit skipped — no paid Mollie payment found to refund against', [
-                'billable' => $billable->getKey(),
-                'prorata_credit_net' => $prorataCreditNet,
-            ]);
-
-            return;
-        }
-
-        $currency = (string) config('mollie-billing.currency', 'EUR');
-
-        try {
-            Mollie::send(new \Mollie\Api\Http\Requests\CreatePaymentRefundRequest(
-                paymentId: $refundPaymentId,
-                description: 'Pro-rata credit: '.$reasonText,
-                amount: new Money($currency, number_format($refundGross / 100, 2, '.', '')),
-            ));
-        } catch (\Mollie\Api\Exceptions\ApiException $e) {
-            if ($e->getCode() === 409) {
-                // Duplicate refund — Mollie already processed it (e.g. retry after
-                // a previous partial failure). Only create credit note if one doesn't already exist.
-                Log::info('Mollie duplicate refund detected (409), checking for existing credit note', [
-                    'billable' => $billable->getKey(),
-                    'payment_id' => $refundPaymentId,
-                    'amount_gross' => $refundGross,
-                ]);
-
-                $existingCreditNote = BillingInvoice::query()
-                    ->where('billable_type', $billable->getMorphClass())
-                    ->where('billable_id', $billable->getKey())
-                    ->where('invoice_kind', InvoiceKind::CreditNote)
-                    ->where('mollie_payment_id', 'like', $refundPaymentId.':cn:%')
-                    ->where('amount_net', -$prorataCreditNet)
-                    ->exists();
-
-                if ($existingCreditNote) {
-                    Log::info('Credit note already exists for this refund, skipping', [
-                        'billable' => $billable->getKey(),
-                        'payment_id' => $refundPaymentId,
-                    ]);
-
-                    return;
-                }
-            } else {
-                throw $e;
-            }
-        }
-
-        // Create a standalone credit-note invoice (no parent invoice).
-        // Country is taken from the original-period VAT snapshot, not the live
-        // billable, so a mid-period country/VAT-status change cannot retroactively
-        // alter how this refund is booked.
-        $invoiceService = app(InvoiceService::class);
-        $creditNote = $invoiceService->createStandaloneCreditNote(
-            $billable,
-            $prorataCreditNet,
-            $vatRate,
-            $lineItems,
-            $reasonText,
-            $refundPaymentId,
-            $country,
-        );
-        $creditNote->refund_reason_code = RefundReasonCode::PlanDowngrade;
-        $creditNote->save();
-    }
-
-    /**
-     * Find the Mollie payment ID for the billable's most recent paid
-     * subscription invoice that has not already been refunded.
-     *
-     * Search order:
-     * 1. Invoice matching the current mollie_subscription_id.
-     * 2. Any paid subscription invoice for this billable (covers the first
-     *    checkout payment which has no subscriptionId, and old invoices
-     *    from prior cancel+recreate cycles).
-     *
-     * Invoices that already have a credit note are excluded to avoid
-     * duplicate refund attempts against Mollie.
-     */
-    private function findSubscriptionPaymentId(Billable $billable, string $subscriptionId): ?string
-    {
-        $alreadyRefundedPaymentIds = BillingInvoice::query()
-            ->where('billable_type', $billable->getMorphClass())
-            ->where('billable_id', $billable->getKey())
-            ->where('invoice_kind', InvoiceKind::CreditNote)
-            ->pluck('mollie_payment_id')
-            ->map(fn (string $id) => explode(':cn:', $id)[0])
-            ->unique()
-            ->all();
-
-        // Try the current subscription ID first.
-        if ($subscriptionId !== '') {
-            $paymentId = BillingInvoice::query()
-                ->where('billable_type', $billable->getMorphClass())
-                ->where('billable_id', $billable->getKey())
-                ->where('mollie_subscription_id', $subscriptionId)
-                ->where('status', InvoiceStatus::Paid)
-                ->when($alreadyRefundedPaymentIds, fn ($q) => $q->whereNotIn('mollie_payment_id', $alreadyRefundedPaymentIds))
-                ->latest()
-                ->value('mollie_payment_id');
-
-            if ($paymentId !== null) {
-                return $paymentId;
-            }
-        }
-
-        // Fallback: covers the first checkout payment (no subscriptionId on
-        // the invoice) and invoices from prior cancel+recreate cycles.
-        return BillingInvoice::query()
-            ->where('billable_type', $billable->getMorphClass())
-            ->where('billable_id', $billable->getKey())
-            ->where('status', InvoiceStatus::Paid)
-            ->where('invoice_kind', InvoiceKind::Subscription)
-            ->when($alreadyRefundedPaymentIds, fn ($q) => $q->whereNotIn('mollie_payment_id', $alreadyRefundedPaymentIds))
-            ->latest()
-            ->value('mollie_payment_id');
-    }
-
-    /**
-     * Compute VAT for a prorata charge or refund using the original period's tax
-     * treatment — never the live billable's current VAT status.
-     *
-     * Tax law requires reverse-charge / B2C-VAT decisions on a refund to mirror
-     * the original invoice exactly. A customer who registers a VAT ID mid-period
-     * (or has theirs invalidated) must still be refunded with the rate originally
-     * charged; otherwise the package would either eat VAT it has already remitted
-     * or refund VAT it never collected.
-     *
-     * @return array{net:int, vat:int, gross:int, rate:float, country:string, vat_number:?string}
-     *
-     * @throws \RuntimeException When no Subscription invoice exists for the current period.
-     */
-    protected function prorataVat(Billable $billable, int $netAmount): array
-    {
-        $invoice = BillingInvoice::currentPeriodSubscriptionInvoice($billable);
-
-        if ($invoice === null) {
-            throw new \RuntimeException(
-                'Cannot determine prorata VAT: no paid Subscription invoice found for the current period of billable '
-                .($billable instanceof Model ? $billable->getKey() : 'unknown')
-                .'. Refunds and prorata charges must reuse the original period\'s VAT rate.',
-            );
-        }
-
-        $rate = (float) $invoice->vat_rate;
-        $vat = (int) round($netAmount * $rate / 100);
-
-        return [
-            'net' => $netAmount,
-            'vat' => $vat,
-            'gross' => $netAmount + $vat,
-            'rate' => $rate,
-            'country' => (string) $invoice->country,
-            'vat_number' => null,
-        ];
-    }
 
 }

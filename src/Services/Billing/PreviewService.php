@@ -212,9 +212,12 @@ class PreviewService
         $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $vat['rate']];
         $prorataNet = $prorataChargeNet > 0 ? $prorataChargeNet : ($prorataCreditNet > 0 ? $prorataCreditNet : 0);
         if ($prorataNet > 0) {
-            $periodInvoice = BillingInvoice::currentPeriodSubscriptionInvoice($billable);
-            if ($periodInvoice !== null) {
-                $rate = (float) $periodInvoice->vat_rate;
+            // VAT-Rate aus dem Plan-Line-Item der laufenden Periode (Per-Item-VAT).
+            $candidates = BillingInvoice::currentPeriodLines($billable, 'plan', $currentPlan);
+            if (! empty($candidates)) {
+                $first = $candidates[0];
+                $line = $first['invoice']->lineItem($first['line_index']) ?? [];
+                $rate = (float) ($line['vat_rate'] ?? 0);
                 $vatAmount = (int) round($prorataNet * $rate / 100);
                 $prorataVat = [
                     'net' => $prorataNet,
@@ -358,6 +361,71 @@ class PreviewService
             'isDowngrade' => BillingPolicy::isDowngrade(
                 $this->catalog, $currentPlan, $currentInterval, $newPlan, $newInterval,
             ),
+            // Multi-VAT-Aufschlüsselung via Composer (UI-Source-of-Truth für die neue Preview).
+            // Aggregat-Felder oben (prorataChargeNet etc.) bleiben für Backwards-Compat.
+            ...$this->prorataLinesPreview($billable, $currentPlan, $newPlan, $currentInterval, $newInterval, $currentSeats, $newSeats, $currentAddons, $newAddons),
+        ];
+    }
+
+    /**
+     * Baut die prorataLines via ProrataComposer für die neue UI-Aufschlüsselung.
+     *
+     * @param  array<string, int>  $currentAddons
+     * @param  array<string, int>  $newAddons
+     * @return array{prorataLines: list<array<string, mixed>>, prorataTotalNet: int, prorataTotalVat: int, prorataTotalGross: int}
+     */
+    private function prorataLinesPreview(
+        Billable $billable,
+        string $currentPlan,
+        string $newPlan,
+        string $currentInterval,
+        string $newInterval,
+        int $currentSeats,
+        int $newSeats,
+        array $currentAddons,
+        array $newAddons,
+    ): array {
+        if ($currentPlan === '' || $newPlan === '') {
+            return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0];
+        }
+
+        try {
+            $intent = new PlanChangeIntent(
+                billable: $billable,
+                currentPlan: $currentPlan,
+                newPlan: $newPlan,
+                currentInterval: $currentInterval,
+                newInterval: $newInterval,
+                currentSeats: $currentSeats,
+                newSeats: $newSeats,
+                currentAddons: $currentAddons,
+                newAddons: $newAddons,
+            );
+
+            $lines = app(ProrataComposer::class)->compose($intent);
+        } catch (\Throwable) {
+            // Bei Daten-Inkonsistenz (z.B. fehlende Original-Lines) leer zurückgeben.
+            // Composer wirft RuntimeException — Preview soll nicht crashen.
+            return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0];
+        }
+
+        $totalNet = 0;
+        $totalVat = 0;
+        $totalGross = 0;
+        $serialized = [];
+
+        foreach ($lines as $line) {
+            $serialized[] = $line->toArray();
+            $totalNet += $line->amountNet;
+            $totalVat += $line->amountVat;
+            $totalGross += $line->amountGross;
+        }
+
+        return [
+            'prorataLines' => $serialized,
+            'prorataTotalNet' => $totalNet,
+            'prorataTotalVat' => $totalVat,
+            'prorataTotalGross' => $totalGross,
         ];
     }
 

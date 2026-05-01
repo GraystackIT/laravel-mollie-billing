@@ -179,6 +179,15 @@ class MollieWebhookController extends Controller
                 return;
             }
 
+            // Neuer Plan-Change-Pfad (Multi-VAT-Sammel-Charge).
+            if ($type === 'prorata_charge') {
+                $this->handleProrataChargePaid($payment, $billable, $metadata);
+                if ($this->hasRefunds($payment)) {
+                    $this->handleRefundWebhook($payment, $billable);
+                }
+                return;
+            }
+
             if (in_array($type, ['overage', 'prorata', 'addon', 'seats'], true)) {
                 $this->handleSingleChargePaid($payment, $billable, $type, $metadata);
                 // Fall through to check for refunds on the same payment below.
@@ -207,6 +216,11 @@ class MollieWebhookController extends Controller
 
             if ($type === 'one_time_order') {
                 $this->handleOneTimeOrderFailed($payment, $billable, $metadata);
+                return;
+            }
+
+            if ($type === 'prorata_charge') {
+                $this->handleProrataChargeFailed($payment, $billable, $metadata);
                 return;
             }
 
@@ -456,8 +470,17 @@ class MollieWebhookController extends Controller
         $paidAt = $payment->paidAt ?? null;
         $periodStartsAt = $paidAt ? \Carbon\Carbon::parse((string) $paidAt) : now();
 
+        // Sync seat_count from the actually-paid invoice line_items so that pro-rata
+        // math on future plan-changes operates on the real paid-for state.
+        $derivedSeatCount = $invoice->deriveSeatCount();
+        $meta = $billable->getBillingSubscriptionMeta();
+        if ($derivedSeatCount !== null) {
+            $meta['seat_count'] = $derivedSeatCount;
+        }
+
         $billable->forceFill([
             'subscription_period_starts_at' => $periodStartsAt,
+            'subscription_meta' => $meta,
         ])->save();
 
         event(new PaymentSucceeded($billable, $invoice));
@@ -603,6 +626,207 @@ class MollieWebhookController extends Controller
     }
 
     /**
+     * Phase-2-Trigger für die neue Plan-Change-Charge-Logik (Multi-VAT-Sammel-Charges).
+     *
+     * 1. Charge-Invoice via InvoiceService::createInvoice persistieren.
+     * 2. Mollie-Subscription-PATCH via MollieSubscriptionPatcher::updateForIntent.
+     * 3. Geplante Refunds (aus Pending-State) via InvoiceService::createRefund ausführen.
+     * 4. Pending-State löschen.
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function handleProrataChargePaid(object $payment, Billable $billable, array $metadata): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
+        if (empty($pending)) {
+            // Pending-State fehlt — möglicherweise schon verarbeitet (idempotent) oder Out-of-Band.
+            // createInvoice ist idempotent via UNIQUE-Index auf mollie_payment_id.
+            return;
+        }
+
+        $invoiceService = app(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class);
+        $patcher = app(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class);
+
+        // Decide upfront whether this charge starts a new billing period (plan/interval change)
+        // or extends the running one (mid-cycle seats/addons). Same logic that step 4 below uses,
+        // hoisted so the new period applies consistently to the charge invoice + line_items.
+        $intentData = is_array($pending['intent'] ?? null) ? $pending['intent'] : null;
+        $oldPlan = $intentData !== null ? (string) ($intentData['current_plan'] ?? '') : '';
+        $oldInterval = $intentData !== null ? (string) ($intentData['current_interval'] ?? '') : '';
+        $newPlanCode = $intentData !== null
+            ? (string) ($intentData['new_plan'] ?? $billable->getBillingSubscriptionPlanCode())
+            : (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $newIntervalCode = $intentData !== null
+            ? (string) ($intentData['new_interval'] ?? $billable->getBillingSubscriptionInterval())
+            : (string) ($billable->getBillingSubscriptionInterval() ?? '');
+        $startsNewPeriod = $oldPlan !== '' && ($oldPlan !== $newPlanCode || $oldInterval !== $newIntervalCode);
+
+        $paidAt = $payment->paidAt ?? null;
+        $newPeriodStart = $paidAt ? \Carbon\Carbon::parse((string) $paidAt) : now();
+        $newPeriodEnd = $newIntervalCode === 'yearly'
+            ? $newPeriodStart->copy()->addYear()
+            : $newPeriodStart->copy()->addMonth();
+
+        $invoicePeriodStart = $startsNewPeriod ? $newPeriodStart : $billable->getBillingPeriodStartsAt();
+        $invoicePeriodEnd = $startsNewPeriod ? $newPeriodEnd : $billable->nextBillingDate();
+
+        // Charge lines come from the persisted pending state (Mollie metadata is capped at 1024 bytes,
+        // so we keep the full payload in subscription_meta instead of round-tripping it via Mollie).
+        // Fallback to legacy metadata.line_items for in-flight charges that were created before this change.
+        $lineItems = (array) ($pending['charge_lines'] ?? $metadata['line_items'] ?? []);
+
+        // For plan/interval changes the charge buys the full new period — overwrite each line's
+        // period to the new window so currentPeriodLines() can later use these as refund sources.
+        if ($startsNewPeriod && $invoicePeriodStart !== null && $invoicePeriodEnd !== null) {
+            $startIso = $invoicePeriodStart->toIso8601String();
+            $endIso = $invoicePeriodEnd->toIso8601String();
+            $lineItems = array_map(static function (array $line) use ($startIso, $endIso): array {
+                $line['period_start'] = $startIso;
+                $line['period_end'] = $endIso;
+                return $line;
+            }, $lineItems);
+        }
+
+        // 1. Charge-Invoice persistieren.
+        try {
+            $chargeInvoice = $invoiceService->createInvoice(
+                billable: $billable,
+                kind: \GraystackIT\MollieBilling\Enums\InvoiceKind::Subscription,
+                molliePaymentId: (string) $payment->id,
+                mollieSubscriptionId: $payment->subscriptionId ?? null,
+                lineItems: $lineItems,
+                periodStart: $invoicePeriodStart,
+                periodEnd: $invoicePeriodEnd,
+            );
+            event(new PaymentSucceeded($billable, $chargeInvoice));
+            $this->notifyInvoiceAvailable($billable, $chargeInvoice);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Failed to persist prorata_charge invoice', [
+                'billable' => $billable->getKey(),
+                'payment_id' => (string) $payment->id,
+                'error' => $e->getMessage(),
+            ]);
+            // Pending-State NICHT löschen — Retry möglich.
+            return;
+        }
+
+        // 2. Mollie-Subscription-PATCH.
+        try {
+            $intent = \GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent::fromArray($pending['intent']);
+            $patcher->updateForIntent($billable, $intent);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Mollie subscription PATCH failed in Phase 2 — will be inconsistent until next recurring run', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+            // Nicht abbrechen — der Recurring-Webhook nutzt live Billable-State, ist also selbst-heilend.
+        }
+
+        // 3. Refunds.
+        $refundLinesData = (array) ($pending['refund_lines'] ?? []);
+        if (! empty($refundLinesData)) {
+            $refundLines = array_map(
+                fn (array $data) => \GraystackIT\MollieBilling\Support\ProrataLine::fromArray($data),
+                $refundLinesData,
+            );
+            try {
+                $invoiceService->createRefund($billable, $refundLines, 'Plan change refund');
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Failed to create refund invoice in Phase 2', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // 4. Plan/Sitze/Addons auf den Billable schreiben (Periode bereits oben berechnet).
+        $billable->refresh();
+        if ($intentData !== null) {
+            $meta = $billable->getBillingSubscriptionMeta();
+
+            // Authoritative seat_count: prefer the freshly-persisted charge invoice's
+            // line_items (matches what Mollie just charged). Fallback to intent.new_seats
+            // (pure-refund flows have no charge invoice).
+            $derivedFromCharge = isset($chargeInvoice) ? $chargeInvoice->deriveSeatCount() : null;
+            $meta['seat_count'] = $derivedFromCharge ?? (int) ($intentData['new_seats'] ?? $billable->getBillingSeatCount());
+
+            unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
+
+            $billable->forceFill([
+                'subscription_plan_code' => $newPlanCode,
+                'subscription_interval' => $newIntervalCode,
+                'active_addon_codes' => array_keys((array) ($intentData['new_addons'] ?? [])),
+                'subscription_meta' => $meta,
+                ...($startsNewPeriod ? ['subscription_period_starts_at' => $newPeriodStart] : []),
+            ])->save();
+        }
+
+        // 5. Wallets rebalancen, falls Plan/Interval gewechselt wurden.
+        // Mirror UpdateSubscription::update() — der Adjuster reset alte Plan-Quotas und
+        // kreditet die neuen, behält gekaufte Credits, und chargt unaufgelöste Overage.
+        $billable->refresh();
+        if ($startsNewPeriod) {
+            try {
+                app(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class)
+                    ->adjust($billable, $oldPlan, $oldInterval, $newPlanCode, $newIntervalCode);
+            } catch (\Throwable $e) {
+                Log::warning('Wallet adjust during prorata charge phase 2 failed', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // 6. Pending-State löschen — alle Marker, damit der nächste Plan-Change nicht blockiert wird.
+        $billable->refresh();
+        $meta = $billable->getBillingSubscriptionMeta();
+        unset(
+            $meta['pending_prorata_change'],
+            $meta['pending_plan_change'],
+            $meta['prorata_pending_payment_id'],
+        );
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Charge-Webhook failed: Pending-State löschen, kein PATCH-Rollback nötig (PATCH lief noch nicht).
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function handleProrataChargeFailed(object $payment, Billable $billable, array $metadata): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $pending = $meta['pending_prorata_change'] ?? null;
+        unset(
+            $meta['pending_prorata_change'],
+            $meta['pending_plan_change'],
+            $meta['prorata_pending_payment_id'],
+        );
+
+        $reason = (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown');
+        $meta['plan_change_failed_at'] = now()->toIso8601String();
+        $meta['plan_change_failed_reason'] = $reason;
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        if ($pending !== null) {
+            event(new PlanChangeFailed($billable, $pending, (string) $payment->id, $reason));
+
+            $recipients = MollieBilling::notifyBillingAdmins($billable);
+            if (! empty($recipients)) {
+                Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+            }
+        }
+    }
+
+    /**
      * Sync refunds initiated via the Mollie dashboard into local credit notes.
      *
      * Each Mollie refund has a unique ID (e.g. re_xxx). We store it in the
@@ -634,28 +858,29 @@ class MollieWebhookController extends Controller
                 continue;
             }
 
-            // Deduplicate by Mollie refund ID — safe for multiple partial
-            // refunds of the same amount on the same payment.
-            $creditNotePaymentId = $payment->id.':re:'.$refundId;
-
-            $exists = BillingInvoice::query()
-                ->where('mollie_payment_id', $creditNotePaymentId)
-                ->exists();
-
-            if ($exists) {
+            // Idempotenz-Check: existiert eine Refund-Invoice, die diese mollie_refund_id in
+            // einem ihrer line_items trägt?
+            if ($this->refundIdAlreadyPersisted($original->billable_type, $original->billable_id, $refundId)) {
                 continue;
             }
 
             $refundAmountCents = (int) round(((float) ($refund->amount->value ?? 0)) * 100);
 
-            // Convert gross refund to net using the original invoice rate.
-            $rate = (float) $original->vat_rate;
+            // Convert gross refund to net using the rate from the original invoice's first line item.
+            $originalLines = (array) ($original->line_items ?? []);
+            $firstLine = $originalLines[0] ?? null;
+            $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
             $netAmount = $rate > 0
                 ? (int) round($refundAmountCents / (1 + $rate / 100))
                 : $refundAmountCents;
 
             $creditNote = $this->salesInvoiceService->createCreditNote($original, $netAmount);
-            $creditNote->mollie_payment_id = $creditNotePaymentId;
+            // mollie_refund_id in line_items eintragen für Idempotenz beim nächsten Webhook.
+            $lines = (array) $creditNote->line_items;
+            if (isset($lines[0])) {
+                $lines[0]['mollie_refund_id'] = $refundId;
+                $creditNote->line_items = $lines;
+            }
             $creditNote->refund_reason_code = RefundReasonCode::Other;
             $creditNote->refund_reason_text = 'synced from Mollie dashboard';
             $creditNote->save();
@@ -718,6 +943,28 @@ class MollieWebhookController extends Controller
             return ((float) ($payment->amountRefunded->value ?? 0)) > 0;
         }
 
+        return false;
+    }
+
+    /**
+     * Idempotenz-Check: existiert eine Refund-Invoice für diesen Billable, die diese mollie_refund_id
+     * in einem ihrer line_items trägt?
+     */
+    protected function refundIdAlreadyPersisted(string $billableType, $billableId, string $refundId): bool
+    {
+        $refunds = BillingInvoice::query()
+            ->where('billable_type', $billableType)
+            ->where('billable_id', $billableId)
+            ->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($refunds as $refund) {
+            foreach ((array) ($refund->line_items ?? []) as $line) {
+                if (($line['mollie_refund_id'] ?? null) === $refundId) {
+                    return true;
+                }
+            }
+        }
         return false;
     }
 

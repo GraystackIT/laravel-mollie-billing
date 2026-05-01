@@ -57,6 +57,14 @@ function makePaidInvoice(TestBillable $billable, int $net = 1000, string $kind =
 
     $vat = (int) round($net * 19 / 100);
 
+    // Per-Item-VAT in line_items.
+    foreach ($lineItems as $i => $li) {
+        $lineItems[$i]['vat_rate'] = $li['vat_rate'] ?? 19.0;
+        $lineItems[$i]['vat_amount'] = $li['vat_amount'] ?? (int) round(($li['total_net'] ?? 0) * 19 / 100);
+        $lineItems[$i]['amount_net'] = $li['amount_net'] ?? ($li['total_net'] ?? 0);
+        $lineItems[$i]['amount_gross'] = $li['amount_gross'] ?? ($lineItems[$i]['amount_net'] + $lineItems[$i]['vat_amount']);
+    }
+
     $invoice = new BillingInvoice;
     $invoice->billable_type = $billable->getMorphClass();
     $invoice->billable_id = $billable->getKey();
@@ -64,7 +72,6 @@ function makePaidInvoice(TestBillable $billable, int $net = 1000, string $kind =
     $invoice->invoice_kind = $kind;
     $invoice->status = InvoiceStatus::Paid;
     $invoice->country = 'DE';
-    $invoice->vat_rate = 19.0;
     $invoice->amount_net = $net;
     $invoice->amount_vat = $vat;
     $invoice->amount_gross = $net + $vat;
@@ -84,7 +91,7 @@ it('fully refunds a subscription invoice and creates a credit note', function ()
     $creditNote = app(RefundInvoiceService::class)->refundFully($invoice, RefundReasonCode::Goodwill);
 
     expect($creditNote->amount_net)->toBe(-1000);
-    expect($creditNote->invoice_kind)->toBe(\GraystackIT\MollieBilling\Enums\InvoiceKind::CreditNote);
+    expect($creditNote->invoice_kind)->toBe(\GraystackIT\MollieBilling\Enums\InvoiceKind::Refund);
     expect($invoice->fresh()->refunded_net)->toBe(1000);
 
     Event::assertDispatched(InvoiceRefunded::class);

@@ -6,13 +6,10 @@ namespace GraystackIT\MollieBilling\Enums;
 
 enum InvoiceKind: string
 {
-    case Subscription = 'subscription';
-    case Prorata = 'prorata';
-    case Addon = 'addon';
-    case Seats = 'seats';
-    case Overage = 'overage';
+    case Subscription = 'subscription';      // Recurring + Mid-cycle + Plan-Change-Charge
     case OneTimeOrder = 'one_time_order';
-    case CreditNote = 'credit_note';
+    case Overage = 'overage';
+    case Refund = 'refund';                  // Plan-Change-Refunds + Admin-Refunds (Overage/OneTimeOrder)
 
     public function label(): string
     {
@@ -23,12 +20,24 @@ enum InvoiceKind: string
     {
         return match ($this) {
             self::Subscription => 'blue',
-            self::Prorata => 'violet',
-            self::Addon => 'cyan',
-            self::Seats => 'amber',
-            self::Overage => 'red',
             self::OneTimeOrder => 'emerald',
-            self::CreditNote => 'zinc',
+            self::Overage => 'red',
+            self::Refund => 'zinc',
         };
+    }
+
+    public function isRefund(): bool
+    {
+        return $this === self::Refund;
+    }
+
+    public function metadataType(): string
+    {
+        return $this->value;
+    }
+
+    public static function fromMetadataType(string $type): self
+    {
+        return self::from($type);
     }
 }

@@ -99,16 +99,16 @@ class CountryMatchService
 
         CountryMismatchResolved::dispatch($billable, $mismatch, $resolvedBy);
 
-        // If a corrective VAT rate differs from the original invoice's rate, issue a credit note.
+        // If a corrective VAT rate differs from the original invoice's plan-line rate, issue a credit note.
         $original = $billable->latestBillingInvoice();
         if ($original instanceof BillingInvoice) {
             $newCountry = $this->normalize($mismatch->tax_country_user);
             if ($newCountry !== null) {
                 try {
                     $newRate = $this->vat->vatRateFor($newCountry);
-                    $originalRate = (float) $original->vat_rate;
+                    $originalRate = $this->originalPlanVatRate($original);
 
-                    if (abs($newRate - $originalRate) > 0.001) {
+                    if ($originalRate !== null && abs($newRate - $originalRate) > 0.001) {
                         $this->salesInvoices->createCreditNote($original, $original->amount_net);
                     }
                 } catch (\Throwable) {
@@ -116,6 +116,22 @@ class CountryMatchService
                 }
             }
         }
+    }
+
+    /**
+     * Liest die VAT-Rate des Plan-Line-Items aus der Original-Invoice.
+     * Multi-VAT-Invoices können mehrere Raten haben — die Plan-Line ist hier die referenzielle.
+     */
+    private function originalPlanVatRate(BillingInvoice $invoice): ?float
+    {
+        foreach ((array) ($invoice->line_items ?? []) as $line) {
+            if (($line['kind'] ?? null) === 'plan' && isset($line['vat_rate'])) {
+                return (float) $line['vat_rate'];
+            }
+        }
+        // Fallback: erste Line.
+        $first = ($invoice->line_items ?? [])[0] ?? null;
+        return $first !== null && isset($first['vat_rate']) ? (float) $first['vat_rate'] : null;
     }
 
     private function normalize(mixed $code): ?string

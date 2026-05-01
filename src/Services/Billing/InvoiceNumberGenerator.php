@@ -25,9 +25,14 @@ class InvoiceNumberGenerator
         $prefixes = (array) config('mollie-billing.invoices.serial_number.prefix', [
             'invoice' => 'IN',
             'credit_note' => 'CR',
+            'refund' => 'CR',
         ]);
 
-        $prefix = $prefixes[$invoiceKind] ?? $prefixes['invoice'] ?? 'IN';
+        // Refund/credit_note teilen sich den CR-Prefix. Alle anderen Kinds bekommen 'invoice'-Prefix.
+        $prefix = match ($invoiceKind) {
+            'refund', 'credit_note' => $prefixes['refund'] ?? $prefixes['credit_note'] ?? 'CR',
+            default => $prefixes[$invoiceKind] ?? $prefixes['invoice'] ?? 'IN',
+        };
         $year = (int) date('y'); // 2-digit year
 
         return DB::transaction(function () use ($format, $prefix, $year): string {

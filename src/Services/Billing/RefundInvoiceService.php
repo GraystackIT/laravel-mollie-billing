@@ -89,7 +89,10 @@ class RefundInvoiceService
                 );
             }
 
-            $rate = (float) $invoice->vat_rate;
+            // VAT-Rate aus dem ersten line_item der Original-Invoice (Per-Item-VAT als Source of Truth).
+            $originalLines = (array) ($invoice->line_items ?? []);
+            $firstLine = $originalLines[0] ?? null;
+            $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
             $refundVat = (int) round($refundAmountNet * $rate / 100);
             $refundGross = $refundAmountNet + $refundVat;
 

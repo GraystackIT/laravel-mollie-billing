@@ -947,6 +947,173 @@ new class extends Component {
                             {{-- Immediate view --}}
                             <div x-show="applyAt === 'immediate'" x-cloak>
                                 @php
+                                    $prorataLines = $preview['prorataLines'] ?? [];
+                                @endphp
+
+                                {{-- Multi-VAT-Aufschlüsselung (neue Preview, wenn ProrataLines vorhanden) --}}
+                                @if (! empty($prorataLines))
+                                    @php
+                                        $linesByCategory = [
+                                            'plan' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'plan'),
+                                            'seats' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'seats'),
+                                            'addon' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'addon'),
+                                        ];
+
+                                        // Per-Usage-Type Mehrverbrauch — separater Mollie-Charge,
+                                        // aber für UI-Transparenz im "Jetzt fällig"-Block sichtbar.
+                                        $usageChanges = (array) ($preview['usageChanges'] ?? []);
+                                        $overageNet = (int) ($preview['usageOverageChargeNet'] ?? 0);
+                                        $overageGross = (int) ($preview['usageOverageChargeGross'] ?? 0);
+                                        $overageVatRate = (float) ($preview['vatRate'] ?? 0);
+                                        $overageLines = [];
+                                        foreach ($usageChanges as $type => $u) {
+                                            $unitsCharged = (int) ($u['unresolved_overage'] ?? 0);
+                                            $netForType = (int) ($u['overage_total_net'] ?? 0);
+                                            if ($unitsCharged <= 0 || $netForType <= 0) {
+                                                continue;
+                                            }
+                                            $grossForType = $overageNet > 0
+                                                ? (int) round($overageGross * $netForType / $overageNet)
+                                                : $netForType;
+                                            $overageLines[] = [
+                                                'type' => $type,
+                                                'units' => $unitsCharged,
+                                                'unit_price_net' => (int) ($u['overage_unit_price_net'] ?? 0),
+                                                'gross' => $grossForType,
+                                            ];
+                                        }
+
+                                        $prorataGross = (int) ($preview['prorataTotalGross'] ?? 0);
+                                        $totalGross = $prorataGross + $overageGross;
+                                        $isSidegrade = $totalGross === 0
+                                            && ! empty($linesByCategory['plan'])
+                                            && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'charge')) > 0
+                                            && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'refund')) > 0;
+                                    @endphp
+
+                                    <div class="space-y-3">
+                                        {{-- Plan-Sektion --}}
+                                        @if (! empty($linesByCategory['plan']))
+                                            <div class="space-y-1">
+                                                @foreach ($linesByCategory['plan'] as $line)
+                                                    <div class="flex items-center justify-between text-sm">
+                                                        <span class="text-zinc-600 dark:text-zinc-300">
+                                                            {{ $line['label'] }}
+                                                            <span class="text-xs text-zinc-400">
+                                                                @if ($line['is_coupon_covered'])
+                                                                    — {{ __('billing::portal.prorata_via_coupon_no_refund') }}
+                                                                @elseif ($line['vat_rate'] == 0)
+                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                @else
+                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }})
+                                                                @endif
+                                                                @if (($line['days_remaining'] ?? 0) > 0)
+                                                                    · {{ __('billing::portal.prorata_plan_remaining_days', ['days' => $line['days_remaining']]) }}
+                                                                @endif
+                                                            </span>
+                                                        </span>
+                                                        <span class="tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
+                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                        </span>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        @endif
+
+                                        {{-- Sitze-Sektion --}}
+                                        @if (! empty($linesByCategory['seats']))
+                                            <div class="space-y-1">
+                                                <div class="text-xs uppercase tracking-wide text-zinc-400">{{ __('billing::portal.prorata_seats_group') }}</div>
+                                                @foreach ($linesByCategory['seats'] as $line)
+                                                    <div class="flex items-center justify-between text-sm">
+                                                        <span class="text-zinc-600 dark:text-zinc-300">
+                                                            {{ $line['label'] }}
+                                                            <span class="text-xs text-zinc-400">
+                                                                @if ($line['is_coupon_covered'])
+                                                                    — {{ __('billing::portal.prorata_via_coupon_no_refund') }}
+                                                                @elseif ($line['vat_rate'] == 0)
+                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                @else
+                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }})
+                                                                @endif
+                                                            </span>
+                                                        </span>
+                                                        <span class="tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
+                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                        </span>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        @endif
+
+                                        {{-- Addons-Sektion --}}
+                                        @if (! empty($linesByCategory['addon']))
+                                            <div class="space-y-1">
+                                                <div class="text-xs uppercase tracking-wide text-zinc-400">{{ __('billing::portal.prorata_addons_group') }}</div>
+                                                @foreach ($linesByCategory['addon'] as $line)
+                                                    <div class="flex items-center justify-between text-sm">
+                                                        <span class="text-zinc-600 dark:text-zinc-300 pl-2">
+                                                            {{ $line['label'] }}
+                                                            <span class="text-xs text-zinc-400">
+                                                                @if ($line['is_coupon_covered'])
+                                                                    — {{ __('billing::portal.prorata_via_coupon_no_refund') }}
+                                                                @elseif ($line['vat_rate'] == 0)
+                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                @else
+                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }})
+                                                                @endif
+                                                            </span>
+                                                        </span>
+                                                        <span class="tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
+                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                        </span>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        @endif
+
+                                        {{-- Mehrverbrauch-Sektion (separater Mollie-Charge, hier nur zur Transparenz) --}}
+                                        @if (! empty($overageLines))
+                                            <div class="space-y-1">
+                                                <div class="text-xs uppercase tracking-wide text-zinc-400">{{ __('billing::portal.prorata_overage_group') }}</div>
+                                                @foreach ($overageLines as $oline)
+                                                    <div class="flex items-center justify-between text-sm">
+                                                        <span class="text-zinc-600 dark:text-zinc-300 pl-2">
+                                                            {{ __('billing::portal.invoice_line_overage', ['type' => $oline['type']]) }}
+                                                            <span class="text-xs text-zinc-400">
+                                                                · {{ $oline['units'] }}× {{ $currencySymbol }}{{ number_format($oline['unit_price_net'] / 100, 2) }}
+                                                                @if ($overageVatRate == 0)
+                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                @else
+                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format($overageVatRate, 0)]) }})
+                                                                @endif
+                                                            </span>
+                                                        </span>
+                                                        <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">
+                                                            +{{ $currencySymbol }}{{ number_format($oline['gross'] / 100, 2) }}
+                                                        </span>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        @endif
+
+                                        <flux:separator class="my-2!" />
+
+                                        <div class="flex items-center justify-between">
+                                            <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.prorata_total') }}</span>
+                                            <span class="text-2xl font-bold tabular-nums {{ $totalGross < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">
+                                                {{ $totalGross < 0 ? '−' : ($totalGross > 0 ? '+' : '') }}{{ $currencySymbol }}{{ number_format(abs($totalGross) / 100, 2) }}
+                                            </span>
+                                        </div>
+
+                                        @if ($isSidegrade)
+                                            <div class="text-xs text-zinc-500 dark:text-zinc-400 italic">
+                                                {{ __('billing::portal.prorata_sidegrade_no_charge') }}
+                                            </div>
+                                        @endif
+                                    </div>
+                                @else
+                                @php
                                     $prorataCharge = $preview['prorataChargeNet'] ?? 0;
                                     $prorataCredit = $preview['prorataCreditNet'] ?? 0;
                                     if ($prorataCharge > 0) {
@@ -1028,6 +1195,7 @@ new class extends Component {
                                         <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.preview_credit_note') }}</flux:text>
                                     @endif
                                 </div>
+                                @endif {{-- end of @if (! empty($prorataLines)) ... @else --}}
                             </div>
 
                             {{-- End-of-period view: no additional costs --}}

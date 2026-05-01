@@ -283,7 +283,7 @@ class ValidateSubscriptionChange
             );
         }
 
-        if (! empty($meta['pending_plan_change'])) {
+        if (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change'])) {
             throw new InvalidSubscriptionStateException(
                 'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
             );

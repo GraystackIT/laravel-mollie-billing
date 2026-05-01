@@ -81,7 +81,7 @@ class SubscriptionAmount
         if ($extraSeats > 0) {
             $seat = (int) ($catalog->seatPriceNet($planCode, $interval) ?? 0);
             $items[] = [
-                'kind' => 'seat',
+                'kind' => 'seats',
                 'label' => 'Extra seats',
                 'code' => null,
                 'quantity' => $extraSeats,
