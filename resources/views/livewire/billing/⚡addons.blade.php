@@ -183,7 +183,7 @@ new class extends Component {
                             @php
                                 $localBlocksThisAddon = $billable && $billable->isLocalBillingSubscription() && $addon['price'] > 0;
                             @endphp
-                            <div class="w-32">
+                            <div class="w-32 flex justify-end">
                                 @if ($hasPendingPlanChange)
                                     <flux:button class="w-full" size="sm" variant="ghost" disabled>
                                         {{ $addon['isActive'] ? __('billing::portal.addons_disable') : __('billing::portal.addons_enable') }}
@@ -205,9 +205,11 @@ new class extends Component {
                                         </flux:button>
                                     </flux:modal.trigger>
                                 @else
-                                    <flux:button class="w-full" size="sm" variant="ghost" disabled>
-                                        {{ __('billing::portal.addons_not_available') }}
-                                    </flux:button>
+                                    <flux:tooltip :content="__('billing::portal.addons_not_available')">
+                                        <flux:badge size="sm" color="zinc" icon="lock-closed">
+                                            {{ __('billing::portal.addons_not_available_short') }}
+                                        </flux:badge>
+                                    </flux:tooltip>
                                 @endif
                             </div>
                         </div>

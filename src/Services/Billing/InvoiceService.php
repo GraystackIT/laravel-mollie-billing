@@ -860,7 +860,7 @@ class InvoiceService
         foreach ($candidates as $invoice) {
             foreach ((array) ($invoice->line_items ?? []) as $line) {
                 if (
-                    ($line['parent_invoice_id'] ?? null) == $parentInvoiceId
+                    (string) ($line['parent_invoice_id'] ?? '') === (string) $parentInvoiceId
                     && ($line['parent_line_item_index'] ?? null) === $parentLineItemIndex
                     && ((int) ($line['amount_net'] ?? 0)) === $amountNet
                 ) {

@@ -161,6 +161,7 @@ return [
     'addons_enable' => 'Abonnieren',
     'addons_disable' => 'Kündigen',
     'addons_not_available' => 'In deinem Plan nicht verfügbar',
+    'addons_not_available_short' => 'Nicht verfügbar',
     'addons_none_available' => 'Keine Zusatzmodule verfügbar.',
     'addons_flash' => [
         'enabled' => ':addon wurde aktiviert.',
@@ -344,6 +345,8 @@ return [
         'paid_count' => 'Bezahlt',
         'open_count' => 'Offen',
         'total_paid' => 'Gesamt bezahlt',
+        'total_spent' => 'Ausgegeben',
+        'total_credits' => 'Gutschriften',
     ],
     'return' => [
         'title' => 'Zahlung erhalten',

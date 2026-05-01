@@ -526,14 +526,11 @@ class ProrataComposer
         $country = (string) ($billable->getBillingCountry() ?? 'DE');
         $vatNumber = $billable instanceof \Illuminate\Database\Eloquent\Model ? ($billable->vat_number ?? null) : null;
 
-        try {
-            $vat = $this->vatService->calculate($country, $netAmount, $vatNumber);
-            return [
-                'rate' => (float) $vat['rate'],
-                'amount' => (int) $vat['vat'],
-            ];
-        } catch (\Throwable) {
-            return ['rate' => 0.0, 'amount' => 0];
-        }
+        $vat = $this->vatService->calculate($country, $netAmount, $vatNumber);
+
+        return [
+            'rate' => (float) $vat['rate'],
+            'amount' => (int) $vat['vat'],
+        ];
     }
 }

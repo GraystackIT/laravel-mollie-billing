@@ -26,11 +26,26 @@ new class extends Component {
         $invoices = $billable->billingInvoices()->latest()->paginate(20);
 
         $query = $billable->billingInvoices();
+
+        // Brutto-Summen: Charge-Invoices (paid) tragen positives amount_gross,
+        // Refund-Invoices (refunded) tragen negatives amount_gross.
+        $paidGross = (int) $query->clone()
+            ->where('status', InvoiceStatus::Paid)
+            ->where('amount_gross', '>', 0)
+            ->sum('amount_gross');
+        $refundGross = (int) $query->clone()
+            ->where('status', InvoiceStatus::Refunded)
+            ->where('amount_gross', '<', 0)
+            ->sum('amount_gross'); // negativ
+        $spentGross = $paidGross + $refundGross; // Saldo = bezahlt − gutschriften
+
+        $fmt = fn (int $cents) => $currency . number_format($cents / 100, 2);
+
         $stats = [
             'total' => $query->count(),
-            'paid' => $query->clone()->where('status', InvoiceStatus::Paid)->count(),
-            'open' => $query->clone()->where('status', InvoiceStatus::Open)->count(),
-            'totalAmount' => $currency . number_format($query->clone()->where('status', InvoiceStatus::Paid)->sum('amount_gross') / 100, 2),
+            'spent' => $fmt($spentGross),
+            'paid' => $fmt($paidGross),
+            'credits' => $fmt(abs($refundGross)),
         ];
 
         return [
@@ -64,21 +79,21 @@ new class extends Component {
                     </div>
                 </flux:card>
                 <flux:card class="p-5!">
-                    <flux:subheading>{{ __('billing::portal.invoice.paid_count') }}</flux:subheading>
+                    <flux:subheading>{{ __('billing::portal.invoice.total_spent') }}</flux:subheading>
                     <div class="mt-3">
-                        <span class="text-3xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{{ $stats['paid'] }}</span>
-                    </div>
-                </flux:card>
-                <flux:card class="p-5!">
-                    <flux:subheading>{{ __('billing::portal.invoice.open_count') }}</flux:subheading>
-                    <div class="mt-3">
-                        <span class="text-3xl font-bold tabular-nums tracking-tight {{ $stats['open'] > 0 ? 'text-amber-600 dark:text-amber-400' : '' }}">{{ $stats['open'] }}</span>
+                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['spent'] }}</span>
                     </div>
                 </flux:card>
                 <flux:card class="p-5!">
                     <flux:subheading>{{ __('billing::portal.invoice.total_paid') }}</flux:subheading>
                     <div class="mt-3">
-                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['totalAmount'] }}</span>
+                        <span class="text-3xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{{ $stats['paid'] }}</span>
+                    </div>
+                </flux:card>
+                <flux:card class="p-5!">
+                    <flux:subheading>{{ __('billing::portal.invoice.total_credits') }}</flux:subheading>
+                    <div class="mt-3">
+                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['credits'] }}</span>
                     </div>
                 </flux:card>
             </div>

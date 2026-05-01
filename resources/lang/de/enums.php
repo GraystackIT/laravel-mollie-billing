@@ -19,7 +19,7 @@ return [
         'subscription' => 'Abonnement',
         'overage' => 'Mehrverbrauch',
         'one_time_order' => 'Einmalkauf',
-        'refund' => 'Refund',
+        'refund' => 'Erstattung',
     ],
     'subscription_source' => [
         'none' => 'Keine',
