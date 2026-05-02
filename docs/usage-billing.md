@@ -50,6 +50,8 @@ Defined per plan per interval inside `intervals.{monthly|yearly}`:
 
 Note: usage quotas are plan-scoped only. Addons do not contribute `included_usages`. See `SubscriptionCatalogInterface::includedUsage()` for details.
 
+The `included_usages` and `usage_overage_prices` keys must line up — a quota without a price means overages cannot be charged, and a price without a quota means the wallet starts at 0. Run `php artisan billing:check-config` to detect such mismatches (it also verifies that any `products.*.usage_type` exists in some plan's usage types).
+
 ### Usage type names
 
 Usage types can be given translated display names via `resources/lang/{locale}/usages.php`:

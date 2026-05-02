@@ -78,6 +78,14 @@ Then run migrations:
 php artisan migrate
 ```
 
+Verify your configuration before deploying — the package ships a validator that checks both `mollie-billing.php` and `mollie-billing-plans.php` for syntax errors, broken references (unknown `feature_keys`, `allowed_addons`, product `group`, …) and likely misconfigurations:
+
+```bash
+php artisan billing:check-config
+```
+
+See the [Commands](#commands) section below for the full list of issues it detects.
+
 ## Quick start
 
 Add the `HasBilling` trait and implement the `Billable` contract on your billable model — typically a tenant or organization, not the `User`:
@@ -687,7 +695,17 @@ php artisan billing:prepare-overage
 
 # Export the OSS report for a given calendar year
 php artisan billing:oss-export 2026
+
+# Validate the syntax and semantic integrity of mollie-billing.php and mollie-billing-plans.php
+php artisan billing:check-config
 ```
+
+`billing:check-config` reports two classes of issues:
+
+- **Errors** — broken references or invalid values that will cause runtime failures (missing `billable_model`, plan `feature_keys` pointing at undefined features, `invoices.disk` not declared in `config/filesystems.php`, invalid serial-number format, unknown `plan_change_mode`, …). Exits with status `1`.
+- **Warnings** — likely misconfigurations that don't break the app but degrade behavior (incomplete invoice seller data, `included_usages` quota without a matching `usage_overage_prices` entry, features defined but never referenced, ambiguous tier ranking, …). Exit status stays `0`.
+
+Run it after editing either config file or as part of CI to catch typos before deployment.
 
 ## Documentation
 
