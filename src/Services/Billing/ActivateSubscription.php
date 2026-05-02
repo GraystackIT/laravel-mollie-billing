@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\TrialStarted;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 
 class ActivateSubscription
@@ -29,7 +30,7 @@ class ActivateSubscription
         if ($trialDays > 0) {
             /** @var Model&Billable $billable */
             $billable->forceFill([
-                'trial_ends_at' => now()->addDays($trialDays),
+                'trial_ends_at' => BillingTime::nowUtc()->addDays($trialDays),
                 'subscription_status' => SubscriptionStatus::Trial,
             ])->save();
 

@@ -21,8 +21,11 @@ class OssProtocolService
      */
     public function export(int $year): string
     {
-        $start = Carbon::create($year, 1, 1, 0, 0, 0);
-        $end = Carbon::create($year, 12, 31, 23, 59, 59);
+        // Quartalsabgrenzung in UTC, damit der Export deterministisch ist und
+        // nicht von app.timezone abhängt (ein Datensatz vom 31.12. 23:30 UTC
+        // soll immer in Q4 des Vorjahres landen, nicht in Q1 des Folgejahres).
+        $start = Carbon::create($year, 1, 1, 0, 0, 0, 'UTC');
+        $end = Carbon::create($year, 12, 31, 23, 59, 59, 'UTC');
 
         $invoices = BillingInvoice::query()
             ->whereBetween('created_at', [$start, $end])
@@ -32,9 +35,10 @@ class OssProtocolService
         // sales_count zählt einmalig pro Invoice-Bucket-Vorkommen.
         $buckets = [];
         foreach ($invoices as $invoice) {
-            $createdAt = $invoice->created_at instanceof Carbon
-                ? $invoice->created_at
-                : Carbon::parse($invoice->created_at);
+            $createdAt = ($invoice->created_at instanceof Carbon
+                ? $invoice->created_at->copy()
+                : Carbon::parse((string) $invoice->created_at))
+                ->setTimezone('UTC');
             $quarter = (int) ceil(((int) $createdAt->month) / 3);
             $country = strtoupper((string) $invoice->country);
 

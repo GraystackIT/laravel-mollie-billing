@@ -4,6 +4,7 @@ use Bavix\Wallet\Models\Transaction;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -51,7 +52,7 @@ new class extends Component {
         $billable = $this->resolveBillable();
 
         if (! $billable) {
-            return ['transactions' => null, 'usageTypes' => [], 'stats' => null];
+            return ['transactions' => null, 'usageTypes' => [], 'stats' => null, 'billable' => null];
         }
 
         $catalog = app(SubscriptionCatalogInterface::class);
@@ -104,6 +105,7 @@ new class extends Component {
             'transactions' => $transactions,
             'usageTypes' => $availableTypes,
             'stats' => $stats,
+            'billable' => $billable,
         ];
     }
 };
@@ -185,7 +187,7 @@ new class extends Component {
                             $translatedReason = $langKey && __($langKey) !== $langKey ? __($langKey) : ($reasonKey ?? '—');
                         @endphp
                         <flux:table.row>
-                            <flux:table.cell class="tabular-nums">{{ $tx->created_at->translatedFormat('d. M Y H:i') }}</flux:table.cell>
+                            <flux:table.cell class="tabular-nums">{{ BillingTime::display($tx->created_at, $billable)->translatedFormat('d. M Y H:i') }}</flux:table.cell>
                             <flux:table.cell>
                                 <flux:badge size="sm" color="zinc">{{ ucfirst($meta['type'] ?? $tx->wallet?->slug ?? '—') }}</flux:badge>
                             </flux:table.cell>

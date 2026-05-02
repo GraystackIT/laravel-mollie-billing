@@ -140,4 +140,10 @@ return [
         'connection' => env('BILLING_QUEUE_CONNECTION'),
         'name' => env('BILLING_QUEUE_NAME', 'billing'),
     ],
+
+    // IANA timezone for displaying billing dates in the portal as the fallback
+    // when a billable does not override Billable::getBillingTimezone(). Persistence
+    // and computation are always in UTC; admin views also render in UTC for
+    // forensic parity with the database. See docs/timezone.md.
+    'billing_timezone' => env('BILLING_TIMEZONE', 'UTC'),
 ];

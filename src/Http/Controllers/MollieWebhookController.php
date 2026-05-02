@@ -34,6 +34,7 @@ use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Http\Request;
@@ -90,7 +91,7 @@ class MollieWebhookController extends Controller
 
             $reservation->update([
                 'event_signature' => BillingProcessedWebhook::finalSignature($paymentId, (string) ($payment->status ?? 'unknown')),
-                'processed_at' => now(),
+                'processed_at' => BillingTime::nowUtc(),
             ]);
 
             return response('', 200);
@@ -122,7 +123,7 @@ class MollieWebhookController extends Controller
 
         $reservation = BillingProcessedWebhook::firstOrCreate(
             ['mollie_payment_id' => $paymentId, 'event_signature' => $signature],
-            ['received_at' => now()],
+            ['received_at' => BillingTime::nowUtc()],
         );
 
         if (! $reservation->wasRecentlyCreated) {
@@ -299,7 +300,7 @@ class MollieWebhookController extends Controller
         $billable->forceFill([
             'subscription_source' => SubscriptionSource::Mollie,
             'subscription_status' => SubscriptionStatus::Active,
-            'subscription_period_starts_at' => now(),
+            'subscription_period_starts_at' => BillingTime::nowUtc(),
         ])->save();
 
         // Hydrate wallets with the new plan's included usages. CreateSubscription
@@ -468,7 +469,7 @@ class MollieWebhookController extends Controller
         }
 
         $paidAt = $payment->paidAt ?? null;
-        $periodStartsAt = $paidAt ? \Carbon\Carbon::parse((string) $paidAt) : now();
+        $periodStartsAt = $paidAt ? \Carbon\Carbon::parse((string) $paidAt)->setTimezone("UTC") : BillingTime::nowUtc();
 
         // Sync seat_count from the actually-paid invoice line_items so that pro-rata
         // math on future plan-changes operates on the real paid-for state.
@@ -546,7 +547,7 @@ class MollieWebhookController extends Controller
                     $billable->refresh();
 
                     $meta = $billable->getBillingSubscriptionMeta();
-                    $meta['plan_change_failed_at'] = now()->toIso8601String();
+                    $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
                     $meta['plan_change_failed_reason'] = $e->getMessage();
                     $billable->forceFill(['subscription_meta' => $meta])->save();
 
@@ -573,7 +574,7 @@ class MollieWebhookController extends Controller
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['payment_failure'] = [
             'payment_id' => (string) $payment->id,
-            'failed_at' => now()->toIso8601String(),
+            'failed_at' => BillingTime::nowUtc()->toIso8601String(),
             'reason' => (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown'),
         ];
 
@@ -609,7 +610,7 @@ class MollieWebhookController extends Controller
 
             if ($pendingChange) {
                 $meta = $billable->getBillingSubscriptionMeta();
-                $meta['plan_change_failed_at'] = now()->toIso8601String();
+                $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
                 $meta['plan_change_failed_reason'] = $reason;
                 $billable->forceFill(['subscription_meta' => $meta])->save();
 
@@ -666,7 +667,7 @@ class MollieWebhookController extends Controller
         $startsNewPeriod = $oldPlan !== '' && ($oldPlan !== $newPlanCode || $oldInterval !== $newIntervalCode);
 
         $paidAt = $payment->paidAt ?? null;
-        $newPeriodStart = $paidAt ? \Carbon\Carbon::parse((string) $paidAt) : now();
+        $newPeriodStart = $paidAt ? \Carbon\Carbon::parse((string) $paidAt)->setTimezone("UTC") : BillingTime::nowUtc();
         $newPeriodEnd = $newIntervalCode === 'yearly'
             ? $newPeriodStart->copy()->addYear()
             : $newPeriodStart->copy()->addMonth();
@@ -812,7 +813,7 @@ class MollieWebhookController extends Controller
         );
 
         $reason = (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown');
-        $meta['plan_change_failed_at'] = now()->toIso8601String();
+        $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
         $meta['plan_change_failed_reason'] = $reason;
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
@@ -917,7 +918,7 @@ class MollieWebhookController extends Controller
     {
         $recent = $billable->redeemedBillingCoupons()
             ->with('coupon')
-            ->where('applied_at', '>=', now()->subHour())
+            ->where('applied_at', '>=', BillingTime::nowUtc()->subHour())
             ->get();
 
         foreach ($recent as $redemption) {

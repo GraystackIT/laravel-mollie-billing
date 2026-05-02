@@ -6,6 +6,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
@@ -93,7 +94,7 @@ new class extends Component {
 
         $currencySymbol = $currency === 'EUR' ? '€' : $currency;
         $invoices = $b->billingInvoices()->latest()->limit(5)->get()->map(fn ($inv) => [
-            'date' => $inv->created_at->translatedFormat('d. M Y'),
+            'date' => BillingTime::display($inv->created_at, $b)->translatedFormat('d. M Y'),
             'kind' => $inv->invoice_kind?->label() ?? '—',
             'kindColor' => $inv->invoice_kind?->color() ?? 'zinc',
             'net' => $currencySymbol . number_format($inv->amount_net / 100, 2),
@@ -122,8 +123,8 @@ new class extends Component {
             'hasSubscription' => $planCode !== null,
             'planName' => $b->getCurrentBillingPlanName() ?? __('billing::portal.no_subscription'),
             'interval' => $interval,
-            'nextBilling' => $b->nextBillingDate()?->translatedFormat('d. M Y') ?? '—',
-            'periodStart' => $b->getBillingPeriodStartsAt()?->translatedFormat('d. M Y') ?? '—',
+            'nextBilling' => BillingTime::display($b->nextBillingDate(), $b)?->translatedFormat('d. M Y') ?? '—',
+            'periodStart' => BillingTime::display($b->getBillingPeriodStartsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
             'seatCount' => $b->getBillingSeatCount(),
             'includedSeats' => $b->getIncludedBillingSeats(),
             'addonCount' => count($addonCodes),
@@ -132,8 +133,8 @@ new class extends Component {
             'isPastDue' => $status === SubscriptionStatus::PastDue,
             'isActive' => $status === SubscriptionStatus::Active,
             'isCancelled' => $status === SubscriptionStatus::Cancelled,
-            'trialEnds' => $b->getBillingTrialEndsAt()?->translatedFormat('d. M Y') ?? '—',
-            'subscriptionEnds' => $b->getBillingSubscriptionEndsAt()?->translatedFormat('d. M Y'),
+            'trialEnds' => BillingTime::display($b->getBillingTrialEndsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
+            'subscriptionEnds' => BillingTime::display($b->getBillingSubscriptionEndsAt(), $b)?->translatedFormat('d. M Y'),
             'subscriptionEndsFuture' => $b->getBillingSubscriptionEndsAt()?->isFuture() ?? false,
             'scheduledChange' => $this->resolveScheduledChange($b),
             'usageTypes' => $usageTypes,
@@ -155,7 +156,7 @@ new class extends Component {
             'planName' => $planCode ? ($catalog->planName($planCode) ?? $planCode) : null,
             'interval' => $sc['interval'] ?? null,
             'scheduledAt' => isset($sc['scheduled_at'])
-                ? \Carbon\Carbon::parse($sc['scheduled_at'])->translatedFormat('d. M Y')
+                ? BillingTime::display(\Carbon\Carbon::parse((string) $sc['scheduled_at'])->setTimezone('UTC'), $b)->translatedFormat('d. M Y')
                 : null,
         ];
     }

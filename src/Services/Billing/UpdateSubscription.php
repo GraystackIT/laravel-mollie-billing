@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
 use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
@@ -134,7 +135,7 @@ class UpdateSubscription
                         'new_net' => $newNet,
                         'prorata_charge_net' => $context->prorataChargeNet,
                         'coupon_code' => $dto->couponCode,
-                        'requested_at' => now()->toIso8601String(),
+                        'requested_at' => BillingTime::nowUtc()->toIso8601String(),
                     ];
                     $meta['prorata_pending_payment_id'] = $billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
                     $billable->forceFill(['subscription_meta' => $meta])->save();
@@ -183,17 +184,17 @@ class UpdateSubscription
                         ]);
                         $meta['pending_subscription_patch'] = [
                             'intent' => $intent->toArray(),
-                            'first_attempt_at' => now()->toIso8601String(),
+                            'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
                             'last_error' => $e->getMessage(),
                         ];
                     }
 
                     $meta['pending_amount_net'] = $newNet;
-                    $meta['pending_amount_recorded_at'] = now()->toIso8601String();
+                    $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
                 } elseif ($context->isMollie && $hasProrata) {
                     $mollieSubscriptionPatched = true;
                     $meta['pending_amount_net'] = $newNet;
-                    $meta['pending_amount_recorded_at'] = now()->toIso8601String();
+                    $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
                 }
 
                 $meta['seat_count'] = $newSeats;
@@ -205,7 +206,7 @@ class UpdateSubscription
                     'subscription_meta' => $meta,
                     ...($downgradeToLocal ? [
                         'subscription_source' => SubscriptionSource::Local,
-                        'subscription_period_starts_at' => now(),
+                        'subscription_period_starts_at' => BillingTime::nowUtc(),
                         'subscription_ends_at' => null,
                     ] : []),
                 ])->save();
@@ -323,7 +324,7 @@ class UpdateSubscription
                     $meta = $billable->getBillingSubscriptionMeta();
                     $meta['pending_subscription_patch'] = [
                         'intent' => $intent->toArray(),
-                        'first_attempt_at' => now()->toIso8601String(),
+                        'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
                         'last_error' => $e->getMessage(),
                     ];
                     $billable->forceFill(['subscription_meta' => $meta])->save();
@@ -337,7 +338,7 @@ class UpdateSubscription
             $meta = $billable->getBillingSubscriptionMeta();
             $meta['seat_count'] = $newSeats;
             $meta['pending_amount_net'] = $newNet;
-            $meta['pending_amount_recorded_at'] = now()->toIso8601String();
+            $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
 
             $billable->forceFill([
                 'subscription_plan_code' => $context->newPlan,
@@ -545,7 +546,7 @@ class UpdateSubscription
             'prorataChargeNet' => $context->prorataChargeNet,
             'prorataCreditNet' => $context->prorataCreditNet,
             'mollieSubscriptionPatched' => $mollieSubscriptionPatched,
-            'appliedAt' => now()->toIso8601String(),
+            'appliedAt' => BillingTime::nowUtc()->toIso8601String(),
             'pendingPaymentConfirmation' => false,
             'scheduledFor' => null,
             'events' => $events,

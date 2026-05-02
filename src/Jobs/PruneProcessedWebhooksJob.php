@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -21,7 +22,7 @@ class PruneProcessedWebhooksJob implements ShouldQueue
     public function handle(): void
     {
         BillingProcessedWebhook::query()
-            ->where('received_at', '<', now()->subDays(180))
+            ->where('received_at', '<', BillingTime::nowUtc()->subDays(180))
             ->delete();
     }
 }

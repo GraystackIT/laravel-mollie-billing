@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 
 class ActivateLocalSubscription
@@ -42,10 +43,10 @@ class ActivateLocalSubscription
             'subscription_plan_code' => $planCode,
             'subscription_interval' => SubscriptionInterval::from($interval),
             'active_addon_codes' => $addonCodes,
-            'subscription_period_starts_at' => now(),
+            'subscription_period_starts_at' => BillingTime::nowUtc(),
             'subscription_status' => SubscriptionStatus::Active,
             'subscription_meta' => $meta,
-            'subscription_ends_at' => $durationDays > 0 ? now()->addDays($durationDays) : null,
+            'subscription_ends_at' => $durationDays > 0 ? BillingTime::nowUtc()->addDays($durationDays) : null,
         ])->save();
 
         $includedUsages = $this->catalog->includedUsages($planCode, $interval);

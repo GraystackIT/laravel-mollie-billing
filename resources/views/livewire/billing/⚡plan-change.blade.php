@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use Livewire\Component;
@@ -192,7 +193,7 @@ new class extends Component {
             }
 
             if (! empty($result['scheduledFor'])) {
-                $date = \Carbon\Carbon::parse($result['scheduledFor'])->translatedFormat('d. M Y');
+                $date = BillingTime::display(\Carbon\Carbon::parse((string) $result['scheduledFor'])->setTimezone('UTC'), $billable)->translatedFormat('d. M Y');
                 \Flux::toast(__('billing::portal.flash.plan_scheduled', ['date' => $date]), variant: 'success');
             } else {
                 \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
@@ -359,7 +360,7 @@ new class extends Component {
                     'plan_code' => $sc['plan_code'] ?? null,
                     'interval' => $sc['interval'] ?? null,
                     'scheduled_at' => isset($sc['scheduled_at'])
-                        ? \Carbon\Carbon::parse($sc['scheduled_at'])->translatedFormat('d. M Y')
+                        ? BillingTime::display(\Carbon\Carbon::parse((string) $sc['scheduled_at'])->setTimezone('UTC'), $billable)->translatedFormat('d. M Y')
                         : null,
                 ];
             }
@@ -367,10 +368,10 @@ new class extends Component {
             $pendingPlanChange = $meta['pending_plan_change'] ?? null;
 
             if (! empty($meta['plan_change_failed_at'])) {
-                $failedAt = \Carbon\Carbon::parse($meta['plan_change_failed_at']);
-                if ($failedAt->isAfter(now()->subDay())) {
+                $failedAt = \Carbon\Carbon::parse((string) $meta['plan_change_failed_at'])->setTimezone('UTC');
+                if ($failedAt->isAfter(BillingTime::nowUtc()->subDay())) {
                     $planChangeFailed = [
-                        'failed_at' => $failedAt->translatedFormat('d. M Y, H:i'),
+                        'failed_at' => BillingTime::display($failedAt, $billable)->translatedFormat('d. M Y, H:i'),
                         'reason' => $meta['plan_change_failed_reason'] ?? null,
                     ];
                 }

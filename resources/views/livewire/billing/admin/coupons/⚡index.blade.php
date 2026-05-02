@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -118,7 +119,7 @@ new class extends Component {
                             <flux:table.cell class="tabular-nums">
                                 {{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : '' }}
                             </flux:table.cell>
-                            <flux:table.cell class="tabular-nums">{{ $coupon->valid_until?->format('Y-m-d') ?? '—' }}</flux:table.cell>
+                            <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d') ?? '—' }}</flux:table.cell>
                             <flux:table.cell>
                                 <flux:badge :color="$coupon->active ? 'green' : 'zinc'" size="sm">
                                     {{ $coupon->active ? 'Active' : 'Inactive' }}

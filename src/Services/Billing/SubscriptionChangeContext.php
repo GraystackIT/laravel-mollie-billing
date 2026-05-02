@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Services\Billing;
 
+use GraystackIT\MollieBilling\Support\BillingTime;
+
 /**
  * Value object that holds all computed values for a subscription change.
  *
@@ -59,7 +61,7 @@ class SubscriptionChangeContext
             'new_net' => $this->newNet,
             'prorata_charge_net' => $this->prorataChargeNet,
             'coupon_code' => $this->couponCode,
-            'requested_at' => now()->toIso8601String(),
+            'requested_at' => BillingTime::nowUtc()->toIso8601String(),
         ];
     }
 

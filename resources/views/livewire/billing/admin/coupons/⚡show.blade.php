@@ -5,6 +5,7 @@ use GraystackIT\MollieBilling\Enums\DiscountType;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
@@ -123,7 +124,7 @@ new class extends Component {
             />
             <x-mollie-billing::admin.stat
                 label="Valid until"
-                :value="$coupon->valid_until?->format('Y-m-d') ?? 'No expiry'"
+                :value="BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d') ?? 'No expiry'"
                 icon="calendar"
                 :tone="$isExpired ? 'danger' : null"
                 :hint="$coupon->valid_until ? $coupon->valid_until->diffForHumans() : null"
@@ -193,11 +194,11 @@ new class extends Component {
 
         <x-mollie-billing::admin.section title="Validity & limits">
             <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
-                <x-mollie-billing::admin.detail label="Valid from" mono>
-                    {{ $coupon->valid_from?->format('Y-m-d H:i') ?? 'Immediately' }}
+                <x-mollie-billing::admin.detail label="Valid from (UTC)" mono>
+                    {{ BillingTime::displayUtc($coupon->valid_from)?->format('Y-m-d H:i') ?? 'Immediately' }}
                 </x-mollie-billing::admin.detail>
-                <x-mollie-billing::admin.detail label="Valid until" mono>
-                    {{ $coupon->valid_until?->format('Y-m-d H:i') ?? 'No expiry' }}
+                <x-mollie-billing::admin.detail label="Valid until (UTC)" mono>
+                    {{ BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d H:i') ?? 'No expiry' }}
                 </x-mollie-billing::admin.detail>
                 <x-mollie-billing::admin.detail label="Redemptions" mono>
                     {{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : ' / ∞' }}
@@ -232,7 +233,7 @@ new class extends Component {
                     <flux:table.rows>
                         @foreach ($redemptions as $r)
                             <flux:table.row :key="$r->id">
-                                <flux:table.cell class="tabular-nums">{{ $r->applied_at?->format('Y-m-d H:i') }}</flux:table.cell>
+                                <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($r->applied_at)?->format('Y-m-d H:i') }}</flux:table.cell>
                                 <flux:table.cell variant="strong" class="font-mono">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</flux:table.cell>
                                 <flux:table.cell align="end">
                                     <x-mollie-billing::admin.money :cents="$r->discount_amount_net ?? 0" />

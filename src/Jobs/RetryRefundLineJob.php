@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Jobs;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -53,8 +54,8 @@ class RetryRefundLineJob implements ShouldQueue
     public function handle(InvoiceService $invoices): void
     {
         // Hard-Limit 7 Tage.
-        $firstAttempt = \Carbon\Carbon::parse($this->firstAttemptAt);
-        if ($firstAttempt->diffInDays(now()) >= 7) {
+        $firstAttempt = \Carbon\Carbon::parse((string) $this->firstAttemptAt)->setTimezone('UTC');
+        if ($firstAttempt->diffInDays(BillingTime::nowUtc()) >= 7) {
             $this->moveToDeadLetter();
             return;
         }

@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Concerns;
 
 use Bavix\Wallet\Traits\HasWallets;
 use Carbon\CarbonInterface;
+use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -118,6 +119,20 @@ trait HasBilling
         return $this->billing_country;
     }
 
+    /**
+     * IANA timezone used to render billing dates in the customer portal.
+     * Defaults to the package-wide `mollie-billing.billing_timezone` config.
+     * Override on the consuming model (e.g. read a `preferred_timezone`
+     * column) to honor a per-user/per-tenant choice. Persistence and
+     * computation always remain UTC regardless of this value.
+     */
+    public function getBillingTimezone(): string
+    {
+        $tz = config('mollie-billing.billing_timezone');
+
+        return is_string($tz) && $tz !== '' ? $tz : 'UTC';
+    }
+
     public function getBillingSubscriptionPlanCode(): ?string
     {
         return $this->subscription_plan_code;
@@ -185,17 +200,17 @@ trait HasBilling
         $this->mergeCasts([
             'subscription_source' => SubscriptionSource::class,
             'subscription_interval' => SubscriptionInterval::class,
-            'subscription_period_starts_at' => 'datetime',
-            'trial_ends_at' => 'datetime',
-            'subscription_ends_at' => 'datetime',
+            'subscription_period_starts_at' => UtcDatetime::class,
+            'trial_ends_at' => UtcDatetime::class,
+            'subscription_ends_at' => UtcDatetime::class,
             'subscription_status' => SubscriptionStatus::class,
             'active_addon_codes' => 'array',
             'subscription_meta' => 'array',
-            'scheduled_change_at' => 'datetime',
+            'scheduled_change_at' => UtcDatetime::class,
             'allows_billing_overage' => 'bool',
             'tax_country_verified' => 'bool',
             'vat_exempt' => 'bool',
-            'country_mismatch_flagged_at' => 'datetime',
+            'country_mismatch_flagged_at' => UtcDatetime::class,
         ]);
     }
 

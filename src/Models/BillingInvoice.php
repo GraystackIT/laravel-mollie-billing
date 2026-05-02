@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
+use GraystackIT\MollieBilling\Casts\UtcDatetime;
 
 class BillingInvoice extends Model
 {
@@ -28,8 +29,8 @@ class BillingInvoice extends Model
             'refund_reason_code' => RefundReasonCode::class,
             'line_items' => 'array',
             'payment_method_details' => 'array',
-            'period_start' => 'datetime',
-            'period_end' => 'datetime',
+            'period_start' => UtcDatetime::class,
+            'period_end' => UtcDatetime::class,
         ];
     }
 
@@ -98,8 +99,8 @@ class BillingInvoice extends Model
         $rawEnd = $line['period_end'] ?? $this->period_end;
 
         return [
-            $rawStart !== null ? \Carbon\Carbon::parse($rawStart) : null,
-            $rawEnd !== null ? \Carbon\Carbon::parse($rawEnd) : null,
+            $rawStart !== null ? \Carbon\Carbon::parse((string) $rawStart)->setTimezone('UTC') : null,
+            $rawEnd !== null ? \Carbon\Carbon::parse((string) $rawEnd)->setTimezone('UTC') : null,
         ];
     }
 
@@ -256,8 +257,8 @@ class BillingInvoice extends Model
                     continue;
                 }
 
-                $start = \Carbon\Carbon::parse($rawStart);
-                $end = \Carbon\Carbon::parse($rawEnd);
+                $start = \Carbon\Carbon::parse((string) $rawStart)->setTimezone('UTC');
+                $end = \Carbon\Carbon::parse((string) $rawEnd)->setTimezone('UTC');
 
                 // Line muss in der aktuellen Billable-Subscription-Periode laufen:
                 // - line_start liegt nicht nach billable.period_end (nicht in der Zukunft)

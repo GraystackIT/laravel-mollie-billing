@@ -7,6 +7,7 @@ use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
@@ -132,14 +133,14 @@ new class extends Component {
                             </div>
                         @endif
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Trial ends" mono>
-                        {{ $b->trial_ends_at?->format('Y-m-d') ?? '—' }}
+                    <x-mollie-billing::admin.detail label="Trial ends (UTC)" mono>
+                        {{ BillingTime::displayUtc($b->trial_ends_at)?->format('Y-m-d H:i') ?? '—' }}
                         @if ($b->trial_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->trial_ends_at->diffForHumans() }}</flux:text>
                         @endif
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Subscription ends" mono>
-                        {{ $b->subscription_ends_at?->format('Y-m-d') ?? '—' }}
+                    <x-mollie-billing::admin.detail label="Subscription ends (UTC)" mono>
+                        {{ BillingTime::displayUtc($b->subscription_ends_at)?->format('Y-m-d H:i') ?? '—' }}
                         @if ($b->subscription_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->subscription_ends_at->diffForHumans() }}</flux:text>
                         @endif
@@ -257,7 +258,7 @@ new class extends Component {
                                     </div>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">
-                                    {{ $g->applied_at?->format('Y-m-d') }}
+                                    {{ BillingTime::displayUtc($g->applied_at)?->format('Y-m-d H:i') }}
                                     <flux:text size="xs" class="text-zinc-500">{{ $g->applied_at?->diffForHumans() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">{{ $g->grant_days_added ?? '—' }}</flux:table.cell>

@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -106,7 +107,7 @@ new class extends Component {
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->email }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">
-                                    {{ $b->updated_at?->format('Y-m-d') }}
+                                    {{ BillingTime::displayUtc($b->updated_at)?->format('Y-m-d H:i') }}
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->updated_at?->diffForHumans() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell>
