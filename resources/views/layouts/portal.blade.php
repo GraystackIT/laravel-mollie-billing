@@ -79,8 +79,8 @@
                     {{ __('billing::portal.nav.products') }}
                 </flux:navlist.item>
             @endif
-            <flux:navlist.item icon="credit-card" href="{{ route(BillingRoute::name('payment-method')) }}" :current="$currentRoute === BillingRoute::name('payment-method')">
-                {{ __('billing::portal.nav.payment_method') }}
+            <flux:navlist.item icon="credit-card" href="{{ route(BillingRoute::name('billing-data')) }}" :current="$currentRoute === BillingRoute::name('billing-data')">
+                {{ __('billing::portal.nav.billing_data') }}
             </flux:navlist.item>
         </flux:navlist>
 

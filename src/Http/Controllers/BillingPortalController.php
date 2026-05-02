@@ -54,9 +54,9 @@ class BillingPortalController extends Controller
         return $this->render('products');
     }
 
-    public function paymentMethod(Request $request): View
+    public function billingData(Request $request): View
     {
-        return $this->render('payment-method');
+        return $this->render('billing-data');
     }
 
     public function return(Request $request): View
