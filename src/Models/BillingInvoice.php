@@ -31,6 +31,8 @@ class BillingInvoice extends Model
             'payment_method_details' => 'array',
             'period_start' => UtcDatetime::class,
             'period_end' => UtcDatetime::class,
+            'created_at' => UtcDatetime::class,
+            'updated_at' => UtcDatetime::class,
         ];
     }
 
@@ -99,8 +101,8 @@ class BillingInvoice extends Model
         $rawEnd = $line['period_end'] ?? $this->period_end;
 
         return [
-            $rawStart !== null ? \Carbon\Carbon::parse((string) $rawStart)->setTimezone('UTC') : null,
-            $rawEnd !== null ? \Carbon\Carbon::parse((string) $rawEnd)->setTimezone('UTC') : null,
+            $rawStart !== null ? \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawStart) : null,
+            $rawEnd !== null ? \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawEnd) : null,
         ];
     }
 
@@ -257,8 +259,8 @@ class BillingInvoice extends Model
                     continue;
                 }
 
-                $start = \Carbon\Carbon::parse((string) $rawStart)->setTimezone('UTC');
-                $end = \Carbon\Carbon::parse((string) $rawEnd)->setTimezone('UTC');
+                $start = \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawStart);
+                $end = \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawEnd);
 
                 // Line muss in der aktuellen Billable-Subscription-Periode laufen:
                 // - line_start liegt nicht nach billable.period_end (nicht in der Zukunft)

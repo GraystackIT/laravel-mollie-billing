@@ -85,3 +85,45 @@ it('displayUtc forces UTC regardless of input timezone or config', function (): 
     expect($displayed->getTimezone()->getName())->toBe('UTC');
     expect($displayed->format('Y-m-d H:i'))->toBe('2026-05-02 21:30');
 });
+
+it('toUtc keeps a CarbonInterface in UTC under non-UTC app.timezone', function (): void {
+    $previous = date_default_timezone_get();
+    config()->set('app.timezone', 'Europe/Berlin');
+    date_default_timezone_set('Europe/Berlin');
+
+    try {
+        $source = CarbonImmutable::create(2026, 5, 2, 23, 30, 0, 'UTC');
+        $result = BillingTime::toUtc($source);
+
+        expect($result->getTimezone()->getName())->toBe('UTC');
+        expect($result->format('Y-m-d H:i:s'))->toBe('2026-05-02 23:30:00');
+    } finally {
+        date_default_timezone_set($previous);
+    }
+});
+
+it('toUtc interprets an offset-less string as UTC under non-UTC app.timezone', function (): void {
+    $previous = date_default_timezone_get();
+    config()->set('app.timezone', 'Europe/Berlin');
+    date_default_timezone_set('Europe/Berlin');
+
+    try {
+        // The bug we are guarding against: Carbon::parse('2026-05-02 23:30:00')
+        // would interpret it as Berlin local (= 21:30 UTC). toUtc must treat
+        // an offset-less string as already UTC.
+        $result = BillingTime::toUtc('2026-05-02 23:30:00');
+
+        expect($result->getTimezone()->getName())->toBe('UTC');
+        expect($result->format('Y-m-d H:i:s'))->toBe('2026-05-02 23:30:00');
+    } finally {
+        date_default_timezone_set($previous);
+    }
+});
+
+it('toUtc converts an offset-bearing string to the equivalent UTC moment', function (): void {
+    // Berlin offset string with explicit +02:00 means 21:30 UTC.
+    $result = BillingTime::toUtc('2026-05-02T23:30:00+02:00');
+
+    expect($result->getTimezone()->getName())->toBe('UTC');
+    expect($result->format('Y-m-d H:i:s'))->toBe('2026-05-02 21:30:00');
+});

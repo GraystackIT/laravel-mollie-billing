@@ -21,6 +21,8 @@ class BillingCountryMismatch extends Model
         return [
             'status' => CountryMismatchStatus::class,
             'resolved_at' => UtcDatetime::class,
+            'created_at' => UtcDatetime::class,
+            'updated_at' => UtcDatetime::class,
         ];
     }
 

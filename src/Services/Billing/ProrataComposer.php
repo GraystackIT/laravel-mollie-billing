@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Services\Billing;
 
-use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
@@ -198,10 +197,12 @@ class ProrataComposer
         $startRaw = $line['period_start'] ?? $invoice->period_start ?? null;
         $endRaw = $line['period_end'] ?? $invoice->period_end ?? null;
 
-        // Persistierte Periodenwerte sind in UTC gespeichert; setTimezone('UTC') stellt
-        // sicher, dass die Period-Math deterministisch ist, unabhängig von app.timezone.
-        $start = $startRaw !== null ? Carbon::parse((string) $startRaw)->setTimezone('UTC') : $fallbackStart->copy();
-        $end = $endRaw !== null ? Carbon::parse((string) $endRaw)->setTimezone('UTC') : $fallbackEnd->copy();
+        // Period values may arrive as a CarbonImmutable (UtcDatetime cast),
+        // a DateTimeInterface, or an ISO string from a JSON line_items column.
+        // Branching on type avoids a (string)-cast that would drop the offset
+        // and let app.timezone reinterpret an already-UTC value.
+        $start = $startRaw !== null ? BillingTime::toUtc($startRaw) : $fallbackStart->copy();
+        $end = $endRaw !== null ? BillingTime::toUtc($endRaw) : $fallbackEnd->copy();
 
         return [$start, $end];
     }

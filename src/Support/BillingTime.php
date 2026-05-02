@@ -59,6 +59,38 @@ class BillingTime
         return $dt?->copy()->setTimezone('UTC');
     }
 
+    /**
+     * Convert a heterogeneous datetime input to a UTC Carbon for internal use.
+     *
+     * Accepts a `CarbonInterface` (already-typed values from a UtcDatetime cast),
+     * any `DateTimeInterface`, an ISO8601 string with an offset, or a plain
+     * `Y-m-d H:i:s` string. The branching is critical: a `(string)`-cast on a
+     * CarbonImmutable produces an offset-less `Y-m-d H:i:s`, which `Carbon::parse()`
+     * would re-interpret in `app.timezone` and silently shift the value. By keeping
+     * already-typed values in their object form and only invoking `Carbon::parse()`
+     * on raw strings, this helper is correct under any `app.timezone`.
+     *
+     * Plain strings without an offset are interpreted as UTC.
+     */
+    public static function toUtc(\DateTimeInterface|string $value): \Carbon\Carbon
+    {
+        if ($value instanceof CarbonInterface) {
+            return \Carbon\Carbon::instance($value)->setTimezone('UTC');
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return \Carbon\Carbon::instance($value)->setTimezone('UTC');
+        }
+
+        // String: if it already carries an offset, parse() honors it; if not,
+        // interpret it strictly as UTC.
+        if (preg_match('/[+-]\d{2}:?\d{2}$|Z$/', $value) === 1) {
+            return \Carbon\Carbon::parse($value)->setTimezone('UTC');
+        }
+
+        return \Carbon\Carbon::parse($value, 'UTC');
+    }
+
     private static function configuredTimezone(): string
     {
         $tz = config('mollie-billing.billing_timezone');

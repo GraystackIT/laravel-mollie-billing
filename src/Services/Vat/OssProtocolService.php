@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Services\Vat;
 
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Illuminate\Support\Carbon;
 
@@ -35,10 +36,13 @@ class OssProtocolService
         // sales_count zählt einmalig pro Invoice-Bucket-Vorkommen.
         $buckets = [];
         foreach ($invoices as $invoice) {
-            $createdAt = ($invoice->created_at instanceof Carbon
-                ? $invoice->created_at->copy()
-                : Carbon::parse((string) $invoice->created_at))
-                ->setTimezone('UTC');
+            // BillingInvoice::created_at uses the UtcDatetime cast and is always
+            // a UTC CarbonImmutable; the CarbonInterface branch covers that path.
+            // The string fallback exists only for raw rows that bypass the model cast
+            // and parses strictly as UTC so app.timezone cannot leak in.
+            $createdAt = $invoice->created_at instanceof CarbonInterface
+                ? Carbon::instance($invoice->created_at)->setTimezone('UTC')
+                : Carbon::createFromFormat('Y-m-d H:i:s', (string) $invoice->created_at, 'UTC');
             $quarter = (int) ceil(((int) $createdAt->month) / 3);
             $country = strtoupper((string) $invoice->country);
 

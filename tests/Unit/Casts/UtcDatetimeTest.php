@@ -73,20 +73,24 @@ it('persists HasBilling datetime columns as UTC under app.timezone=Pacific/Auckl
     config()->set('app.timezone', 'Pacific/Auckland');
     date_default_timezone_set('Pacific/Auckland');
 
+    // Pin a known UTC moment so we can compare against an independent expectation.
+    $expected = CarbonImmutable::create(2026, 5, 2, 23, 30, 0, 'UTC');
+
     $billable = TestBillable::create([
         'name' => 'Tester',
         'email' => 'tester-tz@example.com',
-        'trial_ends_at' => BillingTime::nowUtc()->addDays(14),
+        'trial_ends_at' => $expected,
     ]);
 
-    // Raw DB read.
+    // Raw DB read — must be the UTC-formatted string, not Auckland local
+    // (Auckland local would be 2026-05-03 11:30 +12, not 2026-05-02 23:30).
     $raw = DB::table('test_billables')->where('id', $billable->id)->value('trial_ends_at');
-    // Reload through Eloquent — must rehydrate as UTC.
-    $reloaded = TestBillable::find($billable->id);
+    expect((string) $raw)->toBe('2026-05-02 23:30:00');
 
-    $expected = CarbonImmutable::createFromFormat('Y-m-d H:i:s', (string) $raw, 'UTC');
+    // Reload through Eloquent — cast must rehydrate as UTC, exactly the original moment.
+    $reloaded = TestBillable::find($billable->id);
     expect($reloaded->trial_ends_at->getTimezone()->getName())->toBe('UTC');
-    expect($reloaded->trial_ends_at->format('Y-m-d H:i:s'))->toBe($expected->format('Y-m-d H:i:s'));
+    expect($reloaded->trial_ends_at->format('Y-m-d H:i:s'))->toBe('2026-05-02 23:30:00');
 });
 
 it('returns null when the stored value is null', function (): void {
