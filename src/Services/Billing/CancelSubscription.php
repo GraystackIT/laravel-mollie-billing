@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Events\SubscriptionCancelled;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
@@ -32,8 +33,8 @@ class CancelSubscription
 
         if ($isLocal) {
             $endsAt = $immediately
-                ? now()
-                : ($billable->getBillingSubscriptionEndsAt() ?: now()->addDays(30));
+                ? BillingTime::nowUtc()
+                : ($billable->getBillingSubscriptionEndsAt() ?: BillingTime::nowUtc()->addDays(30));
 
             $billable->forceFill([
                 'subscription_status' => SubscriptionStatus::Cancelled,
@@ -60,7 +61,7 @@ class CancelSubscription
         if ($immediately) {
             $billable->forceFill([
                 'subscription_status' => SubscriptionStatus::Cancelled,
-                'subscription_ends_at' => now(),
+                'subscription_ends_at' => BillingTime::nowUtc(),
             ])->save();
 
             try {
@@ -71,7 +72,7 @@ class CancelSubscription
         } else {
             $billable->forceFill([
                 'subscription_status' => SubscriptionStatus::Cancelled,
-                'subscription_ends_at' => $billable->nextBillingDate() ?: now()->addDays(30),
+                'subscription_ends_at' => $billable->nextBillingDate() ?: BillingTime::nowUtc()->addDays(30),
             ])->save();
         }
 

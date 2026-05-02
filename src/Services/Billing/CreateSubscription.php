@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
@@ -77,7 +78,7 @@ class CreateSubscription
             'subscription_interval' => SubscriptionInterval::from($interval),
             'active_addon_codes' => $addonCodes,
             'subscription_meta' => $meta,
-            'subscription_period_starts_at' => now(),
+            'subscription_period_starts_at' => BillingTime::nowUtc(),
             'subscription_ends_at' => null,
         ])->save();
 

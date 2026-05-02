@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Events\SubscriptionChangeCancelled;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeRescheduled;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeScheduled;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
@@ -60,7 +61,7 @@ class ScheduleSubscriptionChange
                 ));
             }
 
-            $scheduledAt = $billable->nextBillingDate() ?? now();
+            $scheduledAt = $billable->nextBillingDate() ?? BillingTime::nowUtc();
 
             $scheduledChange = [
                 'plan_code' => $newPlan,

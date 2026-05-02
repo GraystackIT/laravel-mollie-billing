@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
+use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -19,7 +20,7 @@ class BillingCountryMismatch extends Model
     {
         return [
             'status' => CountryMismatchStatus::class,
-            'resolved_at' => 'datetime',
+            'resolved_at' => UtcDatetime::class,
         ];
     }
 

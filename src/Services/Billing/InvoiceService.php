@@ -20,6 +20,7 @@ use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 use Mollie\Api\Http\Data\Money as MollieMoney;
@@ -97,8 +98,8 @@ class InvoiceService
         // Period for line items: prefer the billable's current subscription period
         // (so currentPeriodLines() can later locate them for refunds), else fall back
         // to "now → now+1 month" as a defensive default for one-off charges.
-        $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? now();
-        $linePeriodEnd = $billable->nextBillingDate() ?? now()->addMonth();
+        $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
+        $linePeriodEnd = $billable->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
 
         $invoice->period_start = $linePeriodStart;
         $invoice->period_end = $linePeriodEnd;
@@ -170,8 +171,8 @@ class InvoiceService
                 'vat_rate' => $rate,
                 'vat_amount' => -$creditVat,
                 'amount_gross' => -$creditGross,
-                'period_start' => ($original->period_start ?? now())->toIso8601String(),
-                'period_end' => ($original->period_end ?? now())->toIso8601String(),
+                'period_start' => ($original->period_start ?? BillingTime::nowUtc())->toIso8601String(),
+                'period_end' => ($original->period_end ?? BillingTime::nowUtc())->toIso8601String(),
                 'parent_invoice_id' => $original->id,
                 'parent_line_item_index' => 0,
                 'mollie_refund_id' => null, // wird vom Aufrufer gesetzt falls Mollie-Refund-ID bekannt ist
@@ -677,7 +678,7 @@ class InvoiceService
             'charge_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $chargeLines),
             'refund_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $pendingRefundLines),
             'intent' => $intent->toArray(),
-            'created_at' => now()->toIso8601String(),
+            'created_at' => BillingTime::nowUtc()->toIso8601String(),
         ];
         $billable->forceFill(['subscription_meta' => $meta])->save();
     }
@@ -735,7 +736,7 @@ class InvoiceService
                 $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
                 $persistedLines[] = $line;
             } catch (\Throwable $e) {
-                $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => now()->toIso8601String()];
+                $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
             }
         }
 

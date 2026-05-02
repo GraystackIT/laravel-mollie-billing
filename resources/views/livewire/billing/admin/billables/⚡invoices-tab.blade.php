@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
@@ -106,7 +107,7 @@ new class extends Component {
                     <flux:table.rows>
                         @foreach ($invoices as $inv)
                             <flux:table.row :key="$inv->id">
-                                <flux:table.cell class="tabular-nums">{{ $inv->created_at->format('Y-m-d') }}</flux:table.cell>
+                                <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($inv->created_at)->format('Y-m-d H:i') }}</flux:table.cell>
                                 <flux:table.cell><x-mollie-billing::admin.enum-badge :value="$inv->invoice_kind" /></flux:table.cell>
                                 <flux:table.cell align="end">
                                     <x-mollie-billing::admin.money :cents="$inv->amount_net" />

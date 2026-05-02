@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Events\WalletReset;
 use GraystackIT\MollieBilling\Exceptions\UsageLimitExceededException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\UsageThresholdNotification;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
@@ -248,13 +249,13 @@ class WalletUsageService
 
         $alreadyNotified = $notified !== null
             && $periodStart !== null
-            && Carbon::parse($notified)->greaterThanOrEqualTo($periodStart);
+            && Carbon::parse((string) $notified)->setTimezone('UTC')->greaterThanOrEqualTo($periodStart);
 
         if ($alreadyNotified) {
             return;
         }
 
-        $meta['usage_threshold_notified_at'][$type] = now()->toIso8601String();
+        $meta['usage_threshold_notified_at'][$type] = BillingTime::nowUtc()->toIso8601String();
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);

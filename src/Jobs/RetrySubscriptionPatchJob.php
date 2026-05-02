@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -58,8 +59,8 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
     public function handle(MollieSubscriptionPatcher $patcher): void
     {
         // Hard-Limit 24h.
-        $firstAttempt = \Carbon\Carbon::parse($this->firstAttemptAt);
-        if ($firstAttempt->diffInHours(now()) >= 24) {
+        $firstAttempt = \Carbon\Carbon::parse((string) $this->firstAttemptAt)->setTimezone('UTC');
+        if ($firstAttempt->diffInHours(BillingTime::nowUtc()) >= 24) {
             $this->notifyAdminOfDeadLetter();
             return;
         }

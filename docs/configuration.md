@@ -1,94 +1,95 @@
 # Configuration
 
-Dieses Dokument beschreibt den Aufbau der beiden Konfigurationsdateien des Pakets:
+This document describes the structure of the package's two configuration files:
 
-- `config/mollie-billing.php` — globales Verhalten, ENV-getriebene Schalter, Rechnungsstellung, VAT/OSS-Erweiterungen
-- `config/mollie-billing-plans.php` — Katalog: Pläne, Intervalle, Addons, Features, Produkte und Produktgruppen
+- `config/mollie-billing.php` — global behavior, ENV-driven switches, invoicing, VAT/OSS extensions
+- `config/mollie-billing-plans.php` — catalog: plans, intervals, addons, features, products and product groups
 
-Beide Dateien werden vom Service-Provider geladen. Der Plan-Katalog wird über `SubscriptionCatalogInterface` (Default: `Support\ConfigSubscriptionCatalog`) gelesen — Apps können diese Bindung in `AppServiceProvider` durch eine eigene Implementierung (z. B. DB-getrieben) ersetzen, ohne die Config-Struktur ändern zu müssen.
+Both files are loaded by the service provider. The plan catalog is read through `SubscriptionCatalogInterface` (default: `Support\ConfigSubscriptionCatalog`) — apps can replace this binding in their `AppServiceProvider` with a custom implementation (e.g. database-driven) without having to change the config structure.
 
-> Alle Geldbeträge sind **ganzzahlige Netto-Werte in der kleinsten Währungseinheit** (Cent für EUR). `2900` entspricht also 29,00 €. Brutto/VAT wird zur Laufzeit über `VatCalculationService` ergänzt.
+> All monetary amounts are **integer net values in the smallest currency unit** (cents for EUR). `2900` therefore represents 29.00 €. Gross/VAT is added at runtime by `VatCalculationService`.
 
 ---
 
 ## `config/mollie-billing.php`
 
-Globale Einstellungen. Die meisten Werte sind über ENV-Variablen überschreibbar — der Default in der Datei greift, wenn die ENV nicht gesetzt ist.
+Global settings. Most values can be overridden via ENV variables — the default in the file is used when the ENV is not set.
 
 ### Billable & Branding
 
-| Schlüssel | ENV | Beschreibung |
-|-----------|-----|--------------|
-| `billable_model` | `BILLING_BILLABLE_MODEL` | FQCN des Models, das `Billable` implementiert (User, Team, Organization, …). Pflichtwert vor der ersten Migration. |
-| `logo_url` | `BILLING_LOGO_URL` | URL des Logos im Portal/Checkout-Header. |
-| `favicon_url` | `BILLING_FAVICON_URL` | URL des Favicons der Portal-Views. |
-| `primary_color` | `BILLING_PRIMARY_COLOR` | Flux/Tailwind-Farbname (`teal`, `indigo`, …). Default: `teal`. |
-| `company_name` | — | Default: `APP_NAME`. Wird in Mails und Views verwendet. |
-| `dashboard_url` | `BILLING_DASHBOARD_URL` | Ziel des Logo-Links im Portal. Akzeptiert eine URL oder `route:<name>` (z. B. `route:dashboard`). `null` → Link führt aufs Billing-Dashboard. |
-| `checkout_back_url` | `BILLING_CHECKOUT_BACK_URL` | Default-Ziel des „Zurück"-Links im Checkout, wenn kein expliziter `$backUrl` gesetzt ist. |
+| Key | ENV | Description |
+|-----|-----|-------------|
+| `billable_model` | `BILLING_BILLABLE_MODEL` | FQCN of the model that implements `Billable` (User, Team, Organization, …). Required before the first migration. |
+| `logo_url` | `BILLING_LOGO_URL` | URL of the logo shown in portal/checkout headers. |
+| `favicon_url` | `BILLING_FAVICON_URL` | URL of the favicon used by the portal views. |
+| `primary_color` | `BILLING_PRIMARY_COLOR` | Flux/Tailwind color name (`teal`, `indigo`, …). Default: `teal`. |
+| `company_name` | — | Default: `APP_NAME`. Used in mails and views. |
+| `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard. |
+| `checkout_back_url` | `BILLING_CHECKOUT_BACK_URL` | Default target of the "Back" link in the checkout when no explicit `$backUrl` is set. |
 
-### Checkout-Länderauswahl
+### Checkout country selection
 
 ```php
 'checkout_countries' => [
-    'regions' => ['EU'],   // aktuell unterstützt: 'EU' (27 Mitgliedsstaaten)
-    'include' => [],       // zusätzliche ISO-3166-1-alpha-2-Codes, z. B. ['CH', 'GB']
-    'exclude' => [],       // Codes, die aus der aufgelösten Liste entfernt werden
+    'regions' => ['EU'],   // currently supported: 'EU' (27 member states)
+    'include' => [],       // additional ISO-3166-1 alpha-2 codes, e.g. ['CH', 'GB']
+    'exclude' => [],       // codes to remove from the resolved list
 ],
 ```
 
-Länder aus `additional_countries` (siehe unten) werden automatisch ergänzt.
+Countries from `additional_countries` (see below) are added automatically.
 
-### Verhalten
+### Behavior
 
-| Schlüssel | ENV | Beschreibung |
-|-----------|-----|--------------|
-| `redirect_after_return` | `BILLING_REDIRECT_AFTER_RETURN` | URL, zu der nach erfolgreichem Mollie-Return weitergeleitet wird. |
-| `require_payment_method_for_zero_amount` | `BILLING_REQUIRE_PM_ZERO` | Bei `true` wird auch für 0 €-Pläne ein Mandat verlangt (für spätere kostenpflichtige Wechsel). Default: `true`. |
-| `currency` | `BILLING_CURRENCY` | ISO-4217-Code. Beträge in `mollie-billing-plans.php` und Coupons werden in dieser Währung interpretiert. Default: `EUR`. |
-| `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Anzeigesymbol. Default: `€`. |
-| `allow_overage_default` | `BILLING_ALLOW_OVERAGE` | Default für `Billable::allowsBillingOverage()`. Pro Billable überschreibbar. |
-| `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `Immediate` / `EndOfPeriod` / `UserChoice`. Steuert, wann Planwechsel angewendet werden. Default: `UserChoice`. |
-| `mollie_locale` | `BILLING_MOLLIE_LOCALE` | Locale für Mollie-Hosted-Pages. Bei `null` lässt Mollie automatisch erkennen. |
-| `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Vor der ersten Migration setzen** — beeinflusst FK-Spaltentypen. Default: `uuid`. |
-| `overage_job_time` | `BILLING_OVERAGE_JOB_TIME` | Tageszeit (`HH:MM`) für `PrepareOverageCommand`. Default: `02:00`. |
-| `usage_threshold_percent` | `BILLING_USAGE_THRESHOLD` | Schwelle für Nutzungs-Warnungs-Events (in %). Default: `80`. |
-| `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Globaler Default: Carry-over ungenutzter Wallet-Credits über Periodenwechsel. Pro Plan überschreibbar. Default: `false`. |
-| `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL des KPI-Caches im Admin-Panel (Sekunden). Default: `300`. |
-| `show_yearly_savings` | `BILLING_SHOW_YEARLY_SAVINGS` | Zeigt die berechnete Ersparnis (jährlich vs. monatlich) im Plan-Selector. Default: `true`. |
+| Key | ENV | Description |
+|-----|-----|-------------|
+| `redirect_after_return` | `BILLING_REDIRECT_AFTER_RETURN` | URL to redirect to after a successful Mollie return. |
+| `require_payment_method_for_zero_amount` | `BILLING_REQUIRE_PM_ZERO` | When `true`, a mandate is required even for 0 € plans (so later paid changes can charge it). Default: `true`. |
+| `currency` | `BILLING_CURRENCY` | ISO-4217 code. Amounts in `mollie-billing-plans.php` and coupons are interpreted in this currency. Default: `EUR`. |
+| `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Display symbol. Default: `€`. |
+| `allow_overage_default` | `BILLING_ALLOW_OVERAGE` | Default for `Billable::allowsBillingOverage()`. Overridable per billable. |
+| `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `Immediate` / `EndOfPeriod` / `UserChoice`. Controls when plan changes are applied. Default: `UserChoice`. |
+| `mollie_locale` | `BILLING_MOLLIE_LOCALE` | Locale for Mollie hosted pages. `null` lets Mollie auto-detect. |
+| `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Set before the first migration** — affects FK column shapes. Default: `uuid`. |
+| `overage_job_time` | `BILLING_OVERAGE_JOB_TIME` | Time of day (`HH:MM`) for `PrepareOverageCommand`. Default: `02:00`. |
+| `usage_threshold_percent` | `BILLING_USAGE_THRESHOLD` | Threshold for usage-warning events (in %). Default: `80`. |
+| `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Global default: carry over unused wallet credits across period changes. Overridable per plan. Default: `false`. |
+| `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL of the admin-panel KPI cache (seconds). Default: `300`. |
+| `show_yearly_savings` | `BILLING_SHOW_YEARLY_SAVINGS` | Shows the computed savings (yearly vs. monthly) in the plan selector. Default: `true`. |
+| `billing_timezone` | `BILLING_TIMEZONE` | IANA timezone for the customer-portal display (fallback when `Billable::getBillingTimezone()` is not overridden). Persistence and computation always remain UTC; the admin panel also renders UTC. Default: `UTC`. See [docs/timezone.md](timezone.md). |
 
-### Rechnungen (`invoices`)
+### Invoices (`invoices`)
 
-PDF-Rechnungen werden lokal über `elegantly/laravel-invoices` erzeugt und auf einem Laravel-Filesystem-Disk abgelegt.
+PDF invoices are generated locally via `elegantly/laravel-invoices` and stored on a Laravel filesystem disk.
 
 ```php
 'invoices' => [
     'disk' => env('BILLING_INVOICE_DISK', 'local'),
     'path' => 'billing/invoices',           // → {disk}/billing/invoices/{YYYY/MM}/{serial}.pdf
     'logo' => env('BILLING_INVOICE_LOGO'),
-    'seller' => [ /* Firmenstammdaten */ ],
+    'seller' => [ /* company master data */ ],
     'serial_number' => [
-        'format' => 'PP-YYCCCCCC',           // P=Prefix, Y=Jahr, C=Counter (je Zeichen = ein Slot)
+        'format' => 'PP-YYCCCCCC',           // P=prefix, Y=year, C=counter (each character = one slot)
         'prefix' => [
             'invoice'         => 'IN',
             'credit_note'     => 'CR',
             'one_time_order'  => 'OT',
         ],
     ],
-    'temporary_url_expiry' => 30,            // Minuten (relevant für S3-kompatible Disks)
+    'temporary_url_expiry' => 30,            // minutes (relevant for S3-compatible disks)
 ],
 ```
 
-Unterstützte `logo`-Formate:
+Supported `logo` formats:
 
-- `${APP_URL}/logo.png` (auflösung über `public_path`)
-- relativer Pfad: `images/logo.png`
-- absoluter Pfad: `/var/www/public/logo.png`
-- Data-URI: `data:image/png;base64,…`
+- `${APP_URL}/logo.png` (resolved via `public_path`)
+- relative path: `images/logo.png`
+- absolute path: `/var/www/public/logo.png`
+- data URI: `data:image/png;base64,…`
 
-Seriennummern werden atomar via `InvoiceNumberGenerator` vergeben.
+Serial numbers are issued atomically by `InvoiceNumberGenerator`.
 
-### IP-Geolocation
+### IP geolocation
 
 ```php
 'ip_geolocation' => [
@@ -100,7 +101,7 @@ Seriennummern werden atomar via `InvoiceNumberGenerator` vergeben.
 ],
 ```
 
-Wird vom `CountryMatchService` verwendet (Abgleich von User-, IP- und Payment-Country für VAT-Compliance). Eigene Driver können über `MollieBilling::ipGeolocation(...)` registriert werden.
+Used by `CountryMatchService` (reconciles user-, IP- and payment-country for VAT compliance). Custom drivers can be registered through `MollieBilling::ipGeolocation(...)`.
 
 ### VAT / OSS
 
@@ -114,8 +115,8 @@ Wird vom `CountryMatchService` verwendet (Abgleich von User-, IP- und Payment-Co
 ],
 ```
 
-- `vat_rate_overrides` — überschreibt die per `mpociot/vat-calculator` ermittelten Sätze pro ISO-Code.
-- `additional_countries` — fügt Länder hinzu, die nicht im EU-VAT-System sind. Diese tauchen automatisch in der Checkout-Länderliste auf.
+- `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code.
+- `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list.
 
 ### Queue
 
@@ -126,15 +127,15 @@ Wird vom `CountryMatchService` verwendet (Abgleich von User-, IP- und Payment-Co
 ],
 ```
 
-Alle Background-Jobs des Pakets (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `TrialExpiredNotification`, …) werden auf diese Connection/Queue gelegt. `connection: null` → Default-Connection der App.
+All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `TrialExpiredNotification`, …) are dispatched onto this connection/queue. `connection: null` → the app's default connection.
 
 ---
 
 ## `config/mollie-billing-plans.php`
 
-Definiert den Katalog: was Kunden buchen können, was inkludiert ist und was Overage kostet.
+Defines the catalog: what customers can subscribe to, what is included and what overage costs.
 
-Top-Level-Sektionen:
+Top-level sections:
 
 ```php
 return [
@@ -148,24 +149,24 @@ return [
 
 ### `plans`
 
-Jeder Plan ist mit seinem `planCode` als Schlüssel definiert.
+Each plan is keyed by its `planCode`.
 
 ```php
 'pro' => [
-    'name'           => 'Pro',                              // Fallback wenn keine Übersetzung existiert
+    'name'           => 'Pro',                              // fallback when no translation exists
     'description'    => null,
-    'tier'           => 2,                                  // numerische Stufe (Upgrade/Downgrade-Logik)
+    'tier'           => 2,                                  // numeric tier (upgrade/downgrade detection)
     'trial_days'     => 14,
     'included_seats' => 3,
-    'feature_keys'   => ['dashboard', 'advanced-reports'],  // Verweise auf 'features'
-    'allowed_addons' => ['softdrinks'],                     // Verweise auf 'addons'
-    // 'usage_rollover' => true,                            // optional, überschreibt globalen Default
+    'feature_keys'   => ['dashboard', 'advanced-reports'],  // references into 'features'
+    'allowed_addons' => ['softdrinks'],                     // references into 'addons'
+    // 'usage_rollover' => true,                            // optional, overrides the global default
     'intervals' => [
         'monthly' => [
-            'base_price_net'        => 2900,                // Cent — Plan-Grundpreis
-            'seat_price_net'        => 990,                 // Cent pro zusätzlichem Seat über included_seats hinaus, oder null
+            'base_price_net'        => 2900,                // cents — base plan price
+            'seat_price_net'        => 990,                 // cents per additional seat above included_seats, or null
             'included_usages'       => ['Tokens' => 100, 'SMS' => 50],
-            'usage_overage_prices'  => ['Tokens' => 10, 'SMS' => 15],   // Cent pro Einheit
+            'usage_overage_prices'  => ['Tokens' => 10, 'SMS' => 15],   // cents per unit
         ],
         'yearly' => [
             'base_price_net'        => 29000,
@@ -177,31 +178,31 @@ Jeder Plan ist mit seinem `planCode` als Schlüssel definiert.
 ],
 ```
 
-| Feld | Beschreibung |
-|------|--------------|
-| `name`, `description` | Anzeigewerte. Werden — falls vorhanden — durch Übersetzungen unter `billing::plans.<code>.{name,description}` überschrieben. |
-| `tier` | Ganzzahl. Höher = teurer/größer. Steuert Upgrade/Downgrade-Erkennung in `UpdateSubscription`. |
-| `trial_days` | Trial-Länge in Tagen. `0` = kein Trial. |
-| `included_seats` | Anzahl Seats, die im Grundpreis enthalten sind. `SyncSeats` rechnet alles darüber als zusätzliche Seats. |
-| `feature_keys` | Liste von Feature-Keys aus dem `features`-Block. Werden zusammen mit Addon-Features durch `FeatureAccess` aufgelöst. |
-| `allowed_addons` | Whitelist erlaubter Addons. Andere Addons können dem Plan nicht zugeschaltet werden. |
-| `usage_rollover` *(optional)* | `true` / `false`. Überschreibt `mollie-billing.usage_rollover`. |
-| `intervals` | Pflicht — pro unterstütztem Intervall (`monthly`, `yearly`) ein Block. |
+| Field | Description |
+|-------|-------------|
+| `name`, `description` | Display values. If a translation exists under `billing::plans.<code>.{name,description}` it overrides these. |
+| `tier` | Integer. Higher = more expensive/larger. Drives upgrade/downgrade detection in `UpdateSubscription`. |
+| `trial_days` | Trial length in days. `0` = no trial. |
+| `included_seats` | Number of seats included in the base price. `SyncSeats` charges anything above this as additional seats. |
+| `feature_keys` | List of feature keys from the `features` block. Resolved together with addon features by `FeatureAccess`. |
+| `allowed_addons` | Whitelist of addons. Other addons cannot be enabled on this plan. |
+| `usage_rollover` *(optional)* | `true` / `false`. Overrides `mollie-billing.usage_rollover`. |
+| `intervals` | Required — one block per supported interval (`monthly`, `yearly`). |
 
-**Pro Intervall-Block:**
+**Per interval block:**
 
-| Feld | Pflicht | Beschreibung |
-|------|---------|--------------|
-| `base_price_net` | ✓ | Netto-Grundpreis in Cent. |
-| `seat_price_net` | ✓ | Netto-Preis pro zusätzlichem Seat in Cent, oder `null` wenn der Plan keine Seat-Erweiterung erlaubt. |
-| `included_usages` | ✓ | Map `usage_type => menge`. Diese Mengen werden bei jedem Periodenwechsel auf das Wallet aufaddiert (additiv — negative Salden aus Overage bleiben erhalten). |
-| `usage_overage_prices` | ✓ | Map `usage_type => preis_cent_pro_einheit`. Wird abgerechnet, sobald das Wallet negativ wird. |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `base_price_net` | ✓ | Net base price in cents. |
+| `seat_price_net` | ✓ | Net price per additional seat in cents, or `null` if the plan does not allow seat upgrades. |
+| `included_usages` | ✓ | Map `usage_type => quantity`. These quantities are credited additively to the wallet on every period rollover (negative balances from prior overage are preserved). |
+| `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. |
 
-> **Wichtig:** `included_usages` und `usage_overage_prices` liegen **innerhalb** der `intervals.{monthly|yearly}`-Blöcke, nicht auf Plan-Ebene. Die `SubscriptionCatalogInterface`-Lookups sind immer per `(planCode, interval)` gekeyed.
+> **Important:** `included_usages` and `usage_overage_prices` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
 
 ### `features`
 
-Definiert die im System verfügbaren Features. Plans und Addons referenzieren diese über `feature_keys`.
+Defines the features available in the system. Plans and addons reference these via `feature_keys`.
 
 ```php
 'features' => [
@@ -216,15 +217,15 @@ Definiert die im System verfügbaren Features. Plans und Addons referenzieren di
 ],
 ```
 
-`name`/`description` werden — falls vorhanden — durch Übersetzungen unter `billing::features.<key>.{name,description}` überschrieben. Verwendet von:
+`name` / `description` are overridden by translations under `billing::features.<key>.{name,description}` when present. Used by:
 
-- `MollieBilling::features()` (Liste der aktiven Features für den Billable)
-- `@planFeature('<key>')` Blade-Direktive
-- `billing.feature:<key>[,<key>]` Middleware (OR-Semantik)
+- `MollieBilling::features()` (list of active features for the billable)
+- The `@planFeature('<key>')` Blade directive
+- The `billing.feature:<key>[,<key>]` middleware (OR semantics)
 
 ### `addons`
 
-Buchbare Add-ons, die zusätzliche Features oder Kosten aufschalten.
+Bookable add-ons that unlock additional features and/or cost.
 
 ```php
 'addons' => [
@@ -239,17 +240,17 @@ Buchbare Add-ons, die zusätzliche Features oder Kosten aufschalten.
 ],
 ```
 
-| Feld | Beschreibung |
-|------|--------------|
-| `name`, `description` *(optional)* | Werden durch `billing::addons.<code>.{name,description}` überschrieben, falls Übersetzung existiert. |
-| `feature_keys` | Features, die durch das Addon freigeschaltet werden. Werden mit den Plan-Features zur Gesamtmenge gemerged. |
-| `intervals.{monthly,yearly}.price_net` | Netto-Preis in Cent pro Intervall. |
+| Field | Description |
+|-------|-------------|
+| `name`, `description` *(optional)* | Overridden by `billing::addons.<code>.{name,description}` when a translation exists. |
+| `feature_keys` | Features unlocked by the addon. Merged with the plan's features into the effective set. |
+| `intervals.{monthly,yearly}.price_net` | Net price in cents per interval. |
 
-> Addons tragen **nicht** zu `included_usages` bei — Wallet-Quoten sind plan-scoped.
+> Addons do **not** contribute to `included_usages` — wallet quotas are plan-scoped.
 
 ### `product_groups`
 
-Optionale Gruppierung für die One-Time-Order-Übersicht im Portal.
+Optional grouping for the one-time-order overview in the portal.
 
 ```php
 'product_groups' => [
@@ -258,14 +259,14 @@ Optionale Gruppierung für die One-Time-Order-Übersicht im Portal.
 ],
 ```
 
-| Feld | Beschreibung |
-|------|--------------|
-| `name` | Anzeigename. Wird durch `billing::product_groups.<key>` überschrieben, falls Übersetzung existiert. |
-| `sort` | Sortierreihenfolge im Portal (aufsteigend). |
+| Field | Description |
+|-------|-------------|
+| `name` | Display name. Overridden by `billing::product_groups.<key>` when a translation exists. |
+| `sort` | Sort order in the portal (ascending). |
 
 ### `products`
 
-Einmalkäufe (Top-Ups, Beratungsstunden, etc.). Werden über die One-Time-Order-Flows verkauft.
+One-off purchases (top-ups, consulting hours, etc.). Sold through the one-time-order flows.
 
 ```php
 'products' => [
@@ -274,55 +275,55 @@ Einmalkäufe (Top-Ups, Beratungsstunden, etc.). Werden über die One-Time-Order-
         'description' => 'Top up your account with 500 tokens.',
         'image_url'   => null,
         'price_net'   => 4900,
-        'usage_type'  => 'Tokens',   // optional — verlinkt zum Wallet
-        'quantity'    => 500,        // optional — Einheiten, die beim Kauf gutgeschrieben werden
-        'group'       => 'top-ups',  // optional — Schlüssel aus 'product_groups'
+        'usage_type'  => 'Tokens',   // optional — links to a wallet
+        'quantity'    => 500,        // optional — units credited on purchase
+        'group'       => 'top-ups',  // optional — key from 'product_groups'
     ],
     'consulting-hour' => [
         'name'        => '1h Consulting',
         'description' => 'Book a one-hour consulting session.',
         'price_net'   => 14900,
-        'onetimeonly' => true,       // optional — nur einmal pro Billable kaufbar (Default: false)
+        'onetimeonly' => true,       // optional — purchasable only once per billable (default: false)
         'group'       => 'services',
     ],
 ],
 ```
 
-| Feld | Pflicht | Beschreibung |
-|------|---------|--------------|
-| `name`, `description` | `name` ✓ | Übersetzbar via `billing::products.<code>.{name,description}`. |
-| `image_url` | — | Optional — Produktbild. |
-| `price_net` | ✓ | Netto-Preis in Cent. |
-| `usage_type` | — | Wenn gesetzt zusammen mit `quantity`, schreibt der Kauf diese Menge zusätzlich aufs entsprechende Wallet. |
-| `quantity` | — | Siehe `usage_type`. |
-| `onetimeonly` | — | Bei `true` kann das Produkt pro Billable nur einmal gekauft werden. |
-| `group` | — | Verweis auf `product_groups`. |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name`, `description` | `name` ✓ | Translatable via `billing::products.<code>.{name,description}`. |
+| `image_url` | — | Optional — product image. |
+| `price_net` | ✓ | Net price in cents. |
+| `usage_type` | — | When set together with `quantity`, the purchase additionally credits that quantity to the corresponding wallet. |
+| `quantity` | — | See `usage_type`. |
+| `onetimeonly` | — | When `true`, the product can only be purchased once per billable. |
+| `group` | — | Reference into `product_groups`. |
 
 ---
 
-## Übersetzungen
+## Translations
 
-Anzeigetexte (`name`, `description`) werden — wenn eine Übersetzung existiert — aus den Sprachdateien geladen und überschreiben die Werte aus der Config. Verwendete Translation-Keys:
+Display strings (`name`, `description`) are loaded from language files when a translation exists, overriding the values in the config. Translation keys used:
 
-| Konfig-Bereich | Translation-Key |
-|----------------|-----------------|
+| Config area | Translation key |
+|-------------|-----------------|
 | `plans.<code>.name` / `description` | `billing::plans.<code>.{name,description}` |
 | `addons.<code>.name` / `description` | `billing::addons.<code>.{name,description}` |
 | `features.<key>.name` / `description` | `billing::features.<key>.{name,description}` |
-| Usage-Type-Anzeige | `billing::usages.<type>` |
+| Usage type display | `billing::usages.<type>` |
 | `products.<code>.name` / `description` | `billing::products.<code>.{name,description}` |
 | `product_groups.<key>` | `billing::product_groups.<key>` |
 
-Siehe [translations.md](translations.md) für Details zur Sprachdatei-Veröffentlichung.
+See [translations.md](translations.md) for details on language-file publishing.
 
 ---
 
-## DB-getriebener Katalog
+## Database-driven catalog
 
-Wer die Plan-/Addon-Daten in der DB statt in der Config halten will, implementiert `SubscriptionCatalogInterface` und bindet die Klasse in `AppServiceProvider`:
+To hold plan/addon data in the database instead of the config, implement `SubscriptionCatalogInterface` and bind the class in `AppServiceProvider`:
 
 ```php
 $this->app->bind(SubscriptionCatalogInterface::class, MyDatabaseCatalog::class);
 ```
 
-`config/mollie-billing-plans.php` wird dann ignoriert. Die Methoden des Interfaces müssen dieselben Lookup-Schlüssel respektieren (`planCode`, `interval`, `usageType`, `addonCode`, `featureKey`, `productCode`, `groupKey`).
+`config/mollie-billing-plans.php` is then ignored. The interface methods must respect the same lookup keys (`planCode`, `interval`, `usageType`, `addonCode`, `featureKey`, `productCode`, `groupKey`).

@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -95,7 +96,7 @@ new class extends Component {
                 <flux:table.rows>
                     @foreach ($notes as $n)
                         <flux:table.row :key="$n->id">
-                            <flux:table.cell class="tabular-nums">{{ $n->created_at->format('Y-m-d') }}</flux:table.cell>
+                            <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($n->created_at)->format('Y-m-d H:i') }}</flux:table.cell>
                             <flux:table.cell variant="strong" class="font-mono">{{ class_basename($n->billable_type) }}#{{ $n->billable_id }}</flux:table.cell>
                             <flux:table.cell align="end">
                                 <x-mollie-billing::admin.money :cents="$n->amount_gross" />

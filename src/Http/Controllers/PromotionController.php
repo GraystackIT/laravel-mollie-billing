@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Http\Controllers;
 
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -16,7 +17,7 @@ class PromotionController extends Controller
     {
         $coupon = app(CouponService::class)->resolveByAutoApplyToken($token);
 
-        if ($coupon && $coupon->isWithinValidity(now()) && $coupon->hasGlobalRedemptionsLeft()) {
+        if ($coupon && $coupon->isWithinValidity(BillingTime::nowUtc()) && $coupon->hasGlobalRedemptionsLeft()) {
             session(['billing.auto_apply_coupon' => $coupon->code]);
         } else {
             session()->flash('billing.promotion_status', 'expired_or_invalid');

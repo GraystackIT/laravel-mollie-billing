@@ -6,6 +6,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
@@ -281,7 +282,7 @@ new class extends Component {
                                         @endif
                                         @if ($product['last_purchased_at'])
                                             <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">
-                                                {{ __('billing::portal.products.last_purchased_at', ['date' => $product['last_purchased_at']->translatedFormat('d. M Y')]) }}
+                                                {{ __('billing::portal.products.last_purchased_at', ['date' => BillingTime::display($product['last_purchased_at'], $billable)->translatedFormat('d. M Y')]) }}
                                             </flux:text>
                                         @endif
                                     </div>

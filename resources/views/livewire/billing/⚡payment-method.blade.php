@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\StartMandateCheckout;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Mollie\Laravel\Facades\Mollie;
 use Livewire\Component;
 
@@ -95,7 +96,7 @@ new class extends Component {
         $signatureDate = null;
         if (! empty($mandate->signatureDate)) {
             try {
-                $signatureDate = \Carbon\Carbon::parse((string) $mandate->signatureDate)->translatedFormat('d. M Y');
+                $signatureDate = BillingTime::display(\Carbon\Carbon::parse((string) $mandate->signatureDate)->setTimezone('UTC'), $billable)->translatedFormat('d. M Y');
             } catch (\Throwable) {
                 $signatureDate = null;
             }

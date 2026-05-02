@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
+use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
 use Illuminate\Database\Eloquent\Model;
@@ -28,8 +29,8 @@ class Coupon extends Model
             'applicable_intervals' => 'array',
             'applicable_addons' => 'array',
             'applicable_usages' => 'array',
-            'valid_from' => 'datetime',
-            'valid_until' => 'datetime',
+            'valid_from' => UtcDatetime::class,
+            'valid_until' => UtcDatetime::class,
         ];
     }
 

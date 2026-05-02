@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Jobs;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -45,7 +46,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             return;
         }
 
-        $threshold = now()->subHours(24);
+        $threshold = BillingTime::nowUtc()->subHours(24);
 
         // Suche Billables mit hängendem Pending-State.
         // (JSON-Query — funktioniert in MySQL/Postgres/SQLite.)
@@ -57,7 +58,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 if (empty($pending)) {
                     return false;
                 }
-                $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse($pending['created_at']) : now();
+                $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse((string) $pending["created_at"])->setTimezone("UTC") : BillingTime::nowUtc();
                 return $createdAt->lessThan($threshold);
             });
 
@@ -92,8 +93,8 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 'payment_id' => $paymentId,
             ]);
         }
-        $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse($pending['created_at']) : now()->subDays(8);
-        if ($createdAt->diffInDays(now()) >= 7) {
+        $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse((string) $pending["created_at"])->setTimezone("UTC") : BillingTime::nowUtc()->subDays(8);
+        if ($createdAt->diffInDays(BillingTime::nowUtc()) >= 7) {
             unset($meta['pending_prorata_change']);
             $billable->forceFill(['subscription_meta' => $meta])->save();
 
@@ -135,7 +136,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
         if (in_array($status, ['failed', 'canceled', 'expired'], true)) {
             unset($meta['pending_prorata_change']);
-            $meta['plan_change_failed_at'] = now()->toIso8601String();
+            $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
             $meta['plan_change_failed_reason'] = "Charge {$status}";
             $billable->forceFill(['subscription_meta' => $meta])->save();
             return;

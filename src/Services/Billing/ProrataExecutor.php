@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
@@ -82,7 +83,7 @@ class ProrataExecutor
                 $meta = $billable->getBillingSubscriptionMeta();
                 $meta['pending_subscription_patch'] = [
                     'intent' => $intent->toArray(),
-                    'first_attempt_at' => now()->toIso8601String(),
+                    'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
                     'last_error' => $e->getMessage(),
                 ];
                 $billable->forceFill(['subscription_meta' => $meta])->save();

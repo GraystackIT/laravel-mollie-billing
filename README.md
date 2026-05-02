@@ -387,6 +387,7 @@ Highlights of `config/mollie-billing.php`:
 | `company_name` | Display name used in headers, notifications and signatures. |
 | `billable_model` | Fully-qualified class name of your billable model. |
 | `billable_key_type` | `uuid`, `ulid`, or `int` — determines morph column shape. |
+| `billing_timezone` | IANA timezone for the customer portal display (`BILLING_TIMEZONE`, default `UTC`). Persistence and computation always remain UTC; the admin panel renders UTC. See [Timezones](docs/timezone.md). |
 
 ### Portal "back to dashboard" link
 
@@ -695,6 +696,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Configuration](docs/configuration.md) — `mollie-billing.php` and `mollie-billing-plans.php` reference
 - [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
+- [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
 
 ## Architecture
 

@@ -19,6 +19,10 @@ interface Billable
     public function getBillingPostalCode(): ?string;
     public function getBillingCountry(): ?string;
 
+    // IANA timezone for displaying billing dates in the customer portal.
+    // Persistence and computation always remain UTC.
+    public function getBillingTimezone(): string;
+
     // Subscription master data
     public function getBillingSubscriptionPlanCode(): ?string;
     public function getBillingSubscriptionInterval(): ?string;

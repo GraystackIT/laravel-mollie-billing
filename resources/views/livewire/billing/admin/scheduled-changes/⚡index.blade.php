@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -123,7 +124,7 @@ new class extends Component {
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->email }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">
-                                    {{ $b->scheduled_change_at?->format('Y-m-d H:i') }}
+                                    {{ BillingTime::displayUtc($b->scheduled_change_at)?->format('Y-m-d H:i') }} UTC
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->scheduled_change_at?->diffForHumans() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell>

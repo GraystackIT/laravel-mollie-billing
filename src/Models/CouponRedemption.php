@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
+use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
@@ -21,8 +22,8 @@ class CouponRedemption extends Model
         return [
             'credits_applied' => 'array',
             'grant_applied_snapshot' => 'array',
-            'applied_at' => 'datetime',
-            'revoked_at' => 'datetime',
+            'applied_at' => UtcDatetime::class,
+            'revoked_at' => UtcDatetime::class,
         ];
     }
 

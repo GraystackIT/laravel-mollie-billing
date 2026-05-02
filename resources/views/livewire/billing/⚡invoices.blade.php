@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -20,7 +21,7 @@ new class extends Component {
         $currency = config('mollie-billing.currency_symbol', '€');
 
         if (! $billable) {
-            return ['invoices' => null, 'currency' => $currency, 'stats' => null];
+            return ['invoices' => null, 'currency' => $currency, 'stats' => null, 'billable' => null];
         }
 
         $invoices = $billable->billingInvoices()->latest()->paginate(20);
@@ -52,6 +53,7 @@ new class extends Component {
             'invoices' => $invoices,
             'currency' => $currency,
             'stats' => $stats,
+            'billable' => $billable,
         ];
     }
 };
@@ -114,7 +116,7 @@ new class extends Component {
                 <flux:table.rows>
                     @foreach ($invoices as $invoice)
                         <flux:table.row>
-                            <flux:table.cell class="tabular-nums">{{ $invoice->created_at->translatedFormat('d. M Y') }}</flux:table.cell>
+                            <flux:table.cell class="tabular-nums">{{ BillingTime::display($invoice->created_at, $billable)->translatedFormat('d. M Y') }}</flux:table.cell>
                             <flux:table.cell>
                                 <flux:badge size="sm" :color="$invoice->invoice_kind?->color() ?? 'zinc'">{{ $invoice->invoice_kind?->label() ?? '—' }}</flux:badge>
                             </flux:table.cell>

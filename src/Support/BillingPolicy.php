@@ -22,15 +22,18 @@ class BillingPolicy
      */
     public static function prorataPeriodDays(CarbonInterface $periodStart, CarbonInterface $periodEnd): array
     {
-        $start = $periodStart->copy()->startOfDay();
-        $end = $periodEnd->copy()->startOfDay();
+        // Day-granular comparison must happen in a single, deterministic timezone.
+        // We pin to UTC so the result is independent of the timezone the caller
+        // happened to construct $periodStart / $periodEnd in.
+        $start = $periodStart->copy()->utc()->startOfDay();
+        $end = $periodEnd->copy()->utc()->startOfDay();
         $totalDays = (int) $start->diffInDays($end);
 
         if ($totalDays <= 0) {
             return ['total' => 0, 'remaining' => 0];
         }
 
-        $remainingDays = (int) now($end->getTimezone())->startOfDay()->diffInDays($end, false);
+        $remainingDays = (int) now('UTC')->startOfDay()->diffInDays($end, false);
 
         return [
             'total' => $totalDays,

@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
@@ -143,7 +144,7 @@ class ChargeUsageOverageDirectly
                 'vat_amount' => $vat['vat'],
                 'vat_rate' => $vat['rate'],
                 'currency' => (string) config('mollie-billing.currency', 'EUR'),
-                'created_at' => now()->toIso8601String(),
+                'created_at' => BillingTime::nowUtc()->toIso8601String(),
             ];
             $billable->forceFill(['subscription_meta' => $meta])->save();
         }

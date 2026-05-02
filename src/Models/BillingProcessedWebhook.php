@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
+use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use Illuminate\Database\Eloquent\Model;
 
 class BillingProcessedWebhook extends Model
@@ -17,8 +18,8 @@ class BillingProcessedWebhook extends Model
     protected function casts(): array
     {
         return [
-            'received_at' => 'datetime',
-            'processed_at' => 'datetime',
+            'received_at' => UtcDatetime::class,
+            'processed_at' => UtcDatetime::class,
         ];
     }
 

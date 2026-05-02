@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\CountryMismatchNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
 
@@ -72,7 +73,7 @@ class CountryMatchService
             'status' => CountryMismatchStatus::Pending,
         ]);
 
-        $model->forceFill(['country_mismatch_flagged_at' => now()])->save();
+        $model->forceFill(['country_mismatch_flagged_at' => BillingTime::nowUtc()])->save();
 
         CountryMismatchFlagged::dispatch($billable, $mismatch);
 
@@ -93,7 +94,7 @@ class CountryMatchService
 
         $mismatch->forceFill([
             'status' => CountryMismatchStatus::Resolved,
-            'resolved_at' => now(),
+            'resolved_at' => BillingTime::nowUtc(),
             'resolved_by_user_id' => $resolvedById,
         ])->save();
 

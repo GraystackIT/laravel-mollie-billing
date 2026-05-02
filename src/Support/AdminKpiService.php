@@ -25,7 +25,7 @@ class AdminKpiService
     {
         return (int) $this->cached('mrr', function (): int {
             return $this->safely(function (): int {
-                $thirty = now()->subDays(30);
+                $thirty = BillingTime::nowUtc()->subDays(30);
                 $monthly = (int) BillingInvoice::query()
                     ->where('invoice_kind', 'subscription')
                     ->where('status', InvoiceStatus::Paid)
@@ -85,7 +85,7 @@ class AdminKpiService
             }
 
             return $this->safely(function () use ($billableClass, $days): float {
-                $since = now()->subDays($days);
+                $since = BillingTime::nowUtc()->subDays($days);
                 $cancelled = (int) $billableClass::query()
                     ->where('subscription_status', SubscriptionStatus::Cancelled)
                     ->where('subscription_ends_at', '>=', $since)
@@ -111,7 +111,7 @@ class AdminKpiService
             }
 
             return $this->safely(function () use ($billableClass, $days): float {
-                $since = now()->subDays($days);
+                $since = BillingTime::nowUtc()->subDays($days);
 
                 $converted = (int) $billableClass::query()
                     ->where('subscription_source', SubscriptionSource::Mollie)
@@ -164,7 +164,7 @@ class AdminKpiService
                 $out = [];
 
                 for ($i = $months - 1; $i >= 0; $i--) {
-                    $start = now()->subMonths($i)->startOfMonth();
+                    $start = BillingTime::nowUtc()->subMonths($i)->startOfMonth();
                     $end = (clone $start)->endOfMonth();
 
                     $net = (int) BillingInvoice::query()

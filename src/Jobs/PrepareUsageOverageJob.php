@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Jobs;
 
-use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\TrialConverted;
@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -54,8 +55,8 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $tomorrowStart = now()->copy()->addDay()->startOfDay();
-        $tomorrowEnd = now()->copy()->addDay()->endOfDay();
+        $tomorrowStart = BillingTime::nowUtc()->addDay()->startOfDay();
+        $tomorrowEnd = BillingTime::nowUtc()->addDay()->endOfDay();
 
         // ── Pass 1: per-billable lifecycle work ──
         $billableClass::query()
@@ -111,7 +112,7 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $billableClass::query()
             ->where('subscription_status', SubscriptionStatus::Cancelled->value)
             ->whereNotNull('subscription_ends_at')
-            ->where('subscription_ends_at', '<', now())
+            ->where('subscription_ends_at', '<', BillingTime::nowUtc())
             ->chunk(200, function ($billables): void {
                 foreach ($billables as $billable) {
                     try {
@@ -131,7 +132,7 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         // ── Pass 4: apply scheduled changes ──
         $billableClass::query()
             ->whereNotNull('scheduled_change_at')
-            ->where('scheduled_change_at', '<=', now())
+            ->where('scheduled_change_at', '<=', BillingTime::nowUtc())
             ->chunk(200, function ($billables) use ($scheduler): void {
                 foreach ($billables as $billable) {
                     try {
@@ -150,8 +151,8 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         Model $billable,
         ChargeUsageOverageDirectly $chargeService,
         WalletUsageService $walletService,
-        Carbon $tomorrowStart,
-        Carbon $tomorrowEnd,
+        CarbonInterface $tomorrowStart,
+        CarbonInterface $tomorrowEnd,
     ): void {
         $nextBilling = $billable->nextBillingDate();
         $endsAt = $billable->getBillingSubscriptionEndsAt();
@@ -240,7 +241,7 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     private function resetLocalQuota(
         Model $billable,
         WalletUsageService $walletService,
-        Carbon $tomorrowStart,
+        CarbonInterface $tomorrowStart,
     ): void {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';

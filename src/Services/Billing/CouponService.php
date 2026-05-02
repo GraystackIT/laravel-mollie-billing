@@ -23,6 +23,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -211,7 +212,7 @@ class CouponService
             throw new InvalidCouponException($billable, $code, 'inactive');
         }
 
-        $now = now();
+        $now = BillingTime::nowUtc();
 
         if ($coupon->valid_from !== null && $coupon->valid_from->isAfter($now)) {
             throw new InvalidCouponException($billable, $code, 'not_yet_valid');
@@ -301,7 +302,7 @@ class CouponService
             return null;
         }
 
-        if (! $coupon->isWithinValidity(now()) || ! $coupon->hasGlobalRedemptionsLeft()) {
+        if (! $coupon->isWithinValidity(BillingTime::nowUtc()) || ! $coupon->hasGlobalRedemptionsLeft()) {
             return null;
         }
 
@@ -334,7 +335,7 @@ class CouponService
             $redemption->coupon_id = $coupon->id;
             $redemption->billable_type = $billableModel->getMorphClass();
             $redemption->billable_id = $billableModel->getKey();
-            $redemption->applied_at = now();
+            $redemption->applied_at = BillingTime::nowUtc();
             $redemption->discount_amount_net = 0;
 
             switch ($coupon->type) {
@@ -387,7 +388,7 @@ class CouponService
                 case CouponType::TrialExtension:
                     $days = (int) ($coupon->trial_extension_days ?? 0);
                     $current = $billable->getBillingTrialEndsAt();
-                    $newEnd = ($current && $current->isFuture() ? $current->copy() : now())->addDays($days);
+                    $newEnd = ($current && $current->isFuture() ? $current->copy() : BillingTime::nowUtc())->addDays($days);
                     $billable->extendBillingTrialUntil($newEnd);
                     $redemption->trial_days_added = $days;
                     break;
@@ -539,7 +540,7 @@ class CouponService
             }
 
             $redemption->forceFill([
-                'revoked_at' => now(),
+                'revoked_at' => BillingTime::nowUtc(),
                 'revoked_reason' => $reason,
             ])->save();
 
@@ -575,7 +576,7 @@ class CouponService
     {
         $days = (int) ($redemption->grant_days_added ?? 0);
         $currentEnd = $billable->getBillingSubscriptionEndsAt();
-        $now = now();
+        $now = BillingTime::nowUtc();
         $newEnd = $currentEnd?->copy()->subDays($days);
 
         if (! $billable instanceof Model) {
@@ -710,7 +711,7 @@ class CouponService
     {
         $hasFullPlan = ! empty($coupon->grant_plan_code);
         $addonOnly = ! $hasFullPlan && ! empty($coupon->grant_addon_codes);
-        $now = now();
+        $now = BillingTime::nowUtc();
 
         if ($addonOnly) {
             $existing = $billable->getActiveBillingAddonCodes();

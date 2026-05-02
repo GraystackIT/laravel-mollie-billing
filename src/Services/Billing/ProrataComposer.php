@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 
 /**
@@ -197,8 +198,10 @@ class ProrataComposer
         $startRaw = $line['period_start'] ?? $invoice->period_start ?? null;
         $endRaw = $line['period_end'] ?? $invoice->period_end ?? null;
 
-        $start = $startRaw !== null ? Carbon::parse($startRaw) : $fallbackStart->copy();
-        $end = $endRaw !== null ? Carbon::parse($endRaw) : $fallbackEnd->copy();
+        // Persistierte Periodenwerte sind in UTC gespeichert; setTimezone('UTC') stellt
+        // sicher, dass die Period-Math deterministisch ist, unabhängig von app.timezone.
+        $start = $startRaw !== null ? Carbon::parse((string) $startRaw)->setTimezone('UTC') : $fallbackStart->copy();
+        $end = $endRaw !== null ? Carbon::parse((string) $endRaw)->setTimezone('UTC') : $fallbackEnd->copy();
 
         return [$start, $end];
     }
@@ -418,8 +421,8 @@ class ProrataComposer
         // Periode auflösen mit Fallback auf Billable-Period (für Legacy-Invoices ohne line/invoice period).
         /** @var Billable&\Illuminate\Database\Eloquent\Model $billable */
         $billable = $invoice->billable()->first();
-        $billableStart = $billable?->getBillingPeriodStartsAt() ?? now();
-        $billableEnd = $billable?->nextBillingDate() ?? now()->addMonth();
+        $billableStart = $billable?->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
+        $billableEnd = $billable?->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
         [$lineStart, $lineEnd] = $this->resolveLinePeriod($line, $invoice, $billableStart, $billableEnd);
 
         // Pro-rata-Faktor auf Line-Item-Periode.
