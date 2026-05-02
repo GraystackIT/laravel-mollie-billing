@@ -31,6 +31,8 @@ class Coupon extends Model
             'applicable_usages' => 'array',
             'valid_from' => UtcDatetime::class,
             'valid_until' => UtcDatetime::class,
+            'created_at' => UtcDatetime::class,
+            'updated_at' => UtcDatetime::class,
         ];
     }
 
