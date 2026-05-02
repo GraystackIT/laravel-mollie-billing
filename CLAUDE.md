@@ -26,6 +26,7 @@ Artisan commands shipped by the package (registered via `MollieBillingServicePro
 ```bash
 php artisan billing:prepare-overage    # PrepareOverageCommand → enqueues PrepareUsageOverageJob
 php artisan billing:oss-export {year}  # OssExportCommand     → CSV via OssProtocolService
+php artisan billing:check-config       # CheckConfigCommand   → validates mollie-billing.php + plans config
 ```
 
 ## Big-picture architecture

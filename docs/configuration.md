@@ -327,3 +327,52 @@ $this->app->bind(SubscriptionCatalogInterface::class, MyDatabaseCatalog::class);
 ```
 
 `config/mollie-billing-plans.php` is then ignored. The interface methods must respect the same lookup keys (`planCode`, `interval`, `usageType`, `addonCode`, `featureKey`, `productCode`, `groupKey`).
+
+---
+
+## Validating the configuration
+
+The package ships a console command that validates both `mollie-billing.php` and `mollie-billing-plans.php`:
+
+```bash
+php artisan billing:check-config
+```
+
+It reports two classes of issues:
+
+- **Errors** — broken references or invalid values that will cause runtime failures. Exit status `1`.
+  - `billable_model` missing, not found, or not implementing `Billable` / not using `HasBilling`
+  - `billable_key_type` not in `uuid|ulid|int`
+  - `plan_change_mode` not a valid `PlanChangeMode` enum value
+  - `invoices.disk` not declared in `config/filesystems.php`
+  - `invoices.serial_number.format` empty or missing the `C` (counter) slot
+  - `ip_geolocation.driver` not declared in `ip_geolocation.drivers`
+  - `checkout_countries.include|exclude` entries that are not uppercase ISO-3166-1 alpha-2 codes
+  - `additional_countries` entries with non-numeric `vat_rate`
+  - `billing_timezone` not a valid IANA identifier
+  - `overage_job_time` not in `HH:MM` format
+  - `usage_threshold_percent` outside `0–100`
+  - `plans` empty
+  - Plan / addon `feature_keys` referencing undefined features
+  - Plan `allowed_addons` referencing undefined addons
+  - Plan `tier` missing or non-integer; `trial_days` / `included_seats` invalid
+  - Interval `base_price_net` / `seat_price_net` missing or negative
+  - Plan / addon defining an unknown interval (only `monthly` and `yearly` are recognised)
+  - Product `group` referencing an undefined product group
+  - Product `quantity` invalid
+
+- **Warnings** — likely misconfigurations that don't break runtime but degrade behavior. Exit status stays `0`.
+  - `currency` not in uppercase ISO-4217 form (e.g. `eur` instead of `EUR`)
+  - `invoices.seller.*` fields empty (generated invoices will be incomplete)
+  - `invoices.serial_number.prefix.{invoice|credit_note|one_time_order}` missing
+  - `ip_geolocation.drivers.ipinfo_lite.token` empty when IPinfo is selected
+  - `additional_countries.<ISO>.name` empty
+  - Multiple plans sharing the same `tier` (ranking becomes ambiguous)
+  - `included_usages` defines a quota without a matching `usage_overage_prices` entry — overages cannot be charged
+  - `usage_overage_prices` defines a type without a matching `included_usages` entry — quota defaults to 0
+  - Addon with empty `feature_keys` (unlocks no features)
+  - Product `usage_type` not declared in any plan's `included_usages` / `usage_overage_prices`
+  - Product declaring `usage_type` without `quantity` (or vice versa)
+  - Features defined but never referenced by any plan or addon
+
+Run it after editing either config file or wire it into CI to catch typos before deployment.

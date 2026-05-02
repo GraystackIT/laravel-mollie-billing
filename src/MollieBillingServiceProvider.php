@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling;
 
+use GraystackIT\MollieBilling\Commands\CheckConfigCommand;
 use GraystackIT\MollieBilling\Commands\OssExportCommand;
 use GraystackIT\MollieBilling\Commands\PrepareOverageCommand;
 use GraystackIT\MollieBilling\Commands\SyncPurchasedBalanceCommand;
@@ -184,6 +185,7 @@ class MollieBillingServiceProvider extends ServiceProvider
             PrepareOverageCommand::class,
             OssExportCommand::class,
             SyncPurchasedBalanceCommand::class,
+            CheckConfigCommand::class,
         ]);
     }
 
