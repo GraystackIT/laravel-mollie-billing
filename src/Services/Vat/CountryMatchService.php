@@ -26,8 +26,11 @@ class CountryMatchService
     }
 
     /**
-     * Compare user-declared, IP, and payment-method countries.
-     * If fewer than two of them match, flag a mismatch.
+     * Compare user-declared and payment-method countries.
+     * Flags a mismatch (idempotent) when:
+     *   - both are present and differ, or
+     *   - tax_country_payment is present but tax_country_user is missing
+     *     (a data bug upstream — recorded as user='?' so admins can act).
      */
     public function check(Billable $billable): void
     {
@@ -36,39 +39,59 @@ class CountryMatchService
 
         $countries = [
             'tax_country_user' => $this->normalize($model->getAttribute('tax_country_user')),
-            'tax_country_ip' => $this->normalize($model->getAttribute('tax_country_ip')),
             'tax_country_payment' => $this->normalize($model->getAttribute('tax_country_payment')),
         ];
 
-        $present = array_filter($countries, fn ($c) => $c !== null);
-
-        if (count($present) < 2) {
-            // Not enough information to compare yet.
+        if ($countries['tax_country_payment'] === null) {
+            // Nothing to compare against yet (e.g. before first payment).
             return;
         }
 
-        $counts = array_count_values($present);
-        $maxAgreement = max($counts);
+        if ($countries['tax_country_user'] === null) {
+            $this->flag($billable, [
+                'tax_country_user' => '?',
+                'tax_country_payment' => $countries['tax_country_payment'],
+            ]);
 
-        // Less than 2 of 3 agree -> flag.
-        if ($maxAgreement < 2) {
+            return;
+        }
+
+        if ($countries['tax_country_user'] !== $countries['tax_country_payment']) {
             $this->flag($billable, $countries);
         }
     }
 
     /**
-     * @param  array{tax_country_user:?string,tax_country_ip:?string,tax_country_payment:?string}  $countries
+     * Flag a mismatch — idempotent: if a row with the same (user, payment)
+     * already exists for this billable in any non-final state, do nothing.
+     *
+     * @param  array{tax_country_user:?string,tax_country_payment:?string}  $countries
      */
-    public function flag(Billable $billable, array $countries): BillingCountryMismatch
+    public function flag(Billable $billable, array $countries): ?BillingCountryMismatch
     {
         /** @var Model $model */
         $model = $billable;
+
+        $query = BillingCountryMismatch::query()
+            ->where('billable_type', $model->getMorphClass())
+            ->where('billable_id', $model->getKey())
+            ->where('tax_country_user', $countries['tax_country_user'] ?? '');
+
+        $paymentCountry = $countries['tax_country_payment'] ?? null;
+        $paymentCountry === null
+            ? $query->whereNull('tax_country_payment')
+            : $query->where('tax_country_payment', $paymentCountry);
+
+        $existing = $query->first();
+
+        if ($existing !== null) {
+            return null;
+        }
 
         $mismatch = BillingCountryMismatch::create([
             'billable_type' => $model->getMorphClass(),
             'billable_id' => $model->getKey(),
             'tax_country_user' => $countries['tax_country_user'] ?? '',
-            'tax_country_ip' => $countries['tax_country_ip'] ?? null,
             'tax_country_payment' => $countries['tax_country_payment'] ?? null,
             'status' => CountryMismatchStatus::Pending,
         ]);

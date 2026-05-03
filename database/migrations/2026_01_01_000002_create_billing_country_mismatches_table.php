@@ -16,7 +16,6 @@ return new class extends Migration
             $this->morphIdColumn($table);
 
             $table->string('tax_country_user', 2);
-            $table->string('tax_country_ip', 2)->nullable();
             $table->string('tax_country_payment', 2)->nullable();
             $table->string('status'); // CountryMismatchStatus enum
             $table->timestamp('resolved_at')->nullable();

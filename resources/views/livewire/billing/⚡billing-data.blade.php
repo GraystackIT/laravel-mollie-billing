@@ -31,13 +31,13 @@ new class extends Component {
     public string $billing_street = '';
     public string $billing_postal_code = '';
     public string $billing_city = '';
-    public string $billing_country = 'AT';
+    public string $billing_country = '';
     public ?string $vat_number = null;
     public ?bool $vatNumberValid = null;
     public ?string $vatStatusMessage = null;
 
     /** Snapshot of the persisted country at mount time, used to detect dirty state. */
-    public string $persistedCountry = 'AT';
+    public string $persistedCountry = '';
 
     public function mount(VatCalculationService $vat): void
     {
@@ -48,18 +48,23 @@ new class extends Component {
             $this->awaitingMandateUpdate = true;
         }
 
+        $default = MollieBilling::ipGeolocation()->defaultCountryFor(request()->ip());
+
         if ($billable !== null) {
             $this->company_name = (string) $billable->getBillingName();
             $this->billing_street = (string) ($billable->getBillingStreet() ?? '');
             $this->billing_postal_code = (string) ($billable->getBillingPostalCode() ?? '');
             $this->billing_city = (string) ($billable->getBillingCity() ?? '');
-            $this->billing_country = $billable->getBillingCountry() ?: 'AT';
+            $this->billing_country = $billable->getBillingCountry() ?: $default;
             $this->persistedCountry = $this->billing_country;
             $this->vat_number = $billable->vat_number;
 
             if (filled($this->vat_number)) {
                 $this->validateVatNumberLive($vat);
             }
+        } else {
+            $this->billing_country = $default;
+            $this->persistedCountry = $default;
         }
     }
 
@@ -170,31 +175,26 @@ new class extends Component {
     }
 
     /**
-     * The current country mismatch between declared and IP-detected country, if any.
-     *
-     * @return array{declared: string, detected: string}|null
+     * The country derived from the customer's payment method, if it differs from
+     * the country currently selected in the form. Returns null when there is no
+     * recorded payment country (e.g. before the first payment) or when both match.
      */
-    public function countryMismatch(?Billable $billable): ?array
+    public function paymentCountryMismatch(?Billable $billable): ?string
     {
         if ($billable === null) {
             return null;
         }
 
-        $declared = $billable->tax_country_user;
-        $detected = $billable->tax_country_ip;
-
-        if (! $declared || ! $detected) {
+        $paymentCountry = strtoupper((string) ($billable->tax_country_payment ?? ''));
+        if ($paymentCountry === '') {
             return null;
         }
 
-        if (strtoupper((string) $declared) === strtoupper((string) $detected)) {
+        if ($paymentCountry === strtoupper($this->billing_country)) {
             return null;
         }
 
-        return [
-            'declared' => strtoupper((string) $declared),
-            'detected' => strtoupper((string) $detected),
-        ];
+        return $paymentCountry;
     }
 
     /**
@@ -359,7 +359,7 @@ new class extends Component {
     $billable = $this->resolveBillable();
     $mandate = $this->mandateInfo($billable);
     $isLocal = $billable && $billable->isLocalBillingSubscription();
-    $mismatch = $this->countryMismatch($billable);
+    $paymentCountryMismatch = $this->paymentCountryMismatch($billable);
     $countryDirty = strtoupper($persistedCountry) !== strtoupper($billing_country);
     $reverseCharge = $this->isReverseCharge();
 @endphp
@@ -400,18 +400,6 @@ new class extends Component {
             {{ __('billing::portal.no_billable') }}
         </flux:callout>
     @else
-        @if ($mismatch)
-            <flux:callout color="amber" icon="globe-alt">
-                <flux:callout.heading>{{ __('billing::portal.billing_data.mismatch_title') }}</flux:callout.heading>
-                <flux:callout.text>
-                    {{ __('billing::portal.billing_data.mismatch_body', [
-                        'declared' => $mismatch['declared'],
-                        'detected' => $mismatch['detected'],
-                    ]) }}
-                </flux:callout.text>
-            </flux:callout>
-        @endif
-
         {{-- Invoice address + VAT number --}}
         <flux:card>
             <div class="space-y-6">
@@ -447,17 +435,26 @@ new class extends Component {
                         <flux:label>{{ __('billing::checkout.vat_number') }}</flux:label>
                         <flux:input.group>
                             <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" />
-                            @if ($vatNumberValid === true)
-                                <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
-                                    <flux:icon.check-circle class="size-4" />
-                                </flux:input.group.suffix>
-                            @elseif ($vatNumberValid === false)
-                                <flux:input.group.suffix class="text-red-600 dark:text-red-400">
-                                    <flux:icon.x-circle class="size-4" />
-                                </flux:input.group.suffix>
-                            @endif
+
+                            <flux:input.group.suffix class="text-zinc-500 dark:text-zinc-400" wire:loading.flex wire:target="vat_number,billing_country">
+                                <flux:icon.loading class="size-4" />
+                            </flux:input.group.suffix>
+
+                            <div wire:loading.remove wire:target="vat_number,billing_country" class="contents">
+                                @if ($vatNumberValid === true)
+                                    <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
+                                        <flux:icon.check-circle class="size-4" />
+                                    </flux:input.group.suffix>
+                                @elseif ($vatNumberValid === false)
+                                    <flux:input.group.suffix class="text-red-600 dark:text-red-400">
+                                        <flux:icon.x-circle class="size-4" />
+                                    </flux:input.group.suffix>
+                                @endif
+                            </div>
                         </flux:input.group>
-                        <flux:error name="vat_number" />
+                        <div wire:loading.remove wire:target="vat_number,billing_country">
+                            <flux:error name="vat_number" />
+                        </div>
                         <flux:description>{{ __('billing::portal.billing_data.vat_number_help') }}</flux:description>
                     </flux:field>
 
@@ -465,6 +462,17 @@ new class extends Component {
                         <div class="sm:col-span-2">
                             <flux:callout color="amber" icon="information-circle" inline>
                                 {{ __('billing::portal.billing_data.country_dirty_inline') }}
+                            </flux:callout>
+                        </div>
+                    @endif
+
+                    @if ($paymentCountryMismatch)
+                        <div class="sm:col-span-2">
+                            <flux:callout color="amber" icon="credit-card" inline>
+                                {{ __('billing::portal.billing_data.payment_country_mismatch_inline', [
+                                    'declared' => strtoupper($billing_country),
+                                    'payment' => $paymentCountryMismatch,
+                                ]) }}
                             </flux:callout>
                         </div>
                     @endif
@@ -481,7 +489,7 @@ new class extends Component {
                     variant="primary"
                     icon="check"
                     wire:click="save"
-                    wire:target="save"
+                    wire:target="save,vat_number,billing_country"
                     wire:loading.attr="disabled"
                 >
                     {{ __('billing::portal.billing_data.save') }}

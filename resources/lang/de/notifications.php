@@ -42,7 +42,7 @@ return [
     ],
     'country_mismatch' => [
         'subject' => '[Admin] Länderabweichung für :customer markiert',
-        'body' => 'Die Länderprüfung ist für :customer fehlgeschlagen. Angegeben: :user, IP: :ip, Zahlung: :payment. Manuelle Prüfung erforderlich.',
+        'body' => 'Die Länderprüfung ist für :customer fehlgeschlagen. Angegeben: :user, Zahlung: :payment. Manuelle Prüfung erforderlich.',
     ],
     'refund_processed' => [
         'subject' => 'Deine Erstattung über :amount wurde verarbeitet',

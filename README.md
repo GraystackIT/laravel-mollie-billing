@@ -14,14 +14,14 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 
 - Mollie subscriptions, mandates and webhooks (built on Mollie's official Laravel SDK v4 with typed request objects)
 - VAT calculation, VIES validation and OSS export (`mpociot/vat-calculator`)
-- Country-mismatch reconciliation across declared / IP / payment country
+- Country-mismatch reconciliation: user-declared vs payment-derived country, audit-trail flagged at first and every recurring payment (see [docs/vat-handling.md](docs/vat-handling.md))
 - Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`), with case-insensitive usage-type lookups
 - Direct overage charging with retry and `past_due` state
 - Five coupon types — `FirstPayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
 - Access Grants for full-plan or addon-only complimentary access
 - Scheduled plan changes, prorata, end-of-period downgrades
 - Refunds and credit notes (full, overage units, wallet-only)
-- IP geolocation hook for tax-country detection
+- IP-based country pre-fill in the checkout/billing-data dropdown (UX only — never persisted)
 - Trial flow with Local-to-Mollie subscription conversion
 - Feature gating via `@planFeature` Blade directive and `billing.feature` middleware
 - Built-in first-checkout flow with configurable country list, VAT/VIES validation and coupon support

@@ -425,6 +425,17 @@ class MollieWebhookController extends Controller
         $addonCodes = $billable->getActiveBillingAddonCodes();
         $extraSeats = $billable->getExtraBillingSeats();
 
+        $newPaymentCountry = strtoupper((string) ($payment->countryCode ?? ''));
+        if ($newPaymentCountry !== '' && $newPaymentCountry !== strtoupper((string) ($billable->tax_country_payment ?? ''))) {
+            $billable->forceFill(['tax_country_payment' => $newPaymentCountry])->save();
+        }
+
+        try {
+            $this->countryMatchService->check($billable);
+        } catch (\Throwable $e) {
+            Log::warning('Country match check failed during recurring', ['error' => $e->getMessage()]);
+        }
+
         $seats = $this->catalog->includedSeats($planCode) + $extraSeats;
         $expectedNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
         $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $expectedNet, $billable->vat_number);

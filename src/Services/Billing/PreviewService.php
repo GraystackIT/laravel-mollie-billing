@@ -195,14 +195,23 @@ class PreviewService
             $prorataTotalDays = $days['total'];
         }
 
-        // VAT on recurring price
+        // VAT on recurring price.
+        // Display-only: trust that a stored vat_number means reverse-charge.
+        // The actual VIES check happens at checkout / billing-data save — by the
+        // time we render the plan-change preview, that decision is already made.
         $country = $billable->getBillingCountry() ?? 'DE';
         $vatNumber = $billable instanceof \Illuminate\Database\Eloquent\Model ? ($billable->vat_number ?? null) : null;
-        try {
-            $vat = $this->vatService->calculate($country, max(0, $newNet - $couponDiscountNet), $vatNumber);
-        } catch (\Throwable $e) {
-            $vat = ['net' => max(0, $newNet - $couponDiscountNet), 'vat' => 0, 'gross' => max(0, $newNet - $couponDiscountNet), 'rate' => 0.0];
-            $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
+        $netForRecurring = max(0, $newNet - $couponDiscountNet);
+
+        if (filled($vatNumber)) {
+            $vat = ['net' => $netForRecurring, 'vat' => 0, 'gross' => $netForRecurring, 'rate' => 0.0];
+        } else {
+            try {
+                $vat = $this->vatService->calculate($country, $netForRecurring, null);
+            } catch (\Throwable $e) {
+                $vat = ['net' => $netForRecurring, 'vat' => 0, 'gross' => $netForRecurring, 'rate' => 0.0];
+                $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
+            }
         }
 
         // VAT on prorata amount (due now). Always derived from the invoice that
@@ -348,6 +357,7 @@ class PreviewService
             'vatRate' => $vat['rate'],
             'vatAmount' => $vat['vat'],
             'grossTotal' => $vat['gross'],
+            'reverseCharge' => abs((float) $vat['rate']) < 0.001 && filled($vatNumber),
             'lineItems' => $lineItems,
             'warnings' => $warnings,
             'errors' => $errors,
