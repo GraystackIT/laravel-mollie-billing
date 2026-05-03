@@ -7,9 +7,11 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
+use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
@@ -48,6 +50,7 @@ class MollieSubscriptionPatcher
             interval: $intent->newInterval,
             addons: array_keys($intent->newAddons),
             extraSeats: max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan)),
+            intervalChanged: $intent->currentInterval !== $intent->newInterval,
         );
     }
 
@@ -72,6 +75,7 @@ class MollieSubscriptionPatcher
         string $interval,
         array $addons,
         int $extraSeats,
+        bool $intervalChanged = false,
     ): void {
         if (! ($billable instanceof Model)) {
             return;
@@ -96,7 +100,7 @@ class MollieSubscriptionPatcher
         $vat = $this->vatService->calculate(
             (string) ($billable->getBillingCountry() ?? ''),
             $amountNet,
-            $billable->vat_number ?? null,
+            $billable,
         );
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
@@ -111,10 +115,23 @@ class MollieSubscriptionPatcher
             'extra_seats' => $extraSeats,
         ];
 
+        $mollieInterval = $interval === 'yearly' ? '12 months' : '1 month';
+
+        // For interval changes we must reset the next-charge date too — otherwise
+        // Mollie would still fire on the old monthly cadence with the new (now
+        // yearly) amount. For amount-only changes (seats, addons) the cadence
+        // must stay untouched.
+        $startDate = $intervalChanged
+            ? new Date($interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth())
+            : null;
+
         Mollie::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             amount: new Money($currency, $value),
+            description: "{$planCode} subscription",
+            interval: $mollieInterval,
+            startDate: $startDate,
             metadata: $metadata,
         ));
     }

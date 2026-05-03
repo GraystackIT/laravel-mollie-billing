@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\ViesUnavailableException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\StartMandateCheckout;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
@@ -106,14 +107,24 @@ new class extends Component {
             'vat_number' => ['nullable', 'string', 'max:50'],
         ]);
 
+        // Re-validate against VIES whenever the user submits with a VAT number.
+        // This is a hard gate — if VIES says invalid or is unreachable, the save
+        // is aborted and the user is shown an actionable error. We never persist
+        // billing data with an unverified VAT number.
         if (filled($this->vat_number)) {
-            $this->validateVatNumberLive($vat);
-        }
+            try {
+                $this->validateVatNumberLive($vat);
+            } catch (\Throwable $e) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vies_unavailable'),
+                ]);
+            }
 
-        if ($this->vatNumberValid === false) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'vat_number' => __('billing::checkout.vat_correct_or_clear'),
-            ]);
+            if ($this->vatNumberValid !== true) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vat_correct_or_clear'),
+                ]);
+            }
         }
 
         $countryChanged = strtoupper((string) $billable->getBillingCountry()) !== strtoupper($this->billing_country);
@@ -128,6 +139,20 @@ new class extends Component {
             'vat_number' => $this->vat_number,
             'tax_country_user' => $this->billing_country,
         ])->save();
+
+        // Persist the audit-trail entry for this VAT validation when no current
+        // entry exists for the now-persisted VAT number. `currentVatValidation()`
+        // filters by the billable's current `vat_number`, so a number change
+        // (or initial set) automatically triggers a fresh persist.
+        if (filled($this->vat_number) && $billable->currentVatValidation() === null) {
+            try {
+                $vat->validateAndPersist($billable, (string) $this->vat_number);
+            } catch (ViesUnavailableException) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vies_unavailable'),
+                ]);
+            }
+        }
 
         $this->persistedCountry = $this->billing_country;
 

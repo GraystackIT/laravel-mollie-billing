@@ -38,7 +38,7 @@ return [
     // VAT validation
     'vat_invalid_format' => 'Ungültiges Format der USt-IdNr.',
     'vat_country_mismatch' => 'Das Länderkürzel der USt-IdNr. muss zum gewählten Land passen.',
-    'vies_unavailable' => 'VIES ist vorübergehend nicht verfügbar. Wir prüfen vor der ersten Rechnung erneut.',
+    'vies_unavailable' => 'VIES ist gerade nicht erreichbar. Bitte versuchen Sie es in ein paar Minuten erneut.',
     'vies_validation_failed' => 'Die USt-IdNr. konnte nicht über VIES verifiziert werden.',
     'vat_verified' => 'USt-IdNr. verifiziert — Reverse-Charge wird angewendet.',
     'vat_correct_or_clear' => 'Bitte korrigieren Sie die USt-IdNr. oder lassen Sie das Feld leer.',

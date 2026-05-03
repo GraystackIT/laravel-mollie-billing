@@ -38,7 +38,7 @@ return [
     // VAT validation
     'vat_invalid_format' => 'Invalid VAT number format.',
     'vat_country_mismatch' => 'VAT number prefix must match the selected country.',
-    'vies_unavailable' => 'VIES is temporarily unavailable. We will re-check before the first invoice.',
+    'vies_unavailable' => 'VIES is currently unreachable. Please try again in a few minutes.',
     'vies_validation_failed' => 'The VAT number could not be verified by VIES.',
     'vat_verified' => 'VAT number verified — reverse-charge applies.',
     'vat_correct_or_clear' => 'Please correct the VAT number or leave it blank.',

@@ -528,9 +528,8 @@ class ProrataComposer
     private function liveVat(Billable $billable, int $netAmount): array
     {
         $country = (string) ($billable->getBillingCountry() ?? 'DE');
-        $vatNumber = $billable instanceof \Illuminate\Database\Eloquent\Model ? ($billable->vat_number ?? null) : null;
 
-        $vat = $this->vatService->calculate($country, $netAmount, $vatNumber);
+        $vat = $this->vatService->calculate($country, $netAmount, $billable);
 
         return [
             'rate' => (float) $vat['rate'],

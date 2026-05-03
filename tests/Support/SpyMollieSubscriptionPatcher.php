@@ -54,20 +54,18 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
         string $interval,
         array $addons,
         int $extraSeats,
+        bool $intervalChanged = false,
     ): void {
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
-        self::$calls[] = ['update', $customerId, $subscriptionId, [
+        $payload = [
             'plan_code' => $planCode,
             'interval' => $interval,
             'addons' => $addons,
             'extra_seats' => $extraSeats,
-        ]];
-        SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, [
-            'plan_code' => $planCode,
-            'interval' => $interval,
-            'addons' => $addons,
-            'extra_seats' => $extraSeats,
-        ]];
+            'interval_changed' => $intervalChanged,
+        ];
+        self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
+        SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];
     }
 }

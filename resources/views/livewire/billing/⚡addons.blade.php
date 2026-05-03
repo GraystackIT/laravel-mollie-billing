@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use Livewire\Component;
 
 new class extends Component {
@@ -78,13 +79,31 @@ new class extends Component {
         $currency = config('mollie-billing.currency', 'EUR');
         $currencySymbol = $currency === 'EUR' ? '€' : $currency;
 
+        $reverseCharge = $billable !== null
+            && method_exists($billable, 'usesReverseCharge')
+            && $billable->usesReverseCharge();
+        $vatService = app(VatCalculationService::class);
+        $country = (string) ($billable?->getBillingCountry() ?? 'AT');
+
         $addons = [];
         foreach ($catalog->allAddons() as $code) {
             $allowed = $planCode ? $catalog->planAllowsAddon($planCode, $code) : false;
+            $netPrice = $catalog->addonPriceNet($code, $interval);
+
+            // Display gross to B2C, net to B2B with valid reverse-charge.
+            $displayPrice = $netPrice;
+            if ($netPrice > 0 && ! $reverseCharge && $billable !== null) {
+                try {
+                    $displayPrice = (int) $vatService->calculate($country, $netPrice, $billable)['gross'];
+                } catch (\Throwable) {
+                    // fall back to net
+                }
+            }
+
             $addons[] = [
                 'code' => $code,
                 'name' => $catalog->addonName($code) ?? $code,
-                'price' => $catalog->addonPriceNet($code, $interval),
+                'price' => $displayPrice,
                 'features' => $catalog->addonFeatures($code),
                 'isActive' => in_array($code, $activeAddons, true),
                 'isAllowed' => $allowed,
@@ -98,6 +117,7 @@ new class extends Component {
             'currencySymbol' => $currencySymbol,
             'catalog' => $catalog,
             'hasPendingPlanChange' => $billable?->hasPendingBillingPlanChange() ?? false,
+            'reverseCharge' => $reverseCharge,
         ];
     }
 };
@@ -177,7 +197,7 @@ new class extends Component {
                                     <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($addon['price'] / 100, 2) }}</span>
                                     <span class="text-sm text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }}</span>
                                 </div>
-                                <flux:text class="text-xs text-zinc-400">{{ __('billing::portal.prices_excl_vat') }}</flux:text>
+                                <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                             </div>
 
                             @php

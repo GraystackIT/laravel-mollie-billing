@@ -194,6 +194,7 @@ return [
     'seats_not_available' => 'Seat management is not available for your plan.',
     'seats_warning_below_used' => 'You currently have :used seats in use. Reducing below this number may restrict access for some members.',
     'prices_excl_vat' => 'Prices excl. VAT.',
+    'prices_incl_vat' => 'Prices incl. VAT.',
     'seats_flash' => [
         'synced' => 'Seats updated.',
     ],

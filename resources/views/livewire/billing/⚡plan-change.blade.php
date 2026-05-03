@@ -296,7 +296,7 @@ new class extends Component {
         }
     }
 
-    public function saveBillingDetails(MollieCustomerResolver $customerResolver, PreviewService $previewService): void
+    public function saveBillingDetails(MollieCustomerResolver $customerResolver, PreviewService $previewService, VatCalculationService $vat): void
     {
         $billable = $this->resolveBillable();
         if (! $billable || ! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
@@ -314,11 +314,23 @@ new class extends Component {
             'vat_number' => ['nullable', 'string', 'max:50'],
         ]);
 
-        if ($this->vatNumberValid === false) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'vat_number' => __('billing::checkout.vat_correct_or_clear'),
-            ]);
+        if (filled($this->vat_number)) {
+            try {
+                $this->validateVatNumberLive($vat);
+            } catch (\Throwable) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vies_unavailable'),
+                ]);
+            }
+
+            if ($this->vatNumberValid !== true) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vat_correct_or_clear'),
+                ]);
+            }
         }
+
+        $newVatNumber = $this->vat_number ?: null;
 
         $billable->forceFill([
             'name' => $this->company_name,
@@ -326,8 +338,22 @@ new class extends Component {
             'billing_postal_code' => $this->billing_postal_code,
             'billing_city' => $this->billing_city,
             'billing_country' => $this->billing_country,
-            'vat_number' => $this->vat_number ?: null,
+            'vat_number' => $newVatNumber,
         ])->save();
+
+        // Persist a fresh audit entry when no current validation exists for the
+        // now-persisted VAT number. `currentVatValidation()` filters by the
+        // billable's current `vat_number`, so a number change automatically
+        // triggers a new persist; reaffirming the same number is a no-op.
+        if (filled($newVatNumber) && $billable->currentVatValidation() === null) {
+            try {
+                $vat->validateAndPersist($billable, (string) $newVatNumber);
+            } catch (\GraystackIT\MollieBilling\Exceptions\ViesUnavailableException) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vies_unavailable'),
+                ]);
+            }
+        }
 
         try {
             $customerResolver->sync($billable);
@@ -388,6 +414,11 @@ new class extends Component {
             $this->wasPending = $pendingPlanChange !== null;
         }
 
+        $reverseCharge = $billable !== null
+            && method_exists($billable, 'usesReverseCharge')
+            && $billable->usesReverseCharge();
+        $displayCountry = (string) ($billable?->getBillingCountry() ?? 'AT');
+
         return [
             'billable' => $billable,
             'plans' => app(SubscriptionCatalogInterface::class)->allPlans(),
@@ -395,6 +426,8 @@ new class extends Component {
             'scheduledChange' => $scheduledChange,
             'pendingPlanChange' => $pendingPlanChange,
             'planChangeFailed' => $planChangeFailed,
+            'reverseCharge' => $reverseCharge,
+            'displayCountry' => $displayCountry,
         ];
     }
 };
@@ -539,11 +572,22 @@ new class extends Component {
                 $isCurrent = $currentPlanCode === $code && $currentInterval === $selectedInterval;
                 $isScheduledTarget = $hasScheduled && $scheduledPlanCode === $code && $scheduledInterval === $selectedInterval;
                 $isSelected = $selectedPlan === $code;
-                $price = $catalog->basePriceNet($code, $selectedInterval);
+                $netPrice = $catalog->basePriceNet($code, $selectedInterval);
                 $features = $catalog->planFeatures($code);
                 $seats = $catalog->includedSeats($code);
                 $savings = $selectedInterval === 'yearly' ? $catalog->yearlySavingsPercent($code) : 0;
-                $isFree = $price === 0;
+                $isFree = $netPrice === 0;
+
+                // Display gross to B2C, net to B2B with valid reverse-charge.
+                $price = $netPrice;
+                if (! $reverseCharge && ! $isFree) {
+                    try {
+                        $price = (int) app(GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class)
+                            ->calculate($displayCountry, $netPrice, $billable)['gross'];
+                    } catch (\Throwable) {
+                        // Country not in EU/no override -> fall back to net.
+                    }
+                }
             @endphp
 
             <flux:card
@@ -583,7 +627,7 @@ new class extends Component {
                             <flux:badge size="sm" color="lime" icon="arrow-trending-down" class="mt-2 mb-2">{{ __('billing::portal.save_yearly', ['percent' => round($savings)]) }}</flux:badge>
                         @endif
                         @unless ($isFree)
-                            <flux:text class="text-xs text-zinc-400">{{ __('billing::portal.prices_excl_vat') }}</flux:text>
+                            <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                         @endunless
                     </div>
 

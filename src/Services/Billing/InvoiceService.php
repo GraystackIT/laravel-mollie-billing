@@ -74,7 +74,7 @@ class InvoiceService
         }
 
         $country = (string) ($billable->getBillingCountry() ?? '');
-        $vat = $this->vat->calculate($country, $summedNet, $billable->vat_number ?? null);
+        $vat = $this->vat->calculate($country, $summedNet, $billable);
 
         $invoice = new BillingInvoice();
         $invoice->billable_type = $billable->getMorphClass();
@@ -125,6 +125,7 @@ class InvoiceService
         }, $lineItems);
         $invoice->payment_method_details = self::extractPaymentMethodDetails($payment);
         $invoice->refunded_net = 0;
+        $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $invoice->save();
 
         $this->generateAndStorePdf($invoice, $billable);
@@ -196,6 +197,9 @@ class InvoiceService
         $creditNote->payment_method_details = $original->payment_method_details;
         $creditNote->refund_reason_text = $description;
         $creditNote->refunded_net = 0;
+        // Credit notes anchor on the same VAT validation as the original invoice —
+        // they are a correction of that specific tax event, not a fresh decision.
+        $creditNote->vat_validation_id = $original->vat_validation_id;
         $creditNote->save();
 
         /** @var Billable $billable */
@@ -309,6 +313,20 @@ class InvoiceService
             ? (string) $invoice->refund_reason_text
             : null;
 
+        // Force the tax column on the PDF whenever at least one line has a
+        // non-zero VAT rate. The library's default heuristic only shows it when
+        // totalTaxAmount() > 0, which fails for credit notes (negative totals)
+        // even though the lines themselves carry tax rates and need to be
+        // shown for tax-compliance reasons.
+        $hasAnyTaxedLine = false;
+        foreach ((array) $invoice->line_items as $line) {
+            if (((float) ($line['vat_rate'] ?? 0)) > 0) {
+                $hasAnyTaxedLine = true;
+                break;
+            }
+        }
+        $taxLabel = $hasAnyTaxedLine ? 'invoices::invoice.tax_label' : null;
+
         return new PdfInvoice(
             type: $isCredit ? __('billing::portal.credit_note_type') : __('billing::portal.invoice_type'),
             state: $this->mapInvoiceState($invoice->status),
@@ -318,6 +336,7 @@ class InvoiceService
             buyer: $buyer,
             items: $items,
             description: $description,
+            tax_label: $taxLabel,
             paymentInstructions: $paymentInstruction !== null ? [$paymentInstruction] : [],
             logo: $logo,
         );
@@ -619,6 +638,7 @@ class InvoiceService
         $invoice->period_start = $periodStart;
         $invoice->period_end = $periodEnd;
         $invoice->refunded_net = 0;
+        $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $invoice->save();
 
         $this->generateAndStorePdf($invoice, $billable);
@@ -719,13 +739,42 @@ class InvoiceService
                 continue;
             }
 
-            // Idempotenz-Check: gibt es schon eine Refund-Line für (parent_invoice_id, parent_line_item_index, amount_net)?
-            if ($this->refundLineExists($billable, $original->getKey(), $line->originalLineItemIndex, $line->amountNet)) {
-                continue; // schon refundiert — überspringen
-            }
+            // No (parent_invoice_id, idx, amount_net)-style idempotency check here:
+            // the same triple can legitimately recur when a user reduces seats,
+            // re-adds them, then reduces again — each event is a distinct refund.
+            // BillingInvoice::currentPeriodLines() already filters by remaining
+            // quantity, so the composer never produces a refund line that exceeds
+            // what's still on the original invoice.
 
             $absGross = abs($line->amountGross);
-            $value = number_format($absGross / 100, 2, '.', '');
+
+            // Mollie only knows the original payment's gross charge — it has
+            // no concept of our local net/VAT split. The refund amount must
+            // therefore never exceed what Mollie actually collected, minus
+            // anything already refunded on that payment. If our local gross
+            // drifts above Mollie's charge (e.g. due to a VAT-classification
+            // change between original payment and refund), clamp and warn so
+            // the drift is investigable.
+            $restRefundable = max(0, (int) $original->amount_gross - (int) $original->refunded_net);
+            $refundAmount = min($absGross, $restRefundable);
+
+            if ($refundAmount < $absGross) {
+                Log::warning('Refund amount clamped below local gross', [
+                    'billable' => $billable->getKey(),
+                    'original_invoice_id' => $original->getKey(),
+                    'mollie_payment_id' => $original->mollie_payment_id,
+                    'local_gross' => $absGross,
+                    'rest_refundable' => $restRefundable,
+                    'refund_sent' => $refundAmount,
+                ]);
+            }
+
+            if ($refundAmount <= 0) {
+                $failedLines[] = ['line' => $line->toArray(), 'error' => 'Nothing left to refund on the original payment', 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+                continue;
+            }
+
+            $value = number_format($refundAmount / 100, 2, '.', '');
 
             try {
                 $refund = Mollie::send(new CreatePaymentRefundRequest(
@@ -785,6 +834,7 @@ class InvoiceService
         $invoice->line_items = $lineItemsForPersist;
         $invoice->refund_reason_text = $description;
         $invoice->refunded_net = 0;
+        $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $invoice->save();
 
         $this->generateAndStorePdf($invoice, $billable);
@@ -835,6 +885,7 @@ class InvoiceService
         $invoice->amount_gross = $sumGross;
         $invoice->line_items = $lineItemsForPersist;
         $invoice->refunded_net = 0;
+        $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $invoice->save();
 
         $this->generateAndStorePdf($invoice, $billable);
@@ -843,33 +894,4 @@ class InvoiceService
         return $invoice;
     }
 
-    /**
-     * Idempotenz-Check für Refund-Lines.
-     */
-    private function refundLineExists(Billable $billable, int|string $parentInvoiceId, ?int $parentLineItemIndex, int $amountNet): bool
-    {
-        if ($parentLineItemIndex === null) {
-            return false;
-        }
-
-        $candidates = BillingInvoice::query()
-            ->where('billable_type', $billable->getMorphClass())
-            ->where('billable_id', $billable->getKey())
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get();
-
-        foreach ($candidates as $invoice) {
-            foreach ((array) ($invoice->line_items ?? []) as $line) {
-                if (
-                    (string) ($line['parent_invoice_id'] ?? '') === (string) $parentInvoiceId
-                    && ($line['parent_line_item_index'] ?? null) === $parentLineItemIndex
-                    && ((int) ($line['amount_net'] ?? 0)) === $amountNet
-                ) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
 }
