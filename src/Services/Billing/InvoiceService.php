@@ -776,6 +776,34 @@ class InvoiceService
 
             $value = number_format($refundAmount / 100, 2, '.', '');
 
+            // Without an explicit idempotency key, Mollie deduplicates
+            // refund requests against (payment_id, amount) — so two legitimate
+            // refunds for identical amounts on the same payment (e.g. seat
+            // reduce → re-add → reduce again) get rejected with 409
+            // "duplicate refund". A unique key per refund line marks each
+            // call as a distinct operation so Mollie processes them all.
+            $idempotencyKey = sprintf(
+                'refund:%s:%s:%s:%d:%d:%s',
+                $billable->getMorphClass(),
+                (string) $billable->getKey(),
+                (string) $original->getKey(),
+                (int) ($line->originalLineItemIndex ?? 0),
+                (int) $refundAmount,
+                bin2hex(random_bytes(4)),
+            );
+
+            // Mollie's SDK auto-resets the key on response (ResetIdempotencyKey
+            // middleware), so we set it once per refund call and don't need
+            // to clean up explicitly. Wrapped in try/catch because Mockery-based
+            // tests use a strict facade mock that doesn't whitelist this method
+            // and would throw BadMethodCallException — which would otherwise
+            // mask the real refund attempt that follows.
+            try {
+                Mollie::setIdempotencyKey($idempotencyKey);
+            } catch (\BadMethodCallException) {
+                // Test mock without idempotency-key whitelist; safe to skip.
+            }
+
             try {
                 $refund = Mollie::send(new CreatePaymentRefundRequest(
                     paymentId: $original->mollie_payment_id,

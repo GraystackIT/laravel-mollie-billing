@@ -332,27 +332,33 @@ new class extends Component {
 
         $newVatNumber = $this->vat_number ?: null;
 
-        $billable->forceFill([
-            'name' => $this->company_name,
-            'billing_street' => $this->billing_street,
-            'billing_postal_code' => $this->billing_postal_code,
-            'billing_city' => $this->billing_city,
-            'billing_country' => $this->billing_country,
-            'vat_number' => $newVatNumber,
-        ])->save();
+        // Atomic: persisting the billable with a vat_number and recording the
+        // matching BillingVatValidation must succeed or fail together. Otherwise
+        // a VIES outage between save and validateAndPersist would leave the
+        // billable with a vat_number but no audit row — currentVatValidation()
+        // returns null and reverse-charge silently stops applying.
+        try {
+            \Illuminate\Support\Facades\DB::transaction(function () use ($billable, $newVatNumber, $vat): void {
+                $billable->forceFill([
+                    'name' => $this->company_name,
+                    'billing_street' => $this->billing_street,
+                    'billing_postal_code' => $this->billing_postal_code,
+                    'billing_city' => $this->billing_city,
+                    'billing_country' => $this->billing_country,
+                    'vat_number' => $newVatNumber,
+                ])->save();
 
-        // Persist a fresh audit entry when no current validation exists for the
-        // now-persisted VAT number. `currentVatValidation()` filters by the
-        // billable's current `vat_number`, so a number change automatically
-        // triggers a new persist; reaffirming the same number is a no-op.
-        if (filled($newVatNumber) && $billable->currentVatValidation() === null) {
-            try {
-                $vat->validateAndPersist($billable, (string) $newVatNumber);
-            } catch (\GraystackIT\MollieBilling\Exceptions\ViesUnavailableException) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
-                    'vat_number' => __('billing::checkout.vies_unavailable'),
-                ]);
-            }
+                // `currentVatValidation()` filters by the billable's current
+                // `vat_number`, so a number change automatically triggers a new
+                // persist; reaffirming the same number is a no-op.
+                if (filled($newVatNumber) && $billable->currentVatValidation() === null) {
+                    $vat->validateAndPersist($billable, (string) $newVatNumber);
+                }
+            });
+        } catch (\GraystackIT\MollieBilling\Exceptions\ViesUnavailableException) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'vat_number' => __('billing::checkout.vies_unavailable'),
+            ]);
         }
 
         try {
@@ -1036,28 +1042,28 @@ new class extends Component {
                                             && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'refund')) > 0;
                                     @endphp
 
-                                    <div class="space-y-3">
+                                    <div class="space-y-4">
                                         {{-- Plan-Sektion --}}
                                         @if (! empty($linesByCategory['plan']))
-                                            <div class="space-y-1">
+                                            <div class="space-y-2">
                                                 @foreach ($linesByCategory['plan'] as $line)
-                                                    <div class="flex items-center justify-between text-sm">
-                                                        <span class="text-zinc-600 dark:text-zinc-300">
-                                                            {{ $line['label'] }}
-                                                            <span class="text-xs text-zinc-400">
+                                                    <div class="flex items-baseline justify-between gap-3 text-sm">
+                                                        <div class="min-w-0 flex-1">
+                                                            <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ $line['label'] }}</div>
+                                                            <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
                                                                 @if ($line['is_coupon_covered'])
-                                                                    — {{ __('billing::portal.prorata_via_coupon_no_refund') }}
+                                                                    {{ __('billing::portal.prorata_via_coupon_no_refund') }}
                                                                 @elseif ($line['vat_rate'] == 0)
-                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                    {{ __('billing::portal.prorata_reverse_charge') }}
                                                                 @else
-                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }})
+                                                                    {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }}
                                                                 @endif
                                                                 @if (($line['days_remaining'] ?? 0) > 0)
-                                                                    · {{ __('billing::portal.prorata_plan_remaining_days', ['days' => $line['days_remaining']]) }}
+                                                                    <span class="text-zinc-300 dark:text-zinc-600">·</span> {{ __('billing::portal.prorata_plan_remaining_days', ['days' => $line['days_remaining']]) }}
                                                                 @endif
-                                                            </span>
-                                                        </span>
-                                                        <span class="tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
+                                                            </div>
+                                                        </div>
+                                                        <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
                                                             {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
                                                         </span>
                                                     </div>
@@ -1067,23 +1073,23 @@ new class extends Component {
 
                                         {{-- Sitze-Sektion --}}
                                         @if (! empty($linesByCategory['seats']))
-                                            <div class="space-y-1">
-                                                <div class="text-xs uppercase tracking-wide text-zinc-400">{{ __('billing::portal.prorata_seats_group') }}</div>
+                                            <div class="space-y-2">
+                                                <div class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-zinc-400">{{ __('billing::portal.prorata_seats_group') }}</div>
                                                 @foreach ($linesByCategory['seats'] as $line)
-                                                    <div class="flex items-center justify-between text-sm">
-                                                        <span class="text-zinc-600 dark:text-zinc-300">
-                                                            {{ $line['label'] }}
-                                                            <span class="text-xs text-zinc-400">
+                                                    <div class="flex items-baseline justify-between gap-3 text-sm">
+                                                        <div class="min-w-0 flex-1">
+                                                            <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ $line['label'] }}</div>
+                                                            <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
                                                                 @if ($line['is_coupon_covered'])
-                                                                    — {{ __('billing::portal.prorata_via_coupon_no_refund') }}
+                                                                    {{ __('billing::portal.prorata_via_coupon_no_refund') }}
                                                                 @elseif ($line['vat_rate'] == 0)
-                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                    {{ __('billing::portal.prorata_reverse_charge') }}
                                                                 @else
-                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }})
+                                                                    {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }}
                                                                 @endif
-                                                            </span>
-                                                        </span>
-                                                        <span class="tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
+                                                            </div>
+                                                        </div>
+                                                        <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
                                                             {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
                                                         </span>
                                                     </div>
@@ -1093,23 +1099,23 @@ new class extends Component {
 
                                         {{-- Addons-Sektion --}}
                                         @if (! empty($linesByCategory['addon']))
-                                            <div class="space-y-1">
-                                                <div class="text-xs uppercase tracking-wide text-zinc-400">{{ __('billing::portal.prorata_addons_group') }}</div>
+                                            <div class="space-y-2">
+                                                <div class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-zinc-400">{{ __('billing::portal.prorata_addons_group') }}</div>
                                                 @foreach ($linesByCategory['addon'] as $line)
-                                                    <div class="flex items-center justify-between text-sm">
-                                                        <span class="text-zinc-600 dark:text-zinc-300 pl-2">
-                                                            {{ $line['label'] }}
-                                                            <span class="text-xs text-zinc-400">
+                                                    <div class="flex items-baseline justify-between gap-3 text-sm">
+                                                        <div class="min-w-0 flex-1">
+                                                            <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ $line['label'] }}</div>
+                                                            <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
                                                                 @if ($line['is_coupon_covered'])
-                                                                    — {{ __('billing::portal.prorata_via_coupon_no_refund') }}
+                                                                    {{ __('billing::portal.prorata_via_coupon_no_refund') }}
                                                                 @elseif ($line['vat_rate'] == 0)
-                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                    {{ __('billing::portal.prorata_reverse_charge') }}
                                                                 @else
-                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }})
+                                                                    {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }}
                                                                 @endif
-                                                            </span>
-                                                        </span>
-                                                        <span class="tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
+                                                            </div>
+                                                        </div>
+                                                        <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
                                                             {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
                                                         </span>
                                                     </div>
@@ -1119,22 +1125,23 @@ new class extends Component {
 
                                         {{-- Mehrverbrauch-Sektion (separater Mollie-Charge, hier nur zur Transparenz) --}}
                                         @if (! empty($overageLines))
-                                            <div class="space-y-1">
-                                                <div class="text-xs uppercase tracking-wide text-zinc-400">{{ __('billing::portal.prorata_overage_group') }}</div>
+                                            <div class="space-y-2">
+                                                <div class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-zinc-400">{{ __('billing::portal.prorata_overage_group') }}</div>
                                                 @foreach ($overageLines as $oline)
-                                                    <div class="flex items-center justify-between text-sm">
-                                                        <span class="text-zinc-600 dark:text-zinc-300 pl-2">
-                                                            {{ __('billing::portal.invoice_line_overage', ['type' => $oline['type']]) }}
-                                                            <span class="text-xs text-zinc-400">
-                                                                · {{ $oline['units'] }}× {{ $currencySymbol }}{{ number_format($oline['unit_price_net'] / 100, 2) }}
+                                                    <div class="flex items-baseline justify-between gap-3 text-sm">
+                                                        <div class="min-w-0 flex-1">
+                                                            <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ __('billing::portal.invoice_line_overage', ['type' => $oline['type']]) }}</div>
+                                                            <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
+                                                                {{ $oline['units'] }}× {{ $currencySymbol }}{{ number_format($oline['unit_price_net'] / 100, 2) }}
+                                                                <span class="text-zinc-300 dark:text-zinc-600">·</span>
                                                                 @if ($overageVatRate == 0)
-                                                                    ({{ __('billing::portal.prorata_reverse_charge') }})
+                                                                    {{ __('billing::portal.prorata_reverse_charge') }}
                                                                 @else
-                                                                    ({{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format($overageVatRate, 0)]) }})
+                                                                    {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format($overageVatRate, 0)]) }}
                                                                 @endif
-                                                            </span>
-                                                        </span>
-                                                        <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">
+                                                            </div>
+                                                        </div>
+                                                        <span class="shrink-0 tabular-nums font-medium text-zinc-700 dark:text-zinc-200">
                                                             +{{ $currencySymbol }}{{ number_format($oline['gross'] / 100, 2) }}
                                                         </span>
                                                     </div>
@@ -1142,20 +1149,21 @@ new class extends Component {
                                             </div>
                                         @endif
 
-                                        <flux:separator class="my-2!" />
-
-                                        <div class="flex items-center justify-between">
-                                            <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.prorata_total') }}</span>
-                                            <span class="text-2xl font-bold tabular-nums {{ $totalGross < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">
-                                                {{ $totalGross < 0 ? '−' : ($totalGross > 0 ? '+' : '') }}{{ $currencySymbol }}{{ number_format(abs($totalGross) / 100, 2) }}
-                                            </span>
-                                        </div>
-
-                                        @if ($isSidegrade)
-                                            <div class="text-xs text-zinc-500 dark:text-zinc-400 italic">
-                                                {{ __('billing::portal.prorata_sidegrade_no_charge') }}
+                                        {{-- Total --}}
+                                        <div class="mt-1 border-t border-zinc-200/70 pt-3 dark:border-zinc-700/60">
+                                            <div class="flex items-baseline justify-between gap-3">
+                                                <span class="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.prorata_total') }}</span>
+                                                <span class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">
+                                                    {{ $totalGross < 0 ? '−' : ($totalGross > 0 ? '+' : '') }}{{ $currencySymbol }}{{ number_format(abs($totalGross) / 100, 2) }}
+                                                </span>
                                             </div>
-                                        @endif
+
+                                            @if ($isSidegrade)
+                                                <div class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
+                                                    {{ __('billing::portal.prorata_sidegrade_no_charge') }}
+                                                </div>
+                                            @endif
+                                        </div>
                                     </div>
                                 @else
                                 @php

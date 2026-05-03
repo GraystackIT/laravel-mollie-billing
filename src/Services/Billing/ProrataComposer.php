@@ -56,9 +56,33 @@ class ProrataComposer
         $intervalChanged = $intent->currentInterval !== $intent->newInterval;
 
         if ($planChanged || $intervalChanged) {
+            // Plan or interval change → close out the entire current period
+            // (plan + currently-active extra seats + currently-active addons
+            // get a pro-rata refund) and open a fresh window with the new
+            // plan's catalog prices. This avoids "old seats survive plan
+            // change at old price/VAT" drift.
+            //
+            // Quantity is bounded by the currently-active state (seat_count
+            // and currentAddons), NOT by the sum of remaining_quantity across
+            // historical invoices — those can include stale leftovers from
+            // mid-cycle adjustments that no longer reflect what the user
+            // actually has access to today.
             $refundLine = $this->planRefundLine($intent, $periodStart, $periodEnd);
             if ($refundLine !== null) {
                 $refunds[] = $refundLine;
+            }
+
+            $currentExtraSeats = max(0, $intent->currentSeats - $this->catalog->includedSeats($intent->currentPlan));
+            if ($currentExtraSeats > 0) {
+                $refunds = array_merge($refunds, $this->seatsRefundLines($billable, $currentExtraSeats));
+            }
+
+            foreach ($intent->currentAddons as $code => $qty) {
+                $qty = (int) $qty;
+                if ($qty <= 0) {
+                    continue;
+                }
+                $refunds = array_merge($refunds, $this->addonRefundLines($billable, (string) $code, $qty));
             }
 
             if (! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
@@ -66,16 +90,38 @@ class ProrataComposer
                 if ($chargeLine !== null) {
                     $charges[] = $chargeLine;
                 }
+
+                $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
+                if ($newExtraSeats > 0) {
+                    $chargeLine = $this->seatsChargeLine($intent, $newExtraSeats, $periodStart, $periodEnd);
+                    if ($chargeLine !== null) {
+                        $charges[] = $chargeLine;
+                    }
+                }
+
+                foreach ($intent->newAddons as $code => $qty) {
+                    $qty = (int) $qty;
+                    if ($qty <= 0) {
+                        continue;
+                    }
+                    $chargeLine = $this->addonChargeLine($intent, (string) $code, $qty, $periodStart, $periodEnd);
+                    if ($chargeLine !== null) {
+                        $charges[] = $chargeLine;
+                    }
+                }
             }
+
+            return array_merge($charges, $refunds);
         }
+
+        // Mid-cycle change (same plan, same interval) — only diff what's actually
+        // different. Existing seats and addons stay at the price they were bought.
 
         // Sitz-Änderung — wir betrachten nur EXTRA-Sitze (über includedSeats hinaus).
         // Inkludierte Sitze sind im Plan-Preis enthalten und werden bereits über die
         // Plan-Refund/Charge-Line abgerechnet — sie dürfen nicht doppelt erscheinen.
         $currentExtraSeats = max(0, $intent->currentSeats - $this->catalog->includedSeats($intent->currentPlan));
-        $newExtraSeats = $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)
-            ? 0
-            : max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
+        $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
         $seatDiff = $newExtraSeats - $currentExtraSeats;
 
         if ($seatDiff < 0) {
@@ -94,9 +140,7 @@ class ProrataComposer
 
         foreach ($allCodes as $code) {
             $currentQty = (int) ($currentAddons[$code] ?? 0);
-            $newQty = $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)
-                ? 0
-                : (int) ($newAddons[$code] ?? 0);
+            $newQty = (int) ($newAddons[$code] ?? 0);
             $diff = $newQty - $currentQty;
 
             if ($diff < 0) {
@@ -111,6 +155,7 @@ class ProrataComposer
 
         return array_merge($charges, $refunds);
     }
+
 
     private function planRefundLine(PlanChangeIntent $intent, CarbonInterface $periodStart, CarbonInterface $periodEnd): ?ProrataLine
     {

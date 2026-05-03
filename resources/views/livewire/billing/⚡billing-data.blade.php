@@ -129,29 +129,35 @@ new class extends Component {
 
         $countryChanged = strtoupper((string) $billable->getBillingCountry()) !== strtoupper($this->billing_country);
 
-        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
-        $billable->forceFill([
-            'name' => $this->company_name,
-            'billing_street' => $this->billing_street,
-            'billing_postal_code' => $this->billing_postal_code,
-            'billing_city' => $this->billing_city,
-            'billing_country' => $this->billing_country,
-            'vat_number' => $this->vat_number,
-            'tax_country_user' => $this->billing_country,
-        ])->save();
+        // Atomic: persisting the billable with a vat_number and recording the
+        // matching BillingVatValidation must succeed or fail together. Otherwise
+        // a VIES outage between save and validateAndPersist would leave the
+        // billable with a vat_number but no audit row — currentVatValidation()
+        // returns null and reverse-charge silently stops applying.
+        try {
+            \Illuminate\Support\Facades\DB::transaction(function () use ($billable, $vat): void {
+                /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+                $billable->forceFill([
+                    'name' => $this->company_name,
+                    'billing_street' => $this->billing_street,
+                    'billing_postal_code' => $this->billing_postal_code,
+                    'billing_city' => $this->billing_city,
+                    'billing_country' => $this->billing_country,
+                    'vat_number' => $this->vat_number,
+                    'tax_country_user' => $this->billing_country,
+                ])->save();
 
-        // Persist the audit-trail entry for this VAT validation when no current
-        // entry exists for the now-persisted VAT number. `currentVatValidation()`
-        // filters by the billable's current `vat_number`, so a number change
-        // (or initial set) automatically triggers a fresh persist.
-        if (filled($this->vat_number) && $billable->currentVatValidation() === null) {
-            try {
-                $vat->validateAndPersist($billable, (string) $this->vat_number);
-            } catch (ViesUnavailableException) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
-                    'vat_number' => __('billing::checkout.vies_unavailable'),
-                ]);
-            }
+                // `currentVatValidation()` filters by the billable's current
+                // `vat_number`, so a number change (or initial set) automatically
+                // triggers a fresh persist.
+                if (filled($this->vat_number) && $billable->currentVatValidation() === null) {
+                    $vat->validateAndPersist($billable, (string) $this->vat_number);
+                }
+            });
+        } catch (ViesUnavailableException) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'vat_number' => __('billing::checkout.vies_unavailable'),
+            ]);
         }
 
         $this->persistedCountry = $this->billing_country;
