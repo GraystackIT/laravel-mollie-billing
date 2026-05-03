@@ -6,6 +6,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
@@ -52,13 +53,31 @@ new class extends Component {
         $availableCodes = $billable?->availableBillingProducts() ?? [];
         $boughtCodes = $billable?->boughtBillingProducts() ?? [];
 
-        $buildProduct = function (string $code) use ($catalog): array {
+        $reverseCharge = $billable !== null
+            && method_exists($billable, 'usesReverseCharge')
+            && $billable->usesReverseCharge();
+        $vatService = app(VatCalculationService::class);
+        $country = (string) ($billable?->getBillingCountry() ?? 'AT');
+
+        $buildProduct = function (string $code) use ($catalog, $reverseCharge, $vatService, $country, $billable): array {
+            $netPrice = $catalog->productPriceNet($code);
+
+            // Display gross to B2C, net to B2B with valid reverse-charge.
+            $displayPrice = $netPrice;
+            if ($netPrice > 0 && ! $reverseCharge && $billable !== null) {
+                try {
+                    $displayPrice = (int) $vatService->calculate($country, $netPrice, $billable)['gross'];
+                } catch (\Throwable) {
+                    // fall back to net
+                }
+            }
+
             return [
                 'code' => $code,
                 'name' => $catalog->productName($code) ?? $code,
                 'description' => $catalog->productDescription($code),
                 'image_url' => $catalog->productImageUrl($code),
-                'price_net' => $catalog->productPriceNet($code),
+                'price_net' => $displayPrice,
                 'usage_type' => $catalog->productUsageType($code),
                 'quantity' => $catalog->productQuantity($code),
                 'onetimeonly' => $catalog->productOneTimeOnly($code),
@@ -130,6 +149,7 @@ new class extends Component {
             'availableGroups' => $availableGroups,
             'boughtGroups' => $boughtGroups,
             'currencySymbol' => $currencySymbol,
+            'reverseCharge' => $reverseCharge,
         ];
     }
 };
@@ -197,7 +217,7 @@ new class extends Component {
                                         <div class="flex items-baseline gap-1">
                                             <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($product['price_net'] / 100, 2) }}</span>
                                         </div>
-                                        <flux:text class="text-xs text-zinc-400">{{ __('billing::portal.prices_excl_vat') }}</flux:text>
+                                        <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                                     </div>
 
                                     <div class="w-36">

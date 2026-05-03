@@ -194,6 +194,7 @@ return [
     'seats_not_available' => 'Die Platzverwaltung ist für deinen Plan nicht verfügbar.',
     'seats_warning_below_used' => 'Aktuell sind :used Plätze belegt. Eine Reduzierung darunter kann den Zugang für einige Mitglieder einschränken.',
     'prices_excl_vat' => 'Preise exkl. USt.',
+    'prices_incl_vat' => 'Preise inkl. USt.',
     'seats_flash' => [
         'synced' => 'Plätze aktualisiert.',
     ],

@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use Livewire\Component;
 
 new class extends Component {
@@ -82,9 +83,24 @@ new class extends Component {
         $currencySymbol = $currency === 'EUR' ? '€' : $currency;
 
         $includedSeats = $planCode ? $catalog->includedSeats($planCode) : 0;
-        $seatPrice = $planCode ? $catalog->seatPriceNet($planCode, $interval) : null;
+        $seatPriceNet = $planCode ? $catalog->seatPriceNet($planCode, $interval) : null;
         $usedSeats = $billable?->getUsedBillingSeats() ?? 0;
         $extraSeats = max(0, ($this->seatCount ?? $includedSeats) - $includedSeats);
+
+        // Display gross to B2C, net to B2B with valid reverse-charge.
+        $reverseCharge = $billable !== null
+            && method_exists($billable, 'usesReverseCharge')
+            && $billable->usesReverseCharge();
+
+        $seatPrice = $seatPriceNet;
+        if ($seatPriceNet !== null && $seatPriceNet > 0 && ! $reverseCharge && $billable !== null) {
+            try {
+                $seatPrice = (int) app(VatCalculationService::class)
+                    ->calculate((string) ($billable->getBillingCountry() ?? 'AT'), $seatPriceNet, $billable)['gross'];
+            } catch (\Throwable) {
+                // fall back to net
+            }
+        }
 
         return [
             'billable' => $billable,
@@ -96,6 +112,7 @@ new class extends Component {
             'interval' => $interval,
             'currencySymbol' => $currencySymbol,
             'hasSeats' => $seatPrice !== null || $includedSeats > 0,
+            'reverseCharge' => $reverseCharge,
         ];
     }
 };
@@ -210,7 +227,7 @@ new class extends Component {
                     <div class="mt-3">
                         <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($seatPrice / 100, 2) }}</span>
                     </div>
-                    <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ __('billing::portal.prices_excl_vat') }}</flux:text>
+                    <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                 </flux:card>
             @endif
         </div>
@@ -278,7 +295,7 @@ new class extends Component {
                                     <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.seats_total_cost') }}</span>
                                     <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($extraCost ?? 0) / 100, 2) }}</span>
                                 </div>
-                                <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ __('billing::portal.prices_excl_vat') }}</flux:text>
+                                <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                             </div>
                         </div>
                     @endif

@@ -622,13 +622,23 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         ]);
 
         if (filled($this->vat_number)) {
-            $this->validateVatNumberLive(app(VatCalculationService::class));
-        }
+            try {
+                $this->validateVatNumberLive(app(VatCalculationService::class));
+            } catch (\Throwable) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vies_unavailable'),
+                ]);
+            }
 
-        if ($this->vatNumberValid === false) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'vat_number' => __('billing::checkout.vat_correct_or_clear'),
-            ]);
+            // Hard gate: every persisted VAT number must be VIES-confirmed valid.
+            // Pending state (null) or invalid state both block progression so the
+            // billing data we ultimately store never relies on an unverified
+            // VAT number.
+            if ($this->vatNumberValid !== true) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'vat_number' => __('billing::checkout.vat_correct_or_clear'),
+                ]);
+            }
         }
     }
 
@@ -739,6 +749,21 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'tax_country_user' => $this->billing_country,
             'vat_number' => $this->vat_number,
         ])->save();
+
+        // Persist the VIES audit-trail entry that any subsequent invoice will
+        // reference. We check `currentVatValidation()` (not just "vat_number
+        // changed") because the billable may have been created above with the
+        // VAT number already set — in that case there is no prior persisted
+        // value to diff against, but there is also no audit entry yet.
+        if (filled($this->vat_number) && $billable->currentVatValidation() === null) {
+            try {
+                app(VatCalculationService::class)->validateAndPersist($billable, (string) $this->vat_number);
+            } catch (\GraystackIT\MollieBilling\Exceptions\ViesUnavailableException) {
+                $this->errorMessage = __('billing::checkout.vies_unavailable');
+                $this->processing = false;
+                return null;
+            }
+        }
 
         // Run before-checkout hook
         $blockReason = MollieBilling::runBeforeCheckout($billable);

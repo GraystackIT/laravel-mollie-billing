@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use GraystackIT\MollieBilling\Casts\UtcDatetime;
 
@@ -39,6 +40,19 @@ class BillingInvoice extends Model
     public function billable(): MorphTo
     {
         return $this->morphTo();
+    }
+
+    /**
+     * The VIES validation that was active when this invoice was issued.
+     *
+     * For tax-audit purposes this is the authoritative answer to "on what
+     * VAT-number validation did this specific invoice rely?". Null for B2C
+     * invoices without a VAT number, or for invoices created before the
+     * audit-trail feature was introduced.
+     */
+    public function vatValidation(): BelongsTo
+    {
+        return $this->belongsTo(BillingVatValidation::class, 'vat_validation_id');
     }
 
     public function isFullyRefunded(): bool
@@ -288,13 +302,22 @@ class BillingInvoice extends Model
                     'line_index' => $idx,
                     'remaining_quantity' => $remaining,
                     '_period_start' => $start, // intern für Sortierung
+                    '_invoice_id' => (int) $invoice->getKey(), // intern für Sortierung
                 ];
             }
         }
 
-        // Sortierung nach period_start DESC, secondary line_index DESC.
+        // Sortierung nach period_start DESC, dann invoice_id DESC, dann line_index DESC.
+        // Der invoice_id-Tiebreaker ist wichtig, weil mehrere Invoices in derselben
+        // Subscription-Periode (z.B. Mid-Cycle Sitz-Käufe) identisches period_start haben.
+        // Wir wollen die NEUESTE Invoice zuerst refundieren — sonst läuft der Refund
+        // gegen ein Mollie-Payment, das bereits voll refundiert wurde (Mollie 409).
         usort($result, function (array $a, array $b): int {
             $cmp = $b['_period_start']->getTimestamp() <=> $a['_period_start']->getTimestamp();
+            if ($cmp !== 0) {
+                return $cmp;
+            }
+            $cmp = $b['_invoice_id'] <=> $a['_invoice_id'];
             if ($cmp !== 0) {
                 return $cmp;
             }

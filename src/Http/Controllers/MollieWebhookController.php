@@ -438,7 +438,7 @@ class MollieWebhookController extends Controller
 
         $seats = $this->catalog->includedSeats($planCode) + $extraSeats;
         $expectedNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
-        $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $expectedNet, $billable->vat_number);
+        $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $expectedNet, $billable);
         $actualGross = $this->amountFromMolliePayment($payment);
 
         if (abs($actualGross - (int) $vat['gross']) > 1) {

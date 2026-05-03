@@ -6,7 +6,6 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
-use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -14,6 +13,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
+use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
@@ -51,13 +51,19 @@ class CreateSubscription
         $amountGross = (int) $spec['amount_gross'];
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
-        $urlParams = MollieBilling::resolveUrlParameters($billable);
+        // Mollie schedules the first recurring charge at $startDate. The first
+        // billing period is already paid via the checkout's first-payment, so
+        // Mollie's first recurring charge must happen one full period later.
+        $startDate = $interval === 'yearly'
+            ? BillingTime::nowUtc()->addYear()
+            : BillingTime::nowUtc()->addMonth();
 
         $subscription = Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
             interval: $interval === 'yearly' ? '12 months' : '1 month',
             description: "{$planCode} subscription",
+            startDate: new Date($startDate),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),

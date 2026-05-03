@@ -198,20 +198,16 @@ class PreviewService
         // VAT on recurring price.
         // Display-only: trust that a stored vat_number means reverse-charge.
         // The actual VIES check happens at checkout / billing-data save — by the
-        // time we render the plan-change preview, that decision is already made.
+        // time we render the plan-change preview, that decision is already made
+        // and persisted as a BillingVatValidation. calculate() reads it directly.
         $country = $billable->getBillingCountry() ?? 'DE';
-        $vatNumber = $billable instanceof \Illuminate\Database\Eloquent\Model ? ($billable->vat_number ?? null) : null;
         $netForRecurring = max(0, $newNet - $couponDiscountNet);
 
-        if (filled($vatNumber)) {
+        try {
+            $vat = $this->vatService->calculate($country, $netForRecurring, $billable);
+        } catch (\Throwable $e) {
             $vat = ['net' => $netForRecurring, 'vat' => 0, 'gross' => $netForRecurring, 'rate' => 0.0];
-        } else {
-            try {
-                $vat = $this->vatService->calculate($country, $netForRecurring, null);
-            } catch (\Throwable $e) {
-                $vat = ['net' => $netForRecurring, 'vat' => 0, 'gross' => $netForRecurring, 'rate' => 0.0];
-                $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
-            }
+            $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
         }
 
         // VAT on prorata amount (due now). Always derived from the invoice that
@@ -236,7 +232,7 @@ class PreviewService
                 ];
             } else {
                 try {
-                    $prorataVat = $this->vatService->calculate($country, $prorataNet, $vatNumber);
+                    $prorataVat = $this->vatService->calculate($country, $prorataNet, $billable);
                 } catch (\Throwable) {
                     $prorataVat = ['net' => $prorataNet, 'vat' => 0, 'gross' => $prorataNet, 'rate' => 0.0];
                 }
@@ -309,7 +305,7 @@ class PreviewService
         $usageOverageChargeGross = 0;
         if ($usageOverageChargeNet > 0) {
             try {
-                $usageOverageChargeGross = (int) $this->vatService->calculate($country, $usageOverageChargeNet, $vatNumber)['gross'];
+                $usageOverageChargeGross = (int) $this->vatService->calculate($country, $usageOverageChargeNet, $billable)['gross'];
             } catch (\Throwable) {
                 $usageOverageChargeGross = $usageOverageChargeNet;
             }
@@ -357,7 +353,8 @@ class PreviewService
             'vatRate' => $vat['rate'],
             'vatAmount' => $vat['vat'],
             'grossTotal' => $vat['gross'],
-            'reverseCharge' => abs((float) $vat['rate']) < 0.001 && filled($vatNumber),
+            'reverseCharge' => abs((float) $vat['rate']) < 0.001
+                && $billable->currentVatValidation()?->valid === true,
             'lineItems' => $lineItems,
             'warnings' => $warnings,
             'errors' => $errors,

@@ -126,9 +126,8 @@ class ChargeUsageOverageDirectly
         }
 
         $country = $billable->getBillingCountry() ?? 'DE';
-        $vatNumber = $billable instanceof Model ? ($billable->vat_number ?? null) : null;
 
-        $vat = $this->vatService->calculate($country, $totalNet, $vatNumber);
+        $vat = $this->vatService->calculate($country, $totalNet, $billable);
 
         $payment = $this->createMolliePayment($billable, $vat, $lineItems);
 

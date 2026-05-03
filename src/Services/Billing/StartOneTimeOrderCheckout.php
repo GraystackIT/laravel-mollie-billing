@@ -45,7 +45,7 @@ class StartOneTimeOrderCheckout
         }
 
         $country = $billable->getBillingCountry() ?? 'DE';
-        $vatResult = $this->vatService->calculate($country, $priceNet, $billable->vat_number ?? null);
+        $vatResult = $this->vatService->calculate($country, $priceNet, $billable);
         $amountGross = $vatResult['gross'];
 
         $currency = (string) config('mollie-billing.currency', 'EUR');

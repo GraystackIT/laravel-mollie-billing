@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\TrialExtended;
 use GraystackIT\MollieBilling\Features\FeatureAccess;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Models\BillingVatValidation;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\ChangePlan;
@@ -451,6 +452,50 @@ trait HasBilling
     public function redeemedBillingCoupons(): MorphMany
     {
         return $this->morphMany(CouponRedemption::class, 'billable');
+    }
+
+    // ── VAT validations (audit trail) ──
+
+    public function vatValidations(): MorphMany
+    {
+        return $this->morphMany(BillingVatValidation::class, 'billable');
+    }
+
+    /**
+     * The most recent VIES validation for the billable's *current* VAT number.
+     *
+     * Filters on `vat_number` so that swapping the VAT number to a new value
+     * automatically invalidates the previous validation — `currentVatValidation()`
+     * then returns null until the new number has been validated.
+     *
+     * Implemented as a method (not a relation) because the per-row filter on
+     * `vat_number` cannot be expressed safely in an Eloquent eager-loadable
+     * relation when batching multiple billables with different VAT numbers.
+     */
+    public function currentVatValidation(): ?BillingVatValidation
+    {
+        $vatNumber = $this->vat_number ?? null;
+        if ($vatNumber === null || $vatNumber === '') {
+            return null;
+        }
+
+        return $this->vatValidations()
+            ->where('vat_number', $vatNumber)
+            ->orderByDesc('checked_at')
+            ->first();
+    }
+
+    /**
+     * Whether reverse-charge applies for this billable: a persisted VIES
+     * validation marked valid=true exists for the current VAT number.
+     *
+     * Drives UI price display (B2B sees net, B2C sees gross). The actual
+     * VAT calculation in VatCalculationService::calculate() reads the same
+     * state independently.
+     */
+    public function usesReverseCharge(): bool
+    {
+        return $this->currentVatValidation()?->valid === true;
     }
 
     // ── Plan metadata ──
