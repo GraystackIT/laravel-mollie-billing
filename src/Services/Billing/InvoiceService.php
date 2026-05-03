@@ -794,15 +794,8 @@ class InvoiceService
 
             // Mollie's SDK auto-resets the key on response (ResetIdempotencyKey
             // middleware), so we set it once per refund call and don't need
-            // to clean up explicitly. Wrapped in try/catch because Mockery-based
-            // tests use a strict facade mock that doesn't whitelist this method
-            // and would throw BadMethodCallException — which would otherwise
-            // mask the real refund attempt that follows.
-            try {
-                Mollie::setIdempotencyKey($idempotencyKey);
-            } catch (\BadMethodCallException) {
-                // Test mock without idempotency-key whitelist; safe to skip.
-            }
+            // to clean up explicitly.
+            Mollie::setIdempotencyKey($idempotencyKey);
 
             try {
                 $refund = Mollie::send(new CreatePaymentRefundRequest(

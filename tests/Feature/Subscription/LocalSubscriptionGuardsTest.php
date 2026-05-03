@@ -265,6 +265,7 @@ it('allows the same change when seats are explicitly set (drop-extras path)', fu
     ]);
 
     // The downgrade triggers a Mollie subscription cancel + a refund call.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
     Mollie::shouldReceive('send')->andReturn(new \stdClass);
 
     $result = app(UpdateSubscription::class)->update($billable, [

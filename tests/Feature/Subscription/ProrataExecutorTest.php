@@ -136,6 +136,7 @@ it('Mollie→Free pure refund creates Refund invoice + cancels Mollie sub', func
 
     $cancelCalled = false;
     $refundCalled = false;
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
     Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$cancelCalled, &$refundCalled) {
         if ($request instanceof CancelSubscriptionRequest) {
             $cancelCalled = true;
