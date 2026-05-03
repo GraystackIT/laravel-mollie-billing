@@ -255,6 +255,7 @@ it('Bug B: createRefund clamps the Mollie refund amount to original amount_gross
     );
 
     $sentRefundAmount = null;
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
     Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$sentRefundAmount) {
         if ($request instanceof CreatePaymentRefundRequest) {
             $sentRefundAmount = readPrivateProp($request, 'amount');
@@ -437,6 +438,7 @@ it('Bug regression: a second refund with the same (parent, idx, amount) signatur
     );
 
     $mollieRefundCalled = false;
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
     Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$mollieRefundCalled) {
         if ($request instanceof CreatePaymentRefundRequest) {
             $mollieRefundCalled = true;
