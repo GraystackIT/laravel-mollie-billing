@@ -39,6 +39,12 @@ Global settings. Most values can be overridden via ENV variables — the default
 
 Countries from `additional_countries` (see below) are added automatically.
 
+```php
+'default_billing_country' => env('BILLING_DEFAULT_COUNTRY', 'AT'),
+```
+
+ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted country on the billable yet and the IP-based lookup yields no usable result. See "IP geolocation" below for the lookup chain.
+
 ### Behavior
 
 | Key | ENV | Description |
@@ -101,7 +107,11 @@ Serial numbers are issued atomically by `InvoiceNumberGenerator`.
 ],
 ```
 
-Used by `CountryMatchService` (reconciles user-, IP- and payment-country for VAT compliance). Custom drivers can be registered through `MollieBilling::ipGeolocation(...)`.
+Used to pre-fill the country dropdown at checkout and in the billing-data portal. The lookup is cached for 24h per IP, gracefully falls back to `default_billing_country` when no token is configured / the lookup fails / the resolved country is not in `checkout_countries`. The IP country is **never persisted** on the billable — it is purely a UX default.
+
+Custom drivers can be registered through `MollieBilling::ipGeolocation(...)`.
+
+> **Behind a reverse proxy / Cloudflare?** `request()->ip()` only returns the real client IP when Laravel's `App\Http\Middleware\TrustProxies` is configured for your environment. Without that, the geolocation will see the proxy IP and fall back to `default_billing_country`.
 
 ### VAT / OSS
 

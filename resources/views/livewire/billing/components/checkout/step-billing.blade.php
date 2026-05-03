@@ -15,17 +15,26 @@
             <flux:label>{{ __('billing::checkout.vat_number') }}</flux:label>
             <flux:input.group>
                 <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" />
-                @if ($vatNumberValid === true)
-                    <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
-                        <flux:icon.check-circle class="size-4" />
-                    </flux:input.group.suffix>
-                @elseif ($vatNumberValid === false)
-                    <flux:input.group.suffix class="text-red-600 dark:text-red-400">
-                        <flux:icon.x-circle class="size-4" />
-                    </flux:input.group.suffix>
-                @endif
+
+                <flux:input.group.suffix class="text-zinc-500 dark:text-zinc-400" wire:loading.flex wire:target="vat_number,billing_country">
+                    <flux:icon.loading class="size-4" />
+                </flux:input.group.suffix>
+
+                <div wire:loading.remove wire:target="vat_number,billing_country" class="contents">
+                    @if ($vatNumberValid === true)
+                        <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
+                            <flux:icon.check-circle class="size-4" />
+                        </flux:input.group.suffix>
+                    @elseif ($vatNumberValid === false)
+                        <flux:input.group.suffix class="text-red-600 dark:text-red-400">
+                            <flux:icon.x-circle class="size-4" />
+                        </flux:input.group.suffix>
+                    @endif
+                </div>
             </flux:input.group>
-            <flux:error name="vat_number" />
+            <div wire:loading.remove wire:target="vat_number,billing_country">
+                <flux:error name="vat_number" />
+            </div>
         </flux:field>
     </div>
 </div>
@@ -36,7 +45,13 @@
     @else
         <div></div>
     @endif
-    <flux:button wire:click="next" variant="primary" icon:trailing="arrow-right">
+    <flux:button
+        wire:click="next"
+        wire:loading.attr="disabled"
+        wire:target="next,vat_number,billing_country"
+        variant="primary"
+        icon:trailing="arrow-right"
+    >
         {{ __('billing::checkout.continue') }}
     </flux:button>
 </div>

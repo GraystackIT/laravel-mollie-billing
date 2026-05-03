@@ -1244,7 +1244,12 @@ new class extends Component {
                                     <span class="text-zinc-500">{{ __('billing::portal.net') }}</span>
                                     <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format(($preview['newPriceNet'] ?? 0) / 100, 2) }}</span>
                                 </div>
-                                @if (($preview['vatAmount'] ?? 0) > 0)
+                                @if ($preview['reverseCharge'] ?? false)
+                                    <div class="flex items-center justify-between text-sm">
+                                        <span class="text-zinc-500">{{ __('billing::portal.vat') }}</span>
+                                        <span class="tabular-nums text-emerald-700 dark:text-emerald-400">{{ __('billing::checkout.reverse_charge') }}</span>
+                                    </div>
+                                @elseif (($preview['vatAmount'] ?? 0) > 0)
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-500">{{ __('billing::portal.vat') }} ({{ number_format($preview['vatRate'] ?? 0, 0) }}%)</span>
                                         <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($preview['vatAmount'] / 100, 2) }}</span>
@@ -1254,7 +1259,7 @@ new class extends Component {
                                 <flux:separator class="my-2!" />
 
                                 <div class="flex items-center justify-between">
-                                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.gross') }}</span>
+                                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ ($preview['reverseCharge'] ?? false) ? __('billing::portal.net') : __('billing::portal.gross') }}</span>
                                     <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($preview['grossTotal'] ?? 0) / 100, 2) }}</span>
                                 </div>
                                 <flux:text class="text-xs">{{ __('billing::portal.preview_recurring_from_next_period') }}</flux:text>

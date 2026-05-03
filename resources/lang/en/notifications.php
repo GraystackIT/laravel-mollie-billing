@@ -42,7 +42,7 @@ return [
     ],
     'country_mismatch' => [
         'subject' => '[Admin] Country mismatch flagged for :customer',
-        'body' => 'Country verification failed for :customer. Declared: :user, IP: :ip, Payment: :payment. Manual review required.',
+        'body' => 'Country verification failed for :customer. Declared: :user, Payment: :payment. Manual review required.',
     ],
     'refund_processed' => [
         'subject' => 'Your refund of :amount has been processed',

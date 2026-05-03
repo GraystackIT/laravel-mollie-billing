@@ -32,6 +32,10 @@ return [
         'exclude' => [],
     ],
 
+    // Default country pre-selected in the checkout/billing-data dropdown when no
+    // billable country is persisted yet and the IP-based lookup yields no result.
+    'default_billing_country' => env('BILLING_DEFAULT_COUNTRY', 'AT'),
+
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN'),
 
     'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),

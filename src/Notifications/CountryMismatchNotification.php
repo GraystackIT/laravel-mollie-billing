@@ -38,7 +38,6 @@ class CountryMismatchNotification extends Notification
             ->line(__('billing::notifications.country_mismatch.body', [
                 'customer' => $customer,
                 'user' => $this->mismatch->tax_country_user ?? '-',
-                'ip' => $this->mismatch->tax_country_ip ?? '-',
                 'payment' => $this->mismatch->tax_country_payment ?? '-',
             ]))
             ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
@@ -54,7 +53,6 @@ class CountryMismatchNotification extends Notification
             'type' => 'country_mismatch',
             'customer' => $this->billable->getBillingName(),
             'tax_country_user' => $this->mismatch->tax_country_user ?? null,
-            'tax_country_ip' => $this->mismatch->tax_country_ip ?? null,
             'tax_country_payment' => $this->mismatch->tax_country_payment ?? null,
         ];
     }

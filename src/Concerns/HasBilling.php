@@ -208,7 +208,6 @@ trait HasBilling
             'subscription_meta' => 'array',
             'scheduled_change_at' => UtcDatetime::class,
             'allows_billing_overage' => 'bool',
-            'tax_country_verified' => 'bool',
             'vat_exempt' => 'bool',
             'country_mismatch_flagged_at' => UtcDatetime::class,
         ]);

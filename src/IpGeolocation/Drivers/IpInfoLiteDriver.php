@@ -19,7 +19,7 @@ class IpInfoLiteDriver implements IpGeolocationDriver
             return null;
         }
 
-        $response = Http::timeout(3)->get("https://api.ipinfo.io/lite/{$ip}", ['token' => $this->token]);
+        $response = Http::connectTimeout(1)->timeout(2)->get("https://api.ipinfo.io/lite/{$ip}", ['token' => $this->token]);
 
         if (! $response->successful()) {
             return null;

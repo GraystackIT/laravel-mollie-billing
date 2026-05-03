@@ -26,7 +26,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public string $billing_street = '';
     public string $billing_postal_code = '';
     public string $billing_city = '';
-    public string $billing_country = 'AT';
+    public string $billing_country = '';
     public ?string $vat_number = null;
     public ?bool $vatNumberValid = null;
     public ?string $vatStatusMessage = null;
@@ -65,6 +65,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function mount(): void
     {
         $this->backUrl = Sanitize::backUrl(request()->query('back'));
+
+        $this->billing_country = MollieBilling::ipGeolocation()->defaultCountryFor(request()->ip());
 
         // Pre-select plan and/or interval from query parameters
         $plan = request()->query('plan');
@@ -354,16 +356,30 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function totals(VatCalculationService $vat): array
     {
         $net = $this->totalNet();
+        $reverseCharge = $this->showsNetPrices();
+
+        // Trust the live VIES result captured in vatNumberValid — never re-hit VIES on render.
+        // Otherwise a flaky VIES call could disagree with what the UI just rendered, producing
+        // a "Reverse-Charge" label next to a gross-with-VAT total.
+        if ($reverseCharge) {
+            return [
+                'net' => $net,
+                'vat' => 0,
+                'gross' => $net,
+                'rate' => 0.0,
+                'reverseCharge' => true,
+            ];
+        }
 
         try {
-            $calc = $vat->calculate($this->billing_country, $net, $this->showsNetPrices() ? $this->vat_number : null);
+            $calc = $vat->calculate($this->billing_country, $net, null);
         } catch (\Throwable) {
             $calc = ['net' => $net, 'vat' => 0, 'gross' => $net, 'rate' => 0.0];
         }
 
         return [
             ...$calc,
-            'reverseCharge' => $this->showsNetPrices(),
+            'reverseCharge' => false,
         ];
     }
 
@@ -605,6 +621,10 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'vat_number' => ['nullable', 'string', 'max:50'],
         ]);
 
+        if (filled($this->vat_number)) {
+            $this->validateVatNumberLive(app(VatCalculationService::class));
+        }
+
         if ($this->vatNumberValid === false) {
             throw \Illuminate\Validation\ValidationException::withMessages([
                 'vat_number' => __('billing::checkout.vat_correct_or_clear'),
@@ -646,6 +666,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'billing_postal_code' => $this->billing_postal_code,
             'billing_city' => $this->billing_city,
             'billing_country' => $this->billing_country,
+            'tax_country_user' => $this->billing_country,
             'vat_number' => $this->vat_number,
             'custom' => $this->customData,
         ]);
@@ -715,6 +736,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'billing_postal_code' => $this->billing_postal_code,
             'billing_city' => $this->billing_city,
             'billing_country' => $this->billing_country,
+            'tax_country_user' => $this->billing_country,
             'vat_number' => $this->vat_number,
         ])->save();
 
