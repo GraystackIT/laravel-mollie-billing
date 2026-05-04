@@ -449,6 +449,67 @@ new class extends Component {
         </flux:subheading>
     </div>
 
+    {{-- Current subscription summary --}}
+    @php
+        $headerPlanCode = $billable?->getBillingSubscriptionPlanCode();
+        $headerInterval = $billable?->getBillingSubscriptionInterval();
+        $headerStatus = $billable?->getBillingSubscriptionStatus();
+        $headerIsTrial = $billable && $billable->isOnBillingTrial();
+        $headerIsCancelled = $headerStatus?->value === 'cancelled';
+        $headerIsLocal = $billable && $billable->isLocalBillingSubscription();
+
+        if ($headerIsTrial) {
+            $headerEndsAt = $billable->getBillingTrialEndsAt();
+            $headerEndsLabel = __('billing::portal.trial_ends');
+        } elseif ($headerIsCancelled) {
+            $headerEndsAt = $billable?->getBillingSubscriptionEndsAt();
+            $headerEndsLabel = __('billing::portal.valid_until');
+        } else {
+            $headerEndsAt = $billable?->nextBillingDate();
+            $headerEndsLabel = __('billing::portal.next_billing');
+        }
+
+        $headerEndsDate = $headerEndsAt ? BillingTime::display($headerEndsAt, $billable)?->translatedFormat('d. M Y') : null;
+    @endphp
+
+    @if ($billable && $headerPlanCode)
+        <flux:card class="p-0! overflow-hidden">
+            <div class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+                <div class="space-y-1">
+                    <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">
+                        {{ __('billing::portal.current_plan') }}
+                    </flux:subheading>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <flux:heading size="lg">{{ $catalog->planName($headerPlanCode) ?? $headerPlanCode }}</flux:heading>
+                        @if ($headerInterval)
+                            <flux:badge size="sm" color="zinc">
+                                {{ $headerInterval === 'monthly' ? __('billing::portal.interval_monthly') : __('billing::portal.interval_yearly') }}
+                            </flux:badge>
+                        @endif
+                        @if ($headerStatus)
+                            <flux:badge size="sm" :color="$headerStatus->color()">{{ $headerStatus->label() }}</flux:badge>
+                        @endif
+                    </div>
+                </div>
+
+                @if ($headerEndsDate)
+                    <div class="space-y-1 sm:text-right">
+                        <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">
+                            {{ $headerEndsLabel }}
+                        </flux:subheading>
+                        @if ($headerIsLocal && ! $headerIsCancelled && ! $headerIsTrial)
+                            <flux:text class="font-semibold text-zinc-500 dark:text-zinc-400">
+                                {{ __('billing::portal.free_plan_recurring_charge') }}
+                            </flux:text>
+                        @else
+                            <flux:text class="font-semibold">{{ $headerEndsDate }}</flux:text>
+                        @endif
+                    </div>
+                @endif
+            </div>
+        </flux:card>
+    @endif
+
     @if ($planChangeFailed)
         <flux:callout variant="danger" icon="exclamation-triangle">
             {{ __('billing::portal.flash.plan_change_failed') }}
@@ -545,10 +606,27 @@ new class extends Component {
     @endif
 
     {{-- Controls --}}
+    @php
+        $maxYearlySavings = 0;
+        foreach ($plans as $planCodeForSavings) {
+            $maxYearlySavings = max($maxYearlySavings, $catalog->yearlySavingsPercent($planCodeForSavings));
+        }
+        $maxYearlySavings = (int) round($maxYearlySavings);
+    @endphp
+
     <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <flux:radio.group wire:model.live="selectedInterval" variant="segmented">
             <flux:radio value="monthly" label="{{ __('billing::portal.interval_monthly') }}" />
-            <flux:radio value="yearly" label="{{ __('billing::portal.interval_yearly') }}" />
+            <flux:radio value="yearly">
+                <span class="flex items-center gap-2">
+                    <span>{{ __('billing::portal.interval_yearly') }}</span>
+                    @if ($maxYearlySavings > 0)
+                        <flux:badge size="sm" color="lime">
+                            {{ __('billing::portal.save_up_to', ['percent' => $maxYearlySavings]) }}
+                        </flux:badge>
+                    @endif
+                </span>
+            </flux:radio>
         </flux:radio.group>
     </div>
 
@@ -585,15 +663,21 @@ new class extends Component {
                 $isFree = $netPrice === 0;
 
                 // Display gross to B2C, net to B2B with valid reverse-charge.
-                $price = $netPrice;
-                if (! $reverseCharge && ! $isFree) {
-                    try {
-                        $price = (int) app(GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class)
-                            ->calculate($displayCountry, $netPrice, $billable)['gross'];
-                    } catch (\Throwable) {
-                        // Country not in EU/no override -> fall back to net.
+                $vatService = app(GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class);
+                $toDisplayCents = function (int $netCents) use ($reverseCharge, $displayCountry, $billable, $vatService): int {
+                    if ($reverseCharge || $netCents === 0) {
+                        return $netCents;
                     }
-                }
+                    try {
+                        return (int) $vatService->calculate($displayCountry, $netCents, $billable)['gross'];
+                    } catch (\Throwable) {
+                        return $netCents;
+                    }
+                };
+
+                $price = $toDisplayCents($netPrice);
+
+                $includedUsages = $catalog->includedUsages($code, $selectedInterval);
             @endphp
 
             <flux:card
@@ -647,6 +731,25 @@ new class extends Component {
                                 <span>{{ trans_choice('billing::portal.seats_included_count', $seats, ['count' => $seats]) }}</span>
                             </div>
                         @endif
+
+                        @foreach ($includedUsages as $usageType => $included)
+                            @php
+                                $overageNet = $catalog->usageOveragePrice($code, $selectedInterval, $usageType);
+                                $overageDisplay = $overageNet !== null ? $toDisplayCents($overageNet) : null;
+                                $usageLabel = $catalog->usageTypeName($usageType);
+                            @endphp
+                            <div class="text-zinc-600 dark:text-zinc-300">
+                                <div class="flex items-center gap-2">
+                                    <flux:icon.chart-bar class="size-4 shrink-0 text-zinc-400" />
+                                    <span>{{ __('billing::portal.usage_included_count', ['count' => number_format($included), 'type' => $usageLabel]) }}</span>
+                                </div>
+                                @if ($overageDisplay !== null && $overageDisplay > 0)
+                                    <div class="ml-6 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">
+                                        {{ __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => number_format($overageDisplay / 100, 2), 'type' => $usageLabel]) }}
+                                    </div>
+                                @endif
+                            </div>
+                        @endforeach
 
                         @if (count($features) > 0)
                         <flux:separator class="mt-4"/>
