@@ -178,8 +178,11 @@ new class extends Component {
             return [];
         }
 
+        $upper = array_map('strtoupper', $this->appliedCouponCodes);
+        $placeholders = implode(',', array_fill(0, count($upper), '?'));
+
         return Coupon::query()
-            ->whereIn('code', array_map('strtoupper', $this->appliedCouponCodes))
+            ->whereRaw('UPPER(code) IN ('.$placeholders.')', $upper)
             ->pluck('id')
             ->all();
     }

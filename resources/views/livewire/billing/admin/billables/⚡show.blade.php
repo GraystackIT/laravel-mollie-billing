@@ -205,11 +205,7 @@ new class extends Component {
                             {{ $mandateStatusLabel }}
                         </span>
                     @else
-                        <flux:icon
-                            :name="$mandate?->method === 'directdebit' ? 'building-library' : ($mandate?->method === 'paypal' ? 'globe-alt' : 'credit-card')"
-                            variant="mini"
-                            class="text-zinc-400"
-                        />
+                        <flux:icon name="credit-card" variant="mini" class="text-zinc-400" />
                     @endif
                 </div>
 

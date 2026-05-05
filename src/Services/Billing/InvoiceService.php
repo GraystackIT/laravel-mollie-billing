@@ -732,6 +732,13 @@ class InvoiceService
         $persistedLines = [];
         $failedLines = [];
 
+        // Multiple refund lines can target the same original invoice (e.g. plan + seats + addon
+        // on a plan change). They are independent ProrataLine instances loaded via separate
+        // currentPeriodLines() queries, so each one carries its own in-memory clone of the
+        // original BillingInvoice — without coordination, every save() would write back its
+        // own stale `refunded_net` and clobber the previous iteration's increment.
+        $refundedNetPerInvoice = [];
+
         foreach ($effective as $line) {
             $original = $line->originalInvoice;
             if ($original === null || $original->mollie_payment_id === null) {
@@ -755,7 +762,14 @@ class InvoiceService
             // drifts above Mollie's charge (e.g. due to a VAT-classification
             // change between original payment and refund), clamp and warn so
             // the drift is investigable.
-            $restRefundable = max(0, (int) $original->amount_gross - (int) $original->refunded_net);
+            //
+            // Use the running per-invoice tracker so successive lines targeting
+            // the same original see refunds from earlier iterations in this loop
+            // — the in-memory $original may be a separate clone whose attributes
+            // are still stale after another iteration's save().
+            $originalKey = $original->getKey();
+            $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? (int) $original->refunded_net;
+            $restRefundable = max(0, (int) $original->amount_gross - $alreadyRefundedNet);
             $refundAmount = min($absGross, $restRefundable);
 
             if ($refundAmount < $absGross) {
@@ -811,7 +825,14 @@ class InvoiceService
                 // refund on the same invoice would compute remainingRefundableNet()
                 // against a stale base and either offer a refund that's already
                 // exhausted or accept an amount that gets rejected by Mollie.
-                $original->refunded_net = (int) $original->refunded_net + (int) abs($line->amountNet);
+                //
+                // Drive the new value off the running tracker (not $original->refunded_net)
+                // because $original may be a stale clone whose in-memory attribute hasn't
+                // been refreshed after an earlier iteration saved a different clone of the
+                // same DB row.
+                $newRefundedNet = $alreadyRefundedNet + (int) abs($line->amountNet);
+                $refundedNetPerInvoice[$originalKey] = $newRefundedNet;
+                $original->refunded_net = $newRefundedNet;
                 $original->save();
             } catch (\Throwable $e) {
                 $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];

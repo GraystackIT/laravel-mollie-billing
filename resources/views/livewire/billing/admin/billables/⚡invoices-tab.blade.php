@@ -60,6 +60,9 @@ new class extends Component {
         if ($decimalPos >= 0) {
             $intPart = preg_replace('/[.,]/', '', substr($normalized, 0, $decimalPos));
             $fracPart = preg_replace('/[.,]/', '', substr($normalized, $decimalPos + 1));
+            if (strlen($fracPart) > 2) {
+                return false;
+            }
             $normalized = $intPart.'.'.$fracPart;
         } else {
             $normalized = preg_replace('/[.,]/', '', $normalized);
