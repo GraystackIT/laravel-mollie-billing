@@ -9,9 +9,9 @@ use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent;
 
 /**
- * Spy-Patcher: zeichnet alle Mollie-Subscription-PATCH/Cancel-Calls auf, ohne Mollie zu treffen.
+ * Spy patcher: records every Mollie-subscription PATCH / cancel call without hitting Mollie.
  *
- * Wird vom Test-Container über bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class) eingehängt.
+ * Bound in the test container via bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class).
  */
 class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
 {
@@ -55,6 +55,7 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
         array $addons,
         int $extraSeats,
         bool $intervalChanged = false,
+        int $couponDiscountNet = 0,
     ): void {
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
@@ -64,8 +65,25 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
             'addons' => $addons,
             'extra_seats' => $extraSeats,
             'interval_changed' => $intervalChanged,
+            'coupon_discount_net' => $couponDiscountNet,
         ];
         self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
         SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];
+    }
+
+    public function pushNextChargeDate(Billable $billable, int $days): void
+    {
+        $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
+        self::$calls[] = ['push_next_charge_date', $customerId, $subscriptionId, ['days' => $days]];
+        SpyUpdateSubscription::$calls[] = ['push_next_charge_date', $customerId, $subscriptionId, ['days' => $days]];
+
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $current = $billable->nextBillingDate() ?? \GraystackIT\MollieBilling\Support\BillingTime::nowUtc();
+            $newDate = $current->copy()->addDays($days);
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta['next_charge_date_override'] = $newDate->toIso8601String();
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
     }
 }

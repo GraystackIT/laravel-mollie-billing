@@ -139,7 +139,7 @@ new class extends Component {
 
                 @if (in_array($type, [CouponType::FirstPayment, CouponType::Recurring]))
                     <x-mollie-billing::admin.detail label="Discount type">
-                        {{ $coupon->discount_type->label() }}
+                        {{ \GraystackIT\MollieBilling\Support\AdminLocale::enumLabel($coupon->discount_type) }}
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail label="Discount value" mono>
                         @if ($coupon->discount_type === DiscountType::Percentage)
@@ -158,6 +158,12 @@ new class extends Component {
                 @if ($type === CouponType::TrialExtension)
                     <x-mollie-billing::admin.detail label="Extends trial by" mono>
                         {{ $coupon->trial_extension_days }} days
+                    </x-mollie-billing::admin.detail>
+                @endif
+
+                @if ($type === CouponType::PeriodExtension)
+                    <x-mollie-billing::admin.detail label="Period extension" mono>
+                        {{ $coupon->grant_duration_days }} days
                     </x-mollie-billing::admin.detail>
                 @endif
 
@@ -187,6 +193,18 @@ new class extends Component {
                         @foreach ($coupon->credits_payload as $usage => $units)
                             <div>{{ $units }} × {{ $usage }}</div>
                         @endforeach
+                    </x-mollie-billing::admin.detail>
+                @endif
+
+                @if (! empty($coupon->applicable_addons))
+                    <x-mollie-billing::admin.detail label="Applicable addons" mono>
+                        {{ implode(', ', (array) $coupon->applicable_addons) }}
+                    </x-mollie-billing::admin.detail>
+                @endif
+
+                @if (! empty($coupon->applicable_products))
+                    <x-mollie-billing::admin.detail label="Applicable products" mono>
+                        {{ implode(', ', (array) $coupon->applicable_products) }}
                     </x-mollie-billing::admin.detail>
                 @endif
             </dl>

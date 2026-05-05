@@ -3,7 +3,10 @@
 use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Models\Coupon;
+use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
@@ -22,6 +25,13 @@ new class extends Component {
     public bool $wasPending = false;
     public bool $dropExtraSeats = false;
     public bool $showLocalUpgradeConfirmation = false;
+
+    /** @var array<int, string> Codes that the user has already applied (uppercased). */
+    public array $appliedCouponCodes = [];
+    /** @var array<int, array{code:string, name:string, stackable:bool}> Display metadata for each applied code. */
+    public array $appliedCouponInfo = [];
+    public string $couponInput = '';
+    public ?string $couponError = null;
 
     // Edit-billing modal state — also used by ValidatesVatNumber trait (vat_number + billing_country)
     public bool $showEditBillingModal = false;
@@ -58,6 +68,147 @@ new class extends Component {
         $this->refreshPreview($service);
     }
 
+    public function applyCoupon(CouponService $couponService, PreviewService $previewService): void
+    {
+        $this->couponError = null;
+
+        $code = strtoupper(trim($this->couponInput));
+        if ($code === '') {
+            return;
+        }
+
+        if (in_array($code, $this->appliedCouponCodes, true)) {
+            $this->couponError = __('billing::checkout.coupon_already_applied');
+            return;
+        }
+
+        if (! $this->canAddMoreCoupons()) {
+            $this->couponError = __('billing::checkout.coupon_not_stackable_with_current');
+            return;
+        }
+
+        $billable = $this->resolveBillable();
+        if (! $billable || ! $this->selectedPlan) {
+            return;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $newSeats = $this->dropExtraSeats
+            ? max($billable->getUsedBillingSeats(), $catalog->includedSeats($this->selectedPlan))
+            : max($billable->getBillingSeatCount(), $catalog->includedSeats($this->selectedPlan));
+        $newAddons = $billable->getActiveBillingAddonCodes();
+        $newNet = \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
+            $catalog,
+            $billable,
+            $this->selectedPlan,
+            $this->selectedInterval,
+            $newSeats,
+            $newAddons,
+        );
+
+        $existingCouponIds = $this->resolveAppliedCouponIds();
+
+        try {
+            $coupon = $couponService->validate($code, $billable, [
+                'planCode' => $this->selectedPlan,
+                'interval' => $this->selectedInterval,
+                'addonCodes' => $newAddons,
+                'orderAmountNet' => $newNet,
+                'existingCouponIds' => $existingCouponIds,
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                ],
+            ]);
+        } catch (InvalidCouponException $e) {
+            $this->couponError = $this->translateCouponReason($e->reason());
+            return;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->couponError = __('billing::checkout.coupon_failed');
+            return;
+        }
+
+        $this->appliedCouponCodes[] = (string) $coupon->code;
+        $this->appliedCouponInfo[] = [
+            'code' => (string) $coupon->code,
+            'name' => (string) ($coupon->name ?: $coupon->code),
+            'stackable' => (bool) $coupon->stackable,
+        ];
+        $this->couponInput = '';
+
+        $this->refreshPreview($previewService);
+    }
+
+    public function removeCoupon(string $code, PreviewService $service): void
+    {
+        $code = strtoupper(trim($code));
+        $this->appliedCouponCodes = array_values(array_filter(
+            $this->appliedCouponCodes,
+            fn (string $c) => $c !== $code,
+        ));
+        $this->appliedCouponInfo = array_values(array_filter(
+            $this->appliedCouponInfo,
+            fn (array $info) => ($info['code'] ?? null) !== $code,
+        ));
+        $this->couponError = null;
+        $this->refreshPreview($service);
+    }
+
+    public function canAddMoreCoupons(): bool
+    {
+        if ($this->appliedCouponCodes === []) {
+            return true;
+        }
+
+        // Once any non-stackable coupon is applied, no further codes are allowed.
+        foreach ($this->appliedCouponInfo as $info) {
+            if (! ($info['stackable'] ?? true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @return array<int, int> */
+    private function resolveAppliedCouponIds(): array
+    {
+        if ($this->appliedCouponCodes === []) {
+            return [];
+        }
+
+        return Coupon::query()
+            ->whereIn('code', array_map('strtoupper', $this->appliedCouponCodes))
+            ->pluck('id')
+            ->all();
+    }
+
+    private function translateCouponReason(string $reason): string
+    {
+        return match ($reason) {
+            'not_found' => __('billing::checkout.coupon_not_found'),
+            'inactive' => __('billing::checkout.coupon_inactive'),
+            'not_yet_valid' => __('billing::checkout.coupon_not_yet_valid'),
+            'expired' => __('billing::checkout.coupon_expired'),
+            'globally_exhausted' => __('billing::checkout.coupon_exhausted'),
+            'plan_not_applicable' => __('billing::checkout.coupon_plan_mismatch'),
+            'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
+            'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
+            'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'min_order_not_met' => __('billing::checkout.coupon_min_order'),
+            'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
+            'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
+            'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
+            'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
+            'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
+            'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
+            'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
+            default => __('billing::checkout.coupon_failed'),
+        };
+    }
+
     private function refreshPreview(PreviewService $service): void
     {
         $billable = $this->resolveBillable();
@@ -76,6 +227,7 @@ new class extends Component {
             planCode: $this->selectedPlan,
             interval: $this->selectedInterval,
             seats: $seats,
+            couponCodes: $this->appliedCouponCodes !== [] ? $this->appliedCouponCodes : null,
         ));
     }
 
@@ -174,6 +326,7 @@ new class extends Component {
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
                 'apply_at' => $applyAt,
+                'coupon_codes' => $this->appliedCouponCodes,
             ];
 
             if ($this->dropExtraSeats) {
@@ -200,6 +353,10 @@ new class extends Component {
             }
             $this->preview = [];
             $this->selectedPlan = null;
+            $this->appliedCouponCodes = [];
+            $this->appliedCouponInfo = [];
+            $this->couponInput = '';
+            $this->couponError = null;
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Plan change failed', [
                 'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
@@ -1102,7 +1259,37 @@ new class extends Component {
                             <div x-show="applyAt === 'immediate'" x-cloak>
                                 @php
                                     $prorataLines = $preview['prorataLines'] ?? [];
+                                    $refundCapNotices = $preview['prorataRefundCapNotices'] ?? [];
                                 @endphp
+
+                                {{-- Hinweis, wenn anteilige Erstattung gegen den Restbetrag der Original-Rechnung gekürzt wurde
+                                     (z.B. nach vorherigem Kulanz-Refund). --}}
+                                @if (! empty($refundCapNotices))
+                                    <div class="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                                        <div class="flex items-start gap-2">
+                                            <flux:icon.information-circle class="mt-0.5 size-4 shrink-0" />
+                                            <div class="space-y-1">
+                                                <div class="font-semibold">{{ __('billing::portal.prorata_refund_cap_notice_title') }}</div>
+                                                @foreach ($refundCapNotices as $notice)
+                                                    @php
+                                                        $serial = $notice['invoiceSerial'] ?? null;
+                                                        $params = [
+                                                            'already' => $currencySymbol . number_format(((int) ($notice['alreadyRefundedNet'] ?? 0)) / 100, 2),
+                                                            'original' => $currencySymbol . number_format(((int) ($notice['originalAmountNet'] ?? 0)) / 100, 2),
+                                                        ];
+                                                    @endphp
+                                                    <div>
+                                                        @if ($serial)
+                                                            {{ __('billing::portal.prorata_refund_cap_notice_body', array_merge($params, ['serial' => $serial])) }}
+                                                        @else
+                                                            {{ __('billing::portal.prorata_refund_cap_notice_body_no_serial', $params) }}
+                                                        @endif
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        </div>
+                                    </div>
+                                @endif
 
                                 {{-- Multi-VAT-Aufschlüsselung (neue Preview, wenn ProrataLines vorhanden) --}}
                                 @if (! empty($prorataLines))
@@ -1111,6 +1298,7 @@ new class extends Component {
                                             'plan' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'plan'),
                                             'seats' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'seats'),
                                             'addon' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'addon'),
+                                            'coupon' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'coupon'),
                                         ];
 
                                         // Per-Usage-Type Mehrverbrauch — separater Mollie-Charge,
@@ -1165,6 +1353,11 @@ new class extends Component {
                                                                     <span class="text-zinc-300 dark:text-zinc-600">·</span> {{ __('billing::portal.prorata_plan_remaining_days', ['days' => $line['days_remaining']]) }}
                                                                 @endif
                                                             </div>
+                                                            @if (! empty($line['refund_cap_note']))
+                                                                <div class="mt-0.5 text-[0.7rem] text-zinc-400 wrap-break-word">
+                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => $currencySymbol . number_format(((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0)) / 100, 2)]) }}
+                                                                </div>
+                                                            @endif
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
                                                             {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
@@ -1191,6 +1384,11 @@ new class extends Component {
                                                                     {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }}
                                                                 @endif
                                                             </div>
+                                                            @if (! empty($line['refund_cap_note']))
+                                                                <div class="mt-0.5 text-[0.7rem] text-zinc-400 wrap-break-word">
+                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => $currencySymbol . number_format(((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0)) / 100, 2)]) }}
+                                                                </div>
+                                                            @endif
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
                                                             {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
@@ -1217,9 +1415,38 @@ new class extends Component {
                                                                     {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }}
                                                                 @endif
                                                             </div>
+                                                            @if (! empty($line['refund_cap_note']))
+                                                                <div class="mt-0.5 text-[0.7rem] text-zinc-400 wrap-break-word">
+                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => $currencySymbol . number_format(((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0)) / 100, 2)]) }}
+                                                                </div>
+                                                            @endif
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
                                                             {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                        </span>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        @endif
+
+                                        {{-- Coupon-Sektion --}}
+                                        @if (! empty($linesByCategory['coupon']))
+                                            <div class="space-y-2">
+                                                <div class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-zinc-400">{{ __('billing::portal.coupon_section') }}</div>
+                                                @foreach ($linesByCategory['coupon'] as $line)
+                                                    <div class="flex items-baseline justify-between gap-3 text-sm">
+                                                        <div class="min-w-0 flex-1">
+                                                            <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ $line['label'] }}</div>
+                                                            <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
+                                                                @if ($line['vat_rate'] == 0)
+                                                                    {{ __('billing::portal.prorata_reverse_charge') }}
+                                                                @else
+                                                                    {{ __('billing::portal.prorata_incl_vat_rate', ['rate' => number_format((float) $line['vat_rate'], 0)]) }}
+                                                                @endif
+                                                            </div>
+                                                        </div>
+                                                        <span class="shrink-0 tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
+                                                            −{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
                                                         </span>
                                                     </div>
                                                 @endforeach
@@ -1418,6 +1645,53 @@ new class extends Component {
                                     <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($preview['grossTotal'] ?? 0) / 100, 2) }}</span>
                                 </div>
                                 <flux:text class="text-xs">{{ __('billing::portal.preview_recurring_from_next_period') }}</flux:text>
+
+                                <flux:separator class="my-3!" />
+
+                                <div class="space-y-2">
+                                    @foreach ($appliedCouponInfo as $info)
+                                        <div class="flex items-center justify-between gap-2 rounded-md border border-emerald-300/60 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-800/50 dark:bg-emerald-900/20">
+                                            <div class="flex items-center gap-2 text-sm">
+                                                <flux:icon.ticket class="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                                                <span class="font-medium tabular-nums text-emerald-700 dark:text-emerald-300">{{ $info['code'] }}</span>
+                                                @if (! ($info['stackable'] ?? true))
+                                                    <span class="text-xs text-zinc-400">{{ __('billing::portal.coupon_not_stackable') }}</span>
+                                                @endif
+                                            </div>
+                                            <flux:button
+                                                size="xs"
+                                                variant="ghost"
+                                                icon="x-mark"
+                                                wire:click="removeCoupon('{{ $info['code'] }}')"
+                                                :aria-label="__('billing::checkout.remove_coupon')"
+                                            />
+                                        </div>
+                                    @endforeach
+
+                                    @if ($this->canAddMoreCoupons())
+                                        <flux:input.group>
+                                            <flux:input
+                                                size="sm"
+                                                wire:model="couponInput"
+                                                wire:keydown.enter.prevent="applyCoupon"
+                                                :placeholder="__('billing::portal.coupon_code_placeholder')"
+                                            />
+                                            <flux:button size="sm" type="button" wire:click="applyCoupon" icon="check">
+                                                {{ __('billing::portal.coupon_redeem_button') }}
+                                            </flux:button>
+                                        </flux:input.group>
+                                    @endif
+
+                                    @if ($couponError)
+                                        <flux:text class="text-xs text-rose-600 dark:text-rose-400">{{ $couponError }}</flux:text>
+                                    @endif
+
+                                    @if (! empty($preview['warnings']))
+                                        @foreach ($preview['warnings'] as $warning)
+                                            <flux:text class="text-xs text-rose-600 dark:text-rose-400">{{ $warning }}</flux:text>
+                                        @endforeach
+                                    @endif
+                                </div>
                             </div>
                         </div>
                     </div>

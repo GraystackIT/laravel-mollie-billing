@@ -68,9 +68,10 @@ Edit `config/mollie-billing.php` and set the billable model:
 ```php
 'billable_model' => \App\Models\Organization::class,
 'billable_key_type' => 'uuid', // 'uuid' | 'ulid' | 'int'
+'user_key_type' => 'int',      // 'uuid' | 'ulid' | 'int' — primary key type of your auth user model
 ```
 
-> **Important:** `billable_key_type` must be set **before running migrations for the first time**. It controls the column type of every polymorphic foreign key that references your billable — including `bavix/laravel-wallet`'s `wallets.holder_id`, `transactions.payable_id`, and `transfers.{from,to}_id`, which we rewrite from the default `bigint` to `uuid`/`ulid`. Changing it later requires manually altering those columns.
+> **Important:** `billable_key_type` and `user_key_type` must be set **before running migrations for the first time**. `billable_key_type` controls the column type of every polymorphic foreign key that references your billable — including `bavix/laravel-wallet`'s `wallets.holder_id`, `transactions.payable_id`, and `transfers.{from,to}_id`, which we rewrite from the default `bigint` to `uuid`/`ulid`. `user_key_type` controls columns that reference the auth user (e.g. `billing_country_mismatches.resolved_by_user_id`). Changing them later requires manually altering those columns.
 
 Then run migrations:
 
@@ -116,6 +117,7 @@ Configure your environment:
 MOLLIE_KEY=test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BILLING_BILLABLE_MODEL=App\Models\Organization
 BILLING_BILLABLE_KEY_TYPE=uuid
+BILLING_USER_KEY_TYPE=int
 BILLING_CURRENCY=EUR
 ```
 
@@ -395,6 +397,7 @@ Highlights of `config/mollie-billing.php`:
 | `company_name` | Display name used in headers, notifications and signatures. |
 | `billable_model` | Fully-qualified class name of your billable model. |
 | `billable_key_type` | `uuid`, `ulid`, or `int` — determines morph column shape. |
+| `user_key_type` | `uuid`, `ulid`, or `int` — primary key type of your auth user model (used e.g. for `billing_country_mismatches.resolved_by_user_id`). |
 | `billing_timezone` | IANA timezone for the customer portal display (`BILLING_TIMEZONE`, default `UTC`). Persistence and computation always remain UTC; the admin panel renders UTC. See [Timezones](docs/timezone.md). |
 
 ### Portal "back to dashboard" link

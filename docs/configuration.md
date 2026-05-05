@@ -57,6 +57,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `Immediate` / `EndOfPeriod` / `UserChoice`. Controls when plan changes are applied. Default: `UserChoice`. |
 | `mollie_locale` | `BILLING_MOLLIE_LOCALE` | Locale for Mollie hosted pages. `null` lets Mollie auto-detect. |
 | `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Set before the first migration** — affects FK column shapes. Default: `uuid`. |
+| `user_key_type` | `BILLING_USER_KEY_TYPE` | `uuid` / `ulid` / `int`. Primary key type of your auth user model — used for columns like `billing_country_mismatches.resolved_by_user_id`. **Set before the first migration**. Default: `int`. |
 | `overage_job_time` | `BILLING_OVERAGE_JOB_TIME` | Time of day (`HH:MM`) for `PrepareOverageCommand`. Default: `02:00`. |
 | `usage_threshold_percent` | `BILLING_USAGE_THRESHOLD` | Threshold for usage-warning events (in %). Default: `80`. |
 | `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Global default: carry over unused wallet credits across period changes. Overridable per plan. Default: `false`. |
@@ -353,6 +354,7 @@ It reports two classes of issues:
 - **Errors** — broken references or invalid values that will cause runtime failures. Exit status `1`.
   - `billable_model` missing, not found, or not implementing `Billable` / not using `HasBilling`
   - `billable_key_type` not in `uuid|ulid|int`
+  - `user_key_type` not in `uuid|ulid|int`
   - `plan_change_mode` not a valid `PlanChangeMode` enum value
   - `invoices.disk` not declared in `config/filesystems.php`
   - `invoices.serial_number.format` empty or missing the `C` (counter) slot

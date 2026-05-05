@@ -295,7 +295,7 @@ it('multi-VAT: refund of addon with 10% VAT is independent of plan 20%', functio
     $lines = app(ProrataComposer::class)->compose($intent);
 
     expect($lines)->toHaveCount(1);
-    expect($lines[0]->vatRate)->toBe(10.0); // Aus Original-Line, nicht Plan
+    expect($lines[0]->vatRate)->toBe(10.0); // From original line, not from the plan
 });
 
 it('coupon-covered original (amount_net=0) marks line as isCouponCovered', function (): void {
@@ -375,16 +375,16 @@ it('seat reduction LIFO across multiple original line items', function (): void 
 
     $lines = app(ProrataComposer::class)->compose($intent);
 
-    // 5 Sitze zurückgeben: jüngste (2) zuerst, dann nächst-jüngste (3) → 2 Refund-Lines.
+    // Return 5 seats: newest (2) first, then next-newest (3) -> 2 refund lines.
     expect($lines)->toHaveCount(2);
     expect($lines[0]->kind)->toBe('seats');
-    expect($lines[0]->quantity)->toBe(2); // jüngste
-    expect($lines[1]->quantity)->toBe(3); // zweit-jüngste
+    expect($lines[0]->quantity)->toBe(2); // newest
+    expect($lines[1]->quantity)->toBe(3); // second-newest
 });
 
-it('throws RuntimeException when refund target line item is missing', function (): void {
+it('skips refund line when original plan invoice is missing', function (): void {
     $billable = makeComposerBillable('enterprise');
-    // Keine Period-Invoice mit Plan-Line erstellt!
+    // No period invoice with a plan line was created — e.g. after a full refund / data inconsistency.
 
     $intent = new PlanChangeIntent(
         billable: $billable,
@@ -394,6 +394,208 @@ it('throws RuntimeException when refund target line item is missing', function (
         currentAddons: [], newAddons: [],
     );
 
-    expect(fn () => app(ProrataComposer::class)->compose($intent))
-        ->toThrow(\RuntimeException::class);
+    $lines = app(ProrataComposer::class)->compose($intent);
+
+    // No refund line, but the new plan is still charged pro-rata.
+    expect($lines)->toHaveCount(1);
+    expect($lines[0]->direction)->toBe('charge');
+    expect($lines[0]->kind)->toBe('plan');
+    expect($lines[0]->code)->toBe('starter');
+});
+
+it('skips plan refund when original invoice is fully refunded already', function (): void {
+    $billable = makeComposerBillable('enterprise');
+    $invoice = makePeriodInvoiceWithLines($billable, [
+        planLine('enterprise', 3000, 20.0),
+    ]);
+    // Original invoice was fully refunded as a goodwill gesture (cached column).
+    $invoice->refunded_net = $invoice->amount_net;
+    $invoice->save();
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'enterprise', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+
+    // No refund line — everything was already paid back.
+    expect($lines)->toHaveCount(1);
+    expect($lines[0]->direction)->toBe('charge');
+    expect($lines[0]->kind)->toBe('plan');
+});
+
+it('caps plan refund at remaining refundable on partial pre-refund', function (): void {
+    $billable = makeComposerBillable('enterprise');
+    // 30.00 EUR plan line, with 25.00 EUR already refunded as goodwill -> 5.00 EUR left.
+    $invoice = makePeriodInvoiceWithLines($billable, [
+        planLine('enterprise', 3000, 20.0),
+    ]);
+    $invoice->refunded_net = 2500;
+    $invoice->save();
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'enterprise', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+    $refund = collect($lines)->firstWhere('direction', 'refund');
+
+    expect($refund)->not->toBeNull();
+    // Uncapped would be ~50% of 3000 ≈ 1500 — but only 500 remain refundable.
+    expect($refund->amountNet)->toBe(-500);
+    expect($refund->refundCapNote)->not->toBeNull();
+    expect($refund->refundCapNote['alreadyRefundedNet'])->toBe(2500);
+    expect($refund->refundCapNote['originalAmountNet'])->toBe(3000);
+    expect($refund->refundCapNote['cappedRefundNet'])->toBe(500);
+    expect($refund->refundCapNote['uncappedRefundNet'])->toBeGreaterThan(500);
+});
+
+it('shares remaining-refundable budget across plan and seat refund lines on the same invoice', function (): void {
+    $billable = makeComposerBillable('enterprise', seats: 3);
+    // Original invoice: plan 3000 + 2 seats 1000 = 4000 net. 1500 already refunded
+    // (e.g. goodwill) leaves 2500 in the pool. Uncapped pro-rata at ~50% factor:
+    // plan 1500 + seats 500 = 2000 — fits, but barely. Drop one more seat into the
+    // mix so the budget overflows and the seat line gets capped.
+    $invoice = makePeriodInvoiceWithLines($billable, [
+        planLine('enterprise', 3000, 20.0),
+        seatsLine(2, 1000, 20.0),
+    ]);
+    $invoice->refunded_net = 2000; // pool = 2000
+    $invoice->save();
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'enterprise', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 3, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+    $refunds = collect($lines)->where('direction', 'refund')->values();
+
+    // Sum of refund nets must not exceed remaining budget.
+    $totalRefundNet = $refunds->sum(fn ($l) => abs($l->amountNet));
+    expect($totalRefundNet)->toBeLessThanOrEqual(2000);
+
+    // Plan refund consumes 1500 (uncapped, fits within 2000), leaves 500 for seats.
+    $plan = $refunds->firstWhere('kind', 'plan');
+    expect($plan)->not->toBeNull();
+    expect($plan->refundCapNote)->toBeNull();
+    expect(abs($plan->amountNet))->toBe(1500);
+
+    // Seat refund gets capped from uncapped 500 down to the remaining 500 — exact fit,
+    // so no cap note. Verify the budget was respected.
+    $seats = $refunds->firstWhere('kind', 'seats');
+    expect($seats)->not->toBeNull();
+    expect(abs($seats->amountNet))->toBe(500);
+});
+
+it('caps refunds per invoice when seats are spread across two original invoices with different pre-refund states', function (): void {
+    $billable = makeComposerBillable('starter', seats: 6);
+    // Newer invoice (5 days old): 3 seats × 500. Half-refunded -> pool 750.
+    $newer = BillingInvoice::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'mollie_payment_id' => 'tr_newer',
+        'invoice_kind' => InvoiceKind::Subscription,
+        'status' => InvoiceStatus::Paid,
+        'country' => 'AT',
+        'currency' => 'EUR',
+        'amount_net' => 1500,
+        'amount_vat' => 300,
+        'amount_gross' => 1800,
+        'line_items' => [
+            seatsLine(3, 1500, 20.0, now()->subDays(5)->toIso8601String(), now()->addDays(15)->toIso8601String()),
+        ],
+        'period_start' => now()->subDays(5),
+        'period_end' => now()->addDays(15),
+        'refunded_net' => 750,
+    ]);
+    // Older invoice (10 days old): 2 seats × 500. Untouched -> pool 1000.
+    $older = BillingInvoice::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'mollie_payment_id' => 'tr_older',
+        'invoice_kind' => InvoiceKind::Subscription,
+        'status' => InvoiceStatus::Paid,
+        'country' => 'AT',
+        'currency' => 'EUR',
+        'amount_net' => 1000,
+        'amount_vat' => 200,
+        'amount_gross' => 1200,
+        'line_items' => [
+            seatsLine(2, 1000, 20.0, now()->subDays(10)->toIso8601String(), now()->addDays(15)->toIso8601String()),
+        ],
+        'period_start' => now()->subDays(10),
+        'period_end' => now()->addDays(15),
+        'refunded_net' => 0,
+    ]);
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'starter', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 6, newSeats: 1, // refund 5 seats
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+    $refunds = collect($lines)->where('direction', 'refund')->values();
+
+    // Two refund lines — newer first, then older.
+    expect($refunds)->toHaveCount(2);
+
+    // Newer invoice: refund of 3 seats × 500 × ~50% factor ≈ 750 — exactly the pool size,
+    // so no cap. Each invoice has its own budget; the older invoice's budget is unaffected.
+    $newerRefund = $refunds->firstWhere(fn ($l) => $l->originalInvoice?->id === $newer->id);
+    expect($newerRefund)->not->toBeNull();
+    expect($newerRefund->quantity)->toBe(3);
+
+    // Older invoice: refund of 2 seats untouched by the newer-invoice cap.
+    $olderRefund = $refunds->firstWhere(fn ($l) => $l->originalInvoice?->id === $older->id);
+    expect($olderRefund)->not->toBeNull();
+    expect($olderRefund->quantity)->toBe(2);
+    expect($olderRefund->refundCapNote)->toBeNull();
+});
+
+it('caps seat refund line when plan refund already consumed most of the budget', function (): void {
+    $billable = makeComposerBillable('enterprise', seats: 3);
+    // Plan 3000 + 2 seats 1000 = 4000 net. 2500 already refunded -> 1500 in pool.
+    // Plan-refund uncapped 1500 consumes the entire pool exactly; seats then get fully capped.
+    $invoice = makePeriodInvoiceWithLines($billable, [
+        planLine('enterprise', 3000, 20.0),
+        seatsLine(2, 1000, 20.0),
+    ]);
+    $invoice->refunded_net = 2500;
+    $invoice->save();
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'enterprise', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 3, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+    $refunds = collect($lines)->where('direction', 'refund')->values();
+
+    // Plan takes the full 1500, no cap note.
+    $plan = $refunds->firstWhere('kind', 'plan');
+    expect($plan)->not->toBeNull();
+    expect(abs($plan->amountNet))->toBe(1500);
+    expect($plan->refundCapNote)->toBeNull();
+
+    // Budget exhausted -> seat line is dropped entirely.
+    $seats = $refunds->firstWhere('kind', 'seats');
+    expect($seats)->toBeNull();
 });

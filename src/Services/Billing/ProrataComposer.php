@@ -111,6 +111,8 @@ class ProrataComposer
                 }
             }
 
+            $refunds = $this->applyRemainingRefundablePool($refunds);
+
             return array_merge($charges, $refunds);
         }
 
@@ -153,17 +155,106 @@ class ProrataComposer
             }
         }
 
+        $refunds = $this->applyRemainingRefundablePool($refunds);
+
         return array_merge($charges, $refunds);
     }
 
+    /**
+     * Cap refund lines against the remaining-refundable budget of each original
+     * invoice. Multiple refund lines on the same invoice (plan + seats + addons)
+     * share one budget; otherwise a partial pre-refund (e.g. a goodwill credit)
+     * would be ignored by all but the first line.
+     *
+     * Lines are processed in input order. When a line exceeds the remaining
+     * budget it is reduced to fit; when the budget is exhausted, follow-up lines
+     * on that invoice are dropped entirely. Lines without an original invoice or
+     * that are coupon-covered are passed through unchanged.
+     *
+     * The (possibly reduced) line carries a `refundCapNote` so the UI can render
+     * "gekürzt wg. X bereits erstattet".
+     *
+     * @param  list<ProrataLine>  $refundLines
+     * @return list<ProrataLine>
+     */
+    private function applyRemainingRefundablePool(array $refundLines): array
+    {
+        $pools = [];   // [invoice_id] => remaining net budget
+        $totals = [];  // [invoice_id] => original total budget at start (for the note)
+        $out = [];
+
+        foreach ($refundLines as $line) {
+            $invoice = $line->originalInvoice;
+            if ($invoice === null || $line->isCouponCovered) {
+                $out[] = $line;
+                continue;
+            }
+
+            $invoiceId = $invoice->getKey();
+            if (! array_key_exists($invoiceId, $pools)) {
+                $pools[$invoiceId] = (int) $invoice->remainingRefundableNet();
+                $totals[$invoiceId] = (int) $invoice->amount_net;
+            }
+
+            $uncappedNet = abs($line->amountNet);
+            $available = $pools[$invoiceId];
+
+            if ($uncappedNet <= $available) {
+                $pools[$invoiceId] = $available - $uncappedNet;
+                $out[] = $line;
+                continue;
+            }
+
+            if ($available <= 0) {
+                continue; // budget exhausted on this invoice — drop the line
+            }
+
+            // Partial fit: clamp this line to the remaining budget. We keep the
+            // original VAT rate and recompute VAT proportionally so per-line
+            // gross stays consistent.
+            $cappedNet = $available;
+            $vatRate = $line->vatRate;
+            $cappedVat = (int) round($cappedNet * $vatRate / 100);
+            $capped = new ProrataLine(
+                originalInvoice: $invoice,
+                originalLineItemIndex: $line->originalLineItemIndex,
+                kind: $line->kind,
+                code: $line->code,
+                label: $line->label,
+                quantity: $line->quantity,
+                amountNet: -$cappedNet,
+                vatRate: $vatRate,
+                amountVat: -$cappedVat,
+                amountGross: -($cappedNet + $cappedVat),
+                periodStart: $line->periodStart,
+                periodEnd: $line->periodEnd,
+                daysActive: $line->daysActive,
+                daysRemaining: $line->daysRemaining,
+                isCouponCovered: false,
+                direction: 'refund',
+            );
+            $capped->refundCapNote = [
+                'alreadyRefundedNet' => (int) $invoice->effectiveRefundedNet(),
+                'originalAmountNet' => $totals[$invoiceId],
+                'uncappedRefundNet' => $uncappedNet,
+                'cappedRefundNet' => $cappedNet,
+            ];
+            $out[] = $capped;
+            $pools[$invoiceId] = 0;
+        }
+
+        return $out;
+    }
 
     private function planRefundLine(PlanChangeIntent $intent, CarbonInterface $periodStart, CarbonInterface $periodEnd): ?ProrataLine
     {
         $candidates = BillingInvoice::currentPeriodLines($intent->billable, 'plan', $intent->currentPlan);
         if (empty($candidates)) {
-            // Kein Original — nur erlaubt wenn currentPlan war Free (oben schon abgefangen).
-            // Sonst Daten-Inkonsistenz.
-            throw new \RuntimeException("Kein Original-Plan-Line-Item für {$intent->currentPlan} in laufender Periode.");
+            // Keine offene Plan-Line in der aktuellen Periode — z.B. wenn die Original-
+            // Subscription-Invoice aus Kulanz vollständig refundiert wurde. Dann gibt es
+            // nichts mehr zu refundieren; der neue Plan wird einfach ohne Pro-rata-
+            // Gegenbuchung gechargt. Free→* wurde weiter oben bereits abgefangen.
+            return null;
         }
 
         $first = $candidates[0];
@@ -208,9 +299,17 @@ class ProrataComposer
         }
 
         $refundNet = (int) round($cashNet * $factor);
+        if ($refundNet <= 0) {
+            return null;
+        }
+
         $refundVat = (int) round($refundNet * $vatRate / 100);
         $refundGross = $refundNet + $refundVat;
 
+        // No per-line cap here. The composer applies a per-invoice remaining-pool
+        // cap at the end (see applyRemainingRefundablePool()) so multiple refund
+        // lines on the same original invoice (plan + seats + addons) share a
+        // single budget instead of each independently reading the full remainder.
         return new ProrataLine(
             originalInvoice: $invoice,
             originalLineItemIndex: $idx,
@@ -332,7 +431,10 @@ class ProrataComposer
             $takeQty = min($remaining, $availableQty);
             $remaining -= $takeQty;
 
-            $lines[] = $this->buildRefundLine($invoice, $idx, 'seats', null, $takeQty);
+            $line = $this->buildRefundLine($invoice, $idx, 'seats', null, $takeQty);
+            if ($line !== null) {
+                $lines[] = $line;
+            }
         }
 
         return $lines;
@@ -405,7 +507,10 @@ class ProrataComposer
             $takeQty = min($remaining, $availableQty);
             $remaining -= $takeQty;
 
-            $lines[] = $this->buildRefundLine($invoice, $idx, 'addon', $code, $takeQty);
+            $line = $this->buildRefundLine($invoice, $idx, 'addon', $code, $takeQty);
+            if ($line !== null) {
+                $lines[] = $line;
+            }
         }
 
         return $lines;
@@ -452,8 +557,11 @@ class ProrataComposer
 
     /**
      * Baut eine Refund-Zeile für eine bestimmte Original-Line mit gegebener Mengen-Reduktion.
+     *
+     * Liefert null, wenn auf der Original-Invoice nichts mehr offen ist (z.B. nach
+     * vorherigem Kulanz-Vollrefund). Die Aufrufer filtern null.
      */
-    private function buildRefundLine(BillingInvoice $invoice, int $idx, string $kind, ?string $code, int $quantity): ProrataLine
+    private function buildRefundLine(BillingInvoice $invoice, int $idx, string $kind, ?string $code, int $quantity): ?ProrataLine
     {
         $line = $invoice->lineItem($idx);
         if ($line === null) {
@@ -503,9 +611,15 @@ class ProrataComposer
         }
 
         $refundNet = (int) round($perItemNet * $quantity * $factor);
+        if ($refundNet <= 0) {
+            return null;
+        }
+
         $refundVat = (int) round($refundNet * $vatRate / 100);
         $refundGross = $refundNet + $refundVat;
 
+        // No per-line cap here — the composer applies a per-invoice remaining-pool
+        // cap at the end so plan + seats + addons on the same invoice share a budget.
         return new ProrataLine(
             originalInvoice: $invoice,
             originalLineItemIndex: $idx,

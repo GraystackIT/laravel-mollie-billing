@@ -28,7 +28,7 @@ class SpyUpdateSubscription extends UpdateSubscription
     /** @var array<int, array<int, mixed>> */
     public static array $calls = [];
 
-    protected function applyProrata(Billable $billable, SubscriptionChangeContext $context): void
+    protected function applyProrata(Billable $billable, SubscriptionChangeContext $context, array $resolvedCoupons = []): array
     {
         if ($context->prorataChargeNet > 0) {
             self::$calls[] = ['prorata_charge', $context->prorataChargeNet];
@@ -40,11 +40,19 @@ class SpyUpdateSubscription extends UpdateSubscription
                 $meta = $billable->getBillingSubscriptionMeta();
                 $meta['pending_prorata_change'] = [
                     'charge_payment_id' => 'tr_test_'.uniqid(),
+                    'charge_lines' => array_map(
+                        fn ($c) => [
+                            'kind' => 'coupon',
+                            'code' => (string) $c->code,
+                            'amount_net' => -1, // sentinel; tests that care override this directly
+                        ],
+                        $resolvedCoupons,
+                    ),
                 ];
                 $billable->forceFill(['subscription_meta' => $meta])->save();
             }
 
-            return;
+            return ['path' => 'deferred_charge', 'invoice' => null];
         }
 
         if ($context->prorataCreditNet > 0) {
@@ -66,5 +74,7 @@ class SpyUpdateSubscription extends UpdateSubscription
         );
 
         app(MollieSubscriptionPatcher::class)->updateForIntent($billable, $intent);
+
+        return ['path' => 'noop', 'invoice' => null];
     }
 }

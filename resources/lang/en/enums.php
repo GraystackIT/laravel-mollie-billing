@@ -36,6 +36,7 @@ return [
         'credits' => 'Credits',
         'trial_extension' => 'Trial extension',
         'access_grant' => 'Access grant',
+        'period_extension' => 'Period extension',
     ],
     'discount_type' => [
         'percentage' => 'Percentage',

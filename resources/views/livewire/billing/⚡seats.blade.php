@@ -2,7 +2,11 @@
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Models\Coupon;
+use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use Livewire\Component;
 
@@ -10,6 +14,15 @@ new class extends Component {
     public ?int $seatCount = 0;
     public ?string $flash = null;
     public bool $flashSuccess = true;
+
+    /** @var array<int, string> Codes that the user has already applied (uppercased). */
+    public array $appliedCouponCodes = [];
+    /** @var array<int, array{code:string, name:string, stackable:bool}> */
+    public array $appliedCouponInfo = [];
+    public string $couponInput = '';
+    public ?string $couponError = null;
+    public ?int $couponDiscountNet = null;
+    public array $couponWarnings = [];
 
     public function mount(): void
     {
@@ -32,19 +45,187 @@ new class extends Component {
         }
     }
 
-    public function increment(): void
+    public function increment(PreviewService $service): void
     {
         $this->ensureMinSeats();
         $this->seatCount++;
+        $this->refreshCouponPreview($service);
     }
 
-    public function decrement(): void
+    public function decrement(PreviewService $service): void
     {
         $this->ensureMinSeats();
         $min = $this->minSeats();
         if ($this->seatCount > $min) {
             $this->seatCount--;
         }
+        $this->refreshCouponPreview($service);
+    }
+
+    public function updatedSeatCount(PreviewService $service): void
+    {
+        $this->refreshCouponPreview($service);
+    }
+
+    public function applyCoupon(CouponService $couponService, PreviewService $previewService): void
+    {
+        $this->couponError = null;
+
+        $code = strtoupper(trim($this->couponInput));
+        if ($code === '') {
+            return;
+        }
+
+        if (in_array($code, $this->appliedCouponCodes, true)) {
+            $this->couponError = __('billing::checkout.coupon_already_applied');
+            return;
+        }
+
+        if (! $this->canAddMoreCoupons()) {
+            $this->couponError = __('billing::checkout.coupon_not_stackable_with_current');
+            return;
+        }
+
+        $billable = $this->resolveBillable();
+        if (! $billable) {
+            return;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
+        $interval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
+        $newSeats = max($this->seatCount ?? 0, $catalog->includedSeats($planCode));
+        $newAddons = $billable->getActiveBillingAddonCodes();
+        $newNet = \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
+            $catalog,
+            $billable,
+            $planCode,
+            $interval,
+            $newSeats,
+            $newAddons,
+        );
+
+        try {
+            $coupon = $couponService->validate($code, $billable, [
+                'planCode' => $planCode ?: null,
+                'interval' => $interval,
+                'addonCodes' => $newAddons,
+                'orderAmountNet' => $newNet,
+                'existingCouponIds' => $this->resolveAppliedCouponIds(),
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                ],
+            ]);
+        } catch (InvalidCouponException $e) {
+            $this->couponError = $this->translateCouponReason($e->reason());
+            return;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->couponError = __('billing::checkout.coupon_failed');
+            return;
+        }
+
+        $this->appliedCouponCodes[] = (string) $coupon->code;
+        $this->appliedCouponInfo[] = [
+            'code' => (string) $coupon->code,
+            'name' => (string) ($coupon->name ?: $coupon->code),
+            'stackable' => (bool) $coupon->stackable,
+        ];
+        $this->couponInput = '';
+
+        $this->refreshCouponPreview($previewService);
+    }
+
+    public function removeCoupon(string $code, PreviewService $service): void
+    {
+        $code = strtoupper(trim($code));
+        $this->appliedCouponCodes = array_values(array_filter(
+            $this->appliedCouponCodes,
+            fn (string $c) => $c !== $code,
+        ));
+        $this->appliedCouponInfo = array_values(array_filter(
+            $this->appliedCouponInfo,
+            fn (array $info) => ($info['code'] ?? null) !== $code,
+        ));
+        $this->couponError = null;
+        $this->refreshCouponPreview($service);
+    }
+
+    public function canAddMoreCoupons(): bool
+    {
+        if ($this->appliedCouponCodes === []) {
+            return true;
+        }
+
+        foreach ($this->appliedCouponInfo as $info) {
+            if (! ($info['stackable'] ?? true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @return array<int, int> */
+    private function resolveAppliedCouponIds(): array
+    {
+        if ($this->appliedCouponCodes === []) {
+            return [];
+        }
+
+        return Coupon::query()
+            ->whereIn('code', array_map('strtoupper', $this->appliedCouponCodes))
+            ->pluck('id')
+            ->all();
+    }
+
+    private function translateCouponReason(string $reason): string
+    {
+        return match ($reason) {
+            'not_found' => __('billing::checkout.coupon_not_found'),
+            'inactive' => __('billing::checkout.coupon_inactive'),
+            'not_yet_valid' => __('billing::checkout.coupon_not_yet_valid'),
+            'expired' => __('billing::checkout.coupon_expired'),
+            'globally_exhausted' => __('billing::checkout.coupon_exhausted'),
+            'plan_not_applicable' => __('billing::checkout.coupon_plan_mismatch'),
+            'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
+            'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
+            'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'min_order_not_met' => __('billing::checkout.coupon_min_order'),
+            'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
+            'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
+            'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
+            'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
+            'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
+            'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
+            'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
+            default => __('billing::checkout.coupon_failed'),
+        };
+    }
+
+    private function refreshCouponPreview(PreviewService $service): void
+    {
+        $this->couponDiscountNet = null;
+        $this->couponWarnings = [];
+
+        if ($this->appliedCouponCodes === []) {
+            return;
+        }
+
+        $billable = $this->resolveBillable();
+        if (! $billable) {
+            return;
+        }
+
+        $preview = $service->previewUpdate($billable, new \GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest(
+            seats: $this->seatCount ?? 0,
+            couponCodes: $this->appliedCouponCodes,
+        ));
+
+        $this->couponDiscountNet = (int) ($preview['couponDiscountNet'] ?? 0);
+        $this->couponWarnings = (array) ($preview['warnings'] ?? []);
     }
 
     private function minSeats(): int
@@ -63,9 +244,19 @@ new class extends Component {
         $this->ensureMinSeats();
 
         try {
-            $billable->syncBillingSeats($this->seatCount);
+            $billable->syncBillingSeats(
+                $this->seatCount,
+                null,
+                $this->appliedCouponCodes !== [] ? $this->appliedCouponCodes : null,
+            );
             $this->flash = __('billing::portal.seats_flash.synced');
             $this->flashSuccess = true;
+            $this->appliedCouponCodes = [];
+            $this->appliedCouponInfo = [];
+            $this->couponInput = '';
+            $this->couponError = null;
+            $this->couponDiscountNet = null;
+            $this->couponWarnings = [];
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
@@ -290,12 +481,70 @@ new class extends Component {
                                         <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ $currencySymbol }}{{ number_format($extraCost / 100, 2) }}</span>
                                     </div>
                                 @endif
+                                @if (($couponDiscountNet ?? 0) > 0)
+                                    <div class="flex items-center justify-between text-sm">
+                                        <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.coupon_code_placeholder') }}</span>
+                                        <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($couponDiscountNet / 100, 2) }}</span>
+                                    </div>
+                                @endif
                                 <flux:separator class="my-1!" />
                                 <div class="flex items-center justify-between">
                                     <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.seats_total_cost') }}</span>
-                                    <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($extraCost ?? 0) / 100, 2) }}</span>
+                                    <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0)) / 100, 2) }}</span>
                                 </div>
                                 <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
+
+                                <flux:separator class="my-3!" />
+
+                                <div class="space-y-2">
+                                    @foreach ($appliedCouponInfo as $info)
+                                        <div class="flex items-center justify-between gap-2 rounded-md border border-emerald-300/60 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-800/50 dark:bg-emerald-900/20">
+                                            <div class="flex items-center gap-2 text-sm">
+                                                <flux:icon.ticket class="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                                                <span class="font-medium tabular-nums text-emerald-700 dark:text-emerald-300">{{ $info['code'] }}</span>
+                                                @if (! ($info['stackable'] ?? true))
+                                                    <span class="text-xs text-zinc-400">{{ __('billing::portal.coupon_not_stackable') }}</span>
+                                                @endif
+                                            </div>
+                                            <flux:button
+                                                size="xs"
+                                                variant="ghost"
+                                                icon="x-mark"
+                                                wire:click="removeCoupon('{{ $info['code'] }}')"
+                                                :aria-label="__('billing::checkout.remove_coupon')"
+                                            />
+                                        </div>
+                                    @endforeach
+
+                                    @if ($this->canAddMoreCoupons())
+                                        <flux:input.group>
+                                            <flux:input
+                                                size="sm"
+                                                wire:model="couponInput"
+                                                wire:keydown.enter.prevent="applyCoupon"
+                                                :placeholder="__('billing::portal.coupon_code_placeholder')"
+                                                :disabled="$hasPendingPlanChange || $localBlocksPaidSeats"
+                                            />
+                                            <flux:button
+                                                size="sm"
+                                                type="button"
+                                                wire:click="applyCoupon"
+                                                icon="check"
+                                                :disabled="$hasPendingPlanChange || $localBlocksPaidSeats"
+                                            >
+                                                {{ __('billing::portal.coupon_redeem_button') }}
+                                            </flux:button>
+                                        </flux:input.group>
+                                    @endif
+
+                                    @if ($couponError)
+                                        <flux:text class="text-xs text-rose-600 dark:text-rose-400">{{ $couponError }}</flux:text>
+                                    @endif
+
+                                    @foreach ($couponWarnings as $warning)
+                                        <flux:text class="text-xs text-rose-600 dark:text-rose-400">{{ $warning }}</flux:text>
+                                    @endforeach
+                                </div>
                             </div>
                         </div>
                     @endif

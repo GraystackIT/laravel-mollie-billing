@@ -11,4 +11,7 @@ return [
     'access_grant_conflicts_with_mollie' => 'Access grants cannot be applied while a paid subscription is active.',
     'access_grant_requires_active_subscription' => 'An active subscription is required before this addon grant can be applied.',
     'refund_exceeds_invoice_amount' => 'The refund amount exceeds the remaining refundable total of this invoice.',
+    'coupon_recurring_conflict' => 'Another recurring coupon is already active on this subscription.',
+    'coupon_requires_active_subscription' => 'An active subscription is required to redeem this coupon.',
+    'coupon_too_close_to_charge' => 'The next charge is too close to safely apply this coupon. Please try again after the next billing date.',
 ];

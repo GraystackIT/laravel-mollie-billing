@@ -433,6 +433,18 @@ trait HasBilling
 
     public function nextBillingDate(): ?CarbonInterface
     {
+        $override = $this->subscription_meta['next_charge_date_override'] ?? null;
+        if ($override !== null && $override !== '') {
+            try {
+                $parsed = \Carbon\Carbon::parse((string) $override);
+                if ($parsed->isFuture()) {
+                    return $parsed;
+                }
+            } catch (\Throwable) {
+                // fall through to the regular computation below
+            }
+        }
+
         if ($this->subscription_period_starts_at === null || $this->subscription_interval === null) {
             return null;
         }
@@ -533,13 +545,24 @@ trait HasBilling
 
     // ── One-time orders ──
 
-    /** @return array{checkout_url:?string, payment_id:string} */
-    public function purchaseOneTimeOrder(string $productCode, array $metadata = []): array
+    /**
+     * @param  array<int, string>|null  $couponCodes  Multiple stackable coupon codes; takes precedence over $couponCode.
+     * @return array{checkout_url:?string, payment_id:string}
+     */
+    public function purchaseOneTimeOrder(string $productCode, array $metadata = [], ?string $couponCode = null, ?array $couponCodes = null): array
     {
-        return app(StartOneTimeOrderCheckout::class)->handle($this, [
+        $payload = [
             'product_code' => $productCode,
             'metadata' => $metadata,
-        ]);
+        ];
+
+        if ($couponCodes !== null && $couponCodes !== []) {
+            $payload['coupon_codes'] = $couponCodes;
+        } elseif ($couponCode !== null && $couponCode !== '') {
+            $payload['coupon_code'] = $couponCode;
+        }
+
+        return app(StartOneTimeOrderCheckout::class)->handle($this, $payload);
     }
 
     /** @return array<int, string> All configured product codes. */
@@ -602,9 +625,12 @@ trait HasBilling
         app(ResubscribeSubscription::class)->handle($this);
     }
 
-    public function enableBillingAddon(string $addonCode): void
+    /**
+     * @param  array<int, string>|null  $couponCodes  Multiple stackable coupon codes; takes precedence over $couponCode.
+     */
+    public function enableBillingAddon(string $addonCode, ?string $couponCode = null, ?array $couponCodes = null): void
     {
-        app(EnableAddon::class)->handle($this, $addonCode);
+        app(EnableAddon::class)->handle($this, $addonCode, $couponCode, $couponCodes);
     }
 
     public function disableBillingAddon(string $addonCode): void
@@ -612,8 +638,11 @@ trait HasBilling
         app(DisableAddon::class)->handle($this, $addonCode);
     }
 
-    public function syncBillingSeats(int $seats): void
+    /**
+     * @param  array<int, string>|null  $couponCodes  Multiple stackable coupon codes; takes precedence over $couponCode.
+     */
+    public function syncBillingSeats(int $seats, ?string $couponCode = null, ?array $couponCodes = null): void
     {
-        app(SyncSeats::class)->handle($this, $seats);
+        app(SyncSeats::class)->handle($this, $seats, $couponCode, $couponCodes);
     }
 }

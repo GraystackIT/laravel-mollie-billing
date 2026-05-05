@@ -57,12 +57,52 @@ class BillingInvoice extends Model
 
     public function isFullyRefunded(): bool
     {
-        return $this->refunded_net >= $this->amount_net && $this->amount_net > 0;
+        return $this->effectiveRefundedNet() >= $this->amount_net && $this->amount_net > 0;
     }
 
     public function remainingRefundableNet(): int
     {
-        return max(0, $this->amount_net - $this->refunded_net);
+        return max(0, $this->amount_net - $this->effectiveRefundedNet());
+    }
+
+    /**
+     * Authoritative refunded-net for this invoice: the larger of the cached
+     * `refunded_net` column and the value derived live from refund-invoice
+     * line items pointing back at this invoice. The derivation closes the gap
+     * for legacy paths that issued refunds without updating the cache column
+     * (some plan-change refunds before the bug fix), so refundable accounting
+     * stays consistent regardless of which refund path produced the credit
+     * note.
+     */
+    public function effectiveRefundedNet(): int
+    {
+        return max((int) $this->refunded_net, $this->derivedRefundedNet());
+    }
+
+    /**
+     * Sum the absolute net of every refund-invoice line item that references
+     * this invoice via `parent_invoice_id`. Returns 0 if no refund children
+     * exist.
+     */
+    public function derivedRefundedNet(): int
+    {
+        $sum = 0;
+        $children = self::query()
+            ->where('billable_type', $this->billable_type)
+            ->where('billable_id', $this->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($children as $child) {
+            foreach ((array) ($child->line_items ?? []) as $line) {
+                if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
+                    continue;
+                }
+                $sum += (int) abs((int) ($line['amount_net'] ?? 0));
+            }
+        }
+
+        return $sum;
     }
 
     public function hasPdf(): bool
@@ -243,12 +283,21 @@ class BillingInvoice extends Model
             ->where('invoice_kind', InvoiceKind::Refund)
             ->get();
 
+        // Mengen-Aggregation für Stück-für-Stück-Refunds (z.B. Sitz reduzieren).
+        // NUR strukturierte Refund-Lines (kind plan/seats/addon) zählen — generische
+        // Cash-Refund-Lines (kind 'refund', vom Webhook nach Dashboard-Refund oder
+        // Kulanz-Vollrefund) refundieren einen Geld-Betrag auf Invoice-Ebene und
+        // dürfen nicht als "1 Plan-Stück verbraucht" gezählt werden, sonst blockt
+        // ein einzelner Cash-Refund alle weiteren Plan-Wechsel.
         $alreadyRefunded = []; // [parent_invoice_id][parent_line_item_index] => quantity
         foreach ($refundInvoices as $refund) {
             foreach ((array) ($refund->line_items ?? []) as $rline) {
                 $pid = $rline['parent_invoice_id'] ?? null;
                 $pidx = $rline['parent_line_item_index'] ?? null;
                 if ($pid === null || $pidx === null) {
+                    continue;
+                }
+                if (! in_array(($rline['kind'] ?? null), ['plan', 'seats', 'seat', 'addon'], true)) {
                     continue;
                 }
                 $alreadyRefunded[$pid][$pidx] = ($alreadyRefunded[$pid][$pidx] ?? 0) + (int) ($rline['quantity'] ?? 0);

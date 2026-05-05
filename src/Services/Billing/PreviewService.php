@@ -126,37 +126,61 @@ class PreviewService
             $newAddons,
         );
 
-        // Coupon handling
+        // Coupon handling — iterate over all applied coupon codes (stackable).
+        // We split the resolution into two separate discount totals:
+        //   - $couponDiscountNet         applies to the recurring price (only Recurring-type)
+        //   - $prorataCouponDiscountNet  applies to the prorata charge ("due now") and is
+        //                                fed by both Recurring AND FirstPayment coupons.
+        // Other coupon types (Credits, TrialExtension, AccessGrant, PeriodExtension)
+        // have no monetary effect on plan changes and are silently skipped here —
+        // they get redeemed in `UpdateSubscription::update()` for their side effects.
         $couponDiscountNet = 0;
-        if ($dto->couponCode !== null && $dto->couponCode !== '') {
+        $prorataCouponDiscountNet = 0;
+        $existingCouponIds = [];
+        $remainingRecurring = $newNet;
+        /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
+        $resolvedRecurringCoupons = [];
+        /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
+        $resolvedFirstPaymentCoupons = [];
+
+        foreach ($dto->couponCodes as $code) {
             try {
                 $coupon = $this->couponService->validate(
-                    $dto->couponCode,
+                    $code,
                     $billable,
                     [
                         'planCode' => $newPlan,
                         'interval' => $newInterval,
                         'addonCodes' => array_keys($newAddons),
-                        'orderAmountNet' => $newNet,
+                        'orderAmountNet' => $remainingRecurring,
+                        'existingCouponIds' => $existingCouponIds,
                     ],
                 );
+                $existingCouponIds[] = $coupon->id;
 
-                $couponDiscountNet = $this->couponService->computeRecurringDiscount($coupon, $newNet);
+                if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
+                    $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remainingRecurring);
+                    $couponDiscountNet += $thisDiscount;
+                    $remainingRecurring = max(0, $remainingRecurring - $thisDiscount);
+                    $resolvedRecurringCoupons[] = ['coupon' => $coupon, 'discount' => $thisDiscount];
 
-                if ($couponDiscountNet > 0) {
-                    $lineItems[] = [
-                        'kind' => 'coupon',
-                        'label' => 'Coupon '.$coupon->code,
-                        'code' => (string) $coupon->code,
-                        'quantity' => 1,
-                        'unit_price_net' => -$couponDiscountNet,
-                        'total_net' => -$couponDiscountNet,
-                    ];
+                    if ($thisDiscount > 0) {
+                        $lineItems[] = [
+                            'kind' => 'coupon',
+                            'label' => 'Coupon '.$coupon->code,
+                            'code' => (string) $coupon->code,
+                            'quantity' => 1,
+                            'unit_price_net' => -$thisDiscount,
+                            'total_net' => -$thisDiscount,
+                        ];
+                    }
+                } elseif ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment) {
+                    $resolvedFirstPaymentCoupons[] = ['coupon' => $coupon, 'discount' => 0];
                 }
             } catch (InvalidCouponException $e) {
-                $warnings[] = 'Coupon '.$dto->couponCode.' is not applicable: '.$e->getMessage();
+                $warnings[] = 'Coupon '.$code.' is not applicable: '.$e->getMessage();
             } catch (\RuntimeException $e) {
-                $warnings[] = 'Coupon '.$dto->couponCode.' cannot be applied: '.$e->getMessage();
+                $warnings[] = 'Coupon '.$code.' cannot be applied: '.$e->getMessage();
             }
         }
 
@@ -195,12 +219,80 @@ class PreviewService
             $prorataTotalDays = $days['total'];
         }
 
+        // Coupon discounts on the prorata charge ("due now"):
+        //   - Both Recurring and FirstPayment coupons apply their discount rate
+        //     directly against the prorata charge net (the actual money flowing
+        //     "now"), not against the full recurring net. The recurring coupon's
+        //     ongoing discount on future renewals is independent and lives in
+        //     the active_recurring_coupon marker.
+        //   - All discounts are capped at the remaining prorata charge net so
+        //     the line can never go negative.
+        $remainingProrata = $prorataChargeNet;
+        foreach ($resolvedRecurringCoupons as &$entry) {
+            if ($remainingProrata <= 0) {
+                break;
+            }
+            $thisDiscount = $this->couponService->computeRecurringDiscount($entry['coupon'], $remainingProrata);
+            $thisDiscount = min($thisDiscount, $remainingProrata);
+            if ($thisDiscount > 0) {
+                $entry['prorataDiscount'] = $thisDiscount;
+                $prorataCouponDiscountNet += $thisDiscount;
+                $remainingProrata -= $thisDiscount;
+            }
+        }
+        unset($entry);
+        foreach ($resolvedFirstPaymentCoupons as &$entry) {
+            if ($remainingProrata <= 0) {
+                break;
+            }
+            $thisDiscount = $this->couponService->computeRecurringDiscount($entry['coupon'], $remainingProrata);
+            if ($thisDiscount > 0) {
+                $entry['discount'] = $thisDiscount;
+                $prorataCouponDiscountNet += $thisDiscount;
+                $remainingProrata -= $thisDiscount;
+            }
+        }
+        unset($entry);
+
+        $prorataChargeNet = max(0, $prorataChargeNet - $prorataCouponDiscountNet);
+
         // VAT on recurring price.
         // Display-only: trust that a stored vat_number means reverse-charge.
         // The actual VIES check happens at checkout / billing-data save — by the
         // time we render the plan-change preview, that decision is already made
         // and persisted as a BillingVatValidation. calculate() reads it directly.
         $country = $billable->getBillingCountry() ?? 'DE';
+
+        // Apply an existing active recurring coupon marker to the preview as well —
+        // the user keeps seeing the discount they signed up for across plan/seat
+        // changes, capped at the original base_amount_net (no extra rabatt for
+        // additions made after coupon-apply).
+        // Skip this when the user just entered the SAME coupon again in this update —
+        // that case is already covered by $couponDiscountNet from the loop above.
+        $existingMarker = $this->couponService->getActiveRecurringCouponMarker($billable);
+        $existingMarkerCouponId = is_array($existingMarker) ? (int) ($existingMarker['coupon_id'] ?? 0) : 0;
+        $alreadyCountedAsNew = false;
+        foreach ($resolvedRecurringCoupons as $entry) {
+            if ((int) $entry['coupon']->id === $existingMarkerCouponId && $existingMarkerCouponId > 0) {
+                $alreadyCountedAsNew = true;
+                break;
+            }
+        }
+        $existingMarkerDiscountNet = (! $alreadyCountedAsNew)
+            ? $this->couponService->computeMarkerDiscount($billable, $newNet)
+            : 0;
+        if ($existingMarkerDiscountNet > 0) {
+            $couponDiscountNet += $existingMarkerDiscountNet;
+            $lineItems[] = [
+                'kind' => 'coupon',
+                'label' => 'Coupon '.($existingMarker['code'] ?? ''),
+                'code' => (string) ($existingMarker['code'] ?? ''),
+                'quantity' => 1,
+                'unit_price_net' => -$existingMarkerDiscountNet,
+                'total_net' => -$existingMarkerDiscountNet,
+            ];
+        }
+
         $netForRecurring = max(0, $newNet - $couponDiscountNet);
 
         try {
@@ -370,8 +462,53 @@ class PreviewService
             ),
             // Multi-VAT-Aufschlüsselung via Composer (UI-Source-of-Truth für die neue Preview).
             // Aggregat-Felder oben (prorataChargeNet etc.) bleiben für Backwards-Compat.
-            ...$this->prorataLinesPreview($billable, $currentPlan, $newPlan, $currentInterval, $newInterval, $currentSeats, $newSeats, $currentAddons, $newAddons),
+            // Coupon-Discount-Lines werden als negative Zeilen angehängt — der Composer
+            // selbst hat keine Coupon-Awareness, das passiert hier.
+            ...$this->prorataLinesPreview(
+                $billable,
+                $currentPlan,
+                $newPlan,
+                $currentInterval,
+                $newInterval,
+                $currentSeats,
+                $newSeats,
+                $currentAddons,
+                $newAddons,
+                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons, $resolvedFirstPaymentCoupons),
+            ),
         ];
+    }
+
+    /**
+     * Build the per-coupon discount lines for the prorata charge ("due now").
+     *
+     * Both Recurring and FirstPayment coupons here render the discount that was
+     * actually applied to the prorata charge — already pre-computed in the
+     * loop above (`$entry['prorataDiscount']` for recurring, `$entry['discount']`
+     * for first-payment). No further scaling here.
+     *
+     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int, prorataDiscount?: int}>  $recurringCoupons
+     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>  $firstPaymentCoupons
+     * @return list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>
+     */
+    private function buildProrataCouponDiscountLines(
+        array $recurringCoupons,
+        array $firstPaymentCoupons,
+    ): array {
+        $out = [];
+        foreach ($recurringCoupons as $entry) {
+            $proratedDiscount = (int) ($entry['prorataDiscount'] ?? 0);
+            if ($proratedDiscount > 0) {
+                $out[] = ['coupon' => $entry['coupon'], 'discount' => $proratedDiscount];
+            }
+        }
+        foreach ($firstPaymentCoupons as $entry) {
+            if ((int) $entry['discount'] > 0) {
+                $out[] = ['coupon' => $entry['coupon'], 'discount' => (int) $entry['discount']];
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -379,7 +516,10 @@ class PreviewService
      *
      * @param  array<string, int>  $currentAddons
      * @param  array<string, int>  $newAddons
-     * @return array{prorataLines: list<array<string, mixed>>, prorataTotalNet: int, prorataTotalVat: int, prorataTotalGross: int}
+     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>  $couponDiscountLines
+     *         Coupon entries with their already-computed discount net amount on the
+     *         prorata charge. Rendered as additional negative lines under `kind=coupon`.
+     * @return array{prorataLines: list<array<string, mixed>>, prorataTotalNet: int, prorataTotalVat: int, prorataTotalGross: int, prorataRefundCapNotices: list<array<string, mixed>>}
      */
     private function prorataLinesPreview(
         Billable $billable,
@@ -391,9 +531,10 @@ class PreviewService
         int $newSeats,
         array $currentAddons,
         array $newAddons,
+        array $couponDiscountLines = [],
     ): array {
         if ($currentPlan === '' || $newPlan === '') {
-            return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0];
+            return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0, 'prorataRefundCapNotices' => []];
         }
 
         try {
@@ -413,19 +554,63 @@ class PreviewService
         } catch (\Throwable) {
             // Bei Daten-Inkonsistenz (z.B. fehlende Original-Lines) leer zurückgeben.
             // Composer wirft RuntimeException — Preview soll nicht crashen.
-            return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0];
+            return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0, 'prorataRefundCapNotices' => []];
         }
 
         $totalNet = 0;
         $totalVat = 0;
         $totalGross = 0;
         $serialized = [];
+        $refundCapNotices = [];
 
         foreach ($lines as $line) {
             $serialized[] = $line->toArray();
             $totalNet += $line->amountNet;
             $totalVat += $line->amountVat;
             $totalGross += $line->amountGross;
+
+            if ($line->refundCapNote !== null) {
+                $refundCapNotices[] = [
+                    'kind' => $line->kind,
+                    'code' => $line->code,
+                    'invoiceSerial' => $line->originalInvoice?->serial_number,
+                    ...$line->refundCapNote,
+                ];
+            }
+        }
+
+        // Append coupon discount lines (negative amounts) so the "due now" panel
+        // mirrors the recurring panel and the user sees exactly what each coupon
+        // contributes. VAT rate falls back to the plan-line rate of the new plan.
+        $vatRate = 0.0;
+        foreach ($lines as $line) {
+            if ($line->kind === 'plan' && $line->vatRate > 0) {
+                $vatRate = (float) $line->vatRate;
+                break;
+            }
+        }
+
+        foreach ($couponDiscountLines as $entry) {
+            $discountNet = (int) ($entry['discount'] ?? 0);
+            if ($discountNet <= 0) {
+                continue;
+            }
+            $vatAmount = (int) round($discountNet * $vatRate / 100);
+            $serialized[] = [
+                'kind' => 'coupon',
+                'category' => 'coupon',
+                'direction' => 'charge',
+                'label' => __('billing::portal.coupon_label', ['code' => (string) $entry['coupon']->code]),
+                'amount_net' => -$discountNet,
+                'vat_amount' => -$vatAmount,
+                'amount_gross' => -($discountNet + $vatAmount),
+                'vat_rate' => $vatRate,
+                'is_coupon_covered' => false,
+                'days_remaining' => 0,
+            ];
+            $totalNet -= $discountNet;
+            $totalVat -= $vatAmount;
+            $totalGross -= ($discountNet + $vatAmount);
         }
 
         return [
@@ -433,6 +618,7 @@ class PreviewService
             'prorataTotalNet' => $totalNet,
             'prorataTotalVat' => $totalVat,
             'prorataTotalGross' => $totalGross,
+            'prorataRefundCapNotices' => $refundCapNotices,
         ];
     }
 

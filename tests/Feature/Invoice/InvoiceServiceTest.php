@@ -144,12 +144,12 @@ it('credit note uses original VAT rate from line_items, not current', function (
 
     $cn = app(InvoiceService::class)->createCreditNote($original, 1000);
 
-    // VAT-Rate lebt ausschließlich in line_items[0].vat_rate (Invoice-Spalte vat_rate gibt es nicht mehr).
+    // VAT rate lives exclusively in line_items[0].vat_rate (the invoice-level vat_rate column is gone).
     expect((float) $cn->line_items[0]['vat_rate'])->toBe(16.0);
     expect($cn->amount_net)->toBe(-1000);
     expect($cn->amount_vat)->toBe(-160);
     expect($cn->amount_gross)->toBe(-1160);
-    // parent_invoice_id-Spalte existiert nicht mehr — Verweis lebt in line_items[0].parent_invoice_id.
+    // The parent_invoice_id column is gone — the reference lives in line_items[0].parent_invoice_id.
     expect($cn->line_items[0]['parent_invoice_id'])->toBe($original->id);
     expect($cn->serial_number)->toStartWith('CR');
     expect($cn->hasPdf())->toBeTrue();

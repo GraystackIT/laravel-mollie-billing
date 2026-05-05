@@ -36,6 +36,7 @@ return [
         'credits' => 'Guthaben',
         'trial_extension' => 'Testverlängerung',
         'access_grant' => 'Zugangsgewährung',
+        'period_extension' => 'Periodenverlängerung',
     ],
     'discount_type' => [
         'percentage' => 'Prozentual',

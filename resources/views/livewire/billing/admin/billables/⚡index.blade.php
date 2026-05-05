@@ -87,7 +87,7 @@ new class extends Component {
             <flux:select wire:model.live="statusFilter" placeholder="All statuses" class="w-56 shrink-0">
                 <flux:select.option value="">All statuses</flux:select.option>
                 @foreach (SubscriptionStatus::cases() as $status)
-                    <flux:select.option value="{{ $status->value }}">{{ $status->label() }}</flux:select.option>
+                    <flux:select.option value="{{ $status->value }}">{{ \GraystackIT\MollieBilling\Support\AdminLocale::enumLabel($status) }}</flux:select.option>
                 @endforeach
             </flux:select>
         </div>
@@ -101,7 +101,7 @@ new class extends Component {
                 />
             </flux:card>
         @else
-            <flux:card class="p-0!">
+            <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table :paginate="$billables">
                     <flux:table.columns>
                         <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Name</flux:table.column>

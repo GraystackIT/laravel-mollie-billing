@@ -805,6 +805,14 @@ class InvoiceService
                 ));
                 $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
                 $persistedLines[] = $line;
+
+                // Keep `refunded_net` on the original in sync with what we just
+                // refunded at Mollie. Without this, a subsequent admin-initiated
+                // refund on the same invoice would compute remainingRefundableNet()
+                // against a stale base and either offer a refund that's already
+                // exhausted or accept an amount that gets rejected by Mollie.
+                $original->refunded_net = (int) $original->refunded_net + (int) abs($line->amountNet);
+                $original->save();
             } catch (\Throwable $e) {
                 $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
             }

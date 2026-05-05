@@ -69,6 +69,7 @@ class ScheduleSubscriptionChange
                 'seats' => $newSeats,
                 'addons' => $dto->addons,
                 'coupon_code' => $dto->couponCode,
+                'coupon_codes' => $dto->couponCodes,
                 'scheduled_at' => $scheduledAt->toIso8601String(),
             ];
 

@@ -50,14 +50,27 @@ class ResubscribeSubscription
             throw new \RuntimeException('Cannot resubscribe: plan or interval missing.');
         }
 
-        $amountGross = $this->catalog->basePriceNet($planCode, $interval);
+        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+        $recurringDiscountNet = 0;
+        if (is_array($marker)) {
+            $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $billable->getExtraBillingSeats());
+            $baseNet = \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
+                $this->catalog,
+                $billable,
+                $planCode,
+                $interval,
+                $totalSeats,
+                $billable->getActiveBillingAddonCodes(),
+            );
+            $recurringDiscountNet = $this->computeMarkerDiscount($marker, $baseNet);
+        }
 
         $this->createSubscription->handle($billable, [
             'plan_code' => $planCode,
             'interval' => $interval,
             'addon_codes' => $billable->getActiveBillingAddonCodes(),
             'extra_seats' => $billable->getExtraBillingSeats(),
-            'amount_gross' => $amountGross,
+            'recurring_discount_net' => $recurringDiscountNet,
         ]);
 
         $billable->forceFill([
@@ -66,5 +79,36 @@ class ResubscribeSubscription
         ])->save();
 
         SubscriptionResumed::dispatch($billable);
+    }
+
+    /**
+     * Mirrors `CouponService::computeMarkerDiscount()` — the discount basis is
+     * the original recurring net the coupon was applied against, capped to the
+     * current charge so reductions are honored.
+     *
+     * @param  array<string,mixed>  $marker
+     */
+    private function computeMarkerDiscount(array $marker, int $netAmount): int
+    {
+        if ($netAmount <= 0) {
+            return 0;
+        }
+
+        $discountType = (string) ($marker['discount_type'] ?? '');
+        $discountValue = (int) ($marker['discount_value'] ?? 0);
+
+        $baseAmount = isset($marker['base_amount_net'])
+            ? min((int) $marker['base_amount_net'], $netAmount)
+            : $netAmount;
+
+        if ($discountType === 'percentage') {
+            return (int) round($baseAmount * $discountValue / 100);
+        }
+
+        if ($discountType === 'fixed') {
+            return min($discountValue, $baseAmount);
+        }
+
+        return 0;
     }
 }

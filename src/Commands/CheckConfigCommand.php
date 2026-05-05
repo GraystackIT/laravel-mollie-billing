@@ -54,6 +54,11 @@ class CheckConfigCommand extends Command
             $this->addError($scope, "billable_key_type [{$keyType}] must be one of: uuid, ulid, int.");
         }
 
+        $userKeyType = (string) config('mollie-billing.user_key_type', 'int');
+        if (! in_array($userKeyType, ['uuid', 'ulid', 'int'], true)) {
+            $this->addError($scope, "user_key_type [{$userKeyType}] must be one of: uuid, ulid, int.");
+        }
+
         $planChangeMode = config('mollie-billing.plan_change_mode');
         if (! $planChangeMode instanceof PlanChangeMode) {
             $valid = implode(', ', array_map(fn (PlanChangeMode $m) => $m->value, PlanChangeMode::cases()));

@@ -110,6 +110,10 @@ return [
     // Primary key type of the billable model — set before first migration run.
     'billable_key_type' => env('BILLING_BILLABLE_KEY_TYPE', 'uuid'), // uuid|ulid|int
 
+    // Primary key type of the auth user model (used e.g. for resolved_by_user_id
+    // on country mismatches). Set before first migration run.
+    'user_key_type' => env('BILLING_USER_KEY_TYPE', 'int'), // uuid|ulid|int
+
     'ip_geolocation' => [
         'driver' => env('BILLING_IP_DRIVER', 'ipinfo_lite'),
         'drivers' => [

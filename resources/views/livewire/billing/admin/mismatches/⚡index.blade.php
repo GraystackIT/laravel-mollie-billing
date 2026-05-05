@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -43,6 +44,7 @@ new class extends Component {
     public function with(): array
     {
         $q = BillingCountryMismatch::query()
+            ->with('billable')
             ->where('status', CountryMismatchStatus::Pending);
 
         if ($this->search !== '') {
@@ -84,7 +86,7 @@ new class extends Component {
             />
         </flux:card>
     @else
-        <flux:card class="p-0!">
+        <flux:card class="p-0! sm:px-6! sm:py-2!">
             <flux:table :paginate="$rows">
                 <flux:table.columns>
                     <flux:table.column>Billable</flux:table.column>
@@ -94,8 +96,32 @@ new class extends Component {
                 </flux:table.columns>
                 <flux:table.rows>
                     @foreach ($rows as $r)
+                        @php
+                            $b = $r->billable;
+                            $name = $b?->getBillingName();
+                            $email = $b?->getBillingEmail();
+                            $addressParts = array_filter([
+                                $b?->getBillingStreet(),
+                                trim(($b?->getBillingPostalCode() ?? '').' '.($b?->getBillingCity() ?? '')) ?: null,
+                                $b?->getBillingCountry(),
+                            ]);
+                        @endphp
                         <flux:table.row :key="$r->id">
-                            <flux:table.cell variant="strong" class="font-mono">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</flux:table.cell>
+                            <flux:table.cell>
+                                @if ($b)
+                                    <a href="{{ route(BillingRoute::admin('billables.show'), $b) }}" class="hover:underline">
+                                        <span class="font-medium text-zinc-900 dark:text-white">{{ $name ?: class_basename($r->billable_type).'#'.$r->billable_id }}</span>
+                                    </a>
+                                    @if ($addressParts !== [])
+                                        <div class="text-xs text-zinc-500">{{ implode(', ', $addressParts) }}</div>
+                                    @endif
+                                    @if ($email)
+                                        <div class="text-xs text-zinc-500">{{ $email }}</div>
+                                    @endif
+                                @else
+                                    <span class="font-mono text-zinc-500">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</span>
+                                @endif
+                            </flux:table.cell>
                             <flux:table.cell class="font-mono">{{ $r->tax_country_user }}</flux:table.cell>
                             <flux:table.cell class="font-mono">{{ $r->tax_country_payment ?? '—' }}</flux:table.cell>
                             <flux:table.cell>

@@ -11,6 +11,7 @@ enum CouponType: string
     case Credits = 'credits';
     case TrialExtension = 'trial_extension';
     case AccessGrant = 'access_grant';
+    case PeriodExtension = 'period_extension';
 
     public function label(): string
     {
@@ -25,6 +26,7 @@ enum CouponType: string
             self::Credits => 'emerald',
             self::TrialExtension => 'amber',
             self::AccessGrant => 'cyan',
+            self::PeriodExtension => 'sky',
         };
     }
 }

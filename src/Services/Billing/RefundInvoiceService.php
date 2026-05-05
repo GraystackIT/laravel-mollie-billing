@@ -117,11 +117,19 @@ class RefundInvoiceService
                 throw $e;
             }
 
+            // Snapshot what was effectively refunded BEFORE we persist the new
+            // credit note — otherwise effectiveRefundedNet() would already
+            // include the fresh credit note and double-count it on top of the
+            // increment below. The reconciliation closes the gap for legacy
+            // refunds (e.g. plan-change pro-rata) that historically wrote the
+            // credit note without touching the cache column.
+            $reconciledBaseNet = $invoice->effectiveRefundedNet();
+
             $creditNote = $this->invoices->createCreditNote($invoice, $refundAmountNet, $lineItems, $reasonText);
             $creditNote->refund_reason_code = $reasonCode;
             $creditNote->save();
 
-            $invoice->refunded_net = (int) $invoice->refunded_net + $refundAmountNet;
+            $invoice->refunded_net = $reconciledBaseNet + $refundAmountNet;
             $invoice->save();
 
             if ($billable !== null) {

@@ -13,10 +13,21 @@ class SyncSeats
     ) {
     }
 
-    public function handle(Billable $billable, int $seats): void
+    /**
+     * @param  array<int, string>|null  $couponCodes
+     */
+    public function handle(Billable $billable, int $seats, ?string $couponCode = null, ?array $couponCodes = null): void
     {
-        $this->updateSubscription->update($billable, [
+        $payload = [
             'seats' => max(0, $seats),
-        ]);
+        ];
+
+        if ($couponCodes !== null && $couponCodes !== []) {
+            $payload['coupon_codes'] = $couponCodes;
+        } elseif ($couponCode !== null && $couponCode !== '') {
+            $payload['coupon_code'] = $couponCode;
+        }
+
+        $this->updateSubscription->update($billable, $payload);
     }
 }

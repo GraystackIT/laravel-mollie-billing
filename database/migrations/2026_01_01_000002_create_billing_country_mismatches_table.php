@@ -19,7 +19,7 @@ return new class extends Migration
             $table->string('tax_country_payment', 2)->nullable();
             $table->string('status'); // CountryMismatchStatus enum
             $table->timestamp('resolved_at')->nullable();
-            $table->uuid('resolved_by_user_id')->nullable();
+            $this->userIdColumn($table, 'resolved_by_user_id');
             $table->unsignedBigInteger('corrective_invoice_id')->nullable();
 
             $table->timestamps();
@@ -41,6 +41,15 @@ return new class extends Migration
             'int' => $table->unsignedBigInteger('billable_id'),
             'ulid' => $table->ulid('billable_id'),
             default => $table->uuid('billable_id'),
+        };
+    }
+
+    private function userIdColumn(Blueprint $table, string $name): void
+    {
+        match (config('mollie-billing.user_key_type', 'int')) {
+            'uuid' => $table->uuid($name)->nullable(),
+            'ulid' => $table->ulid($name)->nullable(),
+            default => $table->unsignedBigInteger($name)->nullable(),
         };
     }
 };

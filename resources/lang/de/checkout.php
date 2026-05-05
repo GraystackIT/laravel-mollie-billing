@@ -99,8 +99,17 @@ return [
     'coupon_plan_mismatch' => 'Dieser Gutschein gilt nicht für den gewählten Plan.',
     'coupon_interval_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Abrechnungsintervall.',
     'coupon_addon_mismatch' => 'Dieser Gutschein gilt nicht für die gewählten Add-ons.',
+    'coupon_product_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Produkt.',
     'coupon_min_order' => 'Die Bestellung erreicht nicht den Mindestbetrag für diesen Gutschein.',
     'coupon_requires_billable' => 'Dieser Gutschein kann beim Checkout nicht angewendet werden.',
+    'coupon_recurring_conflict' => 'Auf diesem Abonnement ist bereits ein anderer wiederkehrender Gutschein aktiv.',
+    'coupon_requires_active_subscription' => 'Zum Einlösen dieses Gutscheins ist ein aktives Abonnement erforderlich.',
+    'coupon_too_close_to_charge' => 'Die nächste Abrechnung steht zu kurz bevor, um diesen Gutschein noch sicher anzuwenden. Bitte versuche es nach der nächsten Abrechnung erneut.',
+    'coupon_per_billable_limit_reached' => 'Du hast diesen Gutschein bereits maximal oft eingelöst.',
+    'coupon_not_stackable_with_current' => 'Es können keine weiteren Gutscheine hinzugefügt werden — einer der angewendeten Gutscheine ist nicht kombinierbar.',
+    'coupon_full_coverage_use_access_grant' => 'Dieser Gutschein würde den Gesamtbetrag auf null reduzieren. Bitte nutze stattdessen eine Zugangsgewährung (Access Grant) oder einen kostenlosen Plan.',
+    'coupon_recurring_already_active' => 'Dieser Gutschein ist bereits auf deinem Abonnement aktiv und wird bei jeder Verlängerung automatisch angewendet.',
+    'coupon_type_not_allowed_in_context' => 'Dieser Gutscheintyp kann hier nicht eingelöst werden.',
 
     // Promo (existing)
     'coupon_applied' => 'Gutschein :code angewendet.',
