@@ -1004,7 +1004,7 @@ class MollieWebhookController extends Controller
      * Redeems a coupon attached to a first-payment (regular checkout or Local→Mollie upgrade).
      * Handles all 6 coupon types. Returns the recurring discount in cents that
      * `CreateSubscription` should apply to the Mollie subscription's amount —
-     * non-zero only for Recurring-type coupons (FirstPayment is one-time).
+     * non-zero only for Recurring-type coupons (SinglePayment is one-time).
      */
     protected function redeemFirstPaymentCoupon(
         Billable $billable,
@@ -1030,7 +1030,7 @@ class MollieWebhookController extends Controller
                 'addonCodes' => $addonCodes,
                 'orderAmountNet' => $orderAmountNet,
                 'allowed_types' => [
-                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
                     \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                     \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
                     \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
@@ -1048,7 +1048,7 @@ class MollieWebhookController extends Controller
 
         $discount = 0;
         if (in_array($coupon->type, [
-            \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+            \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
             \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
         ], true)) {
             $discount = $this->couponService->computeRecurringDiscount($coupon, $orderAmountNet);
@@ -1147,7 +1147,7 @@ class MollieWebhookController extends Controller
                     'orderAmountNet' => $remainingNet,
                     'existingCouponIds' => $existingCouponIds,
                     'allowed_types' => [
-                        \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                        \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
                         \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                     ],
                 ]);

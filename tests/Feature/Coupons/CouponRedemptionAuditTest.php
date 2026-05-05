@@ -108,7 +108,7 @@ it('Path A (deferred Prorata-Charge) — KEIN Coupon-Redeem in Phase-1, sondern 
     $coupon = $service->create([
         'code' => 'PROR50',
         'name' => 'First-Payment 50%',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 50,
     ]);

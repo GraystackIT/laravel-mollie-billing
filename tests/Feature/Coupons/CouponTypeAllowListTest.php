@@ -41,7 +41,7 @@ function billableForAllowList(): TestBillable
     return $billable;
 }
 
-it('rejects a Credits coupon when allowed_types only contains FirstPayment/Recurring (action flows)', function (): void {
+it('rejects a Credits coupon when allowed_types only contains SinglePayment/Recurring (action flows)', function (): void {
     app(CouponService::class)->create([
         'code' => 'CREDS',
         'name' => 'Credits',
@@ -56,7 +56,7 @@ it('rejects a Credits coupon when allowed_types only contains FirstPayment/Recur
             'planCode' => 'basic',
             'interval' => 'monthly',
             'orderAmountNet' => 1000,
-            'allowed_types' => [CouponType::FirstPayment, CouponType::Recurring],
+            'allowed_types' => [CouponType::SinglePayment, CouponType::Recurring],
         ]);
         $this->fail('expected InvalidCouponException');
     } catch (InvalidCouponException $e) {
@@ -64,7 +64,7 @@ it('rejects a Credits coupon when allowed_types only contains FirstPayment/Recur
     }
 });
 
-it('rejects an AccessGrant coupon on one-time-order context (FirstPayment/Recurring only)', function (): void {
+it('rejects an AccessGrant coupon on one-time-order context (SinglePayment/Recurring only)', function (): void {
     app(CouponService::class)->create([
         'code' => 'AG30',
         'name' => 'Access Grant 30 days',
@@ -80,7 +80,7 @@ it('rejects an AccessGrant coupon on one-time-order context (FirstPayment/Recurr
         app(CouponService::class)->validate('AG30', $billable->fresh(), [
             'productCodes' => ['some-product'],
             'orderAmountNet' => 1000,
-            'allowed_types' => [CouponType::FirstPayment, CouponType::Recurring],
+            'allowed_types' => [CouponType::SinglePayment, CouponType::Recurring],
         ]);
         $this->fail('expected InvalidCouponException');
     } catch (InvalidCouponException $e) {
@@ -88,7 +88,7 @@ it('rejects an AccessGrant coupon on one-time-order context (FirstPayment/Recurr
     }
 });
 
-it('rejects a Credits coupon at checkout (allowed_types: FirstPayment/Recurring/TrialExtension/AccessGrant)', function (): void {
+it('rejects a Credits coupon at checkout (allowed_types: SinglePayment/Recurring/TrialExtension/AccessGrant)', function (): void {
     app(CouponService::class)->create([
         'code' => 'CREDS',
         'name' => 'Credits',
@@ -102,7 +102,7 @@ it('rejects a Credits coupon at checkout (allowed_types: FirstPayment/Recurring/
             'interval' => 'monthly',
             'orderAmountNet' => 1000,
             'allowed_types' => [
-                CouponType::FirstPayment,
+                CouponType::SinglePayment,
                 CouponType::Recurring,
                 CouponType::TrialExtension,
                 CouponType::AccessGrant,
@@ -155,7 +155,7 @@ it('accepts a Recurring coupon when allowed_types includes Recurring (action flo
         'planCode' => 'basic',
         'interval' => 'monthly',
         'orderAmountNet' => 1000,
-        'allowed_types' => [CouponType::FirstPayment, CouponType::Recurring],
+        'allowed_types' => [CouponType::SinglePayment, CouponType::Recurring],
     ]);
 
     expect($coupon->code)->toBe('REC10');

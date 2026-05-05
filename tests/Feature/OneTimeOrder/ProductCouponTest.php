@@ -47,12 +47,12 @@ function fakeProductPaymentResponse(string $id): object
     };
 }
 
-it('applies a FirstPayment coupon discount to the Mollie payment amount', function (): void {
+it('applies a SinglePayment coupon discount to the Mollie payment amount', function (): void {
     $service = app(CouponService::class);
     $service->create([
         'code' => 'PROD20',
         'name' => 'Product 20% off',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 20,
     ]);
@@ -91,7 +91,7 @@ it('rejects a coupon that is not in applicable_products', function (): void {
     $coupon = $service->create([
         'code' => 'CONSULT_ONLY',
         'name' => 'Consulting only',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 50,
         'applicable_products' => ['consulting'],
@@ -121,7 +121,7 @@ it('passes the coupon discount through to the Mollie amount and writes a CouponR
     $coupon = $service->create([
         'code' => 'PROD20',
         'name' => 'Product 20% off',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 20,
         'applicable_products' => ['token-pack'],

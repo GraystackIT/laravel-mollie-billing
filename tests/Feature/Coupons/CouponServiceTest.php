@@ -40,7 +40,7 @@ it('creates a first-payment coupon and validates and redeems it', function (): v
     $coupon = $service->create([
         'code' => 'welcome10',
         'name' => 'Welcome 10',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
     ]);
@@ -73,7 +73,7 @@ it('rejects an expired coupon with the expired reason', function (): void {
     $coupon = Coupon::create([
         'code' => 'EXP',
         'name' => 'Expired',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
         'valid_until' => now()->subDay(),
@@ -148,7 +148,7 @@ it('enforces max_redemptions_per_billable on a second redemption', function (): 
     $coupon = $service->create([
         'code' => 'ONCE',
         'name' => 'Once',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 5,
         'max_redemptions_per_billable' => 1,
@@ -172,7 +172,7 @@ it('resolves a coupon by auto-apply token and falls back to code', function (): 
     $coupon = $service->create([
         'code' => 'AUTO1',
         'name' => 'Auto1',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
         'generate_token' => true,

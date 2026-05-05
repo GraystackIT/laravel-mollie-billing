@@ -21,7 +21,7 @@ new class extends Component {
         ];
     }
 
-    public string $type = 'first_payment';
+    public string $type = 'single_payment';
     public string $code = '';
     public string $name = '';
     public ?string $description = null;
@@ -104,7 +104,7 @@ new class extends Component {
         <x-mollie-billing::admin.section title="Basics" description="Coupon identifier and the kind of benefit it grants.">
             <div class="grid grid-cols-1 gap-4 md:grid-cols-3 md:items-start">
                 <flux:select wire:model.live="type" label="Coupon type">
-                    <flux:select.option value="first_payment">First payment discount</flux:select.option>
+                    <flux:select.option value="single_payment">Single payment discount</flux:select.option>
                     <flux:select.option value="recurring">Recurring discount</flux:select.option>
                     <flux:select.option value="credits">Credits</flux:select.option>
                     <flux:select.option value="trial_extension">Trial extension</flux:select.option>
@@ -157,7 +157,7 @@ new class extends Component {
             </div>
             <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
                 @if ($type === 'recurring')
-                    For recurring coupons, <span class="font-medium">max per billable</span> defines how many billing periods the discount applies — default <span class="tabular-nums">1</span> means the first recurring charge only (equivalent to a first-payment coupon). Use a higher number or set <span class="font-medium">valid until</span> for multi-period campaigns.
+                    For recurring coupons, <span class="font-medium">max per billable</span> defines how many billing periods the discount applies — default <span class="tabular-nums">1</span> means the first recurring charge only (equivalent to a single-payment coupon). Use a higher number or set <span class="font-medium">valid until</span> for multi-period campaigns.
                 @else
                     Leave dates empty to activate immediately and never expire. <span class="font-medium">Max total</span> caps redemptions across all billables; <span class="font-medium">max per billable</span> caps redemptions for a single billable.
                 @endif
@@ -171,17 +171,17 @@ new class extends Component {
             </div>
         </x-mollie-billing::admin.section>
 
-        @if (in_array($type, ['first_payment', 'recurring']))
+        @if (in_array($type, ['single_payment', 'recurring']))
             @php
                 $discountValueDescription = $discount_type === 'percentage'
                     ? ($type === 'recurring'
                         ? 'Whole percent, 1–100. With 100 %, the subscription is free for the discount lifetime, then resumes at full price.'
-                        : 'Whole percent, 1–99. For first-payment, 100 % is not supported — use an access_grant coupon instead.')
+                        : 'Whole percent, 1–99. For single-payment, 100 % is not supported — use an access_grant coupon instead.')
                     : 'Amount in cents. Example: 500 = €5.00';
             @endphp
             <x-mollie-billing::admin.section
                 title="Discount"
-                :description="$type === 'first_payment' ? 'Applied to the first payment only.' : 'Applied to every recurring payment.'"
+                :description="$type === 'single_payment' ? 'Applied to a single payment only.' : 'Applied to every recurring payment.'"
             >
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-3 md:items-start">
                     <flux:select wire:model.live="discount_type" label="Discount type">

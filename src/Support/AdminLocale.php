@@ -10,8 +10,8 @@ use Illuminate\Container\Container;
  * The admin panel is operator tooling — its terminology stays in English no
  * matter what locale the surrounding app uses. This keeps badge labels,
  * enum names and translatable strings consistent with code identifiers,
- * logs and the package spec, so an operator searching for `first_payment`
- * always sees `First payment` in the UI.
+ * logs and the package spec, so an operator searching for `single_payment`
+ * always sees `Single payment` in the UI.
  */
 class AdminLocale
 {

@@ -16,10 +16,10 @@ return new class extends Migration
             $table->string('name');
             $table->string('description')->nullable();
 
-            // CouponType enum (first_payment|recurring|credits|trial_extension|access_grant)
+            // CouponType enum (single_payment|recurring|credits|trial_extension|access_grant)
             $table->string('type');
 
-            // Discount fields (for first_payment / recurring)
+            // Discount fields (for single_payment / recurring)
             $table->string('discount_type')->nullable();     // DiscountType enum
             $table->integer('discount_value')->nullable();
             $table->string('currency', 3)->default(config('mollie-billing.currency', 'EUR'));

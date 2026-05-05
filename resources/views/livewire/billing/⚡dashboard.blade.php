@@ -97,14 +97,14 @@ new class extends Component {
             ? SubscriptionAmount::net($catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes)
             : 0;
 
-        // Pre-flight: detect FirstPayment / Recurring coupons specifically and
+        // Pre-flight: detect SinglePayment / Recurring coupons specifically and
         // surface a "use in action flow" hint instead of the generic
         // type_not_allowed_in_context error. Other types fall through to the
         // strict allow-list below.
         $resolvedCoupon = \GraystackIT\MollieBilling\Models\Coupon::query()
             ->whereRaw('UPPER(code) = ?', [strtoupper($code)])
             ->first();
-        if ($resolvedCoupon !== null && in_array($resolvedCoupon->type, [CouponType::FirstPayment, CouponType::Recurring], true)) {
+        if ($resolvedCoupon !== null && in_array($resolvedCoupon->type, [CouponType::SinglePayment, CouponType::Recurring], true)) {
             $this->couponMessage = __('billing::portal.coupon_redeem_use_in_action');
             $this->couponMessageError = false;
             return;

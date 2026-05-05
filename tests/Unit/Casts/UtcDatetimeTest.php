@@ -29,7 +29,7 @@ it('rehydrates a stored datetime as UTC under app.timezone=Europe/Berlin', funct
     $coupon = new Coupon();
     $coupon->name = 'Test Coupon';
     $coupon->code ='TZTEST-'.uniqid();
-    $coupon->type = \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment;
+    $coupon->type = \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment;
     $coupon->discount_type = \GraystackIT\MollieBilling\Enums\DiscountType::Percentage;
     $coupon->discount_value = 10;
     $coupon->valid_from = CarbonImmutable::create(2026, 5, 2, 23, 30, 0, 'UTC');
@@ -56,7 +56,7 @@ it('writes a Carbon in a non-UTC timezone as the UTC equivalent', function (): v
     $coupon = new Coupon();
     $coupon->name = 'Test Coupon';
     $coupon->code ='TZWRITE-'.uniqid();
-    $coupon->type = \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment;
+    $coupon->type = \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment;
     $coupon->discount_type = \GraystackIT\MollieBilling\Enums\DiscountType::Percentage;
     $coupon->discount_value = 10;
     $coupon->valid_from = $berlin;
@@ -100,7 +100,7 @@ it('returns null when the stored value is null', function (): void {
     $coupon = new Coupon();
     $coupon->name = 'Test Coupon';
     $coupon->code ='TZNULL-'.uniqid();
-    $coupon->type = \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment;
+    $coupon->type = \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment;
     $coupon->discount_type = \GraystackIT\MollieBilling\Enums\DiscountType::Percentage;
     $coupon->discount_value = 10;
     $coupon->valid_from = null;

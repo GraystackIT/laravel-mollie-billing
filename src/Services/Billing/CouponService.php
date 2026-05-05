@@ -140,8 +140,8 @@ class CouponService
             // CreateSubscription / MollieSubscriptionPatcher / ResubscribeSubscription.
         }
 
-        if ($coupon->type === CouponType::FirstPayment) {
-            // Wie Recurring: ein FirstPayment-Coupon, der den Charge-Net komplett auf 0 zieht,
+        if ($coupon->type === CouponType::SinglePayment) {
+            // Wie Recurring: ein SinglePayment-Coupon, der den Charge-Net komplett auf 0 zieht,
             // schlägt im Mollie-Checkout fehl (Mindestbetrag 0.01 €). Bei 100%-Coverage soll
             // der Owner einen AccessGrant (für N Tage gratis) oder einen Free-Plan einsetzen.
             $orderAmount = (int) ($context['orderAmountNet'] ?? 0);
@@ -429,7 +429,7 @@ class CouponService
             $redemption->discount_amount_net = 0;
 
             switch ($coupon->type) {
-                case CouponType::FirstPayment:
+                case CouponType::SinglePayment:
                     // Caller-set `discount_amount_net` (even 0) is taken verbatim — at
                     // path-orchestration sites (UpdateSubscription, OneTimeOrderWebhook)
                     // we always pass the *actually billed* discount and 0 means "no charge
@@ -753,7 +753,7 @@ class CouponService
      *  - Recurring: only > 100% is rejected. 100% is allowed and realised by
      *    deferring the Mollie-Subscription's startDate over the discount
      *    lifetime instead of patching the amount to 0 (Mollie rejects 0 €).
-     *  - FirstPayment: >= 100% is rejected. The first charge happens immediately
+     *  - SinglePayment: >= 100% is rejected. The first charge happens immediately
      *    in checkout and Mollie cannot accept 0 € — for full-coverage on the
      *    first payment, an access_grant coupon (free for a duration) is the
      *    correct shape.
@@ -772,9 +772,9 @@ class CouponService
 
         $discountValue = (int) ($attributes['discount_value'] ?? 0);
 
-        if ($type === CouponType::FirstPayment && $discountValue >= 100) {
+        if ($type === CouponType::SinglePayment && $discountValue >= 100) {
             throw new \InvalidArgumentException(
-                'A 100% (or greater) discount on a first_payment coupon would reduce the first charge to zero, which the payment provider does not accept. Use an access_grant coupon (full coverage for a duration) instead.'
+                'A 100% (or greater) discount on a single_payment coupon would reduce the first charge to zero, which the payment provider does not accept. Use an access_grant coupon (full coverage for a duration) instead.'
             );
         }
 
@@ -792,13 +792,13 @@ class CouponService
         };
 
         switch ($type) {
-            case CouponType::FirstPayment:
+            case CouponType::SinglePayment:
                 if ($missing('discount_type') || $missing('discount_value')) {
                     throw new \InvalidArgumentException(
-                        'first_payment coupon requires discount_type and discount_value.'
+                        'single_payment coupon requires discount_type and discount_value.'
                     );
                 }
-                $this->guardAgainstFullCoverageDiscount($attributes, CouponType::FirstPayment);
+                $this->guardAgainstFullCoverageDiscount($attributes, CouponType::SinglePayment);
                 break;
 
             case CouponType::Recurring:

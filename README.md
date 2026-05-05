@@ -17,7 +17,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - Country-mismatch reconciliation: user-declared vs payment-derived country, audit-trail flagged at first and every recurring payment (see [docs/vat-handling.md](docs/vat-handling.md))
 - Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`), with case-insensitive usage-type lookups
 - Direct overage charging with retry and `past_due` state
-- Five coupon types — `FirstPayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
+- Five coupon types — `SinglePayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
 - Access Grants for full-plan or addon-only complimentary access
 - Scheduled plan changes, prorata, end-of-period downgrades
 - Refunds and credit notes (full, overage units, wallet-only)
@@ -492,7 +492,7 @@ The seat count is used during plan-change previews to calculate whether extra se
 
 | Type | Behavior | Quick example |
 | --- | --- | --- |
-| `FirstPayment` | Discounts only the first invoice. | `MollieBilling::coupons()->firstPaymentCoupon('LAUNCH', 50, 'percent');` |
+| `SinglePayment` | Discounts only a single invoice. | `MollieBilling::coupons()->singlePaymentCoupon('LAUNCH', 50, 'percent');` |
 | `Recurring` | Discounts each invoice for N periods. | `MollieBilling::coupons()->recurringCoupon('LOYAL', 10, 'percent', periods: 6);` |
 | `Credits` | Adds wallet credit balance. | `MollieBilling::coupons()->creditsCoupon('PROMO5', cents: 500);` |
 | `TrialExtension` | Extends the active trial. | `MollieBilling::coupons()->trialExtensionCoupon('EXTEND14', days: 14);` |

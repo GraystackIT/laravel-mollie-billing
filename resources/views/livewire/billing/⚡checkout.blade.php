@@ -450,7 +450,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'addonCodes' => $this->addon_codes,
                 'orderAmountNet' => $this->subtotalNet(),
                 'allowed_types' => [
-                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
                     \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                     \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
                     \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
@@ -493,7 +493,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'addonCodes' => $this->addon_codes,
                 'orderAmountNet' => $this->subtotalNet(),
                 'allowed_types' => [
-                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
                     \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                     \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
                     \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,

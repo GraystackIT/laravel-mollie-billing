@@ -73,7 +73,7 @@ new class extends Component {
                 'orderAmountNet' => $remainingNet,
                 'existingCouponIds' => $this->resolveAppliedCouponIds($current),
                 'allowed_types' => [
-                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
                     \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                 ],
             ]);

@@ -35,7 +35,7 @@ use Mollie\Laravel\Facades\Mollie;
  *    wallet already holds the current period's credits.
  *
  * The Mollie-Subscription amount is computed from the catalog (base + seats +
- * addons + VAT), never from the just-paid first-payment — otherwise a FirstPayment
+ * addons + VAT), never from the just-paid first-payment — otherwise a SinglePayment
  * coupon would lock the discounted total in as the dauerhafte Recurring-Höhe.
  * If a Recurring coupon applies, the caller passes its discount via
  * `recurring_discount_net`.
