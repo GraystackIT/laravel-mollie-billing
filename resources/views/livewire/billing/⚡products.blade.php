@@ -4,8 +4,11 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
+use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Models\Coupon;
+use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
@@ -13,9 +16,185 @@ use Livewire\Component;
 new class extends Component {
     public bool $processing = false;
 
+    /** @var array<string, array<int, string>> applied coupon codes per product */
+    public array $appliedCouponCodes = [];
+    /** @var array<string, array<int, array{code:string, name:string, stackable:bool}>> */
+    public array $appliedCouponInfo = [];
+    /** @var array<string, string> active input per product */
+    public array $couponInputs = [];
+    /** @var array<string, ?string> validation error per product */
+    public array $couponErrors = [];
+    /** @var array<string, int> total coupon discount net (cents) per product */
+    public array $couponDiscounts = [];
+
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    public function applyCoupon(string $productCode, CouponService $service): void
+    {
+        $this->couponErrors[$productCode] = null;
+
+        $code = strtoupper(trim((string) ($this->couponInputs[$productCode] ?? '')));
+        if ($code === '') {
+            return;
+        }
+
+        $current = $this->appliedCouponCodes[$productCode] ?? [];
+
+        if (in_array($code, $current, true)) {
+            $this->couponErrors[$productCode] = __('billing::checkout.coupon_already_applied');
+            return;
+        }
+
+        if (! $this->canAddMoreCouponsFor($productCode)) {
+            $this->couponErrors[$productCode] = __('billing::checkout.coupon_not_stackable_with_current');
+            return;
+        }
+
+        $billable = $this->resolveBillable();
+        if (! $billable) {
+            return;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $priceNet = $catalog->productPriceNet($productCode);
+        if ($priceNet <= 0) {
+            return;
+        }
+
+        $remainingNet = $priceNet - (int) ($this->couponDiscounts[$productCode] ?? 0);
+        $remainingNet = max(0, $remainingNet);
+
+        try {
+            $coupon = $service->validate($code, $billable, [
+                'productCodes' => [$productCode],
+                'orderAmountNet' => $remainingNet,
+                'existingCouponIds' => $this->resolveAppliedCouponIds($current),
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                ],
+            ]);
+        } catch (InvalidCouponException $e) {
+            $this->couponErrors[$productCode] = $this->translateCouponReason($e->reason());
+            return;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->couponErrors[$productCode] = __('billing::portal.coupon_redeem_failed');
+            return;
+        }
+
+        $thisDiscount = $service->computeRecurringDiscount($coupon, $remainingNet);
+
+        $this->appliedCouponCodes[$productCode][] = (string) $coupon->code;
+        $this->appliedCouponInfo[$productCode][] = [
+            'code' => (string) $coupon->code,
+            'name' => (string) ($coupon->name ?: $coupon->code),
+            'stackable' => (bool) $coupon->stackable,
+        ];
+        $this->couponDiscounts[$productCode] = ($this->couponDiscounts[$productCode] ?? 0) + $thisDiscount;
+        $this->couponInputs[$productCode] = '';
+    }
+
+    public function removeCoupon(string $productCode, string $code, CouponService $service): void
+    {
+        $code = strtoupper(trim($code));
+        $this->appliedCouponCodes[$productCode] = array_values(array_filter(
+            $this->appliedCouponCodes[$productCode] ?? [],
+            fn (string $c) => $c !== $code,
+        ));
+        $this->appliedCouponInfo[$productCode] = array_values(array_filter(
+            $this->appliedCouponInfo[$productCode] ?? [],
+            fn (array $info) => ($info['code'] ?? null) !== $code,
+        ));
+        $this->couponErrors[$productCode] = null;
+        $this->recomputeDiscounts($service, $productCode);
+    }
+
+    public function canAddMoreCouponsFor(string $productCode): bool
+    {
+        $infos = $this->appliedCouponInfo[$productCode] ?? [];
+        if ($infos === []) {
+            return true;
+        }
+
+        foreach ($infos as $info) {
+            if (! ($info['stackable'] ?? true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param  array<int, string>  $codes
+     * @return array<int, int>
+     */
+    private function resolveAppliedCouponIds(array $codes): array
+    {
+        if ($codes === []) {
+            return [];
+        }
+
+        return Coupon::query()
+            ->whereIn('code', array_map('strtoupper', $codes))
+            ->pluck('id')
+            ->all();
+    }
+
+    private function recomputeDiscounts(CouponService $service, string $productCode): void
+    {
+        $this->couponDiscounts[$productCode] = 0;
+
+        $codes = $this->appliedCouponCodes[$productCode] ?? [];
+        if ($codes === []) {
+            return;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $priceNet = $catalog->productPriceNet($productCode);
+        $remaining = $priceNet;
+        $sum = 0;
+
+        foreach ($codes as $code) {
+            $coupon = Coupon::query()->whereRaw('UPPER(code) = ?', [strtoupper($code)])->first();
+            if ($coupon === null) {
+                continue;
+            }
+            $discount = $service->computeRecurringDiscount($coupon, $remaining);
+            $sum += $discount;
+            $remaining = max(0, $remaining - $discount);
+        }
+
+        $this->couponDiscounts[$productCode] = $sum;
+    }
+
+    private function translateCouponReason(string $reason): string
+    {
+        return match ($reason) {
+            'not_found' => __('billing::checkout.coupon_not_found'),
+            'inactive' => __('billing::checkout.coupon_inactive'),
+            'not_yet_valid' => __('billing::checkout.coupon_not_yet_valid'),
+            'expired' => __('billing::checkout.coupon_expired'),
+            'globally_exhausted' => __('billing::checkout.coupon_exhausted'),
+            'plan_not_applicable' => __('billing::checkout.coupon_plan_mismatch'),
+            'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
+            'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
+            'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'min_order_not_met' => __('billing::checkout.coupon_min_order'),
+            'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
+            'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
+            'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
+            'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
+            'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
+            'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
+            'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
+            default => __('billing::portal.coupon_redeem_failed'),
+        };
     }
 
     public function purchase(string $productCode): void
@@ -26,7 +205,13 @@ new class extends Component {
         $this->processing = true;
 
         try {
-            $result = $billable->purchaseOneTimeOrder($productCode);
+            $codes = $this->appliedCouponCodes[$productCode] ?? [];
+            $result = $billable->purchaseOneTimeOrder(
+                $productCode,
+                [],
+                null,
+                $codes !== [] ? $codes : null,
+            );
 
             if (! empty($result['checkout_url'])) {
                 $this->processing = false;
@@ -243,6 +428,51 @@ new class extends Component {
                                         ]) }}
                                     </flux:text>
                                 </div>
+
+                                <div class="space-y-2">
+                                    @foreach (($appliedCouponInfo[$product['code']] ?? []) as $info)
+                                        <div class="flex items-center justify-between gap-2 rounded-md border border-emerald-300/60 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-800/50 dark:bg-emerald-900/20">
+                                            <div class="flex items-center gap-2 text-sm">
+                                                <flux:icon.ticket class="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                                                <span class="font-medium tabular-nums text-emerald-700 dark:text-emerald-300">{{ $info['code'] }}</span>
+                                                @if (! ($info['stackable'] ?? true))
+                                                    <span class="text-xs text-zinc-400">{{ __('billing::portal.coupon_not_stackable') }}</span>
+                                                @endif
+                                            </div>
+                                            <flux:button
+                                                size="xs"
+                                                variant="ghost"
+                                                icon="x-mark"
+                                                wire:click="removeCoupon('{{ $product['code'] }}', '{{ $info['code'] }}')"
+                                                :aria-label="__('billing::checkout.remove_coupon')"
+                                            />
+                                        </div>
+                                    @endforeach
+
+                                    @if ($this->canAddMoreCouponsFor($product['code']))
+                                        <flux:input.group>
+                                            <flux:input
+                                                wire:model="couponInputs.{{ $product['code'] }}"
+                                                wire:keydown.enter.prevent="applyCoupon('{{ $product['code'] }}')"
+                                                :placeholder="__('billing::portal.coupon_code_placeholder')"
+                                            />
+                                            <flux:button type="button" wire:click="applyCoupon('{{ $product['code'] }}')" icon="check">
+                                                {{ __('billing::portal.coupon_redeem_button') }}
+                                            </flux:button>
+                                        </flux:input.group>
+                                    @endif
+
+                                    @if (($couponDiscounts[$product['code']] ?? 0) > 0)
+                                        <flux:text class="text-xs text-emerald-600 dark:text-emerald-400">
+                                            −{{ $currencySymbol }}{{ number_format(($couponDiscounts[$product['code']] ?? 0) / 100, 2) }} {{ __('billing::portal.coupon_discount_applied') }}
+                                        </flux:text>
+                                    @endif
+
+                                    @if (! empty($couponErrors[$product['code']] ?? null))
+                                        <flux:text class="text-xs text-rose-600 dark:text-rose-400">{{ $couponErrors[$product['code']] }}</flux:text>
+                                    @endif
+                                </div>
+
                                 <div class="flex justify-end gap-2">
                                     <flux:modal.close>
                                         <flux:button variant="ghost">{{ __('billing::portal.products.confirm.cancel') }}</flux:button>

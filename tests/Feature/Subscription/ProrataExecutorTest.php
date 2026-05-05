@@ -199,7 +199,7 @@ it('Mollie→Mollie plan change initiates charge + writes pending_prorata_change
     expect($pending['intent']['new_plan'])->toBe('starter');
     expect($pending['refund_lines'])->toHaveCount(1);
 
-    // Mollie-Subscription-PATCH ist NICHT gelaufen (kommt erst Phase 2).
+    // Mollie-subscription PATCH did NOT run yet (only happens in phase 2).
     expect(Mollie::shouldReceive('send'))->not->toBeNull();
 });
 

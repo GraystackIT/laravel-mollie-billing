@@ -173,13 +173,22 @@ it('preview shows prorata VAT from the period invoice, not the live billable', f
     expect($gross / $net)->toEqualWithDelta(1.20, 0.01, 'Preview gross must reflect original 20% rate');
 });
 
-it('throws when no period invoice exists for a Mollie subscription on prorata refund', function (): void {
+it('skips the refund line when no period invoice exists for the current plan', function (): void {
     $billable = makeMolliePeriodBillable('AT');
-    // Intentionally no period invoice.
+    // No period invoice — e.g. after a full refund or data inconsistency. The ProrataComposer
+    // must no longer throw; it returns a charge-only line for the new plan.
 
-    expect(fn () => app(UpdateSubscription::class)->update($billable, [
-        'plan_code' => 'starter',
-        'interval' => 'monthly',
-        'apply_at' => 'immediate',
-    ]))->toThrow(\RuntimeException::class, 'Kein Original-Plan-Line-Item');
+    $intent = new \GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'pro', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(\GraystackIT\MollieBilling\Services\Billing\ProrataComposer::class)->compose($intent);
+
+    expect($lines)->toHaveCount(1);
+    expect($lines[0]->direction)->toBe('charge');
+    expect($lines[0]->code)->toBe('starter');
 });

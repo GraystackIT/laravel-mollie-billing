@@ -91,7 +91,7 @@ new class extends Component {
                 />
             </flux:card>
         @else
-            <flux:card class="p-0!">
+            <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table :paginate="$billables">
                     <flux:table.columns>
                         <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Billable</flux:table.column>

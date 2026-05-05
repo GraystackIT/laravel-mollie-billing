@@ -29,39 +29,45 @@ class ProrataExecutor
 
     /**
      * @param  list<ProrataLine>  $lines  vom ProrataComposer
+     * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
+     *         path ∈ {'noop', 'sidegrade', 'deferred_charge', 'refund'}.
+     *         invoice is filled for sidegrade and refund (immediate redemption with that invoice id).
+     *         For deferred_charge the invoice is null — redemption happens in
+     *         UpdateSubscription::applyPendingPlanChange() once the Mollie charge clears.
      */
-    public function execute(Billable $billable, PlanChangeIntent $intent, array $lines): void
+    public function execute(Billable $billable, PlanChangeIntent $intent, array $lines): array
     {
         // Idempotenz: bereits laufender Plan-Change → No-Op.
         if ($this->hasPendingProrataChange($billable)) {
-            return;
+            return ['path' => 'noop', 'invoice' => null];
         }
 
         [$chargeLines, $refundLines] = $this->partition($lines);
 
         // Coupon-covered Lines werden in den Service-Methoden gefiltert; hier nur leere Listen prüfen.
         if (empty($chargeLines) && empty($refundLines)) {
-            return;
+            return ['path' => 'noop', 'invoice' => null];
         }
 
         // Sidegrade: echter Plan-Wechsel + Charge-Summe == |Refund-Summe|.
         if ($this->isSaldoZeroPlanSwitch($intent, $chargeLines, $refundLines)) {
-            $this->invoices->createPlanSwitchInvoice($billable, $chargeLines, $refundLines);
+            $invoice = $this->invoices->createPlanSwitchInvoice($billable, $chargeLines, $refundLines);
             $this->safelyPatch($billable, $intent);
-            return;
+            return ['path' => 'sidegrade', 'invoice' => $invoice];
         }
 
         if (! empty($chargeLines)) {
             // Phase 1: Mollie-Charge + Pending-State (PATCH läuft erst in Phase 2 nach Charge-OK).
             $this->invoices->createCharge($billable, $chargeLines, $refundLines, $intent);
-            return;
+            return ['path' => 'deferred_charge', 'invoice' => null];
         }
 
         // Reine Refund-Phase: PATCH (best-effort) + Refunds direkt.
         // Ein PATCH-Fail darf den Refund nicht blockieren — er wird in pending_subscription_patch
         // persistiert und vom RetrySubscriptionPatchJob aufgegriffen.
         $this->safelyPatch($billable, $intent);
-        $this->invoices->createRefund($billable, $refundLines);
+        $refundInvoice = $this->invoices->createRefund($billable, $refundLines);
+        return ['path' => 'refund', 'invoice' => $refundInvoice];
     }
 
     /**

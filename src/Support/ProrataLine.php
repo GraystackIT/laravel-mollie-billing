@@ -17,11 +17,25 @@ final class ProrataLine
 {
     public ?string $mollieRefundId = null; // wird vom InvoiceService nach Mollie-Refund-Call gesetzt
 
+    /**
+     * Notiz für die UI, wenn die Refund-Höhe gegen den Restbetrag der Original-Invoice
+     * gekürzt werden musste (z.B. nachdem schon Kulanz-Refunds gewährt wurden).
+     * `null` wenn nichts gekürzt wurde.
+     *
+     * @var array{
+     *   alreadyRefundedNet: int,
+     *   originalAmountNet: int,
+     *   uncappedRefundNet: int,
+     *   cappedRefundNet: int
+     * }|null
+     */
+    public ?array $refundCapNote = null;
+
     public function __construct(
         public readonly ?BillingInvoice $originalInvoice,
         public readonly ?int $originalLineItemIndex,
-        public readonly string $kind,           // 'plan' | 'seats' | 'addon'
-        public readonly ?string $code,          // plan_code | null (seats) | addon_code
+        public readonly string $kind,           // 'plan' | 'seats' | 'addon' | 'coupon'
+        public readonly ?string $code,          // plan_code | null (seats) | addon_code | coupon_code
         public readonly string $label,
         public readonly int $quantity,
         public readonly int $amountNet,         // negativ Refund / positiv Charge / 0 coupon-covered
@@ -65,6 +79,7 @@ final class ProrataLine
             'parent_invoice_id' => $this->originalInvoice?->getKey(),
             'parent_line_item_index' => $this->originalLineItemIndex,
             'mollie_refund_id' => $this->mollieRefundId,
+            'refund_cap_note' => $this->refundCapNote,
         ];
     }
 
@@ -101,6 +116,10 @@ final class ProrataLine
 
         if (isset($data['mollie_refund_id'])) {
             $line->mollieRefundId = $data['mollie_refund_id'];
+        }
+
+        if (isset($data['refund_cap_note']) && is_array($data['refund_cap_note'])) {
+            $line->refundCapNote = $data['refund_cap_note'];
         }
 
         return $line;

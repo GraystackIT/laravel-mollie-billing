@@ -29,6 +29,7 @@ class Coupon extends Model
             'applicable_intervals' => 'array',
             'applicable_addons' => 'array',
             'applicable_usages' => 'array',
+            'applicable_products' => 'array',
             'valid_from' => UtcDatetime::class,
             'valid_until' => UtcDatetime::class,
             'created_at' => UtcDatetime::class,

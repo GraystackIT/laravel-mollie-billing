@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Http\Controllers\BillingAdminController;
+use GraystackIT\MollieBilling\Http\Controllers\InvoiceDownloadController;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use Illuminate\Support\Facades\Route;
 
@@ -10,6 +11,12 @@ Route::middleware(AuthorizeBillingAdmin::class)
     ->prefix('billing/admin')->name('billing.admin.')->group(function (): void {
         Route::get('/', [BillingAdminController::class, 'show'])
             ->defaults('screen', 'dashboard')->name('dashboard');
+
+        // Admin-side invoice PDF download. Lives outside the tenant prefix so
+        // staff can fetch any billable's PDF without being a member of that
+        // tenant. The controller honours both tenant and admin auth paths.
+        Route::get('invoices/{invoice}/download', InvoiceDownloadController::class)
+            ->name('invoice.download');
         Route::get('coupons', [BillingAdminController::class, 'show'])
             ->defaults('screen', 'coupons.index')->name('coupons.index');
         Route::get('coupons/create', [BillingAdminController::class, 'show'])

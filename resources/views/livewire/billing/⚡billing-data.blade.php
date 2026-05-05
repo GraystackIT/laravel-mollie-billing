@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Exceptions\ViesUnavailableException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Services\Billing\MollieMandateInspector;
 use GraystackIT\MollieBilling\Services\Billing\StartMandateCheckout;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -249,106 +250,25 @@ new class extends Component {
             return null;
         }
 
-        $customerId = $billable->getMollieCustomerId();
-        $mandateId = $billable->getMollieMandateId();
-
-        if ($customerId === null || $mandateId === null || $customerId === '' || $mandateId === '') {
+        $summary = app(MollieMandateInspector::class)->inspect($billable);
+        if ($summary === null) {
             return null;
         }
 
-        try {
-            $mandate = Mollie::api()->mandates->getForId($customerId, $mandateId);
-        } catch (\Throwable $e) {
-            report($e);
+        $payload = $summary->toArray();
 
-            return null;
-        }
-
-        $status = (string) ($mandate->status ?? 'unknown');
-        $method = (string) ($mandate->method ?? 'unknown');
-        $details = is_object($mandate->details ?? null)
-            ? json_decode(json_encode($mandate->details), true) ?: []
-            : (array) ($mandate->details ?? []);
-
-        $signatureDate = null;
-        if (! empty($mandate->signatureDate)) {
+        // Format the signature date in the tenant's timezone — the DTO carries
+        // it as a Carbon instance so each consumer (portal vs admin) can format
+        // however it likes.
+        if ($payload['signatureDate'] instanceof \Carbon\CarbonInterface) {
             try {
-                $signatureDate = BillingTime::display(\Carbon\Carbon::parse((string) $mandate->signatureDate)->setTimezone('UTC'), $billable)->translatedFormat('d. M Y');
+                $payload['signatureDate'] = BillingTime::display($payload['signatureDate'], $billable)->translatedFormat('d. M Y');
             } catch (\Throwable) {
-                $signatureDate = null;
+                $payload['signatureDate'] = null;
             }
         }
 
-        return [
-            'status' => $status,
-            'statusColor' => match ($status) {
-                'valid' => 'lime',
-                'pending' => 'amber',
-                'invalid' => 'red',
-                default => 'zinc',
-            },
-            'statusLabel' => __('billing::portal.payment_method.status.'.$status),
-            'method' => $method,
-            'methodLabel' => __('billing::portal.payment_method.method.'.$method),
-            'details' => $details,
-            'mandateReference' => isset($mandate->mandateReference) ? (string) $mandate->mandateReference : null,
-            'signatureDate' => $signatureDate,
-            'summary' => $this->buildSummary($method, $details),
-        ];
-    }
-
-    /**
-     * Build a human-readable one-liner for the mandate (e.g. "Visa •••• 1234, expires 12/2027").
-     *
-     * @param  array<string, mixed>  $details
-     */
-    private function buildSummary(string $method, array $details): ?string
-    {
-        if ($method === 'creditcard') {
-            $label = isset($details['cardLabel']) ? (string) $details['cardLabel'] : __('billing::portal.payment_method.method.creditcard');
-            $last4 = isset($details['cardNumber']) ? (string) $details['cardNumber'] : null;
-            $expiry = isset($details['cardExpiryDate']) ? (string) $details['cardExpiryDate'] : null;
-
-            $parts = [$label];
-            if ($last4 !== null && $last4 !== '') {
-                $parts[] = '•••• '.$last4;
-            }
-            $summary = implode(' ', $parts);
-
-            if ($expiry !== null && $expiry !== '') {
-                try {
-                    $formatted = \Carbon\Carbon::parse($expiry)->format('m/Y');
-                    $summary .= ' · '.__('billing::portal.payment_method.expires', ['date' => $formatted]);
-                } catch (\Throwable) {
-                    // skip expiry formatting on failure
-                }
-            }
-
-            return $summary;
-        }
-
-        if ($method === 'directdebit') {
-            $holder = isset($details['consumerName']) ? (string) $details['consumerName'] : null;
-            $iban = isset($details['consumerAccount']) ? (string) $details['consumerAccount'] : null;
-
-            $parts = [];
-            if ($holder !== null && $holder !== '') {
-                $parts[] = $holder;
-            }
-            if ($iban !== null && $iban !== '') {
-                $parts[] = $iban;
-            }
-
-            return $parts === [] ? null : implode(' · ', $parts);
-        }
-
-        if ($method === 'paypal') {
-            $email = isset($details['consumerAccount']) ? (string) $details['consumerAccount'] : null;
-
-            return $email;
-        }
-
-        return null;
+        return $payload;
     }
 
     public function changePaymentMethod(StartMandateCheckout $checkout): mixed

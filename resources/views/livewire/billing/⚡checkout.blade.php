@@ -449,6 +449,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'interval' => $this->interval,
                 'addonCodes' => $this->addon_codes,
                 'orderAmountNet' => $this->subtotalNet(),
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                    \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
+                    \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
+                ],
             ]);
         } catch (InvalidCouponException $e) {
             $this->couponError = $this->couponErrorMessage($e->reason());
@@ -486,6 +492,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'interval' => $this->interval,
                 'addonCodes' => $this->addon_codes,
                 'orderAmountNet' => $this->subtotalNet(),
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                    \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
+                    \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
+                ],
             ]);
         } catch (\Throwable) {
             $this->applied_coupon = null;
@@ -547,8 +559,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'plan_not_applicable' => __('billing::checkout.coupon_plan_mismatch'),
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
+            'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
+            'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
+            'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
+            'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
+            'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
+            'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
+            'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
             default => __('billing::checkout.coupon_failed'),
         };
     }

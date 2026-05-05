@@ -6,12 +6,15 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use Carbon\Carbon;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
@@ -30,16 +33,23 @@ use Mollie\Laravel\Facades\Mollie;
  *    purchased balance.
  *  - Resubscribe in grace period (ResubscribeSubscription): do nothing — the
  *    wallet already holds the current period's credits.
+ *
+ * The Mollie-Subscription amount is computed from the catalog (base + seats +
+ * addons + VAT), never from the just-paid first-payment — otherwise a FirstPayment
+ * coupon would lock the discounted total in as the dauerhafte Recurring-Höhe.
+ * If a Recurring coupon applies, the caller passes its discount via
+ * `recurring_discount_net`.
  */
 class CreateSubscription
 {
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
+        private readonly VatCalculationService $vatService,
     ) {
     }
 
     /**
-     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,amount_gross:int,mandate_id?:string}  $spec
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string}  $spec
      */
     public function handle(Billable $billable, array $spec): void
     {
@@ -48,15 +58,43 @@ class CreateSubscription
         $interval = $spec['interval'];
         $addonCodes = $spec['addon_codes'] ?? [];
         $extraSeats = (int) ($spec['extra_seats'] ?? 0);
-        $amountGross = (int) $spec['amount_gross'];
+        $recurringDiscountNet = max(0, (int) ($spec['recurring_discount_net'] ?? 0));
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
-        // Mollie schedules the first recurring charge at $startDate. The first
-        // billing period is already paid via the checkout's first-payment, so
-        // Mollie's first recurring charge must happen one full period later.
-        $startDate = $interval === 'yearly'
-            ? BillingTime::nowUtc()->addYear()
-            : BillingTime::nowUtc()->addMonth();
+        $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
+
+        $baseRecurringNet = SubscriptionAmount::net(
+            $this->catalog,
+            $billable,
+            $planCode,
+            $interval,
+            $totalSeats,
+            $addonCodes,
+        );
+        $netForRecurring = max(0, $baseRecurringNet - $recurringDiscountNet);
+
+        // 100%-coverage: see MollieSubscriptionPatcher for rationale. Mollie can't
+        // accept amount = 0, so we send the FULL price and defer startDate past
+        // the marker's valid_until — Mollie won't charge during the discount
+        // lifetime, the first real charge after that is at full price (marker
+        // already expired by then).
+        $isFullCoverage = $netForRecurring === 0 && $recurringDiscountNet > 0 && $baseRecurringNet > 0;
+        $netForCharge = $isFullCoverage ? $baseRecurringNet : $netForRecurring;
+
+        $vat = $this->vatService->calculate(
+            (string) ($billable->getBillingCountry() ?? ''),
+            $netForCharge,
+            $billable,
+        );
+        $amountGross = (int) $vat['gross'];
+
+        // Mollie schedules the first recurring charge at $startDate. Default cadence:
+        // the first billing period is already paid via the checkout's first-payment,
+        // so Mollie's first recurring charge must happen one full period later.
+        // Full-coverage override: skip past the discount lifetime.
+        $startDate = $isFullCoverage
+            ? $this->fullCoverageStartDate($billable, $interval)
+            : ($interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth());
 
         $subscription = Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
@@ -74,7 +112,7 @@ class CreateSubscription
         ));
 
         $meta = $billable->getBillingSubscriptionMeta();
-        $meta['seat_count'] = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
+        $meta['seat_count'] = $totalSeats;
         $meta['mollie_subscription_id'] = (string) ($subscription->id ?? '');
 
         $billable->forceFill([
@@ -89,5 +127,24 @@ class CreateSubscription
         ])->save();
 
         SubscriptionCreated::dispatch($billable, $planCode, $interval);
+    }
+
+    /**
+     * For a 100%-coverage recurring discount, return the Mollie startDate that
+     * skips the entire discount lifetime: marker.valid_until + 1 day. Falls
+     * back to one period from now if the marker has no valid_until.
+     */
+    private function fullCoverageStartDate(Billable $billable, string $interval): \Carbon\CarbonInterface
+    {
+        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+        $validUntil = is_array($marker) && isset($marker['valid_until']) && $marker['valid_until'] !== null
+            ? Carbon::parse((string) $marker['valid_until'])
+            : null;
+
+        if ($validUntil !== null) {
+            return $validUntil->copy()->addDay();
+        }
+
+        return $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth();
     }
 }

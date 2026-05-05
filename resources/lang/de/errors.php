@@ -11,4 +11,7 @@ return [
     'access_grant_conflicts_with_mollie' => 'Zugangsberechtigungen können nicht zusammen mit einem aktiven kostenpflichtigen Abo verwendet werden.',
     'access_grant_requires_active_subscription' => 'Für diese Zusatz-Berechtigung ist ein aktives Abonnement erforderlich.',
     'refund_exceeds_invoice_amount' => 'Der Erstattungsbetrag übersteigt die verbleibende erstattungsfähige Summe dieser Rechnung.',
+    'coupon_recurring_conflict' => 'Auf diesem Abonnement ist bereits ein anderer wiederkehrender Gutschein aktiv.',
+    'coupon_requires_active_subscription' => 'Zum Einlösen dieses Gutscheins ist ein aktives Abonnement erforderlich.',
+    'coupon_too_close_to_charge' => 'Die nächste Abrechnung steht zu kurz bevor, um diesen Gutschein noch sicher anzuwenden. Bitte versuche es nach der nächsten Abrechnung erneut.',
 ];

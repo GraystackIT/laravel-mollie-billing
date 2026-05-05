@@ -1,6 +1,8 @@
 <?php
 
+use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
+use GraystackIT\MollieBilling\Support\AdminLocale;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
@@ -107,7 +109,7 @@ new class extends Component {
                 />
             </flux:card>
         @else
-            <flux:card class="p-0!">
+            <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table :paginate="$billables">
                     <flux:table.columns>
                         <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Billable</flux:table.column>
@@ -116,8 +118,28 @@ new class extends Component {
                         <flux:table.column class="w-48"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
+                        @php $catalog = app(SubscriptionCatalogInterface::class); @endphp
                         @foreach ($billables as $b)
-                            @php $change = $b->getBillingSubscriptionMeta()['scheduled_change'] ?? []; @endphp
+                            @php
+                                $change = $b->getBillingSubscriptionMeta()['scheduled_change'] ?? [];
+                                $newPlanCode = $change['plan_code'] ?? null;
+                                $newPlanName = $newPlanCode ? ($catalog->planName($newPlanCode) ?? $newPlanCode) : null;
+                                $newInterval = $change['interval'] ?? null;
+                                $newIntervalLabel = $newInterval
+                                    ? AdminLocale::with(fn () => __('billing::enums.subscription_interval.'.$newInterval))
+                                    : null;
+                                $newSeats = $change['seats'] ?? null;
+                                $newAddons = (array) ($change['addons'] ?? []);
+                                $newCoupons = array_filter(array_merge(
+                                    array_filter([$change['coupon_code'] ?? null]),
+                                    (array) ($change['coupon_codes'] ?? []),
+                                ));
+                                $currentPlanCode = $b->subscription_plan_code;
+                                $currentPlanName = $currentPlanCode ? ($catalog->planName($currentPlanCode) ?? $currentPlanCode) : null;
+                                $currentInterval = $b->subscription_interval?->value ?? null;
+                                $planChanged = $newPlanCode !== null && $newPlanCode !== $currentPlanCode;
+                                $intervalChanged = $newInterval !== null && $newInterval !== $currentInterval;
+                            @endphp
                             <flux:table.row :key="$b->getKey()">
                                 <flux:table.cell variant="strong">
                                     <a href="{{ route(BillingRoute::admin('billables.show'), $b) }}" class="hover:underline">{{ $b->name }}</a>
@@ -128,21 +150,67 @@ new class extends Component {
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->scheduled_change_at?->diffForHumans() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell>
-                                    <div class="flex flex-wrap gap-1">
-                                        @foreach ($change as $key => $value)
-                                            <flux:badge size="sm" color="zinc" class="font-mono">
-                                                {{ $key }}: {{ is_scalar($value) ? $value : json_encode($value) }}
-                                            </flux:badge>
-                                        @endforeach
-                                        @if (empty($change))
-                                            <span class="text-zinc-400">—</span>
-                                        @endif
-                                    </div>
+                                    @if (empty($change))
+                                        <span class="text-zinc-400">—</span>
+                                    @else
+                                        <div class="space-y-1">
+                                            {{-- Headline: plan transition. Show "from → to" when the plan changes,
+                                                 otherwise just the plan being kept. --}}
+                                            <div class="flex flex-wrap items-center gap-1.5 text-sm">
+                                                @if ($planChanged && $currentPlanName)
+                                                    <span class="text-zinc-400 line-through dark:text-zinc-500">{{ $currentPlanName }}</span>
+                                                    <flux:icon.arrow-right variant="micro" class="size-3 text-zinc-400" />
+                                                @endif
+                                                @if ($newPlanName)
+                                                    <span class="font-medium text-zinc-900 dark:text-white">{{ $newPlanName }}</span>
+                                                @endif
+                                            </div>
+
+                                            {{-- Interval transition (if any), mirroring the plan-transition style. --}}
+                                            @if ($newIntervalLabel)
+                                                <div class="flex flex-wrap items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-300">
+                                                    @if ($intervalChanged && $currentInterval)
+                                                        <span class="text-zinc-400 line-through dark:text-zinc-500">
+                                                            {{ AdminLocale::with(fn () => __('billing::enums.subscription_interval.'.$currentInterval)) }}
+                                                        </span>
+                                                        <flux:icon.arrow-right variant="micro" class="size-3 text-zinc-400" />
+                                                    @endif
+                                                    <span>{{ $newIntervalLabel }}</span>
+                                                </div>
+                                            @endif
+
+                                            {{-- Detail meta: seats / addons / coupons. Only render rows that carry info. --}}
+                                            @if ($newSeats !== null || ! empty($newAddons) || ! empty($newCoupons))
+                                                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                                    @if ($newSeats !== null)
+                                                        <span class="inline-flex items-center gap-1">
+                                                            <flux:icon.users variant="micro" class="size-3" />
+                                                            <span class="tabular-nums">{{ $newSeats }} {{ (int) $newSeats === 1 ? 'seat' : 'seats' }}</span>
+                                                        </span>
+                                                    @endif
+                                                    @if (! empty($newAddons))
+                                                        <span class="inline-flex items-center gap-1">
+                                                            <flux:icon.puzzle-piece variant="micro" class="size-3" />
+                                                            <span>{{ implode(', ', array_map(fn ($code) => $catalog->addonName($code) ?? $code, $newAddons)) }}</span>
+                                                        </span>
+                                                    @endif
+                                                    @if (! empty($newCoupons))
+                                                        <span class="inline-flex items-center gap-1">
+                                                            <flux:icon.ticket variant="micro" class="size-3" />
+                                                            <span class="font-mono">{{ implode(', ', $newCoupons) }}</span>
+                                                        </span>
+                                                    @endif
+                                                </div>
+                                            @endif
+                                        </div>
+                                    @endif
                                 </flux:table.cell>
-                                <flux:table.cell>
-                                    <div class="flex gap-2">
-                                        <flux:button size="xs" icon="play" wire:click="applyNow({{ $b->getKey() }})" wire:confirm="Apply this change now?">Apply</flux:button>
-                                        <flux:button size="xs" variant="danger" icon="x-mark" wire:click="cancel({{ $b->getKey() }})" wire:confirm="Cancel this scheduled change?">Cancel</flux:button>
+                                <flux:table.cell align="end">
+                                    <div class="flex justify-end gap-1">
+                                        <flux:tooltip content="Cancel scheduled change">
+                                            <flux:button size="xs" variant="ghost" icon="x-mark" aria-label="Cancel" wire:click="cancel('{{ $b->getKey() }}')" wire:confirm="Cancel this scheduled change?" />
+                                        </flux:tooltip>
+                                        <flux:button size="xs" variant="primary" icon="play" wire:click="applyNow('{{ $b->getKey() }}')" wire:confirm="Apply this change now?">Apply now</flux:button>
                                     </div>
                                 </flux:table.cell>
                             </flux:table.row>

@@ -99,8 +99,17 @@ return [
     'coupon_plan_mismatch' => 'This coupon does not apply to the selected plan.',
     'coupon_interval_mismatch' => 'This coupon does not apply to the selected billing interval.',
     'coupon_addon_mismatch' => 'This coupon does not apply to the selected add-ons.',
+    'coupon_product_mismatch' => 'This coupon does not apply to the selected product.',
     'coupon_min_order' => 'The order does not meet the minimum amount for this coupon.',
     'coupon_requires_billable' => 'This coupon cannot be applied during checkout.',
+    'coupon_recurring_conflict' => 'Another recurring coupon is already active on this subscription.',
+    'coupon_requires_active_subscription' => 'An active subscription is required to redeem this coupon.',
+    'coupon_too_close_to_charge' => 'The next charge is too close to safely apply this coupon. Please try again after the next billing date.',
+    'coupon_per_billable_limit_reached' => 'You have already redeemed this coupon the maximum number of times.',
+    'coupon_not_stackable_with_current' => 'Cannot add more coupons — one of the applied coupons is not stackable.',
+    'coupon_full_coverage_use_access_grant' => 'This coupon would reduce the total to zero. Please use an access grant or a free plan instead.',
+    'coupon_recurring_already_active' => 'This coupon is already active on your subscription and applies automatically on every renewal.',
+    'coupon_type_not_allowed_in_context' => 'This coupon type cannot be redeemed here.',
 
     // Promo (existing)
     'coupon_applied' => 'Coupon :code applied.',

@@ -95,7 +95,7 @@ interface Billable
 
     // One-time orders
     /** @return array{checkout_url:?string, payment_id:string} */
-    public function purchaseOneTimeOrder(string $productCode, array $metadata = []): array;
+    public function purchaseOneTimeOrder(string $productCode, array $metadata = [], ?string $couponCode = null, ?array $couponCodes = null): array;
 
     /** @return array<int, string> */
     public function allBillingProducts(): array;
@@ -110,7 +110,7 @@ interface Billable
     public function cancelBillingSubscription(bool $immediately = false): void;
     public function changeBillingPlan(string $planCode, string $interval): void;
     public function resubscribeBillingPlan(): void;
-    public function enableBillingAddon(string $addonCode): void;
+    public function enableBillingAddon(string $addonCode, ?string $couponCode = null, ?array $couponCodes = null): void;
     public function disableBillingAddon(string $addonCode): void;
-    public function syncBillingSeats(int $seats): void;
+    public function syncBillingSeats(int $seats, ?string $couponCode = null, ?array $couponCodes = null): void;
 }

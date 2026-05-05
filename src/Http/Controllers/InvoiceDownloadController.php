@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
+use GraystackIT\MollieBilling\Contracts\AuthorizesBillingAdmin;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Illuminate\Http\Request;
@@ -30,8 +31,16 @@ class InvoiceDownloadController extends Controller
         abort_unless($invoice instanceof BillingInvoice, 404);
 
         $billable = $invoice->billable;
+        abort_unless($billable !== null, 404);
 
-        abort_unless($billable && MollieBilling::authorizes($request, $billable), 403);
+        // Tenant access: the requester is a member/owner of this billable.
+        // Admin access: the requester can access the billing admin panel and
+        // is therefore allowed to download any billable's invoice PDFs.
+        $user = $request->user();
+        $isAdmin = $user instanceof AuthorizesBillingAdmin && $user->canAccessBillingAdmin();
+        $isAuthorizedTenant = MollieBilling::authorizes($request, $billable);
+
+        abort_unless($isAdmin || $isAuthorizedTenant, 403);
         abort_unless($invoice->hasPdf(), 404);
 
         $disk = Storage::disk($invoice->pdf_disk);

@@ -49,15 +49,18 @@ new class extends Component {
 
     public function returnUrl(): string
     {
+        $billable = MollieBilling::resolveBillable(request());
+        $params = $billable ? MollieBilling::resolveUrlParameters($billable) : [];
+
         if ($this->origin === 'products') {
-            return route(BillingRoute::name('products'));
+            return route(BillingRoute::name('products'), $params);
         }
 
         $configured = config('mollie-billing.redirect_after_return');
 
         return $configured
-            ? route($configured)
-            : route(BillingRoute::name('index'));
+            ? route($configured, $params)
+            : route(BillingRoute::name('index'), $params);
     }
 };
 

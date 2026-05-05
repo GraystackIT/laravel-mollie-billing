@@ -2,16 +2,23 @@
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Livewire\Component;
 
 new class extends Component {
     public ?string $flash = null;
     public bool $flashError = false;
+    public string $couponCode = '';
+    public ?string $couponMessage = null;
+    public bool $couponMessageError = false;
 
     private function resolveBillable(): ?Billable
     {
@@ -62,6 +69,109 @@ new class extends Component {
             $this->flash = __('billing::portal.flash.error');
             $this->flashError = true;
         }
+    }
+
+    public function redeemCoupon(CouponService $service): void
+    {
+        $this->couponMessage = null;
+        $this->couponMessageError = false;
+
+        $code = trim($this->couponCode);
+        if ($code === '') {
+            return;
+        }
+
+        $billable = $this->resolveBillable();
+        if (! $billable) {
+            $this->couponMessage = __('billing::portal.coupon_redeem_failed');
+            $this->couponMessageError = true;
+            return;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
+        $interval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
+        $totalSeats = $planCode ? $catalog->includedSeats($planCode) + max(0, $billable->getExtraBillingSeats()) : 0;
+        $addonCodes = $billable->getActiveBillingAddonCodes();
+        $orderAmountNet = $planCode
+            ? SubscriptionAmount::net($catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes)
+            : 0;
+
+        // Pre-flight: detect FirstPayment / Recurring coupons specifically and
+        // surface a "use in action flow" hint instead of the generic
+        // type_not_allowed_in_context error. Other types fall through to the
+        // strict allow-list below.
+        $resolvedCoupon = \GraystackIT\MollieBilling\Models\Coupon::query()
+            ->whereRaw('UPPER(code) = ?', [strtoupper($code)])
+            ->first();
+        if ($resolvedCoupon !== null && in_array($resolvedCoupon->type, [CouponType::FirstPayment, CouponType::Recurring], true)) {
+            $this->couponMessage = __('billing::portal.coupon_redeem_use_in_action');
+            $this->couponMessageError = false;
+            return;
+        }
+
+        try {
+            $coupon = $service->validate($code, $billable, [
+                'planCode' => $planCode ?: null,
+                'interval' => $interval,
+                'addonCodes' => $addonCodes,
+                'orderAmountNet' => $orderAmountNet,
+                'allowed_types' => [
+                    CouponType::Credits,
+                    CouponType::TrialExtension,
+                    CouponType::PeriodExtension,
+                ],
+            ]);
+        } catch (InvalidCouponException $e) {
+            $this->couponMessage = $this->translateCouponReason($e->reason());
+            $this->couponMessageError = true;
+            return;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->couponMessage = __('billing::portal.coupon_redeem_failed');
+            $this->couponMessageError = true;
+            return;
+        }
+
+        try {
+            $service->redeem($coupon, $billable, [
+                'planCode' => $planCode ?: null,
+                'interval' => $interval,
+                'orderAmountNet' => $orderAmountNet,
+            ]);
+            $this->couponMessage = __('billing::portal.coupon_redeem_success', ['code' => $coupon->code]);
+            $this->couponMessageError = false;
+            $this->couponCode = '';
+        } catch (\Throwable $e) {
+            report($e);
+            $this->couponMessage = __('billing::portal.coupon_redeem_failed');
+            $this->couponMessageError = true;
+        }
+    }
+
+    private function translateCouponReason(string $reason): string
+    {
+        return match ($reason) {
+            'not_found' => __('billing::checkout.coupon_not_found'),
+            'inactive' => __('billing::checkout.coupon_inactive'),
+            'not_yet_valid' => __('billing::checkout.coupon_not_yet_valid'),
+            'expired' => __('billing::checkout.coupon_expired'),
+            'globally_exhausted' => __('billing::checkout.coupon_exhausted'),
+            'plan_not_applicable' => __('billing::checkout.coupon_plan_mismatch'),
+            'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
+            'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
+            'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'min_order_not_met' => __('billing::checkout.coupon_min_order'),
+            'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
+            'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
+            'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
+            'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
+            'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
+            'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
+            'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
+            default => __('billing::portal.coupon_redeem_failed'),
+        };
     }
 
     public function dashboardData(?Billable $billable): array
@@ -243,7 +353,7 @@ new class extends Component {
                 </div>
 
                 <div class="flex flex-wrap gap-2">
-                    <flux:button size="sm" variant="primary" href="{{ route(BillingRoute::name('plan')) }}">
+                    <flux:button size="sm" variant="primary" href="{{ route(BillingRoute::name('plan'), MollieBilling::resolveUrlParameters($billable)) }}">
                         {{ __('billing::portal.plan_change') }}
                     </flux:button>
                     @if ($d['isActive'])
@@ -294,6 +404,36 @@ new class extends Component {
             @endif
         </flux:card>
 
+        {{-- Redeem coupon --}}
+        <flux:card class="p-6">
+            <div class="flex items-start gap-3">
+                <div class="flex size-10 items-center justify-center rounded-full bg-accent/10">
+                    <flux:icon.ticket class="size-5 text-accent" />
+                </div>
+                <div class="flex-1">
+                    <flux:heading size="lg">{{ __('billing::portal.coupon_redeem_title') }}</flux:heading>
+                    <flux:text class="text-sm text-zinc-500">{{ __('billing::portal.coupon_redeem_subtitle') }}</flux:text>
+                </div>
+            </div>
+
+            <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-start">
+                <flux:input
+                    wire:model="couponCode"
+                    :placeholder="__('billing::portal.coupon_code_placeholder')"
+                    class="flex-1"
+                />
+                <flux:button variant="primary" wire:click="redeemCoupon">
+                    {{ __('billing::portal.coupon_redeem_button') }}
+                </flux:button>
+            </div>
+
+            @if ($couponMessage)
+                <flux:text class="mt-3 text-sm {{ $couponMessageError ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400' }}">
+                    {{ $couponMessage }}
+                </flux:text>
+            @endif
+        </flux:card>
+
         {{-- Usage meters --}}
         @if (count($d['usageTypes']) > 0)
             <div class="space-y-4">
@@ -317,7 +457,7 @@ new class extends Component {
         <div class="space-y-4">
             <div class="flex items-center justify-between">
                 <flux:heading size="lg">{{ __('billing::portal.recent_invoices') }}</flux:heading>
-                <flux:button size="sm" variant="ghost" href="{{ route(BillingRoute::name('invoices')) }}" icon:trailing="arrow-right">
+                <flux:button size="sm" variant="ghost" href="{{ route(BillingRoute::name('invoices'), MollieBilling::resolveUrlParameters($billable)) }}" icon:trailing="arrow-right">
                     {{ __('billing::portal.view_all_invoices') }}
                 </flux:button>
             </div>

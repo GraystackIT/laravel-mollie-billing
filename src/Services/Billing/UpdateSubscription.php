@@ -72,33 +72,38 @@ class UpdateSubscription
             $addonsAdded = array_values(array_diff($newAddons, $context->currentAddons));
             $addonsRemoved = array_values(array_diff($context->currentAddons, $newAddons));
 
-            // Coupon — validate only; redemption is deferred for pending upgrades.
+            // Coupon — validate all applied codes (stackable). NO redeem here yet:
+            // the actual redemption depends on which path the update takes (sidegrade,
+            // deferred prorata charge, PATCH-only, free downgrade, …) — each path has
+            // a different correct value for `discount_amount_net` and a different
+            // `invoice_id` on the redemption record. We collect resolved coupons here,
+            // then dispatch redemptions per path below.
             $couponApplied = null;
-            $couponDiscountNet = 0;
+            $couponsApplied = [];
+            /** @var array<int, \GraystackIT\MollieBilling\Models\Coupon> $resolvedCoupons */
+            $resolvedCoupons = [];
+            /** @var array<int, int> $perCouponRecurringDiscountNet */
+            $perCouponRecurringDiscountNet = [];
+            $existingCouponIds = [];
+            $remainingNet = $newNet;
 
-            if ($dto->couponCode !== null && $dto->couponCode !== '') {
+            foreach ($dto->couponCodes as $code) {
                 $coupon = $this->couponService->validate(
-                    $dto->couponCode,
+                    $code,
                     $billable,
                     [
                         'planCode' => $context->newPlan,
                         'interval' => $context->newInterval,
                         'addonCodes' => $newAddons,
-                        'orderAmountNet' => $newNet,
+                        'orderAmountNet' => $remainingNet,
+                        'existingCouponIds' => $existingCouponIds,
                     ],
                 );
-                $couponDiscountNet = $this->couponService->computeRecurringDiscount($coupon, $newNet);
-            }
-
-            // Redeem coupon now.
-            if ($dto->couponCode !== null && $dto->couponCode !== '' && isset($coupon)) {
-                $this->couponService->redeem($coupon, $billable, [
-                    'planCode' => $context->newPlan,
-                    'interval' => $context->newInterval,
-                    'orderAmountNet' => $newNet,
-                    'discount_amount_net' => $couponDiscountNet,
-                ]);
-                $couponApplied = (string) $coupon->code;
+                $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
+                $resolvedCoupons[] = $coupon;
+                $perCouponRecurringDiscountNet[] = $thisDiscount;
+                $existingCouponIds[] = $coupon->id;
+                $remainingNet = max(0, $remainingNet - $thisDiscount);
             }
 
             $downgradeToLocal = $context->isMollie
@@ -110,8 +115,9 @@ class UpdateSubscription
             $hasProrata = ($context->prorataChargeNet > 0 || $context->prorataCreditNet > 0)
                 && $context->isMollie;
 
+            $prorataResult = null;
             if ($hasProrata) {
-                $this->applyProrata($billable, $context);
+                $prorataResult = $this->applyProrata($billable, $context, $resolvedCoupons);
                 $billable->refresh();
 
                 // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
@@ -135,6 +141,7 @@ class UpdateSubscription
                         'new_net' => $newNet,
                         'prorata_charge_net' => $context->prorataChargeNet,
                         'coupon_code' => $dto->couponCode,
+                        'coupon_codes' => $dto->couponCodes,
                         'requested_at' => BillingTime::nowUtc()->toIso8601String(),
                     ];
                     $meta['prorata_pending_payment_id'] = $billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
@@ -142,6 +149,8 @@ class UpdateSubscription
 
                     event(new \GraystackIT\MollieBilling\Events\PlanChangePending($billable, $meta['pending_plan_change'], (string) $meta['prorata_pending_payment_id']));
 
+                    // Redemption for deferred charges happens in Phase-2 (applyPendingPlanChange)
+                    // so the redemption record carries the actual prorata discount + invoice id.
                     return [
                         'planChanged' => false,
                         'intervalChanged' => false,
@@ -160,6 +169,43 @@ class UpdateSubscription
                 }
             }
 
+            // Redeem all validated coupons now — paths that did NOT defer a charge.
+            // The discount amount written to each redemption is what was *actually
+            // billed now*, which depends on the path:
+            //   - sidegrade  : the prorata discount applied on the plan-switch invoice
+            //   - refund-only: the prorata discount applied on the refund (rare)
+            //   - other      : 0 (recurring coupons take effect on the next renewal
+            //                   via the active_recurring_coupon marker; first-payment
+            //                   coupons have no charge to attach to)
+            $prorataDiscounts = $this->computeProrataDiscountsPerCoupon(
+                $resolvedCoupons,
+                $perCouponRecurringDiscountNet,
+                $context,
+            );
+            $invoiceIdForRedemption = $prorataResult !== null
+                ? ($prorataResult['invoice']?->id)
+                : null;
+
+            foreach ($resolvedCoupons as $i => $coupon) {
+                $discount = ($invoiceIdForRedemption !== null)
+                    ? ($prorataDiscounts[$i] ?? 0)
+                    : 0;
+
+                $context_redeem = [
+                    'planCode' => $context->newPlan,
+                    'interval' => $context->newInterval,
+                    'orderAmountNet' => $newNet,
+                    'discount_amount_net' => $discount,
+                ];
+                if ($invoiceIdForRedemption !== null) {
+                    $context_redeem['invoice_id'] = (int) $invoiceIdForRedemption;
+                }
+
+                $this->couponService->redeem($coupon, $billable, $context_redeem);
+                $couponsApplied[] = (string) $coupon->code;
+            }
+            $couponApplied = $couponsApplied !== [] ? $couponsApplied[0] : null;
+
             $mollieSubscriptionPatched = false;
 
             if ($billable instanceof Model) {
@@ -169,7 +215,14 @@ class UpdateSubscription
                     if (! $hasProrata) {
                         $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
                     }
-                    unset($meta['mollie_subscription_id'], $meta['pending_amount_net'], $meta['pending_amount_recorded_at']);
+                    // Free downgrade tears down the Mollie subscription — any active
+                    // recurring-coupon marker no longer applies (no future charges).
+                    unset(
+                        $meta['mollie_subscription_id'],
+                        $meta['pending_amount_net'],
+                        $meta['pending_amount_recorded_at'],
+                        $meta['active_recurring_coupon'],
+                    );
                 } elseif ($context->isMollie && ! $hasProrata && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
                     // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
                     // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
@@ -225,8 +278,13 @@ class UpdateSubscription
 
     /**
      * Trampoline: build PlanChangeIntent + invoke the new ProrataExecutor pipeline.
+     *
+     * @param  list<\GraystackIT\MollieBilling\Models\Coupon>  $resolvedCoupons
+     *         Coupons already validated in update(); we apply their discount to the
+     *         prorata charge as additional negative lines (kind=coupon).
+     * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
      */
-    protected function applyProrata(Billable $billable, SubscriptionChangeContext $context): void
+    protected function applyProrata(Billable $billable, SubscriptionChangeContext $context, array $resolvedCoupons = []): array
     {
         $intent = $this->buildIntent(
             $billable,
@@ -238,7 +296,161 @@ class UpdateSubscription
         $composer = app(ProrataComposer::class);
         $lines = $composer->compose($intent);
 
-        $this->prorataExecutor->execute($billable, $intent, $lines);
+        if ($resolvedCoupons !== []) {
+            $lines = $this->applyCouponDiscountsToProrataLines($lines, $resolvedCoupons, $context);
+        }
+
+        return $this->prorataExecutor->execute($billable, $intent, $lines);
+    }
+
+    /**
+     * Compute the per-coupon discount net that was actually billed on the prorata
+     * charge.
+     *
+     * Both Recurring and FirstPayment coupons apply their discount rate directly
+     * against the prorata charge net (the actual money flowing "now"). The
+     * recurring coupon's ongoing effect on future renewals lives in the
+     * `active_recurring_coupon` marker and is independent of this calculation.
+     * Mirrors `applyCouponDiscountsToProrataLines()` and the equivalent loop in
+     * `PreviewService::previewUpdate()` so redemption records line up with what
+     * was billed via Mollie.
+     *
+     * @param  list<\GraystackIT\MollieBilling\Models\Coupon>  $resolvedCoupons
+     * @param  list<int>  $perCouponRecurringDiscountNet  recurring discount per coupon (unused — kept for signature stability)
+     * @return array<int, int>  per-coupon prorata discount net, indexed identically to $resolvedCoupons
+     */
+    private function computeProrataDiscountsPerCoupon(
+        array $resolvedCoupons,
+        array $perCouponRecurringDiscountNet,
+        SubscriptionChangeContext $context,
+    ): array {
+        $out = array_fill(0, count($resolvedCoupons), 0);
+
+        if ($context->prorataChargeNet <= 0) {
+            return $out;
+        }
+
+        $remaining = $context->prorataChargeNet;
+
+        foreach ($resolvedCoupons as $i => $coupon) {
+            if ($remaining <= 0) {
+                break;
+            }
+            if (
+                $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::Recurring
+                && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment
+            ) {
+                continue;
+            }
+
+            $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remaining);
+            $thisDiscount = min($thisDiscount, $remaining);
+
+            if ($thisDiscount > 0) {
+                $out[$i] = $thisDiscount;
+                $remaining -= $thisDiscount;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Append coupon discount lines (negative amounts) to the prorata line set.
+     *
+     * Both Recurring and FirstPayment coupons apply their discount rate directly
+     * against the remaining prorata charge net. The recurring coupon's ongoing
+     * effect on future renewals is independent and lives in the
+     * `active_recurring_coupon` marker.
+     *
+     * @param  list<\GraystackIT\MollieBilling\Support\ProrataLine>  $lines
+     * @param  list<\GraystackIT\MollieBilling\Models\Coupon>  $resolvedCoupons
+     * @return list<\GraystackIT\MollieBilling\Support\ProrataLine>
+     */
+    private function applyCouponDiscountsToProrataLines(array $lines, array $resolvedCoupons, SubscriptionChangeContext $context): array
+    {
+        // Net prorata charge: charge-direction lines minus refund-direction lines.
+        // The Mollie charge that will actually fire is the SUM of all charge-direction
+        // line amounts (positive and negative); refunds are netted there. Coupons can
+        // only meaningfully reduce that final net charge.
+        $chargeNet = 0;
+        $vatRate = 0.0;
+        $periodStart = null;
+        $periodEnd = null;
+        $daysActive = 0;
+        $daysRemaining = 0;
+
+        foreach ($lines as $line) {
+            if ($line->direction === 'charge') {
+                $chargeNet += $line->amountNet;
+            } else {
+                // Refund-direction lines are negative against the customer's invoice
+                // already; for the purposes of "what is being charged now" we net them.
+                $chargeNet += $line->amountNet;
+            }
+            if ($line->kind === 'plan' && $line->vatRate > 0 && $vatRate === 0.0) {
+                $vatRate = (float) $line->vatRate;
+            }
+            if ($periodStart === null) {
+                $periodStart = $line->periodStart;
+                $periodEnd = $line->periodEnd;
+                $daysActive = $line->daysActive;
+                $daysRemaining = $line->daysRemaining;
+            }
+        }
+
+        if ($chargeNet <= 0 || $periodStart === null || $periodEnd === null) {
+            return $lines;
+        }
+
+        $remaining = $chargeNet;
+        $additions = [];
+
+        foreach ($resolvedCoupons as $coupon) {
+            if ($remaining <= 0) {
+                break;
+            }
+            if (
+                $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::Recurring
+                && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment
+            ) {
+                continue;
+            }
+
+            $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remaining);
+            $thisDiscount = min($thisDiscount, $remaining);
+
+            if ($thisDiscount <= 0) {
+                continue;
+            }
+
+            $vatAmount = (int) round($thisDiscount * $vatRate / 100);
+            // direction='charge' with a negative amount: the line is netted into the
+            // Mollie charge total (a refund-direction would route it to createRefund,
+            // which talks to the *original* invoice — wrong for a discount on the
+            // *new* charge).
+            $additions[] = new \GraystackIT\MollieBilling\Support\ProrataLine(
+                originalInvoice: null,
+                originalLineItemIndex: null,
+                kind: 'coupon',
+                code: (string) $coupon->code,
+                label: __('billing::portal.coupon_label', ['code' => (string) $coupon->code]),
+                quantity: 1,
+                amountNet: -$thisDiscount,
+                vatRate: $vatRate,
+                amountVat: -$vatAmount,
+                amountGross: -($thisDiscount + $vatAmount),
+                periodStart: $periodStart,
+                periodEnd: $periodEnd,
+                daysActive: $daysActive,
+                daysRemaining: $daysRemaining,
+                isCouponCovered: false,
+                direction: 'charge',
+            );
+            $remaining -= $thisDiscount;
+        }
+
+        return [...$lines, ...$additions];
     }
 
     /**
@@ -272,19 +484,26 @@ class UpdateSubscription
      * since Phase 1) and then applies it: cancel+recreate Mollie subscription,
      * update the billable, adjust wallets, redeem coupon, dispatch events.
      *
+     * @param  ?\GraystackIT\MollieBilling\Models\BillingInvoice  $chargeInvoice
+     *         The invoice the prorata charge was persisted to. When supplied, the
+     *         coupon redemptions are linked to it (`invoice_id`) and the per-coupon
+     *         `discount_amount_net` is read from the persisted prorata charge_lines
+     *         so the audit record matches what was actually billed.
+     *
      * @throws \Throwable If validation fails (pending stays in meta for admin review)
      */
-    public function applyPendingPlanChange(Billable $billable): array
+    public function applyPendingPlanChange(Billable $billable, ?\GraystackIT\MollieBilling\Models\BillingInvoice $chargeInvoice = null): array
     {
         /** @var Model&Billable $billable */
         $meta = $billable->getBillingSubscriptionMeta();
         $pendingData = $meta['pending_plan_change'] ?? null;
+        $pendingProrataChargeLines = (array) ($meta['pending_prorata_change']['charge_lines'] ?? []);
 
         if ($pendingData === null) {
             return [];
         }
 
-        return DB::transaction(function () use ($billable, $pendingData): array {
+        return DB::transaction(function () use ($billable, $pendingData, $pendingProrataChargeLines, $chargeInvoice): array {
             if ($billable instanceof Model) {
                 $billable->newQuery()
                     ->whereKey($billable->getKey())
@@ -358,34 +577,72 @@ class UpdateSubscription
                 );
             }
 
-            // Redeem coupon if stored in pending.
+            // Redeem coupons if stored in pending. Supports both legacy single
+            // `coupon_code` and the multi-coupon `coupon_codes` payload.
+            //
+            // The actual `discount_amount_net` is read from the prorata charge_lines
+            // that were persisted in Phase-1 (kind='coupon' lines with their
+            // `code` matching the coupon). This way the audit record matches the
+            // amount the customer was actually billed via Mollie.
             $couponApplied = null;
-            if (! empty($pendingData['coupon_code'])) {
-                try {
-                    $coupon = $this->couponService->validate(
-                        $pendingData['coupon_code'],
-                        $billable,
-                        [
+            $pendingCodes = (array) ($pendingData['coupon_codes'] ?? []);
+            if ($pendingCodes === [] && ! empty($pendingData['coupon_code'])) {
+                $pendingCodes = [(string) $pendingData['coupon_code']];
+            }
+
+            if ($pendingCodes !== []) {
+                // Map: coupon code (uppercased) → discount net (positive cents).
+                $billedDiscountByCode = [];
+                foreach ($pendingProrataChargeLines as $line) {
+                    if (($line['kind'] ?? null) !== 'coupon') {
+                        continue;
+                    }
+                    $code = strtoupper((string) ($line['code'] ?? ''));
+                    if ($code === '') {
+                        continue;
+                    }
+                    $billedDiscountByCode[$code] = abs((int) ($line['amount_net'] ?? 0));
+                }
+
+                $existingCouponIds = [];
+                $remainingNet = $newNet;
+                foreach ($pendingCodes as $code) {
+                    try {
+                        $codeUpper = strtoupper((string) $code);
+                        $coupon = $this->couponService->validate(
+                            (string) $code,
+                            $billable,
+                            [
+                                'planCode' => $context->newPlan,
+                                'interval' => $context->newInterval,
+                                'addonCodes' => $newAddons,
+                                'orderAmountNet' => $remainingNet,
+                                'existingCouponIds' => $existingCouponIds,
+                            ],
+                        );
+                        $discount = $billedDiscountByCode[$codeUpper] ?? 0;
+
+                        $redeemContext = [
                             'planCode' => $context->newPlan,
                             'interval' => $context->newInterval,
-                            'addonCodes' => $newAddons,
                             'orderAmountNet' => $newNet,
-                        ],
-                    );
-                    $discount = $this->couponService->computeRecurringDiscount($coupon, $newNet);
-                    $this->couponService->redeem($coupon, $billable, [
-                        'planCode' => $context->newPlan,
-                        'interval' => $context->newInterval,
-                        'orderAmountNet' => $newNet,
-                        'discount_amount_net' => $discount,
-                    ]);
-                    $couponApplied = (string) $coupon->code;
-                } catch (\Throwable $e) {
-                    Log::warning('Coupon redemption failed during applyPendingPlanChange', [
-                        'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                        'coupon' => $pendingData['coupon_code'],
-                        'error' => $e->getMessage(),
-                    ]);
+                            'discount_amount_net' => $discount,
+                        ];
+                        if ($chargeInvoice !== null) {
+                            $redeemContext['invoice_id'] = (int) $chargeInvoice->id;
+                        }
+
+                        $this->couponService->redeem($coupon, $billable, $redeemContext);
+                        $couponApplied = (string) $coupon->code;
+                        $existingCouponIds[] = $coupon->id;
+                        $remainingNet = max(0, $remainingNet - $this->couponService->computeRecurringDiscount($coupon, $remainingNet));
+                    } catch (\Throwable $e) {
+                        Log::warning('Coupon redemption failed during applyPendingPlanChange', [
+                            'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                            'coupon' => $code,
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
                 }
             }
 

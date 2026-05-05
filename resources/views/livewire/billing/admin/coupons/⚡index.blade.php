@@ -57,7 +57,7 @@ new class extends Component {
 ?>
 
 <div class="space-y-6">
-    <x-mollie-billing::admin.page-header title="Coupons" subtitle="Discounts, credits, trial extensions and access grants.">
+    <x-mollie-billing::admin.page-header title="Coupons" subtitle="Discounts, credits, trial extensions, access grants and period extensions.">
         <x-slot:actions>
             <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">New coupon</flux:button>
         </x-slot:actions>
@@ -93,7 +93,7 @@ new class extends Component {
             </x-mollie-billing::admin.empty>
         </flux:card>
     @else
-        <flux:card class="p-0!">
+        <flux:card class="p-0! sm:px-6! sm:py-2!">
             <flux:table :paginate="$coupons">
                 <flux:table.columns>
                     <flux:table.column class="w-8"></flux:table.column>

@@ -97,21 +97,21 @@ it('PreviewService exposes prorataLines with multi-VAT line items per category',
 
     $preview = app(PreviewService::class)->previewUpdate($billable, new SubscriptionUpdateRequest(
         planCode: 'starter', interval: 'monthly',
-        seats: 1, // 3 → 1 = -2 Sitze
-        addons: [], // alle 2 Addons disablen
+        seats: 1, // 3 -> 1 = -2 seats
+        addons: [], // disable both addons
     ));
 
     expect($preview)->toHaveKey('prorataLines');
     $prorataLines = $preview['prorataLines'];
 
-    // Erwartet: 1 Sitz-Refund + 2 Addon-Refunds = 3 Lines (Plan unverändert)
+    // Expected: 1 seat refund + 2 addon refunds = 3 lines (plan unchanged)
     expect($prorataLines)->toHaveCount(3);
 
     $byKind = collect($prorataLines)->groupBy('kind');
     expect($byKind->has('seats'))->toBeTrue();
     expect($byKind->has('addon'))->toBeTrue();
 
-    // Per-Item-VAT korrekt: gateway-a hat 20%, addon-b hat 10%.
+    // Per-item VAT correct: gateway-a has 20%, addon-b has 10%.
     $addonRates = $byKind['addon']->pluck('vat_rate')->all();
     expect($addonRates)->toContain(20.0);
     expect($addonRates)->toContain(10.0);

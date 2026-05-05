@@ -284,13 +284,23 @@ class MollieWebhookController extends Controller
 
         $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
 
+        $recurringDiscountNet = $this->redeemFirstPaymentCoupon(
+            $billable,
+            (string) ($metadata['coupon_code'] ?? ''),
+            $planCode,
+            $interval,
+            $addonCodes,
+            $extraSeats,
+            (int) $invoice->id,
+        );
+
         try {
             $this->createSubscription->handle($billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'amount_gross' => $this->amountFromMolliePayment($payment),
+                'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
@@ -312,8 +322,6 @@ class MollieWebhookController extends Controller
                 $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
             }
         }
-
-        $this->applyPendingCreditsCoupons($billable);
 
         event(new SubscriptionCreated($billable, $planCode, $interval));
         event(new PaymentSucceeded($billable, $invoice));
@@ -349,13 +357,23 @@ class MollieWebhookController extends Controller
 
         $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
 
+        $recurringDiscountNet = $this->redeemFirstPaymentCoupon(
+            $billable,
+            (string) ($metadata['coupon_code'] ?? ''),
+            $planCode,
+            $interval,
+            $addonCodes,
+            $extraSeats,
+            (int) $invoice->id,
+        );
+
         try {
             $this->createSubscription->handle($billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'amount_gross' => $this->amountFromMolliePayment($payment),
+                'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
@@ -368,8 +386,6 @@ class MollieWebhookController extends Controller
             app(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class)
                 ->adjust($billable, $oldPlan, $oldInterval, $planCode, $interval);
         }
-
-        $this->applyPendingCreditsCoupons($billable);
 
         event(new \GraystackIT\MollieBilling\Events\SubscriptionUpgradedFromLocal(
             $billable,
@@ -438,7 +454,9 @@ class MollieWebhookController extends Controller
 
         $seats = $this->catalog->includedSeats($planCode) + $extraSeats;
         $expectedNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
-        $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $expectedNet, $billable);
+        $couponDiscountNet = $this->couponService->computeMarkerDiscount($billable, $expectedNet);
+        $netForCharge = max(0, $expectedNet - $couponDiscountNet);
+        $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $netForCharge, $billable);
         $actualGross = $this->amountFromMolliePayment($payment);
 
         if (abs($actualGross - (int) $vat['gross']) > 1) {
@@ -446,10 +464,67 @@ class MollieWebhookController extends Controller
         }
 
         $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
+        if ($couponDiscountNet > 0) {
+            $vatRate = (float) ($vat['rate'] ?? 0.0);
+            $vatAmount = (int) round($couponDiscountNet * $vatRate / 100);
+            $lineItems[] = [
+                'kind' => 'coupon',
+                'description' => 'Coupon discount',
+                'qty' => 1,
+                'unit_price_net' => -$couponDiscountNet,
+                'amount_net' => -$couponDiscountNet,
+                'vat_rate' => $vatRate,
+                'vat_amount' => -$vatAmount,
+                'amount_gross' => -($couponDiscountNet + $vatAmount),
+            ];
+        }
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
 
-        foreach ($addonCodes as $ignored) {
-            // placeholder — line item construction already accounts for addons.
+        if ($couponDiscountNet > 0) {
+            try {
+                $this->couponService->redeemRecurringCouponForRenewal(
+                    $billable,
+                    $expectedNet,
+                    (int) $invoice->id,
+                );
+            } catch (\Throwable $e) {
+                Log::warning('Recurring coupon redemption failed during renewal webhook', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($this->couponService->markerExpired($billable)) {
+            try {
+                app(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class)
+                    ->updateRecurringAmount(
+                        billable: $billable,
+                        planCode: $planCode,
+                        interval: $interval,
+                        addons: $addonCodes,
+                        extraSeats: $extraSeats,
+                        intervalChanged: false,
+                        couponDiscountNet: 0,
+                    );
+                $this->couponService->clearActiveRecurringCouponMarker($billable);
+            } catch (\Throwable $e) {
+                Log::warning('Mollie reset PATCH after coupon expiry failed — queued for retry', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+                $meta = $billable->getBillingSubscriptionMeta();
+                $meta['pending_subscription_patch'] = [
+                    'reason' => 'recurring_coupon_expiry_reset',
+                    'plan_code' => $planCode,
+                    'interval' => $interval,
+                    'addons' => $addonCodes,
+                    'extra_seats' => $extraSeats,
+                    'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                    'last_error' => $e->getMessage(),
+                ];
+                $billable->forceFill(['subscription_meta' => $meta])->save();
+            }
         }
 
         // Recharge wallets: reset or add based on rollover configuration.
@@ -546,7 +621,7 @@ class MollieWebhookController extends Controller
 
             if (! empty($pendingChange)) {
                 try {
-                    app(UpdateSubscription::class)->applyPendingPlanChange($billable);
+                    app(UpdateSubscription::class)->applyPendingPlanChange($billable, $invoice);
                 } catch (\Throwable $e) {
                     Log::error('Failed to apply pending plan change after prorata payment', [
                         'billable' => $billable->getKey(),
@@ -925,23 +1000,79 @@ class MollieWebhookController extends Controller
         return $type::find($id);
     }
 
-    protected function applyPendingCreditsCoupons(Billable $billable): void
-    {
-        $recent = $billable->redeemedBillingCoupons()
-            ->with('coupon')
-            ->where('applied_at', '>=', BillingTime::nowUtc()->subHour())
-            ->get();
-
-        foreach ($recent as $redemption) {
-            $coupon = $redemption->coupon;
-            if ($coupon && $coupon->type?->value === 'credits') {
-                try {
-                    $this->couponService->applyCreditsToWallets($billable, $redemption);
-                } catch (\Throwable $e) {
-                    Log::warning('Failed to apply credits coupon', ['error' => $e->getMessage()]);
-                }
-            }
+    /**
+     * Redeems a coupon attached to a first-payment (regular checkout or Local→Mollie upgrade).
+     * Handles all 6 coupon types. Returns the recurring discount in cents that
+     * `CreateSubscription` should apply to the Mollie subscription's amount —
+     * non-zero only for Recurring-type coupons (FirstPayment is one-time).
+     */
+    protected function redeemFirstPaymentCoupon(
+        Billable $billable,
+        string $couponCode,
+        string $planCode,
+        string $interval,
+        array $addonCodes,
+        int $extraSeats,
+        int $invoiceId,
+    ): int {
+        $couponCode = trim($couponCode);
+        if ($couponCode === '') {
+            return 0;
         }
+
+        $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
+        $orderAmountNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes);
+
+        try {
+            $coupon = $this->couponService->validate($couponCode, $billable, [
+                'planCode' => $planCode,
+                'interval' => $interval,
+                'addonCodes' => $addonCodes,
+                'orderAmountNet' => $orderAmountNet,
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                    \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
+                    \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('First-payment coupon validation failed', [
+                'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                'coupon_code' => $couponCode,
+                'error' => $e->getMessage(),
+            ]);
+
+            return 0;
+        }
+
+        $discount = 0;
+        if (in_array($coupon->type, [
+            \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+            \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+        ], true)) {
+            $discount = $this->couponService->computeRecurringDiscount($coupon, $orderAmountNet);
+        }
+
+        try {
+            $this->couponService->redeem($coupon, $billable, [
+                'planCode' => $planCode,
+                'interval' => $interval,
+                'orderAmountNet' => $orderAmountNet,
+                'discount_amount_net' => $discount,
+                'invoice_id' => $invoiceId,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('First-payment coupon redemption failed', [
+                'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                'coupon_code' => $couponCode,
+                'error' => $e->getMessage(),
+            ]);
+
+            return 0;
+        }
+
+        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring ? $discount : 0;
     }
 
     protected function amountFromMolliePayment(object $payment): int
@@ -990,6 +1121,50 @@ class MollieWebhookController extends Controller
         }
 
         $priceNet = $this->catalog->productPriceNet($productCode);
+
+        // Accept both legacy single `coupon_code` and multi `coupon_codes` payloads.
+        $couponCodes = (array) ($metadata['coupon_codes'] ?? []);
+        if ($couponCodes === [] && ! empty($metadata['coupon_code'])) {
+            $couponCodes = [(string) $metadata['coupon_code']];
+        }
+        $couponCodes = array_values(array_unique(array_map(
+            'strtoupper',
+            array_filter(array_map(fn ($c) => is_string($c) ? trim($c) : '', $couponCodes), fn (string $c) => $c !== ''),
+        )));
+
+        // Coupon resolution (best-effort): re-validate each coupon now and compute
+        // its discount against the remaining net so the invoice line items match
+        // the actually-charged Mollie amount. We mirror StartOneTimeOrderCheckout.
+        /** @var array<int, array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
+        $resolvedCoupons = [];
+        $totalDiscountNet = 0;
+        $existingCouponIds = [];
+        $remainingNet = $priceNet;
+        foreach ($couponCodes as $code) {
+            try {
+                $coupon = $this->couponService->validate($code, $billable, [
+                    'productCodes' => [$productCode],
+                    'orderAmountNet' => $remainingNet,
+                    'existingCouponIds' => $existingCouponIds,
+                    'allowed_types' => [
+                        \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                        \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                    ],
+                ]);
+                $discount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
+                $resolvedCoupons[] = ['coupon' => $coupon, 'discount' => $discount];
+                $totalDiscountNet += $discount;
+                $remainingNet = max(0, $remainingNet - $discount);
+                $existingCouponIds[] = $coupon->id;
+            } catch (\Throwable $e) {
+                Log::warning('One-time order coupon validation failed during webhook', [
+                    'product_code' => $productCode,
+                    'coupon_code' => $code,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         $lineItems = [[
             'kind' => 'one_time_order',
             'code' => $productCode,
@@ -1000,7 +1175,38 @@ class MollieWebhookController extends Controller
             'total_net' => $priceNet,
         ]];
 
+        foreach ($resolvedCoupons as $entry) {
+            if ($entry['discount'] > 0) {
+                $lineItems[] = [
+                    'kind' => 'coupon',
+                    'code' => $entry['coupon']->code,
+                    'label' => 'Coupon '.$entry['coupon']->code,
+                    'quantity' => 1,
+                    'unit_price' => -$entry['discount'],
+                    'unit_price_net' => -$entry['discount'],
+                    'total_net' => -$entry['discount'],
+                ];
+            }
+        }
+
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'one_time_order', $lineItems, $billable);
+
+        foreach ($resolvedCoupons as $entry) {
+            try {
+                $this->couponService->redeem($entry['coupon'], $billable, [
+                    'productCodes' => [$productCode],
+                    'orderAmountNet' => $priceNet,
+                    'discount_amount_net' => $entry['discount'],
+                    'invoice_id' => (int) $invoice->id,
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('One-time order coupon redemption failed', [
+                    'product_code' => $productCode,
+                    'coupon_code' => $entry['coupon']->code,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
 
         $usageType = $this->catalog->productUsageType($productCode);
         $quantity = $this->catalog->productQuantity($productCode);

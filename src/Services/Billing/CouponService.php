@@ -118,6 +118,41 @@ class CouponService
             }
         }
 
+        if ($coupon->type === CouponType::Recurring) {
+            $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+            if (is_array($marker)) {
+                $markerCouponId = (int) ($marker['coupon_id'] ?? 0);
+                if ($markerCouponId !== $coupon->id) {
+                    // Different recurring coupon already active — only one at a time.
+                    throw new InvalidCouponException($billable, (string) $coupon->code, 'recurring_conflict');
+                }
+
+                // Same coupon is already active on this subscription — re-applying
+                // it via UI would create a duplicate redemption record. Renewals go
+                // through redeemRecurringCouponForRenewal() which doesn't pass through
+                // validate().
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'recurring_already_active');
+            }
+
+            // Note: a 100% recurring discount (or fixed >= orderAmount) is intentionally
+            // allowed here. The Mollie-Subscription is created/patched with the full price
+            // and a deferred startDate covering the discount lifetime — see
+            // CreateSubscription / MollieSubscriptionPatcher / ResubscribeSubscription.
+        }
+
+        if ($coupon->type === CouponType::FirstPayment) {
+            // Wie Recurring: ein FirstPayment-Coupon, der den Charge-Net komplett auf 0 zieht,
+            // schlägt im Mollie-Checkout fehl (Mindestbetrag 0.01 €). Bei 100%-Coverage soll
+            // der Owner einen AccessGrant (für N Tage gratis) oder einen Free-Plan einsetzen.
+            $orderAmount = (int) ($context['orderAmountNet'] ?? 0);
+            if ($orderAmount > 0) {
+                $discount = $this->computeRecurringDiscount($coupon, $orderAmount);
+                if ($discount >= $orderAmount) {
+                    throw new InvalidCouponException($billable, (string) $coupon->code, 'full_coverage_use_access_grant');
+                }
+            }
+        }
+
         if ($coupon->type === CouponType::TrialExtension) {
             $planCode = $context['planCode'] ?? null;
             $planTrialDays = (int) (config('mollie-billing-plans.plans.'.$planCode.'.trial_days') ?? 0);
@@ -127,6 +162,24 @@ class CouponService
                 throw new CouponRequiresTrialException(
                     "Coupon {$coupon->code} requires an active or planned trial."
                 );
+            }
+        }
+
+        if ($coupon->type === CouponType::PeriodExtension) {
+            $source = $billable->getBillingSubscriptionSource();
+            if (
+                $source !== SubscriptionSource::Local->value
+                && $source !== SubscriptionSource::Mollie->value
+            ) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'requires_active_subscription');
+            }
+
+            $nextBilling = $billable->nextBillingDate();
+            if ($source === SubscriptionSource::Mollie->value
+                && $nextBilling !== null
+                && $nextBilling->lessThanOrEqualTo(BillingTime::nowUtc()->addDay())
+            ) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'too_close_to_charge');
             }
         }
 
@@ -212,6 +265,23 @@ class CouponService
             throw new InvalidCouponException($billable, $code, 'inactive');
         }
 
+        // Context-restricted types: each entry point passes an `allowed_types` list
+        // of CouponType cases (or their string values) — the coupon must be one of
+        // them. This is independent of the per-coupon `applicable_*` filters and
+        // exists to prevent semantically-wrong types being redeemed at the wrong
+        // place (e.g. a `credits` coupon on a plan-change action, or an
+        // `access_grant` on a one-time-order purchase).
+        $allowedTypes = (array) ($context['allowed_types'] ?? []);
+        if ($allowedTypes !== []) {
+            $allowedValues = array_map(
+                fn ($t) => $t instanceof CouponType ? $t->value : (string) $t,
+                $allowedTypes,
+            );
+            if (! in_array($coupon->type->value, $allowedValues, true)) {
+                throw new InvalidCouponException($billable, $code, 'type_not_allowed_in_context');
+            }
+        }
+
         $now = BillingTime::nowUtc();
 
         if ($coupon->valid_from !== null && $coupon->valid_from->isAfter($now)) {
@@ -257,6 +327,16 @@ class CouponService
             }
         }
 
+        $productCodes = (array) ($context['productCodes'] ?? []);
+        if (! empty($coupon->applicable_products) && $productCodes !== []) {
+            $allowedProducts = (array) $coupon->applicable_products;
+            foreach ($productCodes as $product) {
+                if (! in_array($product, $allowedProducts, true)) {
+                    throw new InvalidCouponException($billable, $code, 'product_not_applicable');
+                }
+            }
+        }
+
         if (
             $coupon->minimum_order_amount_net !== null
             && $orderAmount < (int) $coupon->minimum_order_amount_net
@@ -264,16 +344,26 @@ class CouponService
             throw new InvalidCouponException($billable, $code, 'min_order_not_met');
         }
 
-        if ($coupon->type !== CouponType::AccessGrant) {
-            if (! $coupon->stackable && $existingCouponIds !== []) {
-                $others = Coupon::query()->whereIn('id', $existingCouponIds)->get();
-                foreach ($others as $other) {
-                    if (! $other->stackable) {
-                        throw new CouponNotStackableException(
-                            "Coupon {$coupon->code} is not stackable with {$other->code}."
-                        );
-                    }
+        if ($coupon->type !== CouponType::AccessGrant && $existingCouponIds !== []) {
+            // The new coupon itself is not stackable → it can't be combined with anything else.
+            if (! $coupon->stackable) {
+                $other = Coupon::query()->whereIn('id', $existingCouponIds)->first();
+                if ($other !== null) {
+                    throw new CouponNotStackableException(
+                        "Coupon {$coupon->code} is not stackable with {$other->code}."
+                    );
                 }
+            }
+
+            // An already-applied coupon is not stackable → no further coupons may follow.
+            $nonStackableExisting = Coupon::query()
+                ->whereIn('id', $existingCouponIds)
+                ->where('stackable', false)
+                ->first();
+            if ($nonStackableExisting !== null) {
+                throw new CouponNotStackableException(
+                    "Coupon {$nonStackableExisting->code} is not stackable with {$coupon->code}."
+                );
             }
         }
 
@@ -340,8 +430,15 @@ class CouponService
 
             switch ($coupon->type) {
                 case CouponType::FirstPayment:
-                    $redemption->discount_amount_net = (int) ($context['discount_amount_net'] ?? 0);
-                    if ($redemption->discount_amount_net === 0 && isset($context['orderAmountNet'])) {
+                    // Caller-set `discount_amount_net` (even 0) is taken verbatim — at
+                    // path-orchestration sites (UpdateSubscription, OneTimeOrderWebhook)
+                    // we always pass the *actually billed* discount and 0 means "no charge
+                    // attached, redemption only sets the audit marker". Only when the key
+                    // is fully missing we fall back to computeRecurringDiscount(orderAmount)
+                    // for backward compatibility with simpler call sites.
+                    if (array_key_exists('discount_amount_net', $context)) {
+                        $redemption->discount_amount_net = (int) $context['discount_amount_net'];
+                    } elseif (isset($context['orderAmountNet'])) {
                         $redemption->discount_amount_net = $this->computeRecurringDiscount(
                             $coupon,
                             (int) $context['orderAmountNet'],
@@ -353,8 +450,9 @@ class CouponService
                     break;
 
                 case CouponType::Recurring:
-                    $redemption->discount_amount_net = (int) ($context['discount_amount_net'] ?? 0);
-                    if ($redemption->discount_amount_net === 0 && isset($context['orderAmountNet'])) {
+                    if (array_key_exists('discount_amount_net', $context)) {
+                        $redemption->discount_amount_net = (int) $context['discount_amount_net'];
+                    } elseif (isset($context['orderAmountNet'])) {
                         $redemption->discount_amount_net = $this->computeRecurringDiscount(
                             $coupon,
                             (int) $context['orderAmountNet'],
@@ -363,6 +461,17 @@ class CouponService
                     if (isset($context['invoice_id'])) {
                         $redemption->invoice_id = (int) $context['invoice_id'];
                     }
+                    if (($context['skip_marker'] ?? false) !== true) {
+                        // The marker locks the discount to the recurring net the
+                        // coupon was applied against — seats/addons added later
+                        // are billed at full price.
+                        $baseAmount = (int) ($context['orderAmountNet'] ?? 0);
+                        $this->setActiveRecurringCouponMarker($coupon, $billable, $baseAmount);
+                    }
+                    break;
+
+                case CouponType::PeriodExtension:
+                    $this->applyPeriodExtension($coupon, $billable, $redemption);
                     break;
 
                 case CouponType::Credits:
@@ -638,6 +747,44 @@ class CouponService
         return array_values(array_unique($addons));
     }
 
+    /**
+     * Reject discount-coupon shapes that don't make sense for the given type:
+     *
+     *  - Recurring: only > 100% is rejected. 100% is allowed and realised by
+     *    deferring the Mollie-Subscription's startDate over the discount
+     *    lifetime instead of patching the amount to 0 (Mollie rejects 0 €).
+     *  - FirstPayment: >= 100% is rejected. The first charge happens immediately
+     *    in checkout and Mollie cannot accept 0 € — for full-coverage on the
+     *    first payment, an access_grant coupon (free for a duration) is the
+     *    correct shape.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function guardAgainstFullCoverageDiscount(array $attributes, CouponType $type): void
+    {
+        $discountType = $attributes['discount_type'] ?? null;
+        if ($discountType instanceof DiscountType) {
+            $discountType = $discountType->value;
+        }
+        if ($discountType !== DiscountType::Percentage->value) {
+            return;
+        }
+
+        $discountValue = (int) ($attributes['discount_value'] ?? 0);
+
+        if ($type === CouponType::FirstPayment && $discountValue >= 100) {
+            throw new \InvalidArgumentException(
+                'A 100% (or greater) discount on a first_payment coupon would reduce the first charge to zero, which the payment provider does not accept. Use an access_grant coupon (full coverage for a duration) instead.'
+            );
+        }
+
+        if ($discountValue > 100) {
+            throw new \InvalidArgumentException(
+                'A discount value greater than 100% is not allowed.'
+            );
+        }
+    }
+
     private function validateRequiredFieldsForType(CouponType $type, array $attributes): void
     {
         $missing = function (string $key) use ($attributes): bool {
@@ -651,14 +798,24 @@ class CouponService
                         'first_payment coupon requires discount_type and discount_value.'
                     );
                 }
+                $this->guardAgainstFullCoverageDiscount($attributes, CouponType::FirstPayment);
                 break;
 
             case CouponType::Recurring:
-                if ($missing('discount_type') || $missing('discount_value') || $missing('valid_until')) {
+                if ($missing('discount_type') || $missing('discount_value')) {
                     throw new \InvalidArgumentException(
-                        'recurring coupon requires discount_type, discount_value and valid_until.'
+                        'recurring coupon requires discount_type and discount_value.'
                     );
                 }
+                $hasMax = isset($attributes['max_redemptions_per_billable'])
+                    && (int) $attributes['max_redemptions_per_billable'] > 0;
+                $hasValidUntil = isset($attributes['valid_until']) && $attributes['valid_until'] !== null && $attributes['valid_until'] !== '';
+                if (! $hasMax && ! $hasValidUntil) {
+                    throw new \InvalidArgumentException(
+                        'recurring coupon requires either max_redemptions_per_billable or valid_until.'
+                    );
+                }
+                $this->guardAgainstFullCoverageDiscount($attributes, CouponType::Recurring);
                 break;
 
             case CouponType::Credits:
@@ -704,7 +861,249 @@ class CouponService
                     );
                 }
                 break;
+
+            case CouponType::PeriodExtension:
+                if ($missing('grant_duration_days') || (int) $attributes['grant_duration_days'] <= 0) {
+                    throw new \InvalidArgumentException(
+                        'period_extension coupon requires a positive grant_duration_days.'
+                    );
+                }
+                break;
         }
+    }
+
+    /**
+     * Set `subscription_meta['active_recurring_coupon']` on initial apply.
+     *
+     * The marker's lifetime is locked here as `valid_until`, computed as the
+     * earliest of:
+     *   - the coupon's own valid_until (if set)
+     *   - now + max_redemptions_per_billable × intervalDays + 1d (1d buffer so
+     *     a charge that lands a few hours after the mathematical period end is
+     *     still within the discount window)
+     *
+     * The validator in validateRequiredFieldsForType() guarantees at least one
+     * of those two gates is set on a recurring coupon.
+     *
+     * `$baseAmountNet` is the recurring net the coupon was applied against at
+     * apply-time (= plan + seats + addons at that moment). Future renewals
+     * compute the discount against MIN(base, current charge) so seats/addons
+     * added after the apply are NOT silently discounted along — only the
+     * subscription state the user originally agreed to is covered.
+     */
+    private function setActiveRecurringCouponMarker(Coupon $coupon, Billable $billable, int $baseAmountNet): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $now = BillingTime::nowUtc();
+        $intervalDays = $billable->getBillingSubscriptionInterval() === 'yearly' ? 365 : 30;
+        $maxRedemptions = (int) ($coupon->max_redemptions_per_billable ?? 0);
+
+        $durationValidUntil = $maxRedemptions > 0
+            ? $now->copy()->addDays($maxRedemptions * $intervalDays + 1)
+            : null;
+
+        $couponValidUntil = $coupon->valid_until;
+
+        $markerValidUntil = match (true) {
+            $couponValidUntil !== null && $durationValidUntil !== null
+                => $couponValidUntil->lessThan($durationValidUntil) ? $couponValidUntil : $durationValidUntil,
+            $couponValidUntil !== null => $couponValidUntil,
+            $durationValidUntil !== null => $durationValidUntil,
+            default => null,
+        };
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['active_recurring_coupon'] = [
+            'coupon_id' => $coupon->id,
+            'code' => (string) $coupon->code,
+            'discount_type' => $coupon->discount_type?->value,
+            'discount_value' => (int) ($coupon->discount_value ?? 0),
+            'valid_until' => $markerValidUntil?->toIso8601String(),
+            'base_amount_net' => max(0, $baseAmountNet),
+            'first_applied_at' => $now->toIso8601String(),
+        ];
+
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Returns the active recurring coupon marker for a billable, or null.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getActiveRecurringCouponMarker(Billable $billable): ?array
+    {
+        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+        return is_array($marker) ? $marker : null;
+    }
+
+    /**
+     * Compute the discount that the active recurring coupon marker applies
+     * to a given net amount. Returns 0 if no marker is set or the underlying
+     * coupon is no longer active / no longer in its validity window.
+     *
+     * The discount applies only to the *base amount* the coupon was originally
+     * applied against — seats/addons added later don't enlarge the discount.
+     * If the user later REDUCES seats/addons below that base, the discount
+     * is capped at the actual current charge so it can never exceed it.
+     */
+    public function computeMarkerDiscount(Billable $billable, int $netAmount): int
+    {
+        $marker = $this->getActiveRecurringCouponMarker($billable);
+        if ($marker === null || $netAmount <= 0) {
+            return 0;
+        }
+
+        if (! $this->isMarkerStillRedeemable($marker)) {
+            return 0;
+        }
+
+        $type = (string) ($marker['discount_type'] ?? '');
+        $value = (int) ($marker['discount_value'] ?? 0);
+
+        // Cap the discount basis at the original base_amount_net so additions
+        // (seats, addons) after coupon-apply don't get silently discounted.
+        // Markers persisted before this field existed (legacy) fall back to
+        // the live netAmount — matching the prior behaviour for that case.
+        $baseAmount = isset($marker['base_amount_net'])
+            ? min((int) $marker['base_amount_net'], $netAmount)
+            : $netAmount;
+
+        if ($type === DiscountType::Percentage->value) {
+            return (int) round($baseAmount * $value / 100);
+        }
+
+        if ($type === DiscountType::Fixed->value) {
+            return min($value, $baseAmount);
+        }
+
+        return 0;
+    }
+
+    /**
+     * @param  array<string, mixed>  $marker
+     */
+    private function isMarkerStillRedeemable(array $marker): bool
+    {
+        $couponId = (int) ($marker['coupon_id'] ?? 0);
+        $coupon = $couponId > 0 ? Coupon::query()->find($couponId) : null;
+        if ($coupon === null || ! $coupon->active) {
+            return false;
+        }
+
+        $now = BillingTime::nowUtc();
+        $validUntil = isset($marker['valid_until']) && $marker['valid_until'] !== null
+            ? Carbon::parse((string) $marker['valid_until'])
+            : null;
+        if ($validUntil !== null && $validUntil->lessThanOrEqualTo($now)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Apply a recurring-coupon discount during a Mollie renewal webhook:
+     * write a CouponRedemption with the given invoice_id and return it (or null
+     * if no marker / coupon is no longer redeemable). Caller is responsible for
+     * the Mollie-Subscription PATCH if the marker is now expired (use markerExpired()).
+     */
+    public function redeemRecurringCouponForRenewal(
+        Billable $billable,
+        int $netAmount,
+        int $invoiceId,
+    ): ?CouponRedemption {
+        $marker = $this->getActiveRecurringCouponMarker($billable);
+        if ($marker === null || ! $this->isMarkerStillRedeemable($marker)) {
+            return null;
+        }
+
+        $couponId = (int) ($marker['coupon_id'] ?? 0);
+        $coupon = Coupon::query()->find($couponId);
+        if ($coupon === null) {
+            return null;
+        }
+
+        // Use the marker-aware computation so the redemption record matches what
+        // was actually billed on the invoice (capped at base_amount_net, not the
+        // current charge net which may include seats/addons added after apply).
+        $discount = $this->computeMarkerDiscount($billable, $netAmount);
+
+        return $this->redeem($coupon, $billable, [
+            'discount_amount_net' => $discount,
+            'invoice_id' => $invoiceId,
+            'skip_marker' => true,
+        ]);
+    }
+
+    /**
+     * Returns true if the marker has reached its limit (applied_count >= max_count
+     * or valid_until <= now or coupon deactivated). Used by the Renewal-Webhook
+     * AFTER a successful redeem to decide whether to PATCH Mollie back to full price.
+     */
+    public function markerExpired(Billable $billable): bool
+    {
+        $marker = $this->getActiveRecurringCouponMarker($billable);
+        if ($marker === null) {
+            return false;
+        }
+
+        return ! $this->isMarkerStillRedeemable($marker);
+    }
+
+    public function clearActiveRecurringCouponMarker(Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        if (! isset($meta['active_recurring_coupon'])) {
+            return;
+        }
+
+        unset($meta['active_recurring_coupon']);
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Apply a PeriodExtension coupon: extend subscription_ends_at on Local subs,
+     * push the next-charge date on Mollie subs.
+     */
+    private function applyPeriodExtension(Coupon $coupon, Billable $billable, CouponRedemption $redemption): void
+    {
+        $days = (int) ($coupon->grant_duration_days ?? 0);
+        if ($days <= 0) {
+            return;
+        }
+
+        $source = $billable->getBillingSubscriptionSource();
+
+        if ($source === SubscriptionSource::Local->value) {
+            $currentEnd = $billable->getBillingSubscriptionEndsAt();
+            $now = BillingTime::nowUtc();
+            $newEnd = ($currentEnd && $currentEnd->isFuture() ? $currentEnd->copy() : $now->copy())->addDays($days);
+
+            if ($billable instanceof Model) {
+                $billable->forceFill(['subscription_ends_at' => $newEnd])->save();
+            }
+
+            event(new SubscriptionExtended($billable, $currentEnd, $newEnd, $coupon));
+        } elseif ($source === SubscriptionSource::Mollie->value) {
+            $patcher = app(MollieSubscriptionPatcher::class);
+            $patcher->pushNextChargeDate($billable, $days);
+        }
+
+        $redemption->grant_days_added = $days;
+        $redemption->grant_applied_snapshot = [
+            'mode' => 'period_extension',
+            'duration_days' => $days,
+            'source' => $source,
+        ];
     }
 
     private function applyAccessGrant(Coupon $coupon, Billable $billable, CouponRedemption $redemption): void
