@@ -19,12 +19,14 @@ use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\PlanChangeFailed;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
+use GraystackIT\MollieBilling\Events\SubscriptionActivationFailed;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Exceptions\PaymentNotFoundException;
 use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
 use GraystackIT\MollieBilling\Notifications\PlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\SubscriptionPaymentFailedNotification;
@@ -284,15 +286,15 @@ class MollieWebhookController extends Controller
 
         $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
 
-        $recurringDiscountNet = $this->redeemFirstPaymentCoupon(
+        $pricedCoupon = $this->priceFirstPaymentCoupon(
             $billable,
             (string) ($metadata['coupon_code'] ?? ''),
             $planCode,
             $interval,
             $addonCodes,
             $extraSeats,
-            (int) $invoice->id,
         );
+        $recurringDiscountNet = $pricedCoupon['recurring_discount_net'] ?? 0;
 
         try {
             $this->createSubscription->handle($billable, [
@@ -304,7 +306,29 @@ class MollieWebhookController extends Controller
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
-            Log::warning('CreateSubscription during webhook failed', ['error' => $e->getMessage()]);
+            $this->reportSubscriptionActivationFailure(
+                $billable,
+                $planCode,
+                $interval,
+                $invoice,
+                $payment,
+                'CreateSubscription during webhook failed',
+                $e,
+            );
+            event(new PaymentSucceeded($billable, $invoice));
+            $this->notifyInvoiceAvailable($billable, $invoice);
+
+            return;
+        }
+
+        if ($pricedCoupon !== null) {
+            $this->redeemPricedFirstPaymentCoupon(
+                $billable,
+                $pricedCoupon,
+                $planCode,
+                $interval,
+                (int) $invoice->id,
+            );
         }
 
         $billable->forceFill([
@@ -357,15 +381,15 @@ class MollieWebhookController extends Controller
 
         $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
 
-        $recurringDiscountNet = $this->redeemFirstPaymentCoupon(
+        $pricedCoupon = $this->priceFirstPaymentCoupon(
             $billable,
             (string) ($metadata['coupon_code'] ?? ''),
             $planCode,
             $interval,
             $addonCodes,
             $extraSeats,
-            (int) $invoice->id,
         );
+        $recurringDiscountNet = $pricedCoupon['recurring_discount_net'] ?? 0;
 
         try {
             $this->createSubscription->handle($billable, [
@@ -377,7 +401,29 @@ class MollieWebhookController extends Controller
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
-            Log::warning('CreateSubscription during local upgrade failed', ['error' => $e->getMessage()]);
+            $this->reportSubscriptionActivationFailure(
+                $billable,
+                $planCode,
+                $interval,
+                $invoice,
+                $payment,
+                'CreateSubscription during local upgrade failed',
+                $e,
+            );
+            event(new PaymentSucceeded($billable, $invoice));
+            $this->notifyInvoiceAvailable($billable, $invoice);
+
+            return;
+        }
+
+        if ($pricedCoupon !== null) {
+            $this->redeemPricedFirstPaymentCoupon(
+                $billable,
+                $pricedCoupon,
+                $planCode,
+                $interval,
+                (int) $invoice->id,
+            );
         }
 
         // Rebalance wallets: plan credits proratised against actual usage,
@@ -1001,23 +1047,82 @@ class MollieWebhookController extends Controller
     }
 
     /**
-     * Redeems a coupon attached to a first-payment (regular checkout or Local→Mollie upgrade).
-     * Handles all 6 coupon types. Returns the recurring discount in cents that
-     * `CreateSubscription` should apply to the Mollie subscription's amount —
-     * non-zero only for Recurring-type coupons (SinglePayment is one-time).
+     * The first payment was received but creating the corresponding Mollie
+     * subscription afterwards failed. The customer paid, so we keep the
+     * invoice — but we must NOT mark the billable as Active, hydrate wallets
+     * or fire SubscriptionCreated, because there is no Mollie subscription to
+     * back any of that. We surface the failure via event + admin notification
+     * so it can be reconciled manually.
      */
-    protected function redeemFirstPaymentCoupon(
+    protected function reportSubscriptionActivationFailure(
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        \GraystackIT\MollieBilling\Models\BillingInvoice $invoice,
+        object $payment,
+        string $logMessage,
+        \Throwable $error,
+    ): void {
+        $paymentId = (string) ($payment->id ?? '');
+
+        Log::warning($logMessage, [
+            'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+            'plan_code' => $planCode,
+            'interval' => $interval,
+            'payment_id' => $paymentId,
+            'invoice_id' => (int) $invoice->id,
+            'error' => $error->getMessage(),
+        ]);
+
+        event(new SubscriptionActivationFailed(
+            $billable,
+            $planCode,
+            $interval,
+            $paymentId,
+            (int) $invoice->id,
+            $error->getMessage(),
+        ));
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+        if ($admins !== []) {
+            Notification::send(
+                $admins,
+                new AdminPlanChangeFailedNotification(
+                    reason: 'Subscription activation after first payment failed — Mollie subscription was not created',
+                    context: [
+                        'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                        'plan_code' => $planCode,
+                        'interval' => $interval,
+                        'payment_id' => $paymentId,
+                        'invoice_id' => (int) $invoice->id,
+                        'error' => $error->getMessage(),
+                    ],
+                ),
+            );
+        }
+    }
+
+    /**
+     * Validate the first-payment coupon and pre-compute its discount, but do
+     * NOT consume the redemption yet. The redemption must happen only after
+     * the new Mollie subscription has been created — otherwise the coupon
+     * could be permanently consumed against a subscription that never came
+     * into existence.
+     *
+     * @return array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount_net: int, recurring_discount_net: int, order_amount_net: int}|null
+     */
+    protected function priceFirstPaymentCoupon(
         Billable $billable,
         string $couponCode,
         string $planCode,
         string $interval,
         array $addonCodes,
         int $extraSeats,
-        int $invoiceId,
-    ): int {
+    ): ?array {
         $couponCode = trim($couponCode);
         if ($couponCode === '') {
-            return 0;
+            return null;
         }
 
         $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
@@ -1043,7 +1148,7 @@ class MollieWebhookController extends Controller
                 'error' => $e->getMessage(),
             ]);
 
-            return 0;
+            return null;
         }
 
         $discount = 0;
@@ -1054,25 +1159,43 @@ class MollieWebhookController extends Controller
             $discount = $this->couponService->computeRecurringDiscount($coupon, $orderAmountNet);
         }
 
+        return [
+            'coupon' => $coupon,
+            'discount_net' => $discount,
+            'recurring_discount_net' => $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring ? $discount : 0,
+            'order_amount_net' => $orderAmountNet,
+        ];
+    }
+
+    /**
+     * Consume the redemption for a coupon previously validated via
+     * priceFirstPaymentCoupon(). Call only after the new subscription has
+     * been created.
+     *
+     * @param  array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount_net: int, recurring_discount_net: int, order_amount_net: int}  $priced
+     */
+    protected function redeemPricedFirstPaymentCoupon(
+        Billable $billable,
+        array $priced,
+        string $planCode,
+        string $interval,
+        int $invoiceId,
+    ): void {
         try {
-            $this->couponService->redeem($coupon, $billable, [
+            $this->couponService->redeem($priced['coupon'], $billable, [
                 'planCode' => $planCode,
                 'interval' => $interval,
-                'orderAmountNet' => $orderAmountNet,
-                'discount_amount_net' => $discount,
+                'orderAmountNet' => $priced['order_amount_net'],
+                'discount_amount_net' => $priced['discount_net'],
                 'invoice_id' => $invoiceId,
             ]);
         } catch (\Throwable $e) {
             Log::warning('First-payment coupon redemption failed', [
                 'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
-                'coupon_code' => $couponCode,
+                'coupon_code' => (string) $priced['coupon']->code,
                 'error' => $e->getMessage(),
             ]);
-
-            return 0;
         }
-
-        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring ? $discount : 0;
     }
 
     protected function amountFromMolliePayment(object $payment): int

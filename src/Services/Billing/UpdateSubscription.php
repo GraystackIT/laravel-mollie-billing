@@ -577,72 +577,89 @@ class UpdateSubscription
                 );
             }
 
-            // Redeem coupons if stored in pending. Supports both legacy single
-            // `coupon_code` and the multi-coupon `coupon_codes` payload.
+            // Redeem coupons that were already billed in Phase-1.
             //
-            // The actual `discount_amount_net` is read from the prorata charge_lines
-            // that were persisted in Phase-1 (kind='coupon' lines with their
-            // `code` matching the coupon). This way the audit record matches the
-            // amount the customer was actually billed via Mollie.
+            // The Phase-1 prorata charge has already been persisted into
+            // `pending_prorata_change.charge_lines` (kind='coupon' lines) and Mollie
+            // has charged the customer the discounted amount. The redemption record
+            // and (for Recurring) the `active_recurring_coupon` marker MUST be created
+            // here, otherwise the customer is billed with the discount but without the
+            // matching audit row / recurring marker.
+            //
+            // We therefore drive redemption from the Phase-1 snapshot and resolve the
+            // coupon by code only — re-running `validate()` would re-check mutable
+            // rules (expired, globally_exhausted, recurring_already_active, …) against
+            // the *current* state, which can flip between Phase-1 and the webhook
+            // arriving and would skip an already-fixed charge.
             $couponApplied = null;
+
+            // Map: coupon code (uppercased) → discount net (positive cents) actually
+            // billed via Mollie. This is the source of truth for the audit record.
+            $billedDiscountByCode = [];
+            foreach ($pendingProrataChargeLines as $line) {
+                if (($line['kind'] ?? null) !== 'coupon') {
+                    continue;
+                }
+                $code = strtoupper((string) ($line['code'] ?? ''));
+                if ($code === '') {
+                    continue;
+                }
+                $billedDiscountByCode[$code] = abs((int) ($line['amount_net'] ?? 0));
+            }
+
+            // Drive iteration from `coupon_codes` (preserves order for stacking) and
+            // fall back to legacy single `coupon_code`. If neither is present but the
+            // snapshot still contains coupon lines (defensive — shouldn't happen),
+            // use the snapshot codes as last resort so the audit record isn't lost.
             $pendingCodes = (array) ($pendingData['coupon_codes'] ?? []);
             if ($pendingCodes === [] && ! empty($pendingData['coupon_code'])) {
                 $pendingCodes = [(string) $pendingData['coupon_code']];
             }
+            if ($pendingCodes === [] && $billedDiscountByCode !== []) {
+                $pendingCodes = array_keys($billedDiscountByCode);
+            }
 
-            if ($pendingCodes !== []) {
-                // Map: coupon code (uppercased) → discount net (positive cents).
-                $billedDiscountByCode = [];
-                foreach ($pendingProrataChargeLines as $line) {
-                    if (($line['kind'] ?? null) !== 'coupon') {
-                        continue;
-                    }
-                    $code = strtoupper((string) ($line['code'] ?? ''));
-                    if ($code === '') {
-                        continue;
-                    }
-                    $billedDiscountByCode[$code] = abs((int) ($line['amount_net'] ?? 0));
+            foreach ($pendingCodes as $code) {
+                $codeUpper = strtoupper((string) $code);
+                $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()
+                    ->whereRaw('UPPER(code) = ?', [$codeUpper])
+                    ->first();
+
+                if ($coupon === null) {
+                    Log::warning('Coupon redemption skipped during applyPendingPlanChange — coupon no longer exists', [
+                        'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                        'coupon' => $code,
+                    ]);
+
+                    continue;
                 }
 
-                $existingCouponIds = [];
-                $remainingNet = $newNet;
-                foreach ($pendingCodes as $code) {
-                    try {
-                        $codeUpper = strtoupper((string) $code);
-                        $coupon = $this->couponService->validate(
-                            (string) $code,
-                            $billable,
-                            [
-                                'planCode' => $context->newPlan,
-                                'interval' => $context->newInterval,
-                                'addonCodes' => $newAddons,
-                                'orderAmountNet' => $remainingNet,
-                                'existingCouponIds' => $existingCouponIds,
-                            ],
-                        );
-                        $discount = $billedDiscountByCode[$codeUpper] ?? 0;
+                $discount = $billedDiscountByCode[$codeUpper] ?? 0;
 
-                        $redeemContext = [
-                            'planCode' => $context->newPlan,
-                            'interval' => $context->newInterval,
-                            'orderAmountNet' => $newNet,
-                            'discount_amount_net' => $discount,
-                        ];
-                        if ($chargeInvoice !== null) {
-                            $redeemContext['invoice_id'] = (int) $chargeInvoice->id;
-                        }
+                $redeemContext = [
+                    'planCode' => $context->newPlan,
+                    'interval' => $context->newInterval,
+                    'orderAmountNet' => $newNet,
+                    'discount_amount_net' => $discount,
+                ];
+                if ($chargeInvoice !== null) {
+                    $redeemContext['invoice_id'] = (int) $chargeInvoice->id;
+                }
 
-                        $this->couponService->redeem($coupon, $billable, $redeemContext);
-                        $couponApplied = (string) $coupon->code;
-                        $existingCouponIds[] = $coupon->id;
-                        $remainingNet = max(0, $remainingNet - $this->couponService->computeRecurringDiscount($coupon, $remainingNet));
-                    } catch (\Throwable $e) {
-                        Log::warning('Coupon redemption failed during applyPendingPlanChange', [
-                            'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                            'coupon' => $code,
-                            'error' => $e->getMessage(),
-                        ]);
-                    }
+                try {
+                    $this->couponService->redeem($coupon, $billable, $redeemContext);
+                    $couponApplied = (string) $coupon->code;
+                } catch (\Throwable $e) {
+                    // redeem() can still fail on hard limits (max_redemptions
+                    // globally exhausted by another billable between Phase-1 and
+                    // here). Log loudly — the customer was charged but the audit
+                    // row is missing; admin intervention required.
+                    Log::error('Coupon redemption failed during applyPendingPlanChange after Phase-1 charge', [
+                        'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                        'coupon' => $code,
+                        'discount_billed_net' => $discount,
+                        'error' => $e->getMessage(),
+                    ]);
                 }
             }
 

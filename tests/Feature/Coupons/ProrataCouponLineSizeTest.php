@@ -115,15 +115,7 @@ it('reproduces the screenshot: 50% Recurring coupon on Enterprise→Business wit
     expect($couponLines)->toHaveCount(1);
 
     $couponLine = $couponLines[0];
-    echo "\n========\n";
-    echo "newPriceNet (recurring) = " . ($preview['newPriceNet'] ?? 0) . " (expected 5400)\n";
-    echo "couponDiscountNet (recurring) = " . ($preview['couponDiscountNet'] ?? 0) . " (expected 2700 = 50%)\n";
-    echo "prorataChargeNet (due now, before coupon) = (was reduced)\n";
-    echo "couponLine.amount_net = " . $couponLine['amount_net'] . "\n";
-    echo "couponLine.amount_gross = " . $couponLine['amount_gross'] . "\n";
-    echo "Total prorataLines net = " . $preview['prorataTotalNet'] . "\n";
-    echo "Total prorataLines gross = " . $preview['prorataTotalGross'] . "\n";
-    echo "========\n";
+
 
     expect((int) ($preview['newPriceNet'] ?? 0))->toBe(5400);
     expect((int) ($preview['couponDiscountNet'] ?? 0))->toBe(2700);

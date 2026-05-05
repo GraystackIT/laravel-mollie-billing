@@ -97,19 +97,12 @@ new class extends Component {
             ? SubscriptionAmount::net($catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes)
             : 0;
 
-        // Pre-flight: detect SinglePayment / Recurring coupons specifically and
-        // surface a "use in action flow" hint instead of the generic
-        // type_not_allowed_in_context error. Other types fall through to the
-        // strict allow-list below.
-        $resolvedCoupon = \GraystackIT\MollieBilling\Models\Coupon::query()
-            ->whereRaw('UPPER(code) = ?', [strtoupper($code)])
-            ->first();
-        if ($resolvedCoupon !== null && in_array($resolvedCoupon->type, [CouponType::SinglePayment, CouponType::Recurring], true)) {
-            $this->couponMessage = __('billing::portal.coupon_redeem_use_in_action');
-            $this->couponMessageError = false;
-            return;
-        }
-
+        // Validate with an extended allow-list that also accepts SinglePayment /
+        // Recurring. This ensures expired / inactive / not-yet-valid coupons
+        // surface their real reason here instead of being silently masked by a
+        // type-only short-circuit. If validation passes and the coupon is one
+        // of those action-flow types, we then surface a "use in action flow"
+        // hint instead of attempting to redeem here.
         try {
             $coupon = $service->validate($code, $billable, [
                 'planCode' => $planCode ?: null,
@@ -120,6 +113,8 @@ new class extends Component {
                     CouponType::Credits,
                     CouponType::TrialExtension,
                     CouponType::PeriodExtension,
+                    CouponType::SinglePayment,
+                    CouponType::Recurring,
                 ],
             ]);
         } catch (InvalidCouponException $e) {
@@ -130,6 +125,12 @@ new class extends Component {
             report($e);
             $this->couponMessage = __('billing::portal.coupon_redeem_failed');
             $this->couponMessageError = true;
+            return;
+        }
+
+        if (in_array($coupon->type, [CouponType::SinglePayment, CouponType::Recurring], true)) {
+            $this->couponMessage = __('billing::portal.coupon_redeem_use_in_action');
+            $this->couponMessageError = false;
             return;
         }
 

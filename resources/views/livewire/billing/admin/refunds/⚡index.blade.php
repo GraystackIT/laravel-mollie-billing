@@ -60,12 +60,12 @@ new class extends Component {
 
         $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
 
-        $detail = $this->detailInvoiceId
+        $detail = $this->showDetail && $this->detailInvoiceId
             ? BillingInvoice::with('billable')->find($this->detailInvoiceId)
             : null;
 
         $parent = null;
-        if ($detail) {
+        if ($detail && is_array($detail->line_items) && isset($detail->line_items[0])) {
             $parentId = $detail->line_items[0]['parent_invoice_id'] ?? null;
             if ($parentId) {
                 $parent = BillingInvoice::with('billable')->find($parentId);
