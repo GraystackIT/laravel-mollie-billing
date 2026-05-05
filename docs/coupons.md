@@ -8,12 +8,12 @@ Coupons are first-class entities in the system. They are stored in `coupons`, re
 
 | Entry point | Component | Coupon types accepted |
 |---|---|---|
-| Checkout | `⚡checkout.blade.php` | `first_payment`, `recurring`, `trial_extension`, `access_grant` |
-| Plan change | `⚡plan-change.blade.php` | `first_payment`, `recurring` |
-| Seat sync | `⚡seats.blade.php` | `first_payment`, `recurring` |
-| Addon enable | `⚡addons.blade.php` | `first_payment`, `recurring` |
-| One-time-order purchase | `⚡products.blade.php` | `first_payment`, `recurring` (via `applicable_products`) |
-| Dashboard "redeem coupon" | `⚡dashboard.blade.php` | `credits`, `trial_extension`, `period_extension` (a `first_payment`/`recurring` code shows a hint to use the action flow) |
+| Checkout | `⚡checkout.blade.php` | `single_payment`, `recurring`, `trial_extension`, `access_grant` |
+| Plan change | `⚡plan-change.blade.php` | `single_payment`, `recurring` |
+| Seat sync | `⚡seats.blade.php` | `single_payment`, `recurring` |
+| Addon enable | `⚡addons.blade.php` | `single_payment`, `recurring` |
+| One-time-order purchase | `⚡products.blade.php` | `single_payment`, `recurring` (via `applicable_products`) |
+| Dashboard "redeem coupon" | `⚡dashboard.blade.php` | `credits`, `trial_extension`, `period_extension` (a `single_payment`/`recurring` code shows a hint to use the action flow) |
 
 The admin creates coupons via `admin/coupons/⚡create.blade.php` — a single form with conditional fields per type.
 
@@ -23,8 +23,8 @@ The system supports six coupon types. Each row in the table below answers: what 
 
 | Type | What it does | Where redeemed | When the side-effect fires | Renewal behaviour |
 |---|---|---|---|---|
-| **`first_payment`** | Reduces a single charge by a percentage or fixed amount | Checkout, Plan change, Seat sync, Addon enable, One-time-order | Immediately on the charge it was applied to (first checkout payment, prorata charge, addon enable charge, product purchase). Redemption record is written with `invoice_id` of that charge. | Never. The discount applies once. The Mollie subscription is configured with the **full** recurring amount so the next renewal charges the regular price. |
-| **`recurring`** | Reduces every recurring charge by a percentage or fixed amount, until the discount lifetime ends | Checkout, Plan change, Seat sync, Addon enable, One-time-order | First charge: same as `first_payment`. From then on, an `active_recurring_coupon` marker on `subscription_meta` is honoured by every Mollie renewal webhook. | **Yes — automatically** until `marker.valid_until`. Once that date is past, the marker is cleared and Mollie is PATCHed back to the full price. |
+| **`single_payment`** | Reduces a single charge by a percentage or fixed amount | Checkout, Plan change, Seat sync, Addon enable, One-time-order | Immediately on the charge it was applied to (first checkout payment, prorata charge, addon enable charge, product purchase). Redemption record is written with `invoice_id` of that charge. | Never. The discount applies once. The Mollie subscription is configured with the **full** recurring amount so the next renewal charges the regular price. |
+| **`recurring`** | Reduces every recurring charge by a percentage or fixed amount, until the discount lifetime ends | Checkout, Plan change, Seat sync, Addon enable, One-time-order | First charge: same as `single_payment`. From then on, an `active_recurring_coupon` marker on `subscription_meta` is honoured by every Mollie renewal webhook. | **Yes — automatically** until `marker.valid_until`. Once that date is past, the marker is cleared and Mollie is PATCHed back to the full price. |
 | **`credits`** | Tops up the wallet(s) listed in `credits_payload` | Dashboard | Immediately on redemption — the wallet is credited and `purchasedBalance` is incremented so the credits survive period resets. | Never. The redemption is one-shot. |
 | **`trial_extension`** | Extends `trial_ends_at` by `trial_extension_days` | Checkout (with trial-gate), Dashboard (with trial-gate) | Immediately on redemption — `extendBillingTrialUntil()` shifts the trial end. | Never. |
 | **`access_grant`** (full or addon-only) | **Full**: activates a Local subscription with the listed plan and addons for `grant_duration_days`. **Addon-only**: merges the listed addons into the active subscription's `active_addon_codes`, also valid for Mollie subscriptions. | Checkout | Immediately. `applyAccessGrant()` either activates a Local subscription or extends `subscription_ends_at`/merges addon codes. The redemption snapshot is stored in `grant_applied_snapshot` for revoke. | Never. The grant is finite; once `subscription_ends_at` is reached the subscription expires (full grants only). Addon-only grants merge the addons permanently — admin can revoke via `revokeGrant()` to remove them. |
@@ -61,7 +61,7 @@ Every coupon can be restricted to a subset of plans, intervals, addons, or produ
 | `max_redemptions` | Global cap across all billables (null = unlimited). |
 | `max_redemptions_per_billable` | Per-billable cap (default `1`). For `recurring`, this defines the discount lifetime in periods: `marker.valid_until = now + max_redemptions × intervalDays + 1d`. **Required for recurring coupons** if `valid_until` is empty. |
 
-## Full coverage handling — `recurring` allows 100 %, `first_payment` does not
+## Full coverage handling — `recurring` allows 100 %, `single_payment` does not
 
 A discount coupon that reduces the charge to zero would normally crash at the payment provider — Mollie rejects `amount = 0` on subscriptions. The system handles this differently per coupon type:
 
@@ -69,7 +69,7 @@ A discount coupon that reduces the charge to zero would normally crash at the pa
 
   See `MollieSubscriptionPatcher::fullCoverageStartDate()` and `CreateSubscription::fullCoverageStartDate()` for the integration. `ResubscribeSubscription` re-uses `CreateSubscription`, so resubscribe-during-discount also defers correctly.
 
-- **`first_payment` 100 %** — *rejected.* The first charge happens immediately in checkout, there is no later date to defer to, and Mollie cannot accept 0 €. `CouponService::create()` rejects this at admin time; the apply-time runtime guard in `validate()` also rejects fixed-amount `first_payment` coupons that fully cover the current order. The correct shape for "first payment free" is `access_grant` (full coverage for a duration) or, on existing subscriptions, `period_extension` (push the next charge by N days).
+- **`single_payment` 100 %** — *rejected.* The first charge happens immediately in checkout, there is no later date to defer to, and Mollie cannot accept 0 €. `CouponService::create()` rejects this at admin time; the apply-time runtime guard in `validate()` also rejects fixed-amount `single_payment` coupons that fully cover the current order. The correct shape for "first payment free" is `access_grant` (full coverage for a duration) or, on existing subscriptions, `period_extension` (push the next charge by N days).
 
 - **Discount > 100 %** — always rejected, semantically nonsensical.
 
@@ -153,7 +153,7 @@ The `discount_amount_net` on each `CouponRedemption` reflects the **actual** amo
 | Sidegrade (Saldo-0 plan switch) | Immediately on `update()` | The prorata discount on the plan-switch invoice | Plan-switch invoice |
 | Renewal webhook (recurring marker) | On every renewal as long as the marker is redeemable | Discount on the renewal charge, capped to `base_amount_net` (see above) | Renewal invoice |
 | PATCH-only (no charge: addon/seat update on existing subscription) | Immediately on `update()` | `0` — no charge attached. The recurring marker (if applicable) takes effect on the next renewal. | — |
-| Local-sub redemption (no Mollie charge) | Immediately on `update()` | `0` for `first_payment`/`recurring`. Other types apply their side effect. | — |
+| Local-sub redemption (no Mollie charge) | Immediately on `update()` | `0` for `single_payment`/`recurring`. Other types apply their side effect. | — |
 | Free downgrade | Immediately on `update()` | `0` | — |
 
 **There is exactly one redemption per actual billing event** — the system avoids double-redeems even across the deferred-charge two-phase flow.
@@ -198,7 +198,7 @@ $coupon = $service->validateWithoutBillable('REC20', [
 
 // Validate (with billable) for an in-session apply.
 // `allowed_types` restricts which coupon types the entry point accepts —
-// e.g. an action flow accepts only first_payment + recurring, the dashboard
+// e.g. an action flow accepts only single_payment + recurring, the dashboard
 // only credits + trial_extension + period_extension. Anything else throws
 // InvalidCouponException with reason 'type_not_allowed_in_context'.
 $coupon = $service->validate('REC20', $billable, [
@@ -208,7 +208,7 @@ $coupon = $service->validate('REC20', $billable, [
     'orderAmountNet' => 5000,
     'existingCouponIds' => [], // for stackability checks
     'allowed_types' => [
-        \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+        \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
         \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
     ],
 ]);
@@ -267,5 +267,5 @@ A coupon can carry an `auto_apply_token` (a short slug). When a checkout URL con
 | `recurring_conflict` | Another recurring coupon already active. |
 | `recurring_already_active` | The same recurring coupon is already active on the subscription. |
 | `too_close_to_charge` | Period-extension would race a Mollie charge scheduled within 24 h. |
-| `full_coverage_use_access_grant` | A `first_payment` discount would zero the immediate charge — use `access_grant` (or `period_extension`) instead. `recurring` 100 % is allowed and does not raise this. |
+| `full_coverage_use_access_grant` | A `single_payment` discount would zero the immediate charge — use `access_grant` (or `period_extension`) instead. `recurring` 100 % is allowed and does not raise this. |
 | `type_not_allowed_in_context` | The coupon's type is not accepted at this entry point (e.g. a `credits` coupon entered on a plan-change form). The acceptance list per entry point is in the overview table at the top of this document. |

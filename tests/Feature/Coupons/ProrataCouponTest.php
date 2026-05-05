@@ -62,11 +62,11 @@ function makeBillableWithBasicPlan(): TestBillable
     return $billable;
 }
 
-it('FirstPayment coupon reduces the prorata charge, not the recurring price', function (): void {
+it('SinglePayment coupon reduces the prorata charge, not the recurring price', function (): void {
     app(CouponService::class)->create([
         'code' => 'PRORATA20',
         'name' => 'First Payment 20%',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 20,
     ]);
@@ -79,11 +79,11 @@ it('FirstPayment coupon reduces the prorata charge, not the recurring price', fu
         couponCodes: ['PRORATA20'],
     ));
 
-    // Recurring-price discount: must be 0 because FirstPayment is one-shot.
+    // Recurring-price discount: must be 0 because SinglePayment is one-shot.
     expect((int) ($preview['couponDiscountNet'] ?? 0))->toBe(0)
         ->and((int) ($preview['newPriceNet'] ?? 0))->toBe(3000);
 
-    // Recurring line items must NOT contain a coupon line (FirstPayment does not
+    // Recurring line items must NOT contain a coupon line (SinglePayment does not
     // flow into the recurring side).
     $couponLines = array_values(array_filter(
         (array) ($preview['lineItems'] ?? []),

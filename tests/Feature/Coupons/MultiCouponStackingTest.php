@@ -51,7 +51,7 @@ it('redeems multiple stackable coupons in one update and writes one redemption p
     $a = $service->create([
         'code' => 'STACK10',
         'name' => 'Stackable 10%',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
         'stackable' => true,
@@ -59,7 +59,7 @@ it('redeems multiple stackable coupons in one update and writes one redemption p
     $b = $service->create([
         'code' => 'STACK5',
         'name' => 'Stackable 5%',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 5,
         'stackable' => true,
@@ -90,7 +90,7 @@ it('rejects a non-stackable coupon when another coupon is already in the apply s
     $service->create([
         'code' => 'STACKABLE',
         'name' => 'Stackable',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
         'stackable' => true,
@@ -98,7 +98,7 @@ it('rejects a non-stackable coupon when another coupon is already in the apply s
     $service->create([
         'code' => 'EXCLUSIVE',
         'name' => 'Exclusive',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 50,
         'stackable' => false,

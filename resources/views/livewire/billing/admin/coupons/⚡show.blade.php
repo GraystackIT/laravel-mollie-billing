@@ -137,7 +137,7 @@ new class extends Component {
                     <x-mollie-billing::admin.enum-badge :value="$coupon->type" />
                 </x-mollie-billing::admin.detail>
 
-                @if (in_array($type, [CouponType::FirstPayment, CouponType::Recurring]))
+                @if (in_array($type, [CouponType::SinglePayment, CouponType::Recurring]))
                     <x-mollie-billing::admin.detail label="Discount type">
                         {{ \GraystackIT\MollieBilling\Support\AdminLocale::enumLabel($coupon->discount_type) }}
                     </x-mollie-billing::admin.detail>

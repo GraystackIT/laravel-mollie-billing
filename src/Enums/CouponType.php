@@ -6,7 +6,7 @@ namespace GraystackIT\MollieBilling\Enums;
 
 enum CouponType: string
 {
-    case FirstPayment = 'first_payment';
+    case SinglePayment = 'single_payment';
     case Recurring = 'recurring';
     case Credits = 'credits';
     case TrialExtension = 'trial_extension';
@@ -21,7 +21,7 @@ enum CouponType: string
     public function color(): string
     {
         return match ($this) {
-            self::FirstPayment => 'blue',
+            self::SinglePayment => 'blue',
             self::Recurring => 'violet',
             self::Credits => 'emerald',
             self::TrialExtension => 'amber',

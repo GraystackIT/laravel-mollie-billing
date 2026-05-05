@@ -31,7 +31,7 @@ return [
         'yearly' => 'Jährlich',
     ],
     'coupon_type' => [
-        'first_payment' => 'Erstzahlung',
+        'single_payment' => 'Einmalzahlung',
         'recurring' => 'Wiederkehrend',
         'credits' => 'Guthaben',
         'trial_extension' => 'Testverlängerung',

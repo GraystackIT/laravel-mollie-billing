@@ -307,7 +307,7 @@ class UpdateSubscription
      * Compute the per-coupon discount net that was actually billed on the prorata
      * charge.
      *
-     * Both Recurring and FirstPayment coupons apply their discount rate directly
+     * Both Recurring and SinglePayment coupons apply their discount rate directly
      * against the prorata charge net (the actual money flowing "now"). The
      * recurring coupon's ongoing effect on future renewals lives in the
      * `active_recurring_coupon` marker and is independent of this calculation.
@@ -338,7 +338,7 @@ class UpdateSubscription
             }
             if (
                 $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::Recurring
-                && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment
+                && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment
             ) {
                 continue;
             }
@@ -358,7 +358,7 @@ class UpdateSubscription
     /**
      * Append coupon discount lines (negative amounts) to the prorata line set.
      *
-     * Both Recurring and FirstPayment coupons apply their discount rate directly
+     * Both Recurring and SinglePayment coupons apply their discount rate directly
      * against the remaining prorata charge net. The recurring coupon's ongoing
      * effect on future renewals is independent and lives in the
      * `active_recurring_coupon` marker.
@@ -412,7 +412,7 @@ class UpdateSubscription
             }
             if (
                 $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::Recurring
-                && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment
+                && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment
             ) {
                 continue;
             }

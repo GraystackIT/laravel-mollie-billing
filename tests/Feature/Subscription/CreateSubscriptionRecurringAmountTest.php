@@ -45,7 +45,7 @@ it('configures the Mollie subscription with the FULL recurring amount, not the d
         'addon_codes' => [],
         'extra_seats' => 0,
         // No `recurring_discount_net` → MUST charge the full price for following periods,
-        // even if the first payment was discounted by a FirstPayment coupon.
+        // even if the first payment was discounted by a SinglePayment coupon.
     ]);
 
     expect($captured)->toBeInstanceOf(CreateSubscriptionRequest::class);

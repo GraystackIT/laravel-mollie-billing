@@ -64,11 +64,11 @@ class StartOneTimeOrderCheckout
                 'orderAmountNet' => $remainingNet,
                 'existingCouponIds' => $existingCouponIds,
                 'allowed_types' => [
-                    \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
                     \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                 ],
             ]);
-            // Only FirstPayment / Recurring discount coupons are accepted on
+            // Only SinglePayment / Recurring discount coupons are accepted on
             // one-time-order purchases; other types are blocked by the allow-list.
             $discount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
             $netForCharge = max(0, $netForCharge - $discount);

@@ -130,7 +130,7 @@ class PreviewService
         // We split the resolution into two separate discount totals:
         //   - $couponDiscountNet         applies to the recurring price (only Recurring-type)
         //   - $prorataCouponDiscountNet  applies to the prorata charge ("due now") and is
-        //                                fed by both Recurring AND FirstPayment coupons.
+        //                                fed by both Recurring AND SinglePayment coupons.
         // Other coupon types (Credits, TrialExtension, AccessGrant, PeriodExtension)
         // have no monetary effect on plan changes and are silently skipped here —
         // they get redeemed in `UpdateSubscription::update()` for their side effects.
@@ -141,7 +141,7 @@ class PreviewService
         /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
         $resolvedRecurringCoupons = [];
         /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
-        $resolvedFirstPaymentCoupons = [];
+        $resolvedSinglePaymentCoupons = [];
 
         foreach ($dto->couponCodes as $code) {
             try {
@@ -174,8 +174,8 @@ class PreviewService
                             'total_net' => -$thisDiscount,
                         ];
                     }
-                } elseif ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::FirstPayment) {
-                    $resolvedFirstPaymentCoupons[] = ['coupon' => $coupon, 'discount' => 0];
+                } elseif ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment) {
+                    $resolvedSinglePaymentCoupons[] = ['coupon' => $coupon, 'discount' => 0];
                 }
             } catch (InvalidCouponException $e) {
                 $warnings[] = 'Coupon '.$code.' is not applicable: '.$e->getMessage();
@@ -220,7 +220,7 @@ class PreviewService
         }
 
         // Coupon discounts on the prorata charge ("due now"):
-        //   - Both Recurring and FirstPayment coupons apply their discount rate
+        //   - Both Recurring and SinglePayment coupons apply their discount rate
         //     directly against the prorata charge net (the actual money flowing
         //     "now"), not against the full recurring net. The recurring coupon's
         //     ongoing discount on future renewals is independent and lives in
@@ -241,7 +241,7 @@ class PreviewService
             }
         }
         unset($entry);
-        foreach ($resolvedFirstPaymentCoupons as &$entry) {
+        foreach ($resolvedSinglePaymentCoupons as &$entry) {
             if ($remainingProrata <= 0) {
                 break;
             }
@@ -474,7 +474,7 @@ class PreviewService
                 $newSeats,
                 $currentAddons,
                 $newAddons,
-                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons, $resolvedFirstPaymentCoupons),
+                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons, $resolvedSinglePaymentCoupons),
             ),
         ];
     }
@@ -482,18 +482,18 @@ class PreviewService
     /**
      * Build the per-coupon discount lines for the prorata charge ("due now").
      *
-     * Both Recurring and FirstPayment coupons here render the discount that was
+     * Both Recurring and SinglePayment coupons here render the discount that was
      * actually applied to the prorata charge — already pre-computed in the
      * loop above (`$entry['prorataDiscount']` for recurring, `$entry['discount']`
      * for first-payment). No further scaling here.
      *
      * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int, prorataDiscount?: int}>  $recurringCoupons
-     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>  $firstPaymentCoupons
+     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>  $singlePaymentCoupons
      * @return list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>
      */
     private function buildProrataCouponDiscountLines(
         array $recurringCoupons,
-        array $firstPaymentCoupons,
+        array $singlePaymentCoupons,
     ): array {
         $out = [];
         foreach ($recurringCoupons as $entry) {
@@ -502,7 +502,7 @@ class PreviewService
                 $out[] = ['coupon' => $entry['coupon'], 'discount' => $proratedDiscount];
             }
         }
-        foreach ($firstPaymentCoupons as $entry) {
+        foreach ($singlePaymentCoupons as $entry) {
             if ((int) $entry['discount'] > 0) {
                 $out[] = ['coupon' => $entry['coupon'], 'discount' => (int) $entry['discount']];
             }

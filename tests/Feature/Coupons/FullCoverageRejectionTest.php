@@ -48,13 +48,13 @@ it('rejects creating a Recurring coupon with discount > 100%', function (): void
     ]))->toThrow(\InvalidArgumentException::class);
 });
 
-it('rejects creating a 100% FirstPayment coupon at admin time', function (): void {
+it('rejects creating a 100% SinglePayment coupon at admin time', function (): void {
     $service = app(CouponService::class);
 
     expect(fn () => $service->create([
         'code' => 'FIRST100',
-        'name' => 'FirstPayment 100%',
-        'type' => CouponType::FirstPayment,
+        'name' => 'SinglePayment 100%',
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 100,
     ]))->toThrow(\InvalidArgumentException::class);
@@ -73,12 +73,12 @@ it('still allows creating a 99% Recurring coupon at admin time', function (): vo
     expect($coupon->code)->toBe('REC99');
 });
 
-it('still rejects a fixed-amount FirstPayment coupon that fully covers the order', function (): void {
+it('still rejects a fixed-amount SinglePayment coupon that fully covers the order', function (): void {
     $service = app(CouponService::class);
     $service->create([
         'code' => 'FIX1000',
         'name' => 'Fixed 10€ off',
-        'type' => CouponType::FirstPayment,
+        'type' => CouponType::SinglePayment,
         'discount_type' => DiscountType::Fixed,
         'discount_value' => 1000,
     ]);
@@ -86,8 +86,8 @@ it('still rejects a fixed-amount FirstPayment coupon that fully covers the order
     $billable = TestBillable::create(['name' => 'X', 'email' => 'x@x.test']);
 
     // orderAmountNet=1000, fixed=1000 → discount equals order → fully covered.
-    // FirstPayment cannot use the deferred-startDate trick (charge is immediate),
-    // so full coverage on FirstPayment remains rejected at validate-time.
+    // SinglePayment cannot use the deferred-startDate trick (charge is immediate),
+    // so full coverage on SinglePayment remains rejected at validate-time.
     expect(fn () => $service->validate('FIX1000', $billable->fresh(), [
         'planCode' => 'basic',
         'interval' => 'monthly',
