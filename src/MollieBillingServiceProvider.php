@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingPortal;
 use GraystackIT\MollieBilling\Http\Middleware\RequireActiveSubscription;
 use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
+use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
@@ -123,6 +124,7 @@ class MollieBillingServiceProvider extends ServiceProvider
 
         $router->aliasMiddleware('billing.portal', AuthorizeBillingPortal::class);
         $router->aliasMiddleware('billing.active', RequireActiveSubscription::class);
+        $router->aliasMiddleware('billing.country-resolved', RequireResolvedCountryMismatch::class);
         $router->aliasMiddleware('billing.feature', RequirePlanFeature::class);
         $router->aliasMiddleware('billing.admin', AuthorizeBillingAdmin::class);
 

@@ -12,6 +12,7 @@ Plan changes are handled by `UpdateSubscription::update()` and come in three fla
 | **Local → Mollie upgrade** | Free-plan user selects a paid plan | Routed to `UpgradeLocalToMollie`, applied via webhook |
 | **Downgrade** (lower price) | User selects a cheaper plan | Immediate or scheduled to end of period |
 | **Mollie → Free downgrade** | Paid user selects a free plan | Cancels Mollie subscription, switches source to Local |
+| **Past-Due reset** | User on `past_due` selects any paid plan (same or different) | Charges the full first period of the new plan, resets the cycle |
 | **Zero-cost change** | Same price, different plan/interval | Immediate |
 | **Free → Free change** | Both source and target are free plans | Immediate, source stays Local |
 
@@ -165,6 +166,79 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 6. Refunds any prorata credit via `refundProrataCredit()` if `apply_at = immediate` and a mandate is still available.
 
 `config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` with `internal=true` to bypass the user-input mode check).
+
+## Past-Due Reset
+
+When a recurring charge fails the subscription enters `subscription_status = past_due`. From this state the user can recover in two ways: pay the failed invoice (regular dunning), or switch to any paid plan. The plan-switch path is the **Past-Due reset** — a special branch through the standard `UpdateSubscription` flow.
+
+The intuition: in `past_due`, the current period was never paid. There is nothing to pro-rate against — no money was collected that could be credited and no fractional period can be left over. So a plan change in this state is conceptually a **fresh start**, not a mid-period adjustment.
+
+### Detection
+
+Past-Due reset triggers when **all** of the following hold:
+
+- `billable->isBillingPastDue()` is `true` (subscription status is `past_due`).
+- The new plan is **not** a free plan (`! catalog->isFreePlan(newPlan, newInterval)`).
+- Either the plan or the interval changed (`planChanged || intervalChanged`).
+
+Pure seat or addon changes on a `past_due` subscription do **not** reset — they go through the normal prorata path. The reset is intentionally limited to plan/interval switches because that is the recovery action exposed to users in the UI.
+
+A `past_due` user downgrading to a free plan does **not** reset either — the existing `Mollie → Free downgrade` path runs and the subscription switches to `local`, no charge.
+
+### What changes vs. a normal upgrade
+
+The reset uses the same Phase 1 / Phase 2 pipeline as a regular deferred upgrade. The only differences:
+
+| Aspect | Normal upgrade | Past-Due reset |
+|--------|----------------|----------------|
+| Prorata charge | `(newNet - currentNet) × factor` | `newNet` (full first period at list price) |
+| Prorata credit | `(currentNet - newNet) × factor`, or `currentNet × factor` on interval change | `0` — nothing was paid that could be credited |
+| Mollie subscription start date | `null` (cadence preserved) on amount-only changes; `now + 1 interval` on interval change | `now + 1 interval` always (`forceResetStartDate=true`) |
+| `subscription_period_starts_at` | Untouched on amount-only changes | Set to `now` (Phase 2, derived from `startsNewPeriod`) |
+| `payment_failure` marker | Untouched | Cleared in Phase 2 |
+| `subscription_status` | Stays `active` | Flipped from `past_due` back to `active` in Phase 2 |
+| `subscription_ends_at` | Untouched | Cleared in Phase 2 |
+
+`forceResetStartDate=true` is critical: without it, Mollie's PATCH would keep the failed-charge cadence and immediately retry charging the (new) amount right after the PATCH lands, producing a duplicate of the prorata charge that just succeeded.
+
+### Code paths
+
+The reset is implemented at three points that must stay in sync. Each builds the same line items, just from a different angle:
+
+1. **`PreviewService::computePreview()`** — sets `prorataChargeNet = newNet`, `prorataCreditNet = 0`, `prorataFactor = 1.0`. Surfaces `isPastDueReset` in the preview array so the UI can show the explanatory callout (`portal.past_due_reset_notice`).
+2. **`UpdateSubscription::buildContext()`** — computes the same charge values for the live mutation. The resulting `SubscriptionChangeContext` flows through Phase 1's payment creation unchanged.
+3. **`ProrataComposer::composePastDueReset()`** — produces the actual `ProrataLine[]` (plan + extra seats + addons) using a synthetic `now → now + 1 interval` window so the standard charge-line helpers compute `factor = 1.0` and emit list-price amounts. No refund lines.
+
+`UpdateSubscription::buildIntent()` then sets `forceResetStartDate = isBillingPastDue() && (planChanged || intervalChanged)` on the `PlanChangeIntent`. `MollieSubscriptionPatcher::updateRecurringAmount()` reads that flag and forces `startDate = now + 1 interval` on the PATCH.
+
+### Phase 2 cleanup
+
+When the prorata payment succeeds, `MollieWebhookController::handleSingleChargePaid()` runs the standard Phase 2 apply on top of additional past-due-specific writes:
+
+- Capture `wasPastDue = (status === PastDue)` **before** rewriting the meta.
+- Drop `payment_failure` from `subscription_meta` — the failed-charge marker no longer reflects reality.
+- Set `subscription_status = active`, `subscription_ends_at = null`, and the new `subscription_period_starts_at = now`.
+
+If Phase 2 fails (re-validation throws, Mollie PATCH errors, etc.), the user stays in `past_due` and the pending state is rolled back via the standard `clearPendingPlanChange()` path. The user can retry the plan switch — there is no half-applied state.
+
+### UI surface
+
+In the bundled plan-change page (`livewire/billing/⚡plan-change.blade.php`), the preview shows `portal.past_due_reset_notice` as an amber callout whenever `preview.isPastDueReset` is true:
+
+> Your previous charge failed, so no part of the current period was paid. Switching plans here charges the full first period of the new plan immediately and starts a fresh billing cycle from today.
+
+This makes the difference from a regular upgrade explicit — the user sees the full price (not a prorated delta) and understands why.
+
+### Edge cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Past-due user picks the **same** plan they already have | `planChanged=false`, `intervalChanged=false` → no reset, no plan-change path runs. The user must use the "pay failed invoice" recovery instead. |
+| Past-due user picks the same plan with a different interval | `intervalChanged=true` → reset applies. Charges full first period of the new interval. |
+| Past-due user downgrades to a **free** plan | Reset does **not** apply (`isFreePlan` check). The `Mollie → Free downgrade` path runs: Mollie subscription cancelled, source flipped to `local`, no charge. `payment_failure` is cleared by the standard downgrade flow. |
+| Reset's prorata payment fails | Standard Phase 2b: `clearPendingPlanChange()` removes the pending state. User remains `past_due`, `payment_failure` marker untouched, `PlanChangeFailed` event + notification sent. |
+| Webhook arrives twice for the same charge | Idempotent via `BillingProcessedWebhook` (standard webhook-dedup) — the `wasPastDue` capture happens once. |
+| Past-due on a Local subscription | Cannot occur. Local subscriptions never enter `past_due` (no recurring charges). |
 
 ## Events
 

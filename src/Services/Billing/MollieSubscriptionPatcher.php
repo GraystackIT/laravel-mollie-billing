@@ -73,6 +73,7 @@ class MollieSubscriptionPatcher
             extraSeats: $extraSeats,
             intervalChanged: $intent->currentInterval !== $intent->newInterval,
             couponDiscountNet: $couponDiscountNet,
+            forceResetStartDate: $intent->forceResetStartDate,
         );
     }
 
@@ -152,6 +153,7 @@ class MollieSubscriptionPatcher
         int $extraSeats,
         bool $intervalChanged = false,
         int $couponDiscountNet = 0,
+        bool $forceResetStartDate = false,
     ): void {
         if (! ($billable instanceof Model)) {
             return;
@@ -205,11 +207,14 @@ class MollieSubscriptionPatcher
 
         // Date precedence:
         //  1. full-coverage discount → defer past marker.valid_until
-        //  2. interval change → reset cadence (else Mollie keeps old cadence with new amount)
+        //  2. interval change OR past-due reset → reset cadence to now + 1 period
+        //     (interval-change: else Mollie keeps old cadence with new amount;
+        //      past-due-reset: else Mollie immediately retries the failed charge
+        //      at the new price right after PATCH).
         //  3. amount-only change → leave cadence untouched (null)
         $startDate = match (true) {
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
-            $intervalChanged => new Date(
+            $intervalChanged || $forceResetStartDate => new Date(
                 $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth()
             ),
             default => null,

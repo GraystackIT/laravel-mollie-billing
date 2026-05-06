@@ -306,7 +306,7 @@ new class extends Component {
                         />
                         <flux:select wire:model="refundReason" label="Reason">
                             @foreach (RefundReasonCode::cases() as $reason)
-                                <flux:select.option value="{{ $reason->value }}">{{ \GraystackIT\MollieBilling\Support\AdminLocale::enumLabel($reason) }}</flux:select.option>
+                                <flux:select.option value="{{ $reason->value }}">{{ $reason->label() }}</flux:select.option>
                             @endforeach
                         </flux:select>
                         <flux:input

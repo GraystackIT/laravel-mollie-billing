@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Jobs;
 
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -21,13 +22,16 @@ class RevokeMollieMandateJob implements ShouldQueue
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public int $tries = 3;
 
     public function __construct(
         public readonly string $mollieCustomerId,
         public readonly string $mandateId,
-    ) {}
+    ) {
+        $this->initializeBillingQueue();
+    }
 
     public function handle(): void
     {

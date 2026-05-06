@@ -55,6 +55,12 @@ return [
         'pending' => 'Pending',
         'resolved' => 'Resolved',
     ],
+    'country_mismatch_strategy' => [
+        'auto_vies' => 'Auto (VIES)',
+        'auto_payment' => 'Auto (payment country)',
+        'auto_noop' => 'Auto (no action needed)',
+        'manual' => 'Manual',
+    ],
     'plan_change_mode' => [
         'immediate' => 'Immediate',
         'end_of_period' => 'End of period',
@@ -66,5 +72,11 @@ return [
         'canceled' => 'Canceled',
         'suspended' => 'Suspended',
         'completed' => 'Completed',
+    ],
+    'oss_export_status' => [
+        'queued' => 'Queued',
+        'processing' => 'Processing',
+        'ready' => 'Ready',
+        'failed' => 'Failed',
     ],
 ];

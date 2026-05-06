@@ -697,6 +697,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'billing_city' => $this->billing_city,
             'billing_country' => $this->billing_country,
             'tax_country_user' => $this->billing_country,
+            'tax_country_ip' => $this->resolveCurrentIpCountry(),
             'vat_number' => $this->vat_number,
             'custom' => $this->customData,
         ]);
@@ -706,6 +707,21 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $this->billableClass = $billable->getMorphClass();
 
         event(new CheckoutStarted($billable));
+    }
+
+    private function resolveCurrentIpCountry(): ?string
+    {
+        $ip = (string) (request()->ip() ?? '');
+        if ($ip === '') {
+            return null;
+        }
+        try {
+            $country = MollieBilling::ipGeolocation()->getCountry($ip);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return is_string($country) && $country !== '' ? strtoupper($country) : null;
     }
 
     private function resolveBillable(): ?Billable
@@ -767,6 +783,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'billing_city' => $this->billing_city,
             'billing_country' => $this->billing_country,
             'tax_country_user' => $this->billing_country,
+            'tax_country_ip' => $this->resolveCurrentIpCountry(),
             'vat_number' => $this->vat_number,
         ])->save();
 

@@ -10,6 +10,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Services\Billing\SyncSeats;
 
 class SyncSeatsJob implements ShouldQueue
@@ -18,12 +19,14 @@ class SyncSeatsJob implements ShouldQueue
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly string $billableClass,
         public readonly string|int $billableId,
         public readonly int $seats,
     ) {
+        $this->initializeBillingQueue();
     }
 
     public function handle(SyncSeats $service): void

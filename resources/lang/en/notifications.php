@@ -40,9 +40,18 @@ return [
         'subject' => '[Admin] Overage charge failed for :customer',
         'body' => 'After 3 retries, the overage charge for :customer (:amount) could not be collected. The customer has been moved to past_due.',
     ],
-    'country_mismatch' => [
-        'subject' => '[Admin] Country mismatch flagged for :customer',
-        'body' => 'Country verification failed for :customer. Declared: :user, Payment: :payment. Manual review required.',
+    'country_mismatch_self' => [
+        'subject' => 'We need to verify your billing country',
+        'body_intro' => 'We could not confirm the billing country you entered. The information from your payment method or your IP address does not match.',
+        'body_user' => 'You entered: :country',
+        'body_payment' => 'Payment method country: :country',
+        'body_ip' => 'IP address country: :country',
+        'body_consequence' => 'Your subscription has been scheduled to be cancelled at the end of the current period. Please correct your billing address from your dashboard to keep it active.',
+        'cta' => 'Open billing dashboard',
+    ],
+    'country_mismatch_reissue_failed' => [
+        'subject' => '[Admin] Country correction reissue failed (mismatch #:mismatch)',
+        'body' => 'A country-correction re-charge for :customer failed at Mollie: :reason. The mismatch was rolled back to Pending so the customer can retry, but you may want to follow up manually.',
     ],
     'refund_processed' => [
         'subject' => 'Your refund of :amount has been processed',

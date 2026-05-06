@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent;
@@ -33,6 +34,7 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public int $uniqueFor = 3600;
 
@@ -41,7 +43,9 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
     public function __construct(
         public readonly array $intentData,
         public readonly string $firstAttemptAt,
-    ) {}
+    ) {
+        $this->initializeBillingQueue();
+    }
 
     public function uniqueId(): string
     {

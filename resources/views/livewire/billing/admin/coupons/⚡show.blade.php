@@ -139,7 +139,7 @@ new class extends Component {
 
                 @if (in_array($type, [CouponType::SinglePayment, CouponType::Recurring]))
                     <x-mollie-billing::admin.detail label="Discount type">
-                        {{ \GraystackIT\MollieBilling\Support\AdminLocale::enumLabel($coupon->discount_type) }}
+                        {{ $coupon->discount_type->label() }}
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail label="Discount value" mono>
                         @if ($coupon->discount_type === DiscountType::Percentage)

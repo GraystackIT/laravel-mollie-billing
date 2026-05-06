@@ -7,7 +7,7 @@ namespace GraystackIT\MollieBilling\Models;
 use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class BillingCountryMismatch extends Model
@@ -21,6 +21,7 @@ class BillingCountryMismatch extends Model
         return [
             'status' => CountryMismatchStatus::class,
             'resolved_at' => UtcDatetime::class,
+            'notified_at' => UtcDatetime::class,
             'created_at' => UtcDatetime::class,
             'updated_at' => UtcDatetime::class,
         ];
@@ -31,8 +32,8 @@ class BillingCountryMismatch extends Model
         return $this->morphTo();
     }
 
-    public function correctiveInvoice(): BelongsTo
+    public function invoices(): HasMany
     {
-        return $this->belongsTo(BillingInvoice::class, 'corrective_invoice_id');
+        return $this->hasMany(BillingInvoice::class, 'mismatch_id');
     }
 }

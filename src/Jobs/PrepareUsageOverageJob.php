@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\TrialConverted;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\TrialConvertedNotification;
 use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
@@ -32,10 +33,16 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public int $uniqueFor = 3600;
 
     public int $tries = 1;
+
+    public function __construct()
+    {
+        $this->initializeBillingQueue();
+    }
 
     public function uniqueId(): string
     {

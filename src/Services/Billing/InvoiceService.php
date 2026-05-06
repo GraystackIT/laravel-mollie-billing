@@ -308,8 +308,10 @@ class InvoiceService
         $logo = $this->resolveLogoPath(config('mollie-billing.invoices.logo'));
         $paymentInstruction = $this->buildPaymentInstruction($invoice, $isCredit);
 
-        // Credit note reason as general description (below items, above payment info).
-        $description = ($isCredit && ! empty($invoice->refund_reason_text))
+        // refund_reason_text doubles as a general invoice description: credit
+        // notes use it for the refund reason, country-correction reissues use
+        // it to explain what happened. Render it for both kinds when set.
+        $description = ! empty($invoice->refund_reason_text)
             ? (string) $invoice->refund_reason_text
             : null;
 
@@ -584,6 +586,252 @@ class InvoiceService
         }
 
         return $sum;
+    }
+
+    // ========================================================================
+    // Country-mismatch correction: refund + reissue with corrected VAT rate.
+    // ========================================================================
+
+    /**
+     * Issue a Mollie one-off charge for the gross amount of an original invoice,
+     * recomputed at a new country's VAT rate (which may include reverse-charge).
+     *
+     * Mirrors the `usage_overage` pattern: the request is sent with metadata
+     * `type=country_correction`, and the resulting BillingInvoice is created
+     * later in the webhook handler when the payment confirms.
+     *
+     * @return object  The Mollie payment object (has $id and $status).
+     */
+    public function issueCorrectionCharge(BillingInvoice $original, Billable $billable, string $newCountry, int $mismatchId, ?string $creditNoteSerial = null): object
+    {
+        /** @var Model&Billable $billable */
+        if (! $billable->hasMollieMandate()) {
+            throw new \LogicException('Cannot issue correction charge: billable has no Mollie mandate.');
+        }
+
+        $newCountry = strtoupper($newCountry);
+        $newLines = $this->cloneLineItemsWithRate($original, $newCountry, $billable);
+
+        $sumNet = 0;
+        foreach ($newLines as $line) {
+            $sumNet += (int) ($line['amount_net'] ?? 0);
+        }
+
+        if ($sumNet <= 0) {
+            throw new \LogicException('Correction charge net amount must be positive.');
+        }
+
+        $vat = $this->vat->calculate($newCountry, $sumNet, $billable);
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+        $value = number_format($vat['gross'] / 100, 2, '.', '');
+
+        $payment = Mollie::send(new CreatePaymentRequest(
+            description: 'Country correction for invoice '.($original->serial_number ?? $original->id),
+            amount: new MollieMoney($currency, $value),
+            metadata: [
+                'type' => 'country_correction',
+                'mismatch_id' => $mismatchId,
+                'original_invoice_id' => (int) $original->id,
+                'billable_type' => $billable->getMorphClass(),
+                'billable_id' => (string) $billable->getKey(),
+            ],
+            sequenceType: 'recurring',
+            mandateId: $billable->getMollieMandateId(),
+            customerId: $billable->getMollieCustomerId(),
+            webhookUrl: route(BillingRoute::webhook()),
+        ));
+
+        // Stash context for the webhook handler. Mollie metadata is capped at
+        // 1024 bytes, so we keep the customer-facing payload (line items,
+        // period, matching credit-note serial) on subscription_meta keyed by
+        // payment_id. The caller passes the credit-note serial after the
+        // refund step so the reissue PDF can reference it.
+        $oldCountry = strtoupper((string) ($original->country ?? ''));
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $pending = (array) ($meta['country_corrections'] ?? []);
+        $paymentId = is_object($payment) ? (string) ($payment->id ?? '') : '';
+        if ($paymentId !== '') {
+            $pending[$paymentId] = [
+                'mismatch_id' => $mismatchId,
+                'original_invoice_id' => (int) $original->id,
+                'old_country' => $oldCountry,
+                'new_country' => $newCountry,
+                'credit_note_serial' => $creditNoteSerial,
+                'line_items' => $newLines,
+                'period_start' => $original->period_start?->toIso8601String(),
+                'period_end' => $original->period_end?->toIso8601String(),
+                'created_at' => BillingTime::nowUtc()->toIso8601String(),
+            ];
+            $meta['country_corrections'] = $pending;
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
+
+        return $payment;
+    }
+
+    /**
+     * Persist a BillingInvoice for a confirmed `country_correction` payment.
+     *
+     * Unlike `createForPayment()`, this preserves the ORIGINAL invoice's period
+     * (semantically correct for OSS / accounting — the reissue belongs to the
+     * original supply period, not "now").
+     */
+    public function createCorrectionInvoice(object $payment, BillingInvoice $original, Billable $billable): BillingInvoice
+    {
+        /** @var Model&Billable $billable */
+        $paymentId = (string) ($payment->id ?? '');
+        $meta = $billable->getBillingSubscriptionMeta();
+        $pending = (array) ($meta['country_corrections'][$paymentId] ?? []);
+
+        $lineItems = (array) ($pending['line_items'] ?? []);
+        if ($lineItems === []) {
+            throw new \LogicException("Cannot create correction invoice: no pending state for payment {$paymentId}.");
+        }
+
+        $newCountry = strtoupper((string) ($pending['new_country'] ?? $billable->getBillingCountry() ?? ''));
+        $sumNet = 0;
+        $sumVat = 0;
+        $sumGross = 0;
+        foreach ($lineItems as $line) {
+            $sumNet += (int) ($line['amount_net'] ?? 0);
+            $sumVat += (int) ($line['vat_amount'] ?? 0);
+            $sumGross += (int) ($line['amount_gross'] ?? 0);
+        }
+
+        $invoice = new BillingInvoice;
+        $invoice->billable_type = $billable->getMorphClass();
+        $invoice->billable_id = $billable->getKey();
+        $invoice->mollie_payment_id = $paymentId;
+        $invoice->mollie_subscription_id = $original->mollie_subscription_id;
+        $invoice->serial_number = $this->numberGenerator->generate(InvoiceKind::Subscription->value);
+        $invoice->invoice_kind = InvoiceKind::Subscription;
+        $invoice->status = InvoiceStatus::Paid;
+        $invoice->country = $newCountry;
+        $invoice->currency = $original->currency ?: (string) config('mollie-billing.currency', 'EUR');
+        $invoice->amount_net = $sumNet;
+        $invoice->amount_vat = $sumVat;
+        $invoice->amount_gross = $sumGross;
+        $invoice->line_items = $lineItems;
+        $invoice->payment_method_details = self::extractPaymentMethodDetails($payment);
+        // Keep the ORIGINAL invoice's period (this is a corrective reissue, not
+        // a fresh charge for "now").
+        $invoice->period_start = $original->period_start;
+        $invoice->period_end = $original->period_end;
+        $invoice->refunded_net = 0;
+        // Use the billable's CURRENT VAT validation — after the VIES re-check
+        // this is the entry that justifies the reverse-charge decision (or its
+        // absence) reflected in the new VAT amounts.
+        $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
+        // Customer-facing explanation rendered on the PDF (same template as the
+        // matching credit note).
+        $invoice->refund_reason_text = $this->correctionReissueReason($original, $pending);
+        $invoice->save();
+
+        $this->generateAndStorePdf($invoice, $billable);
+
+        // Clear the pending entry so a duplicate webhook (idempotency) can no-op.
+        unset($meta['country_corrections'][$paymentId]);
+        if (empty($meta['country_corrections'])) {
+            unset($meta['country_corrections']);
+        }
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        event(new InvoiceCreated($billable, $invoice));
+
+        return $invoice;
+    }
+
+    /**
+     * Rebuild line items at the new country's VAT rate, keeping kind/quantity
+     * and unit_price_net constant. VAT may collapse to 0 under reverse-charge.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    /**
+     * Customer-facing explanation rendered on the reissue invoice PDF.
+     *
+     * @param  array<string, mixed>  $pending  the country_corrections entry from subscription_meta
+     */
+    private function correctionReissueReason(BillingInvoice $original, array $pending): string
+    {
+        $oldCountry = strtoupper((string) ($pending['old_country'] ?? ''));
+        $newCountry = strtoupper((string) ($pending['new_country'] ?? ''));
+        $creditNoteSerial = (string) ($pending['credit_note_serial'] ?? '');
+
+        return (string) __('billing::portal.country_correction_reissue_reason', [
+            'original_serial' => (string) ($original->serial_number ?? $original->id),
+            'old_country' => $oldCountry,
+            'new_country' => $newCountry,
+            'old_rate' => $this->formatRateForCountry($oldCountry, $original),
+            'new_rate' => $this->formatRateForCountry($newCountry),
+            'credit_note_serial' => $creditNoteSerial,
+            'support_email' => $this->correctionSupportEmail(),
+        ]);
+    }
+
+    private function formatRateForCountry(string $country, ?BillingInvoice $reference = null): string
+    {
+        try {
+            $rate = $this->vat->vatRateFor($country);
+        } catch (\Throwable) {
+            $rate = 0.0;
+            if ($reference !== null) {
+                $first = ((array) $reference->line_items)[0] ?? [];
+                $rate = (float) ($first['vat_rate'] ?? 0.0);
+            }
+        }
+
+        return rtrim(rtrim(number_format($rate, 2, '.', ''), '0'), '.');
+    }
+
+    private function correctionSupportEmail(): string
+    {
+        $candidates = [
+            config('mollie-billing.invoices.seller.email'),
+            config('mail.from.address'),
+        ];
+        foreach ($candidates as $candidate) {
+            if (is_string($candidate) && $candidate !== '') {
+                return $candidate;
+            }
+        }
+
+        return 'support';
+    }
+
+    private function cloneLineItemsWithRate(BillingInvoice $original, string $newCountry, Billable $billable): array
+    {
+        $vat = $this->vat->calculate($newCountry, 1, $billable); // probe to detect reverse-charge
+        $newRate = (float) $vat['rate'];
+
+        $now = BillingTime::nowUtc();
+        $periodStart = ($original->period_start ?? $now)->toIso8601String();
+        $periodEnd = ($original->period_end ?? $now)->toIso8601String();
+
+        $cloned = [];
+        foreach ((array) $original->line_items as $line) {
+            $netLine = (int) ($line['amount_net'] ?? 0);
+            $vatLine = (int) round($netLine * $newRate / 100);
+
+            $cloned[] = [
+                'kind' => (string) ($line['kind'] ?? 'plan'),
+                'code' => $line['code'] ?? null,
+                'label' => (string) ($line['label'] ?? ($line['kind'] ?? 'Line')),
+                'quantity' => (int) ($line['quantity'] ?? 1),
+                'unit_price_net' => (int) ($line['unit_price_net'] ?? $netLine),
+                'amount_net' => $netLine,
+                'vat_rate' => $newRate,
+                'vat_amount' => $vatLine,
+                'amount_gross' => $netLine + $vatLine,
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'parent_invoice_id' => (int) $original->id,
+                'description' => $line['description'] ?? null,
+            ];
+        }
+
+        return $cloned;
     }
 
     // ========================================================================

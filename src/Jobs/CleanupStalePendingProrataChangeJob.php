@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -36,8 +37,14 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public int $tries = 1;
+
+    public function __construct()
+    {
+        $this->initializeBillingQueue();
+    }
 
     public function handle(): void
     {

@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\OverageChargeFailed;
 use GraystackIT\MollieBilling\Events\OverageCharged;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminOverageBillingFailedNotification;
 use GraystackIT\MollieBilling\Notifications\OverageBillingFailedNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
@@ -26,6 +27,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public int $uniqueFor = 3600;
 
@@ -36,6 +38,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
         public readonly string|int $billableId,
         public int $attempt = 1,
     ) {
+        $this->initializeBillingQueue();
     }
 
     public function uniqueId(): string

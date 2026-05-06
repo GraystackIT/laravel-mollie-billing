@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -18,11 +19,13 @@ class ApplyScheduledChangesJob implements ShouldQueue
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly string $billableClass,
         public readonly string|int $billableId,
     ) {
+        $this->initializeBillingQueue();
     }
 
     public function handle(ScheduleSubscriptionChange $service): void

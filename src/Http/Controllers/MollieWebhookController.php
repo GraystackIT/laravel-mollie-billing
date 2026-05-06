@@ -191,6 +191,14 @@ class MollieWebhookController extends Controller
                 return;
             }
 
+            if ($type === 'country_correction') {
+                $this->handleCountryCorrectionPaid($payment, $billable, $metadata);
+                if ($this->hasRefunds($payment)) {
+                    $this->handleRefundWebhook($payment, $billable);
+                }
+                return;
+            }
+
             if (in_array($type, ['overage', 'prorata', 'addon', 'seats'], true)) {
                 $this->handleSingleChargePaid($payment, $billable, $type, $metadata);
                 // Fall through to check for refunds on the same payment below.
@@ -224,6 +232,11 @@ class MollieWebhookController extends Controller
 
             if ($type === 'prorata_charge') {
                 $this->handleProrataChargeFailed($payment, $billable, $metadata);
+                return;
+            }
+
+            if ($type === 'country_correction') {
+                $this->handleCountryCorrectionFailed($payment, $billable, $metadata);
                 return;
             }
 
@@ -878,6 +891,7 @@ class MollieWebhookController extends Controller
 
         // 4. Plan/Sitze/Addons auf den Billable schreiben (Periode bereits oben berechnet).
         $billable->refresh();
+        $wasPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
         if ($intentData !== null) {
             $meta = $billable->getBillingSubscriptionMeta();
 
@@ -889,12 +903,26 @@ class MollieWebhookController extends Controller
 
             unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
 
+            // Past-Due-Reset: this charge cleared the failed-payment state. The
+            // payment_failure marker no longer reflects reality and the status
+            // returns to Active. The new period started at $newPeriodStart (set
+            // via $startsNewPeriod above); subscription_ends_at must be cleared
+            // because Mollie's PATCH (with forceResetStartDate) reset the
+            // recurring schedule to now + 1 interval.
+            if ($wasPastDue) {
+                unset($meta['payment_failure']);
+            }
+
             $billable->forceFill([
                 'subscription_plan_code' => $newPlanCode,
                 'subscription_interval' => $newIntervalCode,
                 'active_addon_codes' => array_keys((array) ($intentData['new_addons'] ?? [])),
                 'subscription_meta' => $meta,
                 ...($startsNewPeriod ? ['subscription_period_starts_at' => $newPeriodStart] : []),
+                ...($wasPastDue ? [
+                    'subscription_status' => SubscriptionStatus::Active,
+                    'subscription_ends_at' => null,
+                ] : []),
             ])->save();
         }
 
@@ -956,6 +984,140 @@ class MollieWebhookController extends Controller
             if (! empty($recipients)) {
                 Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
             }
+        }
+    }
+
+    /**
+     * Country-mismatch correction reissue: create the BillingInvoice for a
+     * confirmed correction payment, link it back to the mismatch's audit log,
+     * and clear the pending state.
+     */
+    protected function handleCountryCorrectionPaid(object $payment, Billable $billable, array $metadata): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $paymentId = (string) ($payment->id ?? '');
+        $mismatchId = (int) ($metadata['mismatch_id'] ?? 0);
+        $originalInvoiceId = (int) ($metadata['original_invoice_id'] ?? 0);
+
+        if ($mismatchId === 0 || $originalInvoiceId === 0) {
+            Log::warning('country_correction webhook missing metadata', [
+                'payment_id' => $paymentId,
+                'metadata' => $metadata,
+            ]);
+            return;
+        }
+
+        // Idempotency: if we've already created an invoice for this payment, no-op.
+        $existing = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first();
+        if ($existing !== null) {
+            return;
+        }
+
+        $original = BillingInvoice::query()->whereKey($originalInvoiceId)->first();
+        if ($original === null) {
+            Log::warning('country_correction webhook: original invoice not found', [
+                'payment_id' => $paymentId,
+                'original_invoice_id' => $originalInvoiceId,
+            ]);
+            return;
+        }
+
+        try {
+            $invoice = $this->salesInvoiceService->createCorrectionInvoice($payment, $original, $billable);
+        } catch (\Throwable $e) {
+            Log::error('country_correction reissue failed during webhook', [
+                'payment_id' => $paymentId,
+                'mismatch_id' => $mismatchId,
+                'error' => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        $mismatch = \GraystackIT\MollieBilling\Models\BillingCountryMismatch::query()->whereKey($mismatchId)->first();
+        if ($mismatch !== null) {
+            $log = $mismatch->correctionInvoicesData();
+            $reissued = $log['reissued'];
+            $found = false;
+            foreach ($reissued as &$entry) {
+                if ((int) ($entry['original_invoice_id'] ?? 0) === $originalInvoiceId
+                    && (string) ($entry['mollie_payment_id'] ?? '') === $paymentId) {
+                    $entry['invoice_id'] = (int) $invoice->id;
+                    $found = true;
+                    break;
+                }
+            }
+            unset($entry);
+            if (! $found) {
+                $reissued[] = [
+                    'original_invoice_id' => $originalInvoiceId,
+                    'mollie_payment_id' => $paymentId,
+                    'invoice_id' => (int) $invoice->id,
+                ];
+            }
+            $log['reissued'] = $reissued;
+
+            $mismatch->forceFill([
+                'correction_invoices' => $log,
+                'corrective_invoice_id' => (int) $invoice->id,
+            ])->save();
+        }
+
+        event(new PaymentSucceeded($billable, $invoice));
+    }
+
+    /**
+     * Country-mismatch correction reissue failed at Mollie. Roll the mismatch
+     * back to Pending so the user can retry the resolve flow, drop the pending
+     * country_corrections entry so a future retry isn't double-counted, and
+     * notify the billable's admins so manual follow-up is possible.
+     */
+    protected function handleCountryCorrectionFailed(object $payment, Billable $billable, array $metadata): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $paymentId = (string) ($payment->id ?? '');
+        $mismatchId = (int) ($metadata['mismatch_id'] ?? 0);
+        $reason = (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown');
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        if (isset($meta['country_corrections'][$paymentId])) {
+            unset($meta['country_corrections'][$paymentId]);
+            if (empty($meta['country_corrections'])) {
+                unset($meta['country_corrections']);
+            }
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
+
+        if ($mismatchId === 0) {
+            return;
+        }
+
+        $mismatch = \GraystackIT\MollieBilling\Models\BillingCountryMismatch::query()->whereKey($mismatchId)->first();
+        if ($mismatch === null) {
+            return;
+        }
+
+        $mismatch->forceFill([
+            'status' => \GraystackIT\MollieBilling\Enums\CountryMismatchStatus::Pending,
+        ])->save();
+
+        Log::warning('country_correction reissue failed at Mollie', [
+            'mismatch_id' => $mismatchId,
+            'payment_id' => $paymentId,
+            'reason' => $reason,
+        ]);
+
+        $recipients = MollieBilling::notifyBillingAdmins($billable);
+        if (! empty($recipients)) {
+            Notification::send(
+                $recipients,
+                new \GraystackIT\MollieBilling\Notifications\CountryMismatchReissueFailedNotification($billable, $mismatch, $reason),
+            );
         }
     }
 

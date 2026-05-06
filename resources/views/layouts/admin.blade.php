@@ -8,7 +8,10 @@
     $currentRoute = request()->route()?->getName();
 @endphp
 <!DOCTYPE html>
-<html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="h-full">
+{{-- Admin panel is operator tooling and stays English regardless of app locale.
+     `lang="en"` here also suppresses Chrome's auto-translate prompt, which would
+     otherwise machine-translate the panel into the operator's browser language. --}}
+<html lang="en" class="h-full">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">

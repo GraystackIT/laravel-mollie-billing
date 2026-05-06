@@ -2,7 +2,6 @@
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
-use GraystackIT\MollieBilling\Support\AdminLocale;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
@@ -126,7 +125,7 @@ new class extends Component {
                                 $newPlanName = $newPlanCode ? ($catalog->planName($newPlanCode) ?? $newPlanCode) : null;
                                 $newInterval = $change['interval'] ?? null;
                                 $newIntervalLabel = $newInterval
-                                    ? AdminLocale::with(fn () => __('billing::enums.subscription_interval.'.$newInterval))
+                                    ? __('billing::enums.subscription_interval.'.$newInterval)
                                     : null;
                                 $newSeats = $change['seats'] ?? null;
                                 $newAddons = (array) ($change['addons'] ?? []);
@@ -171,7 +170,7 @@ new class extends Component {
                                                 <div class="flex flex-wrap items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-300">
                                                     @if ($intervalChanged && $currentInterval)
                                                         <span class="text-zinc-400 line-through dark:text-zinc-500">
-                                                            {{ AdminLocale::with(fn () => __('billing::enums.subscription_interval.'.$currentInterval)) }}
+                                                            {{ __('billing::enums.subscription_interval.'.$currentInterval) }}
                                                         </span>
                                                         <flux:icon.arrow-right variant="micro" class="size-3 text-zinc-400" />
                                                     @endif
