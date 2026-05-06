@@ -15,7 +15,6 @@ use GraystackIT\MollieBilling\Testing\TestBillable;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 beforeEach(function (): void {
@@ -200,7 +199,8 @@ it('Mollie→Mollie plan change initiates charge + writes pending_prorata_change
     expect($pending['refund_lines'])->toHaveCount(1);
 
     // Mollie-subscription PATCH did NOT run yet (only happens in phase 2).
-    expect(Mollie::shouldReceive('send'))->not->toBeNull();
+    // Implicitly verified: the andReturnUsing() closure above throws LogicException
+    // on any non-CreatePaymentRequest, so a MollieUpdateSubscriptionRequest would fail the test.
 });
 
 it('idempotent: second execute() call is no-op while pending_prorata_change exists', function (): void {

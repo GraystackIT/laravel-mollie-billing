@@ -25,7 +25,7 @@ class IpInfoLiteDriver implements IpGeolocationDriver
             return null;
         }
 
-        $country = strtoupper((string) ($response->json('country') ?? ''));
+        $country = strtoupper((string) ($response->json('country_code') ?? ''));
 
         return $country !== '' ? $country : null;
     }

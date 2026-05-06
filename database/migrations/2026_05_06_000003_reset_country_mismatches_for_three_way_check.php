@@ -116,6 +116,9 @@ return new class extends Migration
                 if (Schema::hasColumn('billing_country_mismatches', 'notified_at')) {
                     $table->dropColumn('notified_at');
                 }
+                if (Schema::hasColumn('billing_country_mismatches', 'chosen_country')) {
+                    $table->dropColumn('chosen_country');
+                }
             });
         }
     }

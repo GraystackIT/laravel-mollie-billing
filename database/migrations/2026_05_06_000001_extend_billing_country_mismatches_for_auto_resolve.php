@@ -35,9 +35,11 @@ return new class extends Migration
             }
         });
 
-        Schema::table('billing_country_mismatches', function (Blueprint $t): void {
-            $t->index(['status', 'last_auto_attempt_at'], 'billing_country_mismatches_status_last_auto_idx');
-        });
+        if (! Schema::hasIndex('billing_country_mismatches', 'billing_country_mismatches_status_last_auto_idx')) {
+            Schema::table('billing_country_mismatches', function (Blueprint $t): void {
+                $t->index(['status', 'last_auto_attempt_at'], 'billing_country_mismatches_status_last_auto_idx');
+            });
+        }
     }
 
     public function down(): void
@@ -46,9 +48,11 @@ return new class extends Migration
             return;
         }
 
-        Schema::table('billing_country_mismatches', function (Blueprint $t): void {
-            $t->dropIndex('billing_country_mismatches_status_last_auto_idx');
-        });
+        if (Schema::hasIndex('billing_country_mismatches', 'billing_country_mismatches_status_last_auto_idx')) {
+            Schema::table('billing_country_mismatches', function (Blueprint $t): void {
+                $t->dropIndex('billing_country_mismatches_status_last_auto_idx');
+            });
+        }
 
         Schema::table('billing_country_mismatches', function (Blueprint $t): void {
             $t->dropColumn([

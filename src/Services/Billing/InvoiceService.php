@@ -1015,9 +1015,24 @@ class InvoiceService
             // the same original see refunds from earlier iterations in this loop
             // — the in-memory $original may be a separate clone whose attributes
             // are still stale after another iteration's save().
+            //
+            // The cap has two components:
+            //   1. amount_gross is the absolute upper bound (what Mollie collected).
+            //   2. The remaining refundable amount must be computed in net space
+            //      (refunded_net is a net counter, consistent with
+            //      remainingRefundableNet() and the CountryMatch /
+            //      CountryMismatchResolution services) and converted back to
+            //      gross via the original VAT rate before comparing to Mollie.
             $originalKey = $original->getKey();
             $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? (int) $original->refunded_net;
-            $restRefundable = max(0, (int) $original->amount_gross - $alreadyRefundedNet);
+            $restRefundableNet = max(0, (int) $original->amount_net - $alreadyRefundedNet);
+
+            $originalLines = (array) ($original->line_items ?? []);
+            $firstLine = $originalLines[0] ?? null;
+            $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
+            $restRefundableGross = $restRefundableNet + (int) round($restRefundableNet * $rate / 100);
+
+            $restRefundable = min((int) $original->amount_gross, $restRefundableGross);
             $refundAmount = min($absGross, $restRefundable);
 
             if ($refundAmount < $absGross) {

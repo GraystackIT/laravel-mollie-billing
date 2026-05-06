@@ -248,7 +248,15 @@ new class extends Component {
 
     {{-- Current usage meters --}}
     @if (! empty($meters))
-        <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-{{ min(count($meters), 4) }}">
+        @php
+            $metersColsClass = match (min(count($meters), 4)) {
+                1 => 'lg:grid-cols-1',
+                2 => 'lg:grid-cols-2',
+                3 => 'lg:grid-cols-3',
+                default => 'lg:grid-cols-4',
+            };
+        @endphp
+        <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 {{ $metersColsClass }}">
             @foreach ($meters as $meter)
                 <livewire:mollie-billing::components.usage-meter
                     :type="$meter['type']"
