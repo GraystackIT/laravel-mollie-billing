@@ -36,7 +36,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - Laravel 11, 12 or 13
 - A Mollie account with API key
 - Livewire 4 (for the customer portal views)
-- `livewire/flux` (free) for portal components, or `livewire/flux-pro` for the admin panel
+- `livewire/flux-pro` for the billing portal and the admin panel
 
 ## Installation
 
@@ -492,8 +492,8 @@ The seat count is used during plan-change previews to calculate whether extra se
 
 | Type | Behavior | Quick example |
 | --- | --- | --- |
-| `SinglePayment` | Discounts only a single invoice. | `MollieBilling::coupons()->singlePaymentCoupon('LAUNCH', 50, 'percent');` |
-| `Recurring` | Discounts each invoice for N periods. | `MollieBilling::coupons()->recurringCoupon('LOYAL', 10, 'percent', periods: 6);` |
+| `SinglePayment` | Discounts only a single invoice (Subscription Checkout or One-Time-Order). 100 % is supported — Subscription Checkout uses a Mandate-Only flow so Mollie keeps a mandate for period 2; One-Time-Order skips Mollie entirely and writes a local 0-EUR audit invoice. | `MollieBilling::coupons()->singlePaymentCoupon('LAUNCH', 50, 'percent');` |
+| `Recurring` | Discounts each invoice for N periods (Subscription Checkout or any plan-change-style flow). 100 % is supported via a deferred Mollie `startDate`. Not accepted on One-Time-Orders (no follow-up charges to attach to). | `MollieBilling::coupons()->recurringCoupon('LOYAL', 10, 'percent', periods: 6);` |
 | `Credits` | Adds wallet credit balance. | `MollieBilling::coupons()->creditsCoupon('PROMO5', cents: 500);` |
 | `TrialExtension` | Extends the active trial. | `MollieBilling::coupons()->trialExtensionCoupon('EXTEND14', days: 14);` |
 | `AccessGrant` | Grants free access without payment. | See below. |

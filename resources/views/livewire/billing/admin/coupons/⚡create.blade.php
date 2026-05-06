@@ -176,7 +176,7 @@ new class extends Component {
                 $discountValueDescription = $discount_type === 'percentage'
                     ? ($type === 'recurring'
                         ? 'Whole percent, 1–100. With 100 %, the subscription is free for the discount lifetime, then resumes at full price.'
-                        : 'Whole percent, 1–99. For single-payment, 100 % is not supported — use an access_grant coupon instead.')
+                        : 'Whole percent, 1–100. With 100 %, the first charge is free; the subscription then bills regular price from period 2 onwards (Subscription Checkout) or no payment is required at all (One-Time-Order). single_payment coupons cannot be applied on plan change, seat sync, or addon enable — use a recurring coupon there.')
                     : 'Amount in cents. Example: 500 = €5.00';
             @endphp
             <x-mollie-billing::admin.section
@@ -195,7 +195,7 @@ new class extends Component {
                         :placeholder="$discount_type === 'percentage' ? '25' : '500'"
                         :suffix="$discount_type === 'percentage' ? '%' : 'cents'"
                         min="1"
-                        :max="$discount_type === 'percentage' ? ($type === 'recurring' ? 100 : 99) : null"
+                        :max="$discount_type === 'percentage' ? 100 : null"
                         required
                     />
                     <flux:input

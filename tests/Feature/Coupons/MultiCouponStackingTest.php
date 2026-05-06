@@ -47,22 +47,26 @@ it('SubscriptionUpdateRequest::from accepts coupon_codes (array) and falls back 
 });
 
 it('redeems multiple stackable coupons in one update and writes one redemption per code', function (): void {
+    // Recurring coupons (single_payment is no longer accepted on plan change /
+    // seat sync / addon enable). Stacking semantics are coupon-type-agnostic.
     $service = app(CouponService::class);
     $a = $service->create([
         'code' => 'STACK10',
         'name' => 'Stackable 10%',
-        'type' => CouponType::SinglePayment,
+        'type' => CouponType::Recurring,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
         'stackable' => true,
+        'max_redemptions_per_billable' => 3,
     ]);
     $b = $service->create([
         'code' => 'STACK5',
         'name' => 'Stackable 5%',
-        'type' => CouponType::SinglePayment,
+        'type' => CouponType::Recurring,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 5,
         'stackable' => true,
+        'max_redemptions_per_billable' => 3,
     ]);
 
     /** @var TestBillable $billable */
@@ -90,18 +94,20 @@ it('rejects a non-stackable coupon when another coupon is already in the apply s
     $service->create([
         'code' => 'STACKABLE',
         'name' => 'Stackable',
-        'type' => CouponType::SinglePayment,
+        'type' => CouponType::Recurring,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 10,
         'stackable' => true,
+        'max_redemptions_per_billable' => 3,
     ]);
     $service->create([
         'code' => 'EXCLUSIVE',
         'name' => 'Exclusive',
-        'type' => CouponType::SinglePayment,
+        'type' => CouponType::Recurring,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 50,
         'stackable' => false,
+        'max_redemptions_per_billable' => 3,
     ]);
 
     /** @var TestBillable $billable */

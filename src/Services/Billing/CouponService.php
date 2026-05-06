@@ -141,13 +141,18 @@ class CouponService
         }
 
         if ($coupon->type === CouponType::SinglePayment) {
-            // Wie Recurring: ein SinglePayment-Coupon, der den Charge-Net komplett auf 0 zieht,
-            // schlägt im Mollie-Checkout fehl (Mindestbetrag 0.01 €). Bei 100%-Coverage soll
-            // der Owner einen AccessGrant (für N Tage gratis) oder einen Free-Plan einsetzen.
+            // 100%-coverage on SinglePayment is supported on two paths:
+            //   - Subscription Checkout: StartSubscriptionCheckout routes amount_gross=0
+            //     to the Mandate-Only flow; the webhook activates the subscription with
+            //     startDate=now+1 interval so Mollie charges full price from period 2.
+            //   - One-Time-Order: StartOneTimeOrderCheckout writes a local 0-EUR invoice
+            //     inline, with no Mollie roundtrip.
+            // A Fixed-amount discount that EXCEEDS the order is still nonsensical — reject
+            // strictly greater. Equal (= 100%) is allowed and handled by the paths above.
             $orderAmount = (int) ($context['orderAmountNet'] ?? 0);
             if ($orderAmount > 0) {
                 $discount = $this->computeRecurringDiscount($coupon, $orderAmount);
-                if ($discount >= $orderAmount) {
+                if ($discount > $orderAmount) {
                     throw new InvalidCouponException($billable, (string) $coupon->code, 'full_coverage_use_access_grant');
                 }
             }
@@ -750,17 +755,16 @@ class CouponService
     /**
      * Reject discount-coupon shapes that don't make sense for the given type:
      *
-     *  - Recurring: only > 100% is rejected. 100% is allowed and realised by
-     *    deferring the Mollie-Subscription's startDate over the discount
-     *    lifetime instead of patching the amount to 0 (Mollie rejects 0 €).
-     *  - SinglePayment: >= 100% is rejected. The first charge happens immediately
-     *    in checkout and Mollie cannot accept 0 € — for full-coverage on the
-     *    first payment, an access_grant coupon (free for a duration) is the
-     *    correct shape.
+     *  - Both Recurring and SinglePayment: > 100% is rejected (semantically
+     *    nonsensical — discount can never exceed the order).
+     *  - 100% is allowed for both types. Recurring uses a deferred Mollie-Subscription
+     *    startDate over the discount lifetime; SinglePayment uses the Mandate-Only
+     *    flow on the Subscription Checkout (and an inline 0-EUR path on
+     *    One-Time-Orders), so the first charge never hits Mollie at 0 €.
      *
      * @param  array<string, mixed>  $attributes
      */
-    private function guardAgainstFullCoverageDiscount(array $attributes, CouponType $type): void
+    private function guardAgainstFullCoverageDiscount(array $attributes): void
     {
         $discountType = $attributes['discount_type'] ?? null;
         if ($discountType instanceof DiscountType) {
@@ -771,12 +775,6 @@ class CouponService
         }
 
         $discountValue = (int) ($attributes['discount_value'] ?? 0);
-
-        if ($type === CouponType::SinglePayment && $discountValue >= 100) {
-            throw new \InvalidArgumentException(
-                'A 100% (or greater) discount on a single_payment coupon would reduce the first charge to zero, which the payment provider does not accept. Use an access_grant coupon (full coverage for a duration) instead.'
-            );
-        }
 
         if ($discountValue > 100) {
             throw new \InvalidArgumentException(
@@ -798,7 +796,7 @@ class CouponService
                         'single_payment coupon requires discount_type and discount_value.'
                     );
                 }
-                $this->guardAgainstFullCoverageDiscount($attributes, CouponType::SinglePayment);
+                $this->guardAgainstFullCoverageDiscount($attributes);
                 break;
 
             case CouponType::Recurring:
@@ -815,7 +813,7 @@ class CouponService
                         'recurring coupon requires either max_redemptions_per_billable or valid_until.'
                     );
                 }
-                $this->guardAgainstFullCoverageDiscount($attributes, CouponType::Recurring);
+                $this->guardAgainstFullCoverageDiscount($attributes);
                 break;
 
             case CouponType::Credits:

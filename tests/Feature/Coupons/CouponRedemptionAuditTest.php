@@ -104,13 +104,16 @@ it('Path C (no charge) — Coupon-Redemption schreibt discount_amount_net=0; Rec
 });
 
 it('Path A (deferred Prorata-Charge) — KEIN Coupon-Redeem in Phase-1, sondern nur in Phase-2', function (): void {
+    // Recurring coupon (single_payment is no longer accepted on plan-change).
+    // The deferred-redemption semantics are coupon-type-agnostic.
     $service = app(CouponService::class);
     $coupon = $service->create([
         'code' => 'PROR50',
-        'name' => 'First-Payment 50%',
-        'type' => CouponType::SinglePayment,
+        'name' => 'Recurring 50%',
+        'type' => CouponType::Recurring,
         'discount_type' => DiscountType::Percentage,
         'discount_value' => 50,
+        'max_redemptions_per_billable' => 6,
     ]);
 
     $billable = basicMollieBillable();

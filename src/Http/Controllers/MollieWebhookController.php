@@ -173,7 +173,7 @@ class MollieWebhookController extends Controller
             }
 
             if ($type === 'mandate_only') {
-                $this->handleMandateOnlyPaid($payment, $billable);
+                $this->handleMandateOnlyPaid($payment, $billable, $metadata);
                 return;
             }
 
@@ -255,7 +255,10 @@ class MollieWebhookController extends Controller
         }
     }
 
-    protected function handleMandateOnlyPaid(object $payment, Billable $billable): void
+    /**
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function handleMandateOnlyPaid(object $payment, Billable $billable, array $metadata = []): void
     {
         if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
             return;
@@ -269,6 +272,177 @@ class MollieWebhookController extends Controller
         ])->save();
 
         event(new MandateUpdated($billable, $previousMandate, $billable->mollie_mandate_id));
+
+        // 100%-single_payment-coupon flow: the checkout routed to the Mandate-Only
+        // path because the first charge was 0 €. Activate the subscription now that
+        // the mandate is captured. The Mollie subscription is created with the
+        // default startDate = now + 1 interval, so the next period bills at full price.
+        if (! empty($metadata['pending_subscription_plan_code'])) {
+            $this->activateSubscriptionAfterMandate($payment, $billable, $metadata);
+        }
+    }
+
+    /**
+     * Activate a subscription after a 0-EUR Mandate-Only payment for the
+     * 100%-single_payment-coupon flow. Mirrors handleFirstPaymentPaid()'s
+     * post-mandate steps without re-using it (handleFirstPaymentPaid expects
+     * a non-zero charge and recomputes the coupon discount against the paid
+     * gross — neither applies here).
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function activateSubscriptionAfterMandate(object $payment, Billable $billable, array $metadata): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        $planCode = (string) ($metadata['pending_subscription_plan_code'] ?? '');
+        $interval = (string) ($metadata['pending_subscription_interval'] ?? 'monthly');
+        $addonCodes = (array) ($metadata['pending_subscription_addon_codes'] ?? []);
+        $extraSeats = (int) ($metadata['pending_subscription_extra_seats'] ?? 0);
+        $couponCode = (string) ($metadata['pending_subscription_coupon_code'] ?? '');
+
+        if ($planCode === '') {
+            return;
+        }
+
+        if ($billable->hasAccessibleBillingSubscription()) {
+            Log::warning('Mandate-only subscription activation skipped — billable already has an active subscription', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+            ]);
+            DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? ''));
+
+            return;
+        }
+
+        // Persist payment-country + run country-mismatch check, mirroring persistFirstPaymentArtifacts().
+        $billable->forceFill([
+            'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),
+        ])->save();
+
+        try {
+            $this->countryMatchService->check($billable);
+        } catch (\Throwable $e) {
+            Log::warning('Country match check failed during mandate-only activation', ['error' => $e->getMessage()]);
+        }
+
+        // Coupon must validate to a 100% discount; if not, abort the activation
+        // (the customer hasn't paid, and we won't activate without a valid pricing path).
+        $pricedCoupon = $this->priceFirstPaymentCoupon(
+            $billable,
+            $couponCode,
+            $planCode,
+            $interval,
+            $addonCodes,
+            $extraSeats,
+        );
+
+        if ($pricedCoupon === null
+            || $pricedCoupon['order_amount_net'] <= 0
+            || $pricedCoupon['discount_net'] !== $pricedCoupon['order_amount_net']
+        ) {
+            Log::warning('Mandate-only subscription activation skipped — coupon does not produce 100% coverage', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'coupon_code' => $couponCode,
+                'discount_net' => $pricedCoupon['discount_net'] ?? null,
+                'order_amount_net' => $pricedCoupon['order_amount_net'] ?? null,
+            ]);
+
+            return;
+        }
+
+        // The Audit-Invoice's line items live in the period [now, now+1 interval]. Set
+        // subscription_period_starts_at first so InvoiceService::createForPayment uses
+        // the correct period for its line_items (it reads getBillingPeriodStartsAt()).
+        $billable->forceFill([
+            'subscription_plan_code' => $planCode,
+            'subscription_interval' => \GraystackIT\MollieBilling\Enums\SubscriptionInterval::from($interval),
+            'subscription_period_starts_at' => BillingTime::nowUtc(),
+        ])->save();
+
+        // Build line items: positive plan/seat/addon lines + a single negative
+        // coupon line. createForPayment computes VAT per line via
+        // vatService->calculate(country, summedNet=0, billable) — the rate comes from
+        // the country lookup (not collapsed to 0%), so plan + coupon lines net out
+        // to 0 € gross with consistent vat_rate.
+        $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
+        $discountNet = (int) $pricedCoupon['discount_net'];
+        $lineItems[] = [
+            'kind' => 'coupon',
+            'code' => (string) $pricedCoupon['coupon']->code,
+            'label' => 'Coupon '.$pricedCoupon['coupon']->code,
+            'quantity' => 1,
+            'unit_price' => -$discountNet,
+            'unit_price_net' => -$discountNet,
+            'total_net' => -$discountNet,
+        ];
+
+        try {
+            $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
+        } catch (\Throwable $e) {
+            Log::error('Mandate-only audit invoice creation failed', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        try {
+            $this->createSubscription->handle($billable, [
+                'plan_code' => $planCode,
+                'interval' => $interval,
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'recurring_discount_net' => 0,
+                'mandate_id' => $billable->mollie_mandate_id,
+            ]);
+        } catch (\Throwable $e) {
+            $this->reportSubscriptionActivationFailure(
+                $billable,
+                $planCode,
+                $interval,
+                $invoice,
+                $payment,
+                'CreateSubscription during mandate-only activation failed',
+                $e,
+            );
+            event(new PaymentSucceeded($billable, $invoice));
+            $this->notifyInvoiceAvailable($billable, $invoice);
+
+            return;
+        }
+
+        $this->redeemPricedFirstPaymentCoupon(
+            $billable,
+            $pricedCoupon,
+            $planCode,
+            $interval,
+            (int) $invoice->id,
+        );
+
+        $billable->forceFill([
+            'subscription_source' => SubscriptionSource::Mollie,
+            'subscription_status' => SubscriptionStatus::Active,
+        ])->save();
+
+        // Hydrate wallets — same semantics as handleFirstPaymentPaid().
+        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $quantity) {
+            if ((int) $quantity > 0) {
+                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
+            }
+        }
+
+        event(new SubscriptionCreated($billable, $planCode, $interval));
+        event(new PaymentSucceeded($billable, $invoice));
+
+        $this->notifyInvoiceAvailable($billable, $invoice);
+
+        MollieBilling::runAfterCheckout($billable, true);
     }
 
     protected function handleFirstPaymentPaid(object $payment, Billable $billable, array $metadata): void
@@ -1433,7 +1607,6 @@ class MollieWebhookController extends Controller
                     'existingCouponIds' => $existingCouponIds,
                     'allowed_types' => [
                         \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
-                        \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                     ],
                 ]);
                 $discount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);

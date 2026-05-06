@@ -97,6 +97,14 @@ class UpdateSubscription
                         'addonCodes' => $newAddons,
                         'orderAmountNet' => $remainingNet,
                         'existingCouponIds' => $existingCouponIds,
+                        // Only Recurring coupons are valid on plan-change / seat-sync /
+                        // addon-enable. SinglePayment is intentionally excluded — a 100%
+                        // single_payment would zero the prorata charge but leave the
+                        // local plan switched while Mollie's subscription still runs at
+                        // the old amount. Recurring covers every legitimate use case
+                        // here. For 100% single_payment use the Subscription Checkout
+                        // (Mandate-Only) or a One-Time-Order purchase.
+                        'allowed_types' => [\GraystackIT\MollieBilling\Enums\CouponType::Recurring],
                     ],
                 );
                 $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);

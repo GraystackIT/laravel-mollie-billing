@@ -154,6 +154,9 @@ class PreviewService
                         'addonCodes' => array_keys($newAddons),
                         'orderAmountNet' => $remainingRecurring,
                         'existingCouponIds' => $existingCouponIds,
+                        // Mirrors UpdateSubscription — only Recurring is valid on
+                        // plan-change / seat-sync / addon-enable.
+                        'allowed_types' => [\GraystackIT\MollieBilling\Enums\CouponType::Recurring],
                     ],
                 );
                 $existingCouponIds[] = $coupon->id;
