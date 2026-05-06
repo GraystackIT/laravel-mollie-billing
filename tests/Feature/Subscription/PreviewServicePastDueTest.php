@@ -102,7 +102,7 @@ it('Active preview keeps the regular prorata path (sanity check)', function (): 
     expect($preview['prorataFactor'])->toBeLessThan(1.0);
 });
 
-it('Past-Due → Free preview does NOT trigger past-due reset (free target has no charge)', function (): void {
+it('Past-Due → Free preview sets isPastDueReset but results in zero charge', function (): void {
     config()->set('mollie-billing-plans.plans.free', [
         'name' => 'Free',
         'tier' => 0,

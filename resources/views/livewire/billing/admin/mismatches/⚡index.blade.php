@@ -141,7 +141,7 @@ new class extends Component {
     />
 
     @if ($flash)
-        <flux:callout variant="{{ $flashError ? 'danger' : 'success' }}" icon="{{ $flashError ? 'exclamation-triangle' : 'check-circle' }}" inline>{{ $flash }}</flux:callout>
+        <flux:callout variant="{{ $flashError ? 'danger' : 'success' }}" icon="{{ $flashError ? 'exclamation-triangle' : 'check-circle' }}" inline>{{ $flashError ?? $flash }}</flux:callout>
     @endif
 
     <flux:tab.group>

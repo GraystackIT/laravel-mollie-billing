@@ -486,7 +486,7 @@ new class extends Component {
                                 @endif
                                 @if (($couponDiscountNet ?? 0) > 0)
                                     <div class="flex items-center justify-between text-sm">
-                                        <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.coupon_code_placeholder') }}</span>
+                                        <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.discount') }}</span>
                                         <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($couponDiscountNet / 100, 2) }}</span>
                                     </div>
                                 @endif
@@ -513,7 +513,7 @@ new class extends Component {
                                                 size="xs"
                                                 variant="ghost"
                                                 icon="x-mark"
-                                                wire:click="removeCoupon('{{ $info['code'] }}')"
+                                                wire:click="removeCoupon({{ \Illuminate\Support\Js::from($info['code']) }})"
                                                 :aria-label="__('billing::checkout.remove_coupon')"
                                             />
                                         </div>

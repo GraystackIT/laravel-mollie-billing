@@ -1676,7 +1676,7 @@ new class extends Component {
                                                 size="xs"
                                                 variant="ghost"
                                                 icon="x-mark"
-                                                wire:click="removeCoupon('{{ $info['code'] }}')"
+                                                wire:click="removeCoupon({{ \Illuminate\Support\Js::from($info['code']) }})"
                                                 :aria-label="__('billing::checkout.remove_coupon')"
                                             />
                                         </div>
