@@ -9,11 +9,15 @@ Coupons are first-class entities in the system. They are stored in `coupons`, re
 | Entry point | Component | Coupon types accepted |
 |---|---|---|
 | Checkout | `⚡checkout.blade.php` | `single_payment`, `recurring`, `trial_extension`, `access_grant` |
-| Plan change | `⚡plan-change.blade.php` | `single_payment`, `recurring` |
-| Seat sync | `⚡seats.blade.php` | `single_payment`, `recurring` |
-| Addon enable | `⚡addons.blade.php` | `single_payment`, `recurring` |
-| One-time-order purchase | `⚡products.blade.php` | `single_payment`, `recurring` (via `applicable_products`) |
+| Plan change | `⚡plan-change.blade.php` | `recurring` |
+| Seat sync | `⚡seats.blade.php` | `recurring` |
+| Addon enable | `⚡addons.blade.php` | `recurring` |
+| One-time-order purchase | `⚡products.blade.php` | `single_payment` (via `applicable_products`) |
 | Dashboard "redeem coupon" | `⚡dashboard.blade.php` | `credits`, `trial_extension`, `period_extension` (a `single_payment`/`recurring` code shows a hint to use the action flow) |
+
+**Note on the entry-point restrictions:**
+- `single_payment` is *only* accepted on Checkout and One-Time-Order purchases. Plan-change / seat-sync / addon-enable changes the price of an existing Mollie subscription — a one-shot discount that fully covers the prorata charge would leave the local plan switched while Mollie keeps charging the old amount. Use `recurring` for those flows.
+- `recurring` is *not* accepted on One-Time-Order purchases — there are no follow-up charges to attach the recurring marker to, so it would have no effect.
 
 The admin creates coupons via `admin/coupons/⚡create.blade.php` — a single form with conditional fields per type.
 
@@ -23,8 +27,8 @@ The system supports six coupon types. Each row in the table below answers: what 
 
 | Type | What it does | Where redeemed | When the side-effect fires | Renewal behaviour |
 |---|---|---|---|---|
-| **`single_payment`** | Reduces a single charge by a percentage or fixed amount | Checkout, Plan change, Seat sync, Addon enable, One-time-order | Immediately on the charge it was applied to (first checkout payment, prorata charge, addon enable charge, product purchase). Redemption record is written with `invoice_id` of that charge. | Never. The discount applies once. The Mollie subscription is configured with the **full** recurring amount so the next renewal charges the regular price. |
-| **`recurring`** | Reduces every recurring charge by a percentage or fixed amount, until the discount lifetime ends | Checkout, Plan change, Seat sync, Addon enable, One-time-order | First charge: same as `single_payment`. From then on, an `active_recurring_coupon` marker on `subscription_meta` is honoured by every Mollie renewal webhook. | **Yes — automatically** until `marker.valid_until`. Once that date is past, the marker is cleared and Mollie is PATCHed back to the full price. |
+| **`single_payment`** | Reduces the first checkout charge OR a one-time-order purchase by a percentage or fixed amount | Checkout, One-time-order | Immediately on the charge it was applied to (first checkout payment, product purchase). Redemption record is written with `invoice_id` of that charge. With 100% coverage no money flows: Subscription Checkout uses the Mandate-Only path, One-Time-Order writes a local 0-EUR audit invoice with no Mollie roundtrip. | Never. The discount applies once. The Mollie subscription is configured with the **full** recurring amount so the next renewal charges the regular price. |
+| **`recurring`** | Reduces every recurring charge by a percentage or fixed amount, until the discount lifetime ends | Checkout, Plan change, Seat sync, Addon enable | First charge: same as `single_payment`. From then on, an `active_recurring_coupon` marker on `subscription_meta` is honoured by every Mollie renewal webhook. | **Yes — automatically** until `marker.valid_until`. Once that date is past, the marker is cleared and Mollie is PATCHed back to the full price. |
 | **`credits`** | Tops up the wallet(s) listed in `credits_payload` | Dashboard | Immediately on redemption — the wallet is credited and `purchasedBalance` is incremented so the credits survive period resets. | Never. The redemption is one-shot. |
 | **`trial_extension`** | Extends `trial_ends_at` by `trial_extension_days` | Checkout (with trial-gate), Dashboard (with trial-gate) | Immediately on redemption — `extendBillingTrialUntil()` shifts the trial end. | Never. |
 | **`access_grant`** (full or addon-only) | **Full**: activates a Local subscription with the listed plan and addons for `grant_duration_days`. **Addon-only**: merges the listed addons into the active subscription's `active_addon_codes`, also valid for Mollie subscriptions. | Checkout | Immediately. `applyAccessGrant()` either activates a Local subscription or extends `subscription_ends_at`/merges addon codes. The redemption snapshot is stored in `grant_applied_snapshot` for revoke. | Never. The grant is finite; once `subscription_ends_at` is reached the subscription expires (full grants only). Addon-only grants merge the addons permanently — admin can revoke via `revokeGrant()` to remove them. |
@@ -61,17 +65,21 @@ Every coupon can be restricted to a subset of plans, intervals, addons, or produ
 | `max_redemptions` | Global cap across all billables (null = unlimited). |
 | `max_redemptions_per_billable` | Per-billable cap (default `1`). For `recurring`, this defines the discount lifetime in periods: `marker.valid_until = now + max_redemptions × intervalDays + 1d`. **Required for recurring coupons** if `valid_until` is empty. |
 
-## Full coverage handling — `recurring` allows 100 %, `single_payment` does not
+## Full coverage handling — both `recurring` and `single_payment` allow 100 %
 
-A discount coupon that reduces the charge to zero would normally crash at the payment provider — Mollie rejects `amount = 0` on subscriptions. The system handles this differently per coupon type:
+A discount coupon that reduces the charge to zero would normally crash at the payment provider — Mollie rejects `amount = 0` on subscription charges. Each coupon type has its own zero-charge path so 100 % discounts are supported across the board:
 
 - **`recurring` 100 %** — *allowed.* The Mollie subscription is created/PATCHed with the **full** recurring price, and `startDate` is deferred to the day after the marker's `valid_until`. Mollie does not charge anything during the discount lifetime, and the first real charge after that is naturally at full price (the marker is already expired by then). This is what powers "first 3 months free, then €29/month"-style campaigns.
 
   See `MollieSubscriptionPatcher::fullCoverageStartDate()` and `CreateSubscription::fullCoverageStartDate()` for the integration. `ResubscribeSubscription` re-uses `CreateSubscription`, so resubscribe-during-discount also defers correctly.
 
-- **`single_payment` 100 %** — *rejected.* The first charge happens immediately in checkout, there is no later date to defer to, and Mollie cannot accept 0 €. `CouponService::create()` rejects this at admin time; the apply-time runtime guard in `validate()` also rejects fixed-amount `single_payment` coupons that fully cover the current order. The correct shape for "first payment free" is `access_grant` (full coverage for a duration) or, on existing subscriptions, `period_extension` (push the next charge by N days).
+- **`single_payment` 100 % on Subscription Checkout** — *allowed via the Mandate-Only path.* When the checkout total drops to 0 €, `StartSubscriptionCheckout` routes to `StartMandateCheckout`, which creates a 0-EUR mandate-collection payment with the subscription spec embedded in metadata (`pending_subscription_*` keys). Once the mandate is captured, the webhook (`MollieWebhookController::handleMandateOnlyPaid`) activates the Mollie subscription with the default `startDate = now + 1 interval`, writes a local 0-EUR audit invoice, redeems the coupon, and hydrates wallets. The customer pays nothing on the first period and is billed at full price from period 2 onwards. This is the right shape for "first month free, then keep paying" promotions.
 
-- **Discount > 100 %** — always rejected, semantically nonsensical.
+- **`single_payment` 100 % on One-Time-Order** — *allowed via the inline 0-EUR path.* When all coupons together cover the product price, `StartOneTimeOrderCheckout` skips Mollie entirely: it writes a local 0-EUR invoice (`mollie_payment_id = null`), redeems the coupon, credits the wallet, and dispatches `OneTimeOrderCompleted`. There is no webhook for this flow because there is no Mollie payment.
+
+- **`single_payment` 100 % on Plan change / Seat sync / Addon enable** — *not allowed.* These updates change the price of an existing Mollie subscription. A one-shot discount that fully covered the prorata charge would leave the local plan switched while Mollie kept charging the old amount on the next renewal. Use `recurring` for these flows — its deferred-startDate trick keeps Mollie's recurring amount in sync with what the customer actually pays.
+
+- **Discount > 100 %** — always rejected, semantically nonsensical. A fixed-amount `single_payment` coupon whose value exceeds the order is also rejected at validate-time (defense in depth — `computeRecurringDiscount` already caps Fixed at `min(value, netAmount)`).
 
 For "30 days for free without a subscription" use cases, use `access_grant`. For "extend the current period by 14 days" use `period_extension`.
 
@@ -148,12 +156,14 @@ The `discount_amount_net` on each `CouponRedemption` reflects the **actual** amo
 | Trigger | When the row is written | `discount_amount_net` value | `invoice_id` |
 |---|---|---|---|
 | First-payment-webhook (Mollie checkout payment cleared) | After the first Mollie payment is paid and a sales invoice was created | The discount applied to that first invoice | First-payment invoice |
-| One-time-order webhook | After the product payment is paid and a sales invoice was created | The discount applied to that product invoice | Product invoice |
+| Mandate-Only-webhook (100 % `single_payment` checkout) | After the 0-EUR mandate-collection payment is captured and the local audit invoice was written | Full `orderAmountNet` (= the full plan price the coupon waived) | Local 0-EUR audit invoice |
+| One-time-order webhook (Mollie payment cleared) | After the product payment is paid and a sales invoice was created | The discount applied to that product invoice | Product invoice |
+| One-time-order inline (100 % `single_payment`) | Immediately in `StartOneTimeOrderCheckout::handle` — no Mollie payment, no webhook | Full coupon discount per redeemed coupon | Local 0-EUR product invoice (`mollie_payment_id = null`) |
 | Plan-change deferred charge (Phase 2) | When the prorata-charge payment is paid | The actual prorata discount that was billed (read from the persisted `pending_prorata_change.charge_lines` of `kind='coupon'`) | Prorata-charge invoice |
 | Sidegrade (Saldo-0 plan switch) | Immediately on `update()` | The prorata discount on the plan-switch invoice | Plan-switch invoice |
 | Renewal webhook (recurring marker) | On every renewal as long as the marker is redeemable | Discount on the renewal charge, capped to `base_amount_net` (see above) | Renewal invoice |
 | PATCH-only (no charge: addon/seat update on existing subscription) | Immediately on `update()` | `0` — no charge attached. The recurring marker (if applicable) takes effect on the next renewal. | — |
-| Local-sub redemption (no Mollie charge) | Immediately on `update()` | `0` for `single_payment`/`recurring`. Other types apply their side effect. | — |
+| Local-sub redemption (no Mollie charge) | Immediately on `update()` | `0` for `recurring`. Other types apply their side effect. | — |
 | Free downgrade | Immediately on `update()` | `0` | — |
 
 **There is exactly one redemption per actual billing event** — the system avoids double-redeems even across the deferred-charge two-phase flow.
@@ -267,5 +277,5 @@ A coupon can carry an `auto_apply_token` (a short slug). When a checkout URL con
 | `recurring_conflict` | Another recurring coupon already active. |
 | `recurring_already_active` | The same recurring coupon is already active on the subscription. |
 | `too_close_to_charge` | Period-extension would race a Mollie charge scheduled within 24 h. |
-| `full_coverage_use_access_grant` | A `single_payment` discount would zero the immediate charge — use `access_grant` (or `period_extension`) instead. `recurring` 100 % is allowed and does not raise this. |
+| `full_coverage_use_access_grant` | A discount would *exceed* the order amount (e.g. a fixed-amount `single_payment` coupon worth more than the product). 100 %-coverage on its own is allowed and does not raise this — it's handled by the Mandate-Only path (Subscription Checkout) or the inline 0-EUR path (One-Time-Order). |
 | `type_not_allowed_in_context` | The coupon's type is not accepted at this entry point (e.g. a `credits` coupon entered on a plan-change form). The acceptance list per entry point is in the overview table at the top of this document. |

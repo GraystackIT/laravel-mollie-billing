@@ -222,6 +222,17 @@ new class extends Component {
                 return;
             }
 
+            // 100%-coupon flow: StartOneTimeOrderCheckout completed inline (no Mollie
+            // roundtrip). Toast success and refresh so the wallet/inventory updates.
+            if (($result['completed'] ?? false) === true) {
+                $this->processing = false;
+                $this->appliedCouponCodes[$productCode] = [];
+                $this->couponInputs[$productCode] = '';
+                \Flux::toast(__('billing::portal.products.success'), variant: 'success');
+                $this->dispatch('product-purchased', productCode: $productCode);
+                return;
+            }
+
             \Flux::toast(__('billing::portal.products.error'), variant: 'danger');
         } catch (\Throwable $e) {
             report($e);

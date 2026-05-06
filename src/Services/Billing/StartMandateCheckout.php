@@ -18,25 +18,50 @@ class StartMandateCheckout
     /**
      * @param  ?string  $redirectUrl  Optional override for the post-checkout redirect URL.
      *                                Defaults to the package "return" route.
+     * @param  ?array{plan_code?:string,interval?:string,addon_codes?:array<int,string>,extra_seats?:int,coupon_code?:?string}  $subscriptionSpec
+     *         When set, the resulting Mandate-Only payment carries the spec in its
+     *         metadata under `pending_subscription_*` keys. The webhook then activates
+     *         a Mollie subscription after the mandate is captured. Used by the
+     *         100%-single_payment-coupon checkout flow where the first charge is 0 €.
      * @return array{checkout_url:?string,payment_id:string}
      */
-    public function handle(Billable $billable, ?string $redirectUrl = null): array
+    public function handle(Billable $billable, ?string $redirectUrl = null, ?array $subscriptionSpec = null): array
     {
         /** @var Model&Billable $billable */
         $customerId = $this->ensureMollieCustomer($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
+        $metadata = [
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+            'type' => 'mandate_only',
+        ];
+
+        if ($subscriptionSpec !== null) {
+            if (isset($subscriptionSpec['plan_code'])) {
+                $metadata['pending_subscription_plan_code'] = (string) $subscriptionSpec['plan_code'];
+            }
+            if (isset($subscriptionSpec['interval'])) {
+                $metadata['pending_subscription_interval'] = (string) $subscriptionSpec['interval'];
+            }
+            if (isset($subscriptionSpec['addon_codes'])) {
+                $metadata['pending_subscription_addon_codes'] = (array) $subscriptionSpec['addon_codes'];
+            }
+            if (isset($subscriptionSpec['extra_seats'])) {
+                $metadata['pending_subscription_extra_seats'] = (int) $subscriptionSpec['extra_seats'];
+            }
+            if (! empty($subscriptionSpec['coupon_code'])) {
+                $metadata['pending_subscription_coupon_code'] = (string) $subscriptionSpec['coupon_code'];
+            }
+        }
+
         $payment = Mollie::send(new CreatePaymentRequest(
             description: 'Payment method authorisation',
             amount: new Money($currency, '0.00'),
             redirectUrl: $redirectUrl ?? route(BillingRoute::name('return'), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
-            metadata: [
-                'billable_type' => $billable->getMorphClass(),
-                'billable_id' => (string) $billable->getKey(),
-                'type' => 'mandate_only',
-            ],
+            metadata: $metadata,
             sequenceType: 'first',
             customerId: $customerId,
         ));

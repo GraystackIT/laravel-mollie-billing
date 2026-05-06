@@ -851,7 +851,7 @@ class InvoiceService
     public function createInvoice(
         Billable $billable,
         InvoiceKind $kind,
-        string $molliePaymentId,
+        ?string $molliePaymentId,
         ?string $mollieSubscriptionId,
         array $lineItems,
         ?\Carbon\CarbonInterface $periodStart = null,

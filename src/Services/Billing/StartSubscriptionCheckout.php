@@ -20,6 +20,7 @@ class StartSubscriptionCheckout
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly MollieCustomerResolver $customerResolver,
+        private readonly StartMandateCheckout $mandateCheckout,
     ) {
     }
 
@@ -44,11 +45,32 @@ class StartSubscriptionCheckout
             }
         }
 
-        $customerId = $this->customerResolver->resolve($billable);
-
-        $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountGross = (int) $request['amount_gross'];
         $urlParams = MollieBilling::resolveUrlParameters($billable);
+
+        // Full-coverage single_payment coupon → first charge is 0 €. Mollie rejects
+        // 0-EUR subscription charges, so we route to the Mandate-Only flow instead:
+        // a 0-EUR mandate-collection payment, with the subscription spec embedded in
+        // metadata. The webhook activates the subscription once the mandate is captured.
+        // Note: auto-apply coupons (PromotionController) only set the session code —
+        // they don't recompute amount_gross, so a 100%-single_payment auto-apply does
+        // not currently end up here. Out of scope for this implementation.
+        if ($amountGross === 0) {
+            return $this->mandateCheckout->handle(
+                $billable,
+                redirectUrl: route(BillingRoute::name('return'), $urlParams),
+                subscriptionSpec: [
+                    'plan_code' => $request['plan_code'],
+                    'interval' => $request['interval'],
+                    'addon_codes' => $request['addon_codes'] ?? [],
+                    'extra_seats' => $request['extra_seats'] ?? 0,
+                    'coupon_code' => $couponCode,
+                ],
+            );
+        }
+
+        $customerId = $this->customerResolver->resolve($billable);
+        $currency = (string) config('mollie-billing.currency', 'EUR');
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: "Subscription {$request['plan_code']}",

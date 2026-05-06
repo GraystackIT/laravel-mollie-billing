@@ -161,6 +161,59 @@ it('accepts a Recurring coupon when allowed_types includes Recurring (action flo
     expect($coupon->code)->toBe('REC10');
 });
 
+it('rejects a Recurring coupon on a one-time-order context (allowed_types: SinglePayment only)', function (): void {
+    // One-time-orders cannot meaningfully apply a recurring coupon — no follow-up
+    // charges to attach the marker to.
+    app(CouponService::class)->create([
+        'code' => 'REC10',
+        'name' => 'Recurring 10%',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 10,
+        'max_redemptions_per_billable' => 6,
+    ]);
+
+    $billable = billableForAllowList();
+
+    try {
+        app(CouponService::class)->validate('REC10', $billable->fresh(), [
+            'productCodes' => ['some-product'],
+            'orderAmountNet' => 1000,
+            'allowed_types' => [CouponType::SinglePayment],
+        ]);
+        $this->fail('expected InvalidCouponException');
+    } catch (InvalidCouponException $e) {
+        expect($e->reason())->toBe('type_not_allowed_in_context');
+    }
+});
+
+it('rejects a SinglePayment coupon on a plan-change context (allowed_types: Recurring only)', function (): void {
+    // Plan change / seat sync / addon enable accept Recurring only; SinglePayment
+    // could leave the local plan switched while Mollie still bills the old amount
+    // when the prorata charge is fully covered.
+    app(CouponService::class)->create([
+        'code' => 'SP10',
+        'name' => 'Single 10%',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 10,
+    ]);
+
+    $billable = billableForAllowList();
+
+    try {
+        app(CouponService::class)->validate('SP10', $billable->fresh(), [
+            'planCode' => 'basic',
+            'interval' => 'monthly',
+            'orderAmountNet' => 1000,
+            'allowed_types' => [CouponType::Recurring],
+        ]);
+        $this->fail('expected InvalidCouponException');
+    } catch (InvalidCouponException $e) {
+        expect($e->reason())->toBe('type_not_allowed_in_context');
+    }
+});
+
 it('accepts an empty allowed_types as no restriction (legacy callers)', function (): void {
     app(CouponService::class)->create([
         'code' => 'CREDS',

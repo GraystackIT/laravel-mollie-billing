@@ -230,6 +230,7 @@ return [
         'last_purchased_at' => 'Last purchased on :date',
         'back_to_products' => 'Back to products',
         'error' => 'Something went wrong. Please try again.',
+        'success' => 'Purchase completed.',
         'confirm' => [
             'title' => 'Confirm purchase',
             'body' => 'You are about to purchase :product for :price (excl. VAT). You will be redirected to complete the payment.',

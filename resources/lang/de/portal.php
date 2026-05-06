@@ -230,6 +230,7 @@ return [
         'last_purchased_at' => 'Zuletzt am :date',
         'back_to_products' => 'Zurück zu Produkte',
         'error' => 'Ein Fehler ist aufgetreten. Bitte versuche es erneut.',
+        'success' => 'Kauf abgeschlossen.',
         'confirm' => [
             'title' => 'Kauf bestätigen',
             'body' => 'Du bist dabei, :product für :price (exkl. USt.) zu kaufen. Du wirst zur Zahlungsabwicklung weitergeleitet.',

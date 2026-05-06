@@ -62,7 +62,10 @@ function makeBillableWithBasicPlan(): TestBillable
     return $billable;
 }
 
-it('SinglePayment coupon reduces the prorata charge, not the recurring price', function (): void {
+it('SinglePayment coupon is rejected on plan change — surfaces as a preview warning, no discount applied', function (): void {
+    // single_payment is intentionally not allowed on plan-change / seat-sync /
+    // addon-enable paths anymore. The legitimate use case for "first charge free"
+    // lives in Subscription Checkout (Mandate-Only) and One-Time-Order purchases.
     app(CouponService::class)->create([
         'code' => 'PRORATA20',
         'name' => 'First Payment 20%',
@@ -79,20 +82,20 @@ it('SinglePayment coupon reduces the prorata charge, not the recurring price', f
         couponCodes: ['PRORATA20'],
     ));
 
-    // Recurring-price discount: must be 0 because SinglePayment is one-shot.
+    // No discount on either side — the coupon was rejected at validate-time.
     expect((int) ($preview['couponDiscountNet'] ?? 0))->toBe(0)
         ->and((int) ($preview['newPriceNet'] ?? 0))->toBe(3000);
 
-    // Recurring line items must NOT contain a coupon line (SinglePayment does not
-    // flow into the recurring side).
     $couponLines = array_values(array_filter(
         (array) ($preview['lineItems'] ?? []),
         fn ($l) => ($l['kind'] ?? null) === 'coupon',
     ));
     expect($couponLines)->toBeEmpty();
 
-    // Prorata charge is reduced compared to the aggregate total.
-    expect((int) ($preview['prorataChargeNet'] ?? 0))->toBeLessThan(1500); // ~half a period -> < 1500
+    // The PreviewService catches the InvalidCouponException and reports it as a warning.
+    $warnings = (array) ($preview['warnings'] ?? []);
+    expect($warnings)->not->toBeEmpty()
+        ->and(implode(' ', $warnings))->toContain('PRORATA20');
 });
 
 it('Recurring coupon reduces the recurring price and shows up as a recurring line item', function (): void {
