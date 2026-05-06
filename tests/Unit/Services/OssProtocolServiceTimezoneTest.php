@@ -9,11 +9,14 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\OssProtocolService;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
 
-afterEach(function (): void {
-    @unlink(storage_path('app/oss-export-2025.csv'));
+beforeEach(function (): void {
+    Storage::fake('local');
+    config()->set('mollie-billing.oss.disk', 'local');
+    config()->set('mollie-billing.oss.path', 'billing/oss-exports');
 });
 
 it('quartile boundaries are computed in UTC regardless of app.timezone', function (): void {
@@ -60,11 +63,15 @@ it('quartile boundaries are computed in UTC regardless of app.timezone', functio
         ]);
 
         $service = new OssProtocolService();
-        $path = $service->export(2025);
+        $result = $service->export(2025);
 
-        expect(file_exists($path))->toBeTrue();
+        expect($result->disk)->toBe('local');
+        expect($result->rows)->toBe(1);
 
-        $rows = array_map('str_getcsv', file($path));
+        $disk = Storage::disk('local');
+        expect($disk->exists($result->path))->toBeTrue();
+
+        $rows = array_map('str_getcsv', explode("\n", trim((string) $disk->get($result->path))));
         // Header + 1 data row: invoice fell into Q4 2025 (UTC quarter).
         expect(count($rows))->toBe(2);
         expect($rows[1][0])->toBe('4'); // quarter

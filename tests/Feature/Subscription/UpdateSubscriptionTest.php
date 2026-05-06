@@ -355,6 +355,11 @@ it('credits wallet difference on upgrade to plan with more usage quota', functio
 })->skip('covered by WalletPlanChangeAdjuster contract — see WalletUsageServiceTest');
 
 it('caps wallet balance on downgrade to plan with less usage quota', function (): void {
+    // Pin "now" to a 30-day-month day so the prorata math is deterministic.
+    // (May/Jul/Oct/Dec have 31 days; pinning to mid-April gives a clean
+    //  30-day period from periodStart=10 Apr to periodEnd=10 May.)
+    \Carbon\Carbon::setTestNow(\Carbon\Carbon::create(2026, 4, 15, 12, 0, 0, 'UTC'));
+
     config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', ['Tokens' => 100]);
 
     config()->set('mollie-billing-plans.plans.basic', [
@@ -386,10 +391,12 @@ it('caps wallet balance on downgrade to plan with less usage quota', function ()
     $wallet->refresh();
 
     // Prorated plan-change accounting:
-    //   period started 5 days ago (monthly), elapsed ≈ 5/30 ≈ 0.167
-    //   oldIncluded = 100, prorated entitlement so far = 17
+    //   period started 5 days ago (monthly, 30-day month), elapsed = 5/30 ≈ 0.167
+    //   oldIncluded = 100, prorated entitlement so far = round(100 * 5/30) = 17
     //   used = oldIncluded − balance = 100 − 60 = 40
     //   excess = used − prorated = 40 − 17 = 23
     //   targetBalance = newIncluded (50) − excess (23) = 27
     expect((int) $wallet->balanceInt)->toBe(27);
+
+    \Carbon\Carbon::setTestNow();
 });

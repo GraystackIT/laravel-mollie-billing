@@ -35,6 +35,7 @@ return new class extends Migration
                 'pm_country' => fn () => $table->string('pm_country', 2)->nullable(),
                 'tax_country_user' => fn () => $table->string('tax_country_user', 2)->nullable(),
                 'tax_country_payment' => fn () => $table->string('tax_country_payment', 2)->nullable(),
+                'tax_country_ip' => fn () => $table->string('tax_country_ip', 2)->nullable(),
                 'country_mismatch_flagged_at' => fn () => $table->timestamp('country_mismatch_flagged_at')->nullable(),
                 'vat_number' => fn () => $table->string('vat_number')->nullable(),
                 'vat_exempt' => fn () => $table->boolean('vat_exempt')->default(false),

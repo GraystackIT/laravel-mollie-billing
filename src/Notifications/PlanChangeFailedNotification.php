@@ -17,7 +17,17 @@ class PlanChangeFailedNotification extends Notification implements ShouldQueue
     public function __construct(
         public readonly Billable $billable,
         public readonly string $paymentId,
-    ) {}
+    ) {
+        $connection = config('mollie-billing.queue.connection');
+        if (is_string($connection) && $connection !== '') {
+            $this->onConnection($connection);
+        }
+
+        $queue = config('mollie-billing.queue.name');
+        if (is_string($queue) && $queue !== '') {
+            $this->onQueue($queue);
+        }
+    }
 
     /**
      * @return array<int, string>

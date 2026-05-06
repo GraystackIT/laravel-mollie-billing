@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Http\Controllers\BillingAdminController;
 use GraystackIT\MollieBilling\Http\Controllers\InvoiceDownloadController;
+use GraystackIT\MollieBilling\Http\Controllers\OssExportDownloadController;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use Illuminate\Support\Facades\Route;
 
@@ -39,6 +40,8 @@ Route::middleware(AuthorizeBillingAdmin::class)
             ->defaults('screen', 'refunds.index')->name('refunds.index');
         Route::get('oss', [BillingAdminController::class, 'show'])
             ->defaults('screen', 'oss.index')->name('oss.index');
+        Route::get('oss/exports/{export}/download', OssExportDownloadController::class)
+            ->name('oss.download');
         Route::get('bulk', [BillingAdminController::class, 'show'])
             ->defaults('screen', 'bulk.index')->name('bulk.index');
     });

@@ -56,6 +56,7 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
         int $extraSeats,
         bool $intervalChanged = false,
         int $couponDiscountNet = 0,
+        bool $forceResetStartDate = false,
     ): void {
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
@@ -66,6 +67,7 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
             'extra_seats' => $extraSeats,
             'interval_changed' => $intervalChanged,
             'coupon_discount_net' => $couponDiscountNet,
+            'force_reset_start_date' => $forceResetStartDate,
         ];
         self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
         SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];

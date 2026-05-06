@@ -28,6 +28,11 @@ final class PlanChangeIntent
         public readonly int $newSeats,
         public readonly array $currentAddons,
         public readonly array $newAddons,
+        // Past-Due-Reset: when set, the patcher must reset Mollie's recurring
+        // schedule to `now + 1 interval` instead of leaving the cadence
+        // untouched, so the failed prior charge is not retried at the new
+        // price right after the patch.
+        public readonly bool $forceResetStartDate = false,
     ) {}
 
     /**
@@ -48,6 +53,7 @@ final class PlanChangeIntent
             'new_seats' => $this->newSeats,
             'current_addons' => $this->currentAddons,
             'new_addons' => $this->newAddons,
+            'force_reset_start_date' => $this->forceResetStartDate,
         ];
     }
 
@@ -72,6 +78,7 @@ final class PlanChangeIntent
             newSeats: (int) $data['new_seats'],
             currentAddons: (array) ($data['current_addons'] ?? []),
             newAddons: (array) ($data['new_addons'] ?? []),
+            forceResetStartDate: (bool) ($data['force_reset_start_date'] ?? false),
         );
     }
 }

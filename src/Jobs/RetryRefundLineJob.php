@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -33,6 +34,7 @@ class RetryRefundLineJob implements ShouldQueue
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use UsesBillingQueue;
 
     public int $tries = 50; // ~7 Tage mit Backoff
 
@@ -41,7 +43,9 @@ class RetryRefundLineJob implements ShouldQueue
         public readonly string|int $billableId,
         public readonly array $lineData,
         public readonly string $firstAttemptAt,
-    ) {}
+    ) {
+        $this->initializeBillingQueue();
+    }
 
     /**
      * @return array<int, int>

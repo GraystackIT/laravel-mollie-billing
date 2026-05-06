@@ -42,6 +42,16 @@ class ProrataComposer
             return [];
         }
 
+        // Past-Due-Reset: the last recurring charge failed, so the current
+        // period was never paid. A plan change here is semantically a fresh
+        // start, not a mid-period adjustment — charge the full first period
+        // of the new plan, refund nothing (nothing was paid that could be
+        // refunded). Period window is `now → now + 1 interval` so the
+        // existing chargeLine helpers compute factor=1.0 automatically.
+        if ($billable->isBillingPastDue() && ! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
+            return $this->composePastDueReset($intent);
+        }
+
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
         if ($periodStart === null || $periodEnd === null) {
@@ -387,6 +397,50 @@ class ProrataComposer
             isCouponCovered: false,
             direction: 'charge',
         );
+    }
+
+    /**
+     * Past-Due reset path: charge the full first period of the new plan, no
+     * refund lines (nothing was paid that could be refunded). Uses the
+     * standard charge-line helpers with a synthetic `now → now + 1 interval`
+     * window so they compute factor = 1.0 and produce list-price amounts.
+     *
+     * @return list<ProrataLine>
+     */
+    private function composePastDueReset(PlanChangeIntent $intent): array
+    {
+        $periodStart = BillingTime::nowUtc();
+        $periodEnd = $intent->newInterval === 'yearly'
+            ? $periodStart->copy()->addYear()
+            : $periodStart->copy()->addMonth();
+
+        $charges = [];
+
+        $planLine = $this->planChargeLine($intent, $periodStart, $periodEnd);
+        if ($planLine !== null) {
+            $charges[] = $planLine;
+        }
+
+        $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
+        if ($newExtraSeats > 0) {
+            $seatsLine = $this->seatsChargeLine($intent, $newExtraSeats, $periodStart, $periodEnd);
+            if ($seatsLine !== null) {
+                $charges[] = $seatsLine;
+            }
+        }
+
+        foreach ($intent->newAddons as $code => $qty) {
+            $qty = (int) $qty;
+            if ($qty <= 0) {
+                continue;
+            }
+            $addonLine = $this->addonChargeLine($intent, (string) $code, $qty, $periodStart, $periodEnd);
+            if ($addonLine !== null) {
+                $charges[] = $addonLine;
+            }
+        }
+
+        return $charges;
     }
 
     /**

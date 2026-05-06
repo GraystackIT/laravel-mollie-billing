@@ -599,3 +599,95 @@ it('caps seat refund line when plan refund already consumed most of the budget',
     $seats = $refunds->firstWhere('kind', 'seats');
     expect($seats)->toBeNull();
 });
+
+it('Past-Due plan change: charges full first period of new plan, no refund', function (): void {
+    $billable = makeComposerBillable('starter');
+    $billable->forceFill([
+        'subscription_status' => SubscriptionStatus::PastDue,
+        'subscription_period_starts_at' => now()->subDays(40), // period long expired
+    ])->save();
+    $billable->refresh();
+
+    // Intentionally seed an old paid invoice for the starter plan — composer
+    // must NOT generate refund lines against it (nothing was paid for the
+    // unpaid current period).
+    makePeriodInvoiceWithLines($billable, [planLine('starter', 1000, 20.0)]);
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'starter', newPlan: 'enterprise',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+
+    expect($lines)->toHaveCount(1);
+    expect($lines[0]->direction)->toBe('charge');
+    expect($lines[0]->kind)->toBe('plan');
+    expect($lines[0]->code)->toBe('enterprise');
+    expect($lines[0]->amountNet)->toBe(3000); // full enterprise price, factor = 1.0
+    // No refund line — the old period was never paid.
+    $refunds = array_filter($lines, fn (ProrataLine $l) => $l->direction === 'refund');
+    expect($refunds)->toBe([]);
+});
+
+it('Past-Due plan change includes extra seats and addons at full price', function (): void {
+    $billable = makeComposerBillable('starter');
+    $billable->forceFill([
+        'subscription_status' => SubscriptionStatus::PastDue,
+        'subscription_period_starts_at' => now()->subDays(40),
+    ])->save();
+    $billable->refresh();
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'starter', newPlan: 'enterprise',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 3, // 2 extra seats
+        currentAddons: [], newAddons: ['print-gateway' => 1],
+    );
+
+    $lines = app(ProrataComposer::class)->compose($intent);
+
+    $byKind = [];
+    foreach ($lines as $line) {
+        $byKind[$line->kind] = $line;
+    }
+
+    expect(array_keys($byKind))->toEqualCanonicalizing(['plan', 'seats', 'addon']);
+    expect($byKind['plan']->amountNet)->toBe(3000);
+    // 2 extra seats × 500 = 1000
+    expect($byKind['seats']->amountNet)->toBe(1000);
+    expect($byKind['seats']->quantity)->toBe(2);
+    // print-gateway full price 900
+    expect($byKind['addon']->amountNet)->toBe(900);
+    // All charges — no refunds.
+    foreach ($lines as $line) {
+        expect($line->direction)->toBe('charge');
+    }
+});
+
+it('Past-Due → Free plan change yields empty lines (no charge for free target)', function (): void {
+    $billable = makeComposerBillable('starter');
+    $billable->forceFill([
+        'subscription_status' => SubscriptionStatus::PastDue,
+        'subscription_period_starts_at' => now()->subDays(40),
+    ])->save();
+    $billable->refresh();
+
+    $intent = new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'starter', newPlan: 'free',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    );
+
+    // Free target: composer falls through to the regular Mollie→Free path
+    // (refund-only, but in PastDue there is nothing to refund), yielding [].
+    $lines = app(ProrataComposer::class)->compose($intent);
+
+    expect($lines)->toBe([]);
+});

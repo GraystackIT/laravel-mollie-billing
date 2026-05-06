@@ -468,6 +468,8 @@ class UpdateSubscription
             newSeats: $newSeats,
             currentAddons: array_fill_keys($context->currentAddons, 1),
             newAddons: array_fill_keys(array_values($newAddons), 1),
+            forceResetStartDate: $billable->isBillingPastDue()
+                && ($context->planChanged || $context->intervalChanged),
         );
     }
 
@@ -729,7 +731,15 @@ class UpdateSubscription
         $hasChanges = $planChanged || $intervalChanged || $newSeats !== $currentSeats
             || array_diff($newAddons, $currentAddons) || array_diff($currentAddons, $newAddons);
 
-        if ($hasChanges && $periodStart !== null && $periodEnd !== null) {
+        $isPastDueReset = $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+
+        if ($isPastDueReset) {
+            // Past-Due: the current period was never paid (last charge failed).
+            // Charge the full first period of the new plan and start fresh.
+            // Mirrors PreviewService and ProrataComposer::composePastDueReset().
+            $prorataChargeNet = $newNet;
+            $prorataCreditNet = 0;
+        } elseif ($hasChanges && $periodStart !== null && $periodEnd !== null) {
             $prorata = BillingPolicy::computeProrata($currentNet, $newNet, $intervalChanged, $periodStart, $periodEnd);
             $prorataChargeNet = $prorata['charge_net'];
             $prorataCreditNet = $prorata['credit_net'];

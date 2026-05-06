@@ -216,6 +216,41 @@ trait HasBilling
 
     // ── Subscription predicates ──
 
+    public function hasOpenCountryMismatch(): bool
+    {
+        return \GraystackIT\MollieBilling\Models\BillingCountryMismatch::query()
+            ->where('billable_type', $this->getMorphClass())
+            ->where('billable_id', $this->getKey())
+            ->where('status', \GraystackIT\MollieBilling\Enums\CountryMismatchStatus::Pending)
+            ->exists();
+    }
+
+    public function latestOpenCountryMismatch(): ?\GraystackIT\MollieBilling\Models\BillingCountryMismatch
+    {
+        return \GraystackIT\MollieBilling\Models\BillingCountryMismatch::query()
+            ->where('billable_type', $this->getMorphClass())
+            ->where('billable_id', $this->getKey())
+            ->where('status', \GraystackIT\MollieBilling\Enums\CountryMismatchStatus::Pending)
+            ->latest('id')
+            ->first();
+    }
+
+    public function latestResolvedCountryMismatch(): ?\GraystackIT\MollieBilling\Models\BillingCountryMismatch
+    {
+        return \GraystackIT\MollieBilling\Models\BillingCountryMismatch::query()
+            ->where('billable_type', $this->getMorphClass())
+            ->where('billable_id', $this->getKey())
+            ->where('status', \GraystackIT\MollieBilling\Enums\CountryMismatchStatus::Resolved)
+            ->latest('resolved_at')
+            ->first();
+    }
+
+    public function hasPendingCountryCorrections(): bool
+    {
+        $meta = $this->getBillingSubscriptionMeta();
+        return ! empty($meta['country_corrections'] ?? []);
+    }
+
     public function isLocalBillingSubscription(): bool
     {
         return $this->subscription_source === SubscriptionSource::Local;

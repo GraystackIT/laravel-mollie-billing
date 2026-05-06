@@ -40,9 +40,18 @@ return [
         'subject' => '[Admin] Mehrverbrauchsabbuchung für :customer fehlgeschlagen',
         'body' => 'Nach 3 Versuchen konnte der Mehrverbrauch für :customer (:amount) nicht eingezogen werden. Der Kunde wurde auf past_due gesetzt.',
     ],
-    'country_mismatch' => [
-        'subject' => '[Admin] Länderabweichung für :customer markiert',
-        'body' => 'Die Länderprüfung ist für :customer fehlgeschlagen. Angegeben: :user, Zahlung: :payment. Manuelle Prüfung erforderlich.',
+    'country_mismatch_self' => [
+        'subject' => 'Wir müssen dein Rechnungsland verifizieren',
+        'body_intro' => 'Wir konnten das von dir angegebene Rechnungsland nicht bestätigen. Es stimmt nicht mit den Daten deiner Zahlungsmethode oder deiner IP-Adresse überein.',
+        'body_user' => 'Eingegeben: :country',
+        'body_payment' => 'Land der Zahlungsmethode: :country',
+        'body_ip' => 'Land der IP-Adresse: :country',
+        'body_consequence' => 'Deine Subscription wird zum Ende der aktuellen Periode gekündigt. Bitte korrigiere deine Rechnungsadresse über das Dashboard, damit sie aktiv bleibt.',
+        'cta' => 'Zum Billing-Dashboard',
+    ],
+    'country_mismatch_reissue_failed' => [
+        'subject' => '[Admin] Länderkorrektur-Re-Charge fehlgeschlagen (Mismatch #:mismatch)',
+        'body' => 'Ein Re-Charge zur Länderkorrektur für :customer ist bei Mollie fehlgeschlagen: :reason. Der Mismatch wurde auf Pending zurückgesetzt, damit der Kunde erneut auflösen kann; eine manuelle Nachverfolgung ist empfehlenswert.',
     ],
     'refund_processed' => [
         'subject' => 'Deine Erstattung über :amount wurde verarbeitet',

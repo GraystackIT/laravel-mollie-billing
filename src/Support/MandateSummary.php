@@ -11,7 +11,8 @@ namespace GraystackIT\MollieBilling\Support;
  * Translatable display fields (statusLabel, methodLabel, summary, expires)
  * are resolved on demand against the *current* app locale, so the same DTO
  * renders correctly in the customer portal (whatever the user's locale is)
- * and in the admin panel (forced English via AdminLocale).
+ * and in the admin panel (the AuthorizeBillingAdmin middleware pins the
+ * request locale to English).
  */
 final class MandateSummary
 {

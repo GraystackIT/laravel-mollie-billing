@@ -114,7 +114,7 @@ new class extends Component {
                                     <flux:text size="xs" class="text-zinc-500">{{ data_get($b->getBillingSubscriptionMeta(), 'payment_failure.reason', '—') }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:button size="xs" icon="arrow-path" wire:click="retry({{ $b->getKey() }})">Retry</flux:button>
+                                    <flux:button size="xs" icon="arrow-path" wire:click='retry({{ \Illuminate\Support\Js::from($b->getKey()) }})'>Retry</flux:button>
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

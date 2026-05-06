@@ -200,11 +200,20 @@ class PreviewService
         $prorataCreditNet = 0;
         $prorataRemainingDays = 0;
         $prorataTotalDays = 0;
+        $isPastDueReset = $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
 
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
 
-        if (
+        if ($isPastDueReset) {
+            // Past-Due-Reset: the current period was never paid (last charge
+            // failed), so a plan change here is a fresh start. Charge the full
+            // first period of the new plan, no credit (nothing was paid).
+            // Mirrors ProrataComposer::composePastDueReset().
+            $prorataFactor = 1.0;
+            $prorataChargeNet = $newNet;
+            $prorataCreditNet = 0;
+        } elseif (
             ($planChanged || $intervalChanged)
             && $periodStart !== null
             && $periodEnd !== null
@@ -436,6 +445,7 @@ class PreviewService
             'prorataChargeVat' => $prorataChargeNet > 0 ? (int) $prorataVat['vat'] : 0,
             'prorataCreditNet' => $prorataCreditNet,
             'prorataCreditGross' => $prorataCreditNet > 0 ? (int) $prorataVat['gross'] : 0,
+            'isPastDueReset' => $isPastDueReset,
             'currentPeriodCredit' => $periodStart !== null && $periodEnd !== null
                 ? (int) round($currentNet * $prorataFactor)
                 : 0,

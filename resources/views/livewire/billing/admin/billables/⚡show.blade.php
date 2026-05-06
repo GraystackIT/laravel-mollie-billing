@@ -2,7 +2,6 @@
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Billing\MollieMandateInspector;
-use GraystackIT\MollieBilling\Support\AdminLocale;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MandateSummary;
 use Livewire\Component;
@@ -85,9 +84,7 @@ new class extends Component {
         @php
             $planName = $this->planName();
             $planCode = $billable->subscription_plan_code;
-            $intervalLabel = $billable->subscription_interval
-                ? AdminLocale::enumLabel($billable->subscription_interval)
-                : null;
+            $intervalLabel = $billable->subscription_interval?->label();
 
             $planHintParts = [];
             if ($intervalLabel) { $planHintParts[] = $intervalLabel; }
@@ -97,15 +94,8 @@ new class extends Component {
             $planHint = $planHintParts !== [] ? implode(' · ', $planHintParts) : null;
 
             $mandate = $this->mandate();
-            // Resolve all translatable mandate strings under the admin locale so
-            // they match the rest of the panel even when the surrounding app is
-            // running in another language.
-            $mandateMethodLabel = $mandate
-                ? AdminLocale::with(fn (): string => $mandate->methodLabel())
-                : null;
-            $mandateStatusLabel = $mandate
-                ? AdminLocale::with(fn (): string => $mandate->statusLabel())
-                : null;
+            $mandateMethodLabel = $mandate?->methodLabel();
+            $mandateStatusLabel = $mandate?->statusLabel();
             $mandateAccount = $mandate?->accountDisplay();
             $mandateHolder = $mandate?->holder();
             $mandateExpiry = $mandate?->expiry();
@@ -235,7 +225,7 @@ new class extends Component {
                             </div>
                         @else
                             <div class="text-base font-semibold text-zinc-700 dark:text-zinc-300">
-                                {{ AdminLocale::with(fn () => __('billing::portal.payment_method.status.valid')) }}
+                                {{ __('billing::portal.payment_method.status.valid') }}
                             </div>
                         @endif
                     </div>

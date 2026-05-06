@@ -59,35 +59,77 @@ Reverse-charge applies when **all three** are true:
 
 When all three conditions hold, `VatCalculationService::calculate()` returns gross = net, rate = 0, and the invoice line shows the customer's VAT number with a reverse-charge note. The invoice currency and the VAT-rate-source mechanics still flow through the same code path.
 
-## Country reconciliation (audit trail)
+## Country reconciliation (three-way check)
 
-The package compares two country sources to detect discrepancies that may indicate VAT fraud or misdeclaration:
+The package compares **three** country sources to detect billable / payment / IP divergence:
 
 - `tax_country_user` — what the customer entered in the form (mirrored from `billing_country` on save).
-- `tax_country_payment` — what Mollie returns as `payment.countryCode` (BIN-derived for cards, IBAN-derived for SEPA, fixed-per-method for iDEAL/Bancontact). This is **independent of user input**.
+- `tax_country_payment` — what Mollie returns as `payment.countryCode` (BIN-derived for cards, IBAN-derived for SEPA, fixed-per-method for iDEAL/Bancontact). Independent of user input.
+- `tax_country_ip` — what `IpGeolocationManager::getCountry($ip)` returns at the moment the user submits the checkout form. Captured once at billable creation and again on the final submit (same checkout request), persisted on the billable.
 
-`CountryMatchService::check(Billable $billable)` runs:
+### B2B short-circuit
 
-- After the **first payment** (in `MollieWebhookController::persistFirstPaymentArtifacts()`), and
-- After **every recurring payment** (in `MollieWebhookController::handleSubscriptionPaymentPaid()`).
+If the billable has a non-empty `vat_number`, the country-mismatch flow is **skipped entirely**. VIES (validated up-front in `ValidatesVatNumber::validateVatNumberLive()`) is the authoritative signal under reverse-charge — the bank or card country is fiscally irrelevant. The form-level VIES gate ensures that a non-empty `vat_number` is always either VIES-valid for the matching country prefix or a save error.
 
-The recurring path also refreshes `tax_country_payment` from the latest payment, so a customer switching to a card from another country triggers a fresh check.
+### B2C three-way logic
 
-When the two sources are present and differ, a row is inserted into `billing_country_mismatches` with status `Pending`. The check is **idempotent** — repeated calls with the same `(tax_country_user, tax_country_payment)` for the same billable do not create duplicate rows (any `Pending` or `Resolved` row with the same tuple blocks a new insert).
+`CountryMatchService::check(Billable $billable)` runs after every payment (first-payment, recurring, local→Mollie upgrade — same call sites as before). For B2C:
 
-A mismatch is informational, not blocking. The customer's checkout and renewals continue to work. An admin notification is dispatched (`CountryMismatchNotification`) and the row is resolvable from the admin portal.
+- If `tax_country_user` is null or no payment / IP signal is yet known → no flag.
+- If `tax_country_user` matches **at least one** of `tax_country_payment` or `tax_country_ip` → no flag.
+- Otherwise → flag.
 
-> **Note:** A mismatch is a mismatch — there is no priority field. Admins can use the billable's VAT-number column to triage: a row with a VIES-valid VAT number is likely B2B reverse-charge (where the payment country is OSS-secondary anyway), and rows without a VAT number deserve closer review.
+The flag is idempotent: only one Pending row per billable. Repeated `check()` calls while the row exists are no-ops. They do not re-send the customer notification and do not re-cancel the subscription.
 
-### Resolution
+### What `flag()` does
 
-When an admin clicks "Resolve" in the admin portal, `CountryMatchService::resolve()`:
+When a mismatch is flagged, the service performs all of these atomically:
 
-1. Marks the row `Resolved` with `resolved_at` and `resolved_by_user_id`.
-2. Compares the corrected `tax_country_user` rate against the original invoice's plan-line rate.
-3. If they differ by more than 0.001%, **automatically issues a credit note** for the original invoice's net amount. Apps can then re-issue an invoice with the correct VAT.
+1. Insert a `BillingCountryMismatch` row with `status=Pending` and the three country values.
+2. Mark every existing positive-net invoice of the billable (any `invoice_kind` except `Refund`) with `mismatch_id = $mismatch->id` so the resolve flow knows exactly which invoices to refund and reissue.
+3. Set `country_mismatch_flagged_at` on the billable for downstream filtering.
+4. Cancel the subscription at end of period via `CancelSubscription::handle($billable, immediately: false)`. The current paid period stays active; no further Mollie renewal will fire.
+5. Dispatch the `CountryMismatchFlagged` event.
+6. Email the **billable** (not system admins) via `CountryMismatchSelfNotification`. Recipients are resolved through `MollieBilling::notifyBillingAdmins($billable)`; if that callback returns nothing, the package falls back to a single on-demand mail to `$billable->getBillingEmail()`.
 
-This is the only place in the package where a country reconciliation event triggers a financial document.
+A `RequireResolvedCountryMismatch` middleware (alias `billing.country-resolved`) is mounted on the booking-relevant portal routes (`plan`, `addons`, `seats`, `products`, `usage`) and on the checkout route. While a Pending mismatch exists for the resolved billable, those routes redirect to the billing dashboard. The dashboard, billing-data, invoices, and return routes stay reachable so the user can correct the address and view history.
+
+### Self-service resolve (dashboard modal)
+
+The dashboard surfaces three banner states:
+
+1. **Pending mismatch** — danger callout listing the three country values plus a `Correct address` CTA that opens the self-service modal.
+2. **Resolved but subscription still cancelled** — warning callout with a `Reactivate subscription` button (within the subscription end-date grace period) or a `Choose a plan` button (after grace period).
+3. **Re-charge in progress** — info callout shown while `subscription_meta.country_corrections` has pending entries (waiting for Mollie's `country_correction` webhook).
+
+The self-service modal asks the user for the correct invoice address and a country chosen from the **payment- or IP-derived options only**. The country dropdown does not allow free-form input. The user must tick a confirmation checkbox before submit (refund + reissue is acknowledged). The modal explicitly disables saving to a country that doesn't match either signal — there is no escape hatch on this UI; if neither signal is correct, the user must contact support.
+
+The address-edit page (`billing-data.blade.php`) disables the country dropdown while a Pending mismatch exists and surfaces a hint banner pointing back to the dashboard. The `save()` action is a defence-in-depth gate: even direct wire calls cannot change the country while the mismatch is open.
+
+### Resolve flow (`CountryMatchService::resolve()`)
+
+Triggered from the user modal or the admin override. Steps, in order:
+
+1. **Refund every linked invoice** (filter: `mismatch_id = $mismatch->id` AND `invoice_kind != Refund` AND `amount_net > 0` AND not already fully refunded). Each refund goes through `RefundInvoiceService::refundFully()` with `RefundReasonCode::BillingError`, which creates a local credit note and calls Mollie's refund API. The credit-note serial is captured per original invoice for the reissue PDF.
+2. **Update the billable** in a DB transaction: `tax_country_user = billing_country = $newCountry`, plus the mismatch row gets `chosen_country`, `status=Resolved`, `resolved_at`, and `resolved_by_user_id`.
+3. **Issue a Mollie correction charge** per refunded invoice via `InvoiceService::issueCorrectionCharge()` with metadata `type=country_correction`. The customer-facing reissue invoice is created when the `country_correction` payment confirms (in `MollieWebhookController::handleCountryCorrectionPaid()`, which preserves the original invoice's `period_start` / `period_end` for OSS-correct accounting).
+4. Dispatch `CountryMismatchResolved`.
+
+**Idempotency.** If a re-charge fails (e.g. mandate revoked) the webhook handler `handleCountryCorrectionFailed` rolls the mismatch back to Pending, drops the failed payment from `subscription_meta.country_corrections`, and notifies the billable's admins via `CountryMismatchReissueFailedNotification`. The user can retry the resolve modal: refunds with an existing credit note are skipped (`refunded_net >= amount_net`), and re-charges with a still-pending entry in `subscription_meta.country_corrections` are skipped (no double charge). Only the missing pieces are retried.
+
+**No auto-reactivate.** Mollie subscriptions cannot be un-cancelled — `ResubscribeSubscription` creates a new Mollie subscription via `CreateSubscription`, which can trigger an immediate charge at the next renewal day. The package therefore never auto-resumes after a resolve. The user clicks the explicit `Reactivate subscription` button on the dashboard.
+
+### Admin override
+
+The admin portal's mismatch list still has Pending and Resolved tabs. The Pending resolve modal lets an admin pick the user-, payment-, or IP-derived country, **or** enter any ISO-2 code freely (admins know the context). The chosen country goes through the same `CountryMatchService::resolve()` path as the user modal. `resolved_by_user_id` records the operator.
+
+### Edge cases
+
+- **Local-subscription invoices** (no `mollie_payment_id`) still get a local credit note (`RefundInvoiceService` is no-op for the Mollie call) but the reissue charge in step 3 will fail (no mandate) — these billables stay flagged and surface a manual follow-up via `handleCountryCorrectionFailed`. In practice, free-tier billables almost never produce paid invoices, so this is a rare edge case.
+- **VIES outage during B2B save** — `validateVatNumberLive` throws `ViesUnavailableException` and the form blocks. Status quo, intentional: we never persist a `vat_number` we couldn't verify, otherwise reverse-charge silently stops applying when the audit row is missing.
+- **VIES says invalid** — same hard block: form refuses save until the user fixes or clears the UID. Clearing the UID drops the billable into the B2C flow.
+- **User fixes UID after a B2C mismatch was flagged** — entering a valid UID does not auto-clear the existing mismatch; past invoices were issued without reverse-charge and need the explicit refund + reissue. The user runs the resolve modal first, then enters the UID.
+- **Mandate from a different country than the chosen one** (e.g. SEPA DE-IBAN paying for an AT-resident customer) — the resolve corrects the past and reactivates the sub on the new country, but the next Mollie recurring payment will still report `payment.countryCode = DE`. With IP also pointing at AT, that's still an `AT vs DE+AT` match (one signal agrees) — no new flag. With IP at CH, the cycle starts again.
 
 ## OSS quarterly export
 

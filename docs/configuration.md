@@ -124,21 +124,34 @@ Custom drivers can be registered through `MollieBilling::ipGeolocation(...)`.
 'additional_countries' => [
     // 'CH' => ['vat_rate' => 8.1, 'name' => 'Switzerland'],
 ],
+
+'oss' => [
+    'disk' => env('BILLING_OSS_DISK'),                    // null → falls back to invoices.disk
+    'path' => env('BILLING_OSS_PATH', 'billing/oss-exports'),
+    'temporary_url_expiry' => 30,                         // minutes (S3-compatible disks)
+],
 ```
 
 - `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code.
 - `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list.
+- `oss.disk` — Laravel filesystem disk where generated OSS protocol CSVs are stored. Works with any S3-compatible private bucket; the admin portal hands out a short-lived presigned URL via `Storage::temporaryUrl()`. When `null`, the disk configured under `invoices.disk` is reused.
+- `oss.path` — base path on the disk. Files are written as `{path}/oss-export-{YYYY}-{timestamp}.csv` so previous exports remain available as an audit trail.
+- `oss.temporary_url_expiry` — validity window of the download link in minutes (only relevant for non-`local` disks).
+
+OSS exports run as a queued job (`GenerateOssExportJob`) — admins click "Generate" / "Regenerate" in the admin panel and the table auto-refreshes via `wire:poll` until the file is ready. The CLI command `php artisan billing:oss-export {year}` runs synchronously and persists a row in the same `billing_oss_exports` audit table, so CLI exports are downloadable from the portal too.
 
 ### Queue
 
 ```php
 'queue' => [
     'connection' => env('BILLING_QUEUE_CONNECTION'),
-    'name'       => env('BILLING_QUEUE_NAME', 'billing'),
+    'name'       => env('BILLING_QUEUE_NAME'),
 ],
 ```
 
-All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `TrialExpiredNotification`, …) are dispatched onto this connection/queue. `connection: null` → the app's default connection.
+All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `RevokeMollieMandateJob`, `RetrySubscriptionPatchJob`, `RetryRefundLineJob`, `CleanupStalePendingProrataChangeJob`, `PruneProcessedWebhooksJob`, `ApplyScheduledChangesJob`, `SyncSeatsJob`, `GenerateOssExportJob`) and the queued `PlanChangeFailedNotification` are dispatched onto this connection/queue.
+
+Both keys default to `null`, which falls back to the framework default connection (`config('queue.default')`) and the default queue name. Set `BILLING_QUEUE_NAME=billing` (and a dedicated worker) when you want to isolate billing work from the rest of your application's queue.
 
 ---
 
@@ -357,6 +370,7 @@ It reports two classes of issues:
   - `user_key_type` not in `uuid|ulid|int`
   - `plan_change_mode` not a valid `PlanChangeMode` enum value
   - `invoices.disk` not declared in `config/filesystems.php`
+  - `oss.disk` (when set) not declared in `config/filesystems.php`
   - `invoices.serial_number.format` empty or missing the `C` (counter) slot
   - `ip_geolocation.driver` not declared in `ip_geolocation.drivers`
   - `checkout_countries.include|exclude` entries that are not uppercase ISO-3166-1 alpha-2 codes

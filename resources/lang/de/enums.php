@@ -55,6 +55,12 @@ return [
         'pending' => 'Ausstehend',
         'resolved' => 'Gelöst',
     ],
+    'country_mismatch_strategy' => [
+        'auto_vies' => 'Automatisch (VIES)',
+        'auto_payment' => 'Automatisch (Zahlungsland)',
+        'auto_noop' => 'Automatisch (keine Aktion nötig)',
+        'manual' => 'Manuell',
+    ],
     'plan_change_mode' => [
         'immediate' => 'Sofort',
         'end_of_period' => 'Periodenende',
@@ -66,5 +72,11 @@ return [
         'canceled' => 'Storniert',
         'suspended' => 'Ausgesetzt',
         'completed' => 'Abgeschlossen',
+    ],
+    'oss_export_status' => [
+        'queued' => 'In Warteschlange',
+        'processing' => 'In Bearbeitung',
+        'ready' => 'Bereit',
+        'failed' => 'Fehlgeschlagen',
     ],
 ];

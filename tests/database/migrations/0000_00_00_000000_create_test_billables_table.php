@@ -25,6 +25,7 @@ return new class extends Migration
 
             $table->string('tax_country_user', 2)->nullable();
             $table->string('tax_country_payment', 2)->nullable();
+            $table->string('tax_country_ip', 2)->nullable();
             $table->timestamp('country_mismatch_flagged_at')->nullable();
             $table->string('vat_number')->nullable();
             $table->boolean('vat_exempt')->default(false);

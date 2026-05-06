@@ -128,6 +128,16 @@ new class extends Component {
             }
         }
 
+        // Defence in depth: even if the disabled select is bypassed via direct
+        // wire calls, refuse a country change while a mismatch is open. The
+        // self-service modal on the dashboard is the single allowed path.
+        if ($billable->hasOpenCountryMismatch()
+            && strtoupper((string) $billable->getBillingCountry()) !== strtoupper($this->billing_country)) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'billing_country' => __('billing::portal.country_mismatch.billing_data_warning'),
+            ]);
+        }
+
         $countryChanged = strtoupper((string) $billable->getBillingCountry()) !== strtoupper($this->billing_country);
 
         // Atomic: persisting the billable with a vat_number and recording the
@@ -313,6 +323,7 @@ new class extends Component {
     $paymentCountryMismatch = $this->paymentCountryMismatch($billable);
     $countryDirty = strtoupper($persistedCountry) !== strtoupper($billing_country);
     $reverseCharge = $this->isReverseCharge();
+    $hasOpenMismatch = $billable?->hasOpenCountryMismatch() ?? false;
 @endphp
 
 <div class="space-y-6"
@@ -351,6 +362,12 @@ new class extends Component {
             {{ __('billing::portal.no_billable') }}
         </flux:callout>
     @else
+        @if ($hasOpenMismatch)
+            <flux:callout variant="warning" icon="exclamation-triangle">
+                {{ __('billing::portal.country_mismatch.billing_data_warning') }}
+            </flux:callout>
+        @endif
+
         {{-- Invoice address + VAT number --}}
         <flux:card>
             <div class="space-y-6">
@@ -375,11 +392,14 @@ new class extends Component {
                     <flux:input wire:model="billing_city" :label="__('billing::checkout.city')" type="text" required />
                     <flux:field>
                         <flux:label>{{ __('billing::checkout.country') }}</flux:label>
-                        <flux:select wire:model.live="billing_country" required>
+                        <flux:select wire:model.live="billing_country" required :disabled="$hasOpenMismatch">
                             @foreach ($this->countries() as $iso => $name)
                                 <flux:select.option value="{{ $iso }}">{{ $name }}</flux:select.option>
                             @endforeach
                         </flux:select>
+                        @if ($hasOpenMismatch)
+                            <flux:description>{{ __('billing::portal.billing_data.country_locked_by_mismatch') }}</flux:description>
+                        @endif
                         <flux:error name="billing_country" />
                     </flux:field>
                     <flux:field>

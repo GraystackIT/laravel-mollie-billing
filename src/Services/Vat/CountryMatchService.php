@@ -5,87 +5,105 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Vat;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
+use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\CountryMismatchFlagged;
 use GraystackIT\MollieBilling\Events\CountryMismatchResolved;
-use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
-use GraystackIT\MollieBilling\Notifications\CountryMismatchNotification;
+use GraystackIT\MollieBilling\Notifications\CountryMismatchSelfNotification;
+use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 
+/**
+ * Three-way country reconciliation for B2C billables.
+ *
+ * Compares user-declared, payment-method, and IP-derived country codes. If
+ * the user's declared country matches at least one of the other signals, the
+ * billable is consistent. Otherwise a {@see BillingCountryMismatch} is opened,
+ * the subscription is scheduled for cancel-at-period-end, and the billable is
+ * notified by email so the user can self-correct via the dashboard modal.
+ *
+ * B2B billables (those with a non-empty `vat_number`) are skipped: VIES is the
+ * authoritative signal there, and the bank/card country is fiscally irrelevant
+ * under the reverse-charge mechanism.
+ */
 class CountryMatchService
 {
     public function __construct(
-        private readonly VatCalculationService $vat,
-        private readonly InvoiceService $salesInvoices,
+        private readonly CancelSubscription $cancelSubscription,
+        private readonly RefundInvoiceService $refunds,
+        private readonly InvoiceService $invoices,
     ) {
     }
 
     /**
-     * Compare user-declared and payment-method countries.
-     * Flags a mismatch (idempotent) when:
-     *   - both are present and differ, or
-     *   - tax_country_payment is present but tax_country_user is missing
-     *     (a data bug upstream — recorded as user='?' so admins can act).
+     * Run the three-way check. Returns the freshly flagged mismatch (or the
+     * existing pending one if already flagged), or null if everything is fine
+     * or the billable is B2B / has insufficient signals.
      */
-    public function check(Billable $billable): void
+    public function check(Billable $billable): ?BillingCountryMismatch
     {
         /** @var Model $model */
         $model = $billable;
 
-        $countries = [
-            'tax_country_user' => $this->normalize($model->getAttribute('tax_country_user')),
-            'tax_country_payment' => $this->normalize($model->getAttribute('tax_country_payment')),
-        ];
-
-        if ($countries['tax_country_payment'] === null) {
-            // Nothing to compare against yet (e.g. before first payment).
-            return;
+        $vatNumber = trim((string) ($model->getAttribute('vat_number') ?? ''));
+        if ($vatNumber !== '') {
+            return null;
         }
 
-        if ($countries['tax_country_user'] === null) {
-            $this->flag($billable, [
-                'tax_country_user' => '?',
-                'tax_country_payment' => $countries['tax_country_payment'],
-            ]);
+        $user = $this->normalize($model->getAttribute('tax_country_user'));
+        $payment = $this->normalize($model->getAttribute('tax_country_payment'));
+        $ip = $this->normalize($model->getAttribute('tax_country_ip'));
 
-            return;
+        if ($user === null) {
+            return null;
         }
 
-        if ($countries['tax_country_user'] !== $countries['tax_country_payment']) {
-            $this->flag($billable, $countries);
+        $signals = array_values(array_filter([$payment, $ip]));
+        if ($signals === []) {
+            return null;
         }
+
+        if (in_array($user, $signals, true)) {
+            return null;
+        }
+
+        return $this->flag($billable, [
+            'tax_country_user' => $user,
+            'tax_country_payment' => $payment,
+            'tax_country_ip' => $ip,
+        ]);
     }
 
     /**
-     * Flag a mismatch — idempotent: if a row with the same (user, payment)
-     * already exists for this billable in any non-final state, do nothing.
+     * Idempotent flag: if a Pending mismatch already exists for this billable,
+     * return it without resending notifications, re-marking invoices, or
+     * re-cancelling the subscription.
      *
-     * @param  array{tax_country_user:?string,tax_country_payment:?string}  $countries
+     * @param  array{tax_country_user:?string,tax_country_payment:?string,tax_country_ip:?string}  $countries
      */
-    public function flag(Billable $billable, array $countries): ?BillingCountryMismatch
+    public function flag(Billable $billable, array $countries): BillingCountryMismatch
     {
         /** @var Model $model */
         $model = $billable;
 
-        $query = BillingCountryMismatch::query()
+        $existing = BillingCountryMismatch::query()
             ->where('billable_type', $model->getMorphClass())
             ->where('billable_id', $model->getKey())
-            ->where('tax_country_user', $countries['tax_country_user'] ?? '');
-
-        $paymentCountry = $countries['tax_country_payment'] ?? null;
-        $paymentCountry === null
-            ? $query->whereNull('tax_country_payment')
-            : $query->where('tax_country_payment', $paymentCountry);
-
-        $existing = $query->first();
+            ->where('status', CountryMismatchStatus::Pending)
+            ->first();
 
         if ($existing !== null) {
-            return null;
+            return $existing;
         }
 
         $mismatch = BillingCountryMismatch::create([
@@ -93,69 +111,212 @@ class CountryMatchService
             'billable_id' => $model->getKey(),
             'tax_country_user' => $countries['tax_country_user'] ?? '',
             'tax_country_payment' => $countries['tax_country_payment'] ?? null,
+            'tax_country_ip' => $countries['tax_country_ip'] ?? null,
             'status' => CountryMismatchStatus::Pending,
         ]);
 
+        BillingInvoice::query()
+            ->where('billable_type', $model->getMorphClass())
+            ->where('billable_id', $model->getKey())
+            ->where('invoice_kind', '!=', InvoiceKind::Refund)
+            ->where('amount_net', '>', 0)
+            ->whereNull('mismatch_id')
+            ->update(['mismatch_id' => $mismatch->id]);
+
         $model->forceFill(['country_mismatch_flagged_at' => BillingTime::nowUtc()])->save();
+
+        try {
+            $this->cancelSubscription->handle($billable, immediately: false);
+        } catch (\Throwable $e) {
+            Log::warning('Country mismatch: cancel-at-period-end failed', [
+                'billable_id' => (string) $model->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         CountryMismatchFlagged::dispatch($billable, $mismatch);
 
-        $notifiables = MollieBilling::notifyAdmin();
-        if (! empty($notifiables)) {
-            Notification::send(
-                $notifiables,
-                new CountryMismatchNotification($billable, $mismatch),
-            );
-        }
+        $this->notifyBillable($billable, $mismatch);
+
+        $mismatch->forceFill(['notified_at' => BillingTime::nowUtc()])->save();
 
         return $mismatch;
     }
 
-    public function resolve(Billable $billable, BillingCountryMismatch $mismatch, mixed $resolvedBy): void
+    /**
+     * Resolve a mismatch end-to-end: refund all linked invoices, update the
+     * billable's country, mark the mismatch as Resolved, and trigger Mollie
+     * re-charges with the new country's VAT rate.
+     *
+     * Subscription is NOT auto-resumed — the user must explicitly resubscribe
+     * from the dashboard banner.
+     *
+     * Idempotency: invoices that are already fully refunded are skipped. Any
+     * `country_corrections` pending entry for an original invoice is reused
+     * rather than duplicated.
+     */
+    public function resolve(Billable $billable, BillingCountryMismatch $mismatch, string $newCountry, mixed $resolvedBy = null): void
     {
+        /** @var Model $model */
+        $model = $billable;
+
+        $newCountry = strtoupper(trim($newCountry));
+        if (strlen($newCountry) !== 2) {
+            throw new \InvalidArgumentException("Invalid ISO-2 country: {$newCountry}");
+        }
+
+        if ($mismatch->status === CountryMismatchStatus::Resolved && $mismatch->chosen_country === $newCountry) {
+            // Already resolved to the same country — only retry pending re-charges.
+            $this->retryPendingReissues($billable, $mismatch, $newCountry);
+            return;
+        }
+
+        $invoices = $mismatch->invoices()
+            ->where('invoice_kind', '!=', InvoiceKind::Refund)
+            ->where('amount_net', '>', 0)
+            ->get();
+
         $resolvedById = $resolvedBy instanceof Model ? $resolvedBy->getKey() : $resolvedBy;
 
-        $mismatch->forceFill([
-            'status' => CountryMismatchStatus::Resolved,
-            'resolved_at' => BillingTime::nowUtc(),
-            'resolved_by_user_id' => $resolvedById,
-        ])->save();
+        $creditNoteSerialsByOriginal = [];
+        foreach ($invoices as $invoice) {
+            if ((int) $invoice->refunded_net >= (int) $invoice->amount_net) {
+                continue;
+            }
+
+            try {
+                $creditNote = $this->refunds->refundFully(
+                    $invoice,
+                    RefundReasonCode::BillingError,
+                    'Country mismatch correction'
+                );
+                $creditNoteSerialsByOriginal[(int) $invoice->id] = (string) ($creditNote->serial_number ?? '');
+            } catch (\Throwable $e) {
+                Log::error('Country mismatch resolve: refund failed', [
+                    'mismatch_id' => $mismatch->id,
+                    'invoice_id' => (int) $invoice->id,
+                    'error' => $e->getMessage(),
+                ]);
+
+                throw $e;
+            }
+        }
+
+        DB::transaction(function () use ($model, $newCountry, $mismatch, $resolvedById): void {
+            $model->forceFill([
+                'tax_country_user' => $newCountry,
+                'billing_country' => $newCountry,
+            ])->save();
+
+            $mismatch->forceFill([
+                'status' => CountryMismatchStatus::Resolved,
+                'chosen_country' => $newCountry,
+                'resolved_at' => BillingTime::nowUtc(),
+                'resolved_by_user_id' => $resolvedById,
+            ])->save();
+        });
+
+        foreach ($invoices as $invoice) {
+            $serial = $creditNoteSerialsByOriginal[(int) $invoice->id] ?? null;
+
+            if ($this->hasPendingReissue($billable, (int) $invoice->id)) {
+                continue;
+            }
+
+            try {
+                $this->invoices->issueCorrectionCharge(
+                    $invoice,
+                    $billable,
+                    $newCountry,
+                    (int) $mismatch->id,
+                    $serial,
+                );
+            } catch (\Throwable $e) {
+                Log::error('Country mismatch resolve: re-charge failed', [
+                    'mismatch_id' => $mismatch->id,
+                    'original_invoice_id' => (int) $invoice->id,
+                    'error' => $e->getMessage(),
+                ]);
+                // Do not abort: the mismatch is already Resolved locally;
+                // the failed Mollie call will be retried via the same
+                // resolve() entry point or surfaced via the webhook
+                // failure handler.
+            }
+        }
 
         CountryMismatchResolved::dispatch($billable, $mismatch, $resolvedBy);
+    }
 
-        // If a corrective VAT rate differs from the original invoice's plan-line rate, issue a credit note.
-        $original = $billable->latestBillingInvoice();
-        if ($original instanceof BillingInvoice) {
-            $newCountry = $this->normalize($mismatch->tax_country_user);
-            if ($newCountry !== null) {
-                try {
-                    $newRate = $this->vat->vatRateFor($newCountry);
-                    $originalRate = $this->originalPlanVatRate($original);
+    /**
+     * Retry path for an already-resolved mismatch where some Mollie re-charges
+     * never confirmed. Refunds are not repeated; only missing pending entries
+     * are re-issued.
+     */
+    private function retryPendingReissues(Billable $billable, BillingCountryMismatch $mismatch, string $newCountry): void
+    {
+        $invoices = $mismatch->invoices()
+            ->where('invoice_kind', '!=', InvoiceKind::Refund)
+            ->where('amount_net', '>', 0)
+            ->get();
 
-                    if ($originalRate !== null && abs($newRate - $originalRate) > 0.001) {
-                        $this->salesInvoices->createCreditNote($original, $original->amount_net);
-                    }
-                } catch (\Throwable) {
-                    // Non-EU / unknown country during reconciliation: skip auto-credit-note.
-                }
+        foreach ($invoices as $invoice) {
+            if ($this->hasPendingReissue($billable, (int) $invoice->id)) {
+                continue;
+            }
+
+            // Lookup the credit note serial for this original via line_items.parent_invoice_id.
+            $serial = BillingInvoice::query()
+                ->where('billable_type', $invoice->billable_type)
+                ->where('billable_id', $invoice->billable_id)
+                ->where('invoice_kind', InvoiceKind::Refund)
+                ->whereJsonContains('line_items', [['parent_invoice_id' => (int) $invoice->id]])
+                ->orderByDesc('id')
+                ->value('serial_number');
+
+            try {
+                $this->invoices->issueCorrectionCharge(
+                    $invoice,
+                    $billable,
+                    $newCountry,
+                    (int) $mismatch->id,
+                    is_string($serial) ? $serial : null,
+                );
+            } catch (\Throwable $e) {
+                Log::error('Country mismatch retry: re-charge failed', [
+                    'mismatch_id' => $mismatch->id,
+                    'original_invoice_id' => (int) $invoice->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
     }
 
-    /**
-     * Liest die VAT-Rate des Plan-Line-Items aus der Original-Invoice.
-     * Multi-VAT-Invoices können mehrere Raten haben — die Plan-Line ist hier die referenzielle.
-     */
-    private function originalPlanVatRate(BillingInvoice $invoice): ?float
+    private function hasPendingReissue(Billable $billable, int $originalInvoiceId): bool
     {
-        foreach ((array) ($invoice->line_items ?? []) as $line) {
-            if (($line['kind'] ?? null) === 'plan' && isset($line['vat_rate'])) {
-                return (float) $line['vat_rate'];
+        $meta = $billable->getBillingSubscriptionMeta();
+        $pending = (array) ($meta['country_corrections'] ?? []);
+        foreach ($pending as $entry) {
+            if ((int) ($entry['original_invoice_id'] ?? 0) === $originalInvoiceId) {
+                return true;
             }
         }
-        // Fallback: erste Line.
-        $first = ($invoice->line_items ?? [])[0] ?? null;
-        return $first !== null && isset($first['vat_rate']) ? (float) $first['vat_rate'] : null;
+        return false;
+    }
+
+    private function notifyBillable(Billable $billable, BillingCountryMismatch $mismatch): void
+    {
+        $notification = new CountryMismatchSelfNotification($billable, $mismatch);
+
+        $recipients = MollieBilling::notifyBillingAdmins($billable);
+        if (! empty($recipients)) {
+            Notification::send($recipients, $notification);
+            return;
+        }
+
+        $email = $billable->getBillingEmail();
+        if (is_string($email) && $email !== '') {
+            Notification::route('mail', $email)->notify($notification);
+        }
     }
 
     private function normalize(mixed $code): ?string

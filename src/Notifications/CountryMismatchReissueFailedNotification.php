@@ -10,13 +10,14 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class CountryMismatchNotification extends Notification
+class CountryMismatchReissueFailedNotification extends Notification
 {
     use Queueable;
 
     public function __construct(
         public readonly Billable $billable,
         public readonly BillingCountryMismatch $mismatch,
+        public readonly string $reason,
     ) {
     }
 
@@ -31,14 +32,14 @@ class CountryMismatchNotification extends Notification
     public function toMail(object $notifiable): MailMessage
     {
         $app = config('mollie-billing.company_name', config('app.name'));
-        $customer = $this->billable->getBillingName();
 
         return (new MailMessage())
-            ->subject(__('billing::notifications.country_mismatch.subject', ['customer' => $customer]))
-            ->line(__('billing::notifications.country_mismatch.body', [
-                'customer' => $customer,
-                'user' => $this->mismatch->tax_country_user ?? '-',
-                'payment' => $this->mismatch->tax_country_payment ?? '-',
+            ->subject(__('billing::notifications.country_mismatch_reissue_failed.subject', [
+                'mismatch' => (string) $this->mismatch->id,
+            ]))
+            ->line(__('billing::notifications.country_mismatch_reissue_failed.body', [
+                'customer' => $this->billable->getBillingName(),
+                'reason' => $this->reason,
             ]))
             ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
             ->line(__('billing::emails.signature_line', ['app' => $app]));
@@ -50,10 +51,10 @@ class CountryMismatchNotification extends Notification
     public function toArray(object $notifiable): array
     {
         return [
-            'type' => 'country_mismatch',
+            'type' => 'country_mismatch_reissue_failed',
+            'mismatch_id' => $this->mismatch->id,
             'customer' => $this->billable->getBillingName(),
-            'tax_country_user' => $this->mismatch->tax_country_user ?? null,
-            'tax_country_payment' => $this->mismatch->tax_country_payment ?? null,
+            'reason' => $this->reason,
         ];
     }
 }

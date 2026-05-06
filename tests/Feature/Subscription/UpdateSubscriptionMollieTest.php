@@ -69,6 +69,36 @@ function makeMollieSubBillable(string $plan = 'free', string $interval = 'monthl
     return $b->refresh();
 }
 
+it('Past-Due plan change charges full new-plan price (not prorata factor)', function (): void {
+    Event::fake([PlanChangePending::class]);
+
+    $b = makeMollieSubBillable('starter', 'monthly');
+    config()->set('mollie-billing-plans.plans.starter', [
+        'name' => 'Starter',
+        'tier' => 1,
+        'trial_days' => 0,
+        'included_seats' => 1,
+        'feature_keys' => [],
+        'allowed_addons' => [],
+        'intervals' => [
+            'monthly' => ['base_price_net' => 1000, 'seat_price_net' => null, 'included_usages' => []],
+        ],
+    ]);
+    $b->forceFill([
+        'subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::PastDue,
+        'subscription_period_starts_at' => now()->subDays(40),
+    ])->save();
+
+    app(UpdateSubscription::class)->update($b->refresh(), ['plan_code' => 'pro', 'interval' => 'monthly']);
+
+    // Spy records ['prorata_charge', $chargeNet]. Pro monthly = 2900 (net).
+    // In a normal prorata flow with 5 days remaining, this would be ~480.
+    // In Past-Due we charge the FULL net of 2900.
+    $chargeCall = collect(SpyUpdateSubscription::$calls)->firstWhere(0, 'prorata_charge');
+    expect($chargeCall)->not->toBeNull();
+    expect($chargeCall[1])->toBe(2900);
+});
+
 it('stores pending plan change for Mollie upgrade and does not apply immediately', function (): void {
     Event::fake([PlanChangePending::class]);
 

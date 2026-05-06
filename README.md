@@ -14,7 +14,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 
 - Mollie subscriptions, mandates and webhooks (built on Mollie's official Laravel SDK v4 with typed request objects)
 - VAT calculation, VIES validation and OSS export (`mpociot/vat-calculator`)
-- Country-mismatch reconciliation: user-declared vs payment-derived country, audit-trail flagged at first and every recurring payment (see [docs/vat-handling.md](docs/vat-handling.md))
+- Country-mismatch reconciliation: three-way reconciliation of user-declared, payment-derived, and IP-derived country at every recurring payment. If the user country matches none of the other signals, the subscription is set to cancel-at-period-end, the billable is notified by email, and the user can self-correct via a dashboard modal (refund + reissue at the corrected VAT rate). B2B billables with a VIES-validated VAT number bypass the check (reverse-charge makes the bank country fiscally irrelevant). Manual admin override available. See [docs/vat-handling.md](docs/vat-handling.md).
 - Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`), with case-insensitive usage-type lookups
 - Direct overage charging with retry and `past_due` state
 - Five coupon types — `SinglePayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
@@ -696,7 +696,9 @@ MollieBilling::assertSubscriptionStarted($billable);
 # Re-queue overage charges for everyone whose period ended in the last hour
 php artisan billing:prepare-overage
 
-# Export the OSS report for a given calendar year
+# Export the OSS report for a given calendar year (writes to the configured
+# OSS disk — S3-compatible — and persists a downloadable row that the admin
+# panel surfaces alongside queued/admin-triggered exports)
 php artisan billing:oss-export 2026
 
 # Validate the syntax and semantic integrity of mollie-billing.php and mollie-billing-plans.php
@@ -717,6 +719,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Configuration](docs/configuration.md) — `mollie-billing.php` and `mollie-billing-plans.php` reference
 - [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
+- [VAT Handling](docs/vat-handling.md) — VAT calculation, VIES, OSS, country reconciliation, automatic resolution
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
 
 ## Architecture

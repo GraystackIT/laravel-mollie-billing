@@ -7,6 +7,8 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
+use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -20,9 +22,109 @@ new class extends Component {
     public ?string $couponMessage = null;
     public bool $couponMessageError = false;
 
+    // Country-mismatch self-service modal
+    public string $fixCountry = '';
+    public string $fixStreet = '';
+    public string $fixPostalCode = '';
+    public string $fixCity = '';
+    public bool $fixConfirmed = false;
+    public ?string $fixError = null;
+
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    public function openCountryFix(): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+
+        $this->fixCountry = (string) ($billable->getBillingCountry() ?? '');
+        $this->fixStreet = (string) ($billable->getBillingStreet() ?? '');
+        $this->fixPostalCode = (string) ($billable->getBillingPostalCode() ?? '');
+        $this->fixCity = (string) ($billable->getBillingCity() ?? '');
+        $this->fixConfirmed = false;
+        $this->fixError = null;
+    }
+
+    public function saveCountryFix(CountryMatchService $service): void
+    {
+        $this->fixError = null;
+
+        $billable = $this->resolveBillable();
+        if (! $billable) {
+            $this->fixError = __('billing::portal.no_billable');
+            return;
+        }
+
+        $mismatch = $billable->latestOpenCountryMismatch();
+        if ($mismatch === null) {
+            \Flux::modal('fix-country')->close();
+            return;
+        }
+
+        if (! $this->fixConfirmed) {
+            $this->fixError = __('billing::portal.country_mismatch.confirm_required');
+            return;
+        }
+
+        $this->validate([
+            'fixStreet' => ['required', 'string', 'max:255'],
+            'fixPostalCode' => ['required', 'string', 'max:20'],
+            'fixCity' => ['required', 'string', 'max:255'],
+            'fixCountry' => ['required', 'string', 'size:2'],
+        ]);
+
+        $newCountry = strtoupper($this->fixCountry);
+        $allowed = array_values(array_filter([
+            $mismatch->tax_country_payment ? strtoupper((string) $mismatch->tax_country_payment) : null,
+            $mismatch->tax_country_ip ? strtoupper((string) $mismatch->tax_country_ip) : null,
+        ]));
+
+        if (! in_array($newCountry, $allowed, true)) {
+            $this->fixError = __('billing::portal.country_mismatch.invalid_country');
+            return;
+        }
+
+        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+        $billable->forceFill([
+            'billing_street' => $this->fixStreet,
+            'billing_postal_code' => $this->fixPostalCode,
+            'billing_city' => $this->fixCity,
+        ])->save();
+
+        try {
+            $service->resolve(
+                $billable,
+                $mismatch,
+                $newCountry,
+                MollieBilling::resolveBillable(request()) ? request()->user()?->getKey() : null,
+            );
+        } catch (\Throwable $e) {
+            report($e);
+            $this->fixError = __('billing::portal.country_mismatch.resolve_failed');
+            return;
+        }
+
+        \Flux::modal('fix-country')->close();
+        $this->flash = __('billing::portal.country_mismatch.resolved_flash');
+        $this->flashError = false;
+    }
+
+    public function reactivateAfterMismatch(ResubscribeSubscription $service): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+        try {
+            $service->handle($billable);
+            $this->flash = __('billing::portal.flash.resubscribed');
+            $this->flashError = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->flash = __('billing::portal.country_mismatch.reactivate_failed');
+            $this->flashError = true;
+        }
     }
 
     public function cancelSubscription(): void
@@ -221,10 +323,48 @@ new class extends Component {
             $addonCodes,
         );
 
+        $openMismatch = $b->latestOpenCountryMismatch();
+        $allowedFixCountries = $openMismatch !== null
+            ? array_values(array_unique(array_filter([
+                $openMismatch->tax_country_payment ? strtoupper((string) $openMismatch->tax_country_payment) : null,
+                $openMismatch->tax_country_ip ? strtoupper((string) $openMismatch->tax_country_ip) : null,
+            ])))
+            : [];
+        $resolvedMismatch = $b->latestResolvedCountryMismatch();
+        $endsAt = $b->getBillingSubscriptionEndsAt();
+        $needsReactivate = $status === SubscriptionStatus::Cancelled
+            && $openMismatch === null
+            && $resolvedMismatch !== null
+            && $endsAt !== null
+            && $resolvedMismatch->resolved_at !== null
+            && $resolvedMismatch->resolved_at->lessThanOrEqualTo($endsAt);
+        $reactivateInGrace = $endsAt?->isFuture() ?? false;
+
+        $invoicesUnderMismatch = $openMismatch !== null
+            ? $b->billingInvoices()
+                ->where('mismatch_id', $openMismatch->id)
+                ->where('amount_net', '>', 0)
+                ->get()
+            : collect();
+        $mismatchInvoiceCount = $invoicesUnderMismatch->count();
+        $mismatchInvoiceTotalGross = (int) $invoicesUnderMismatch->sum('amount_gross');
+
         return [
             'status' => $status,
             'statusLabel' => $status->label(),
             'statusColor' => $status->color(),
+            'mismatch' => $openMismatch !== null ? [
+                'id' => $openMismatch->id,
+                'user' => (string) ($openMismatch->tax_country_user ?? '-'),
+                'payment' => (string) ($openMismatch->tax_country_payment ?? '-'),
+                'ip' => (string) ($openMismatch->tax_country_ip ?? '-'),
+                'allowed_countries' => $allowedFixCountries,
+                'invoice_count' => $mismatchInvoiceCount,
+                'invoice_total_gross' => $currencySymbol . number_format($mismatchInvoiceTotalGross / 100, 2),
+            ] : null,
+            'needsReactivate' => $needsReactivate,
+            'reactivateInGrace' => $reactivateInGrace,
+            'hasPendingCorrections' => $b->hasPendingCountryCorrections(),
             'accentClass' => match($status) {
                 SubscriptionStatus::Active => 'bg-emerald-500',
                 SubscriptionStatus::Trial => 'bg-amber-400',
@@ -330,6 +470,75 @@ new class extends Component {
                         {{ __('billing::portal.scheduled_change_cancel') }}
                     </flux:button>
                 </div>
+            </flux:callout>
+        @endif
+
+        {{-- Country mismatch: Pending --}}
+        @if ($d['mismatch'])
+            <flux:callout variant="danger" icon="exclamation-triangle">
+                <flux:callout.heading>{{ __('billing::portal.country_mismatch.banner_heading') }}</flux:callout.heading>
+                <flux:callout.text>
+                    <p>{{ __('billing::portal.country_mismatch.banner_text') }}</p>
+
+                    <div class="mt-3 flex flex-wrap items-center gap-2 text-sm">
+                        <span class="inline-flex items-center gap-1.5 rounded-md bg-red-50 px-2 py-1 font-medium text-red-800 ring-1 ring-inset ring-red-200/70 dark:bg-red-500/10 dark:text-red-200 dark:ring-red-400/20">
+                            <flux:icon.user class="size-3.5 opacity-70" />
+                            <span class="opacity-75">{{ __('billing::portal.country_mismatch.label_user') }}</span>
+                            <span class="font-mono font-semibold tracking-wide">{{ $d['mismatch']['user'] }}</span>
+                        </span>
+                        <flux:icon.arrow-long-right class="size-4 text-red-400/70 dark:text-red-300/60" />
+                        <span class="inline-flex items-center gap-1.5 rounded-md bg-red-50 px-2 py-1 font-medium text-red-800 ring-1 ring-inset ring-red-200/70 dark:bg-red-500/10 dark:text-red-200 dark:ring-red-400/20">
+                            <flux:icon.credit-card class="size-3.5 opacity-70" />
+                            <span class="opacity-75">{{ __('billing::portal.country_mismatch.label_payment') }}</span>
+                            <span class="font-mono font-semibold tracking-wide">{{ $d['mismatch']['payment'] }}</span>
+                        </span>
+                        <span class="inline-flex items-center gap-1.5 rounded-md bg-red-50 px-2 py-1 font-medium text-red-800 ring-1 ring-inset ring-red-200/70 dark:bg-red-500/10 dark:text-red-200 dark:ring-red-400/20">
+                            <flux:icon.globe-alt class="size-3.5 opacity-70" />
+                            <span class="opacity-75">{{ __('billing::portal.country_mismatch.label_ip') }}</span>
+                            <span class="font-mono font-semibold tracking-wide">{{ $d['mismatch']['ip'] }}</span>
+                        </span>
+                    </div>
+
+                    <p class="mt-3 text-sm">{{ __('billing::portal.country_mismatch.banner_consequence') }}</p>
+                    <p class="mt-1 text-sm">{{ __('billing::portal.country_mismatch.banner_blocked_actions') }}</p>
+                </flux:callout.text>
+                <x-slot name="actions">
+                    <flux:button size="sm" variant="primary" wire:click="openCountryFix" x-on:click="$flux.modal('fix-country').show()">
+                        {{ __('billing::portal.country_mismatch.fix_cta') }}
+                    </flux:button>
+                </x-slot>
+            </flux:callout>
+        @endif
+
+        {{-- Country mismatch: Resolved but subscription still cancelled --}}
+        @if (! $d['mismatch'] && $d['needsReactivate'])
+            <flux:callout variant="warning" icon="information-circle">
+                <flux:callout.heading>{{ __('billing::portal.country_mismatch.reactivate_heading') }}</flux:callout.heading>
+                <flux:callout.text>
+                    @if ($d['reactivateInGrace'])
+                        {{ __('billing::portal.country_mismatch.reactivate_text_grace') }}
+                    @else
+                        {{ __('billing::portal.country_mismatch.reactivate_text_expired') }}
+                    @endif
+                </flux:callout.text>
+                <x-slot name="actions">
+                    @if ($d['reactivateInGrace'])
+                        <flux:button size="sm" variant="primary" wire:click="reactivateAfterMismatch">
+                            {{ __('billing::portal.country_mismatch.reactivate_cta') }}
+                        </flux:button>
+                    @else
+                        <flux:button size="sm" variant="primary" :href="route(BillingRoute::checkout())">
+                            {{ __('billing::portal.country_mismatch.reactivate_checkout_cta') }}
+                        </flux:button>
+                    @endif
+                </x-slot>
+            </flux:callout>
+        @endif
+
+        {{-- Country correction re-charge in progress --}}
+        @if ($d['hasPendingCorrections'])
+            <flux:callout variant="secondary" icon="arrow-path">
+                {{ __('billing::portal.country_mismatch.recharge_pending') }}
             </flux:callout>
         @endif
 
@@ -522,5 +731,51 @@ new class extends Component {
                 </div>
             </div>
         </flux:modal>
+
+        {{-- Country mismatch self-service modal --}}
+        @if ($d['mismatch'])
+            <flux:modal name="fix-country" class="max-w-xl">
+                <form wire:submit.prevent="saveCountryFix" class="space-y-6">
+                    <div class="space-y-2">
+                        <flux:heading size="lg">{{ __('billing::portal.country_mismatch.modal_title') }}</flux:heading>
+                        <flux:text>{{ __('billing::portal.country_mismatch.modal_intro') }}</flux:text>
+                    </div>
+
+                    <div class="grid gap-4 sm:grid-cols-2">
+                        <flux:input wire:model="fixStreet" :label="__('billing::portal.billing_data.street')" />
+                        <flux:input wire:model="fixPostalCode" :label="__('billing::portal.billing_data.postal_code')" />
+                        <flux:input wire:model="fixCity" :label="__('billing::portal.billing_data.city')" />
+                        <flux:select wire:model="fixCountry" :label="__('billing::portal.billing_data.country')">
+                            <option value="">— {{ __('billing::portal.country_mismatch.choose_country') }} —</option>
+                            @foreach ($d['mismatch']['allowed_countries'] as $code)
+                                <option value="{{ $code }}">{{ $code }}</option>
+                            @endforeach
+                        </flux:select>
+                    </div>
+
+                    <flux:callout variant="secondary" icon="information-circle">
+                        {{ __('billing::portal.country_mismatch.confirm_note', [
+                            'count' => $d['mismatch']['invoice_count'],
+                            'total' => $d['mismatch']['invoice_total_gross'],
+                        ]) }}
+                    </flux:callout>
+
+                    <flux:checkbox wire:model="fixConfirmed" :label="__('billing::portal.country_mismatch.confirm_checkbox')" />
+
+                    @if ($fixError)
+                        <flux:callout variant="danger" icon="exclamation-triangle">{{ $fixError }}</flux:callout>
+                    @endif
+
+                    <div class="flex justify-end gap-2">
+                        <flux:modal.close>
+                            <flux:button variant="ghost" type="button">{{ __('billing::portal.country_mismatch.cancel') }}</flux:button>
+                        </flux:modal.close>
+                        <flux:button variant="primary" type="submit">
+                            {{ __('billing::portal.country_mismatch.save') }}
+                        </flux:button>
+                    </div>
+                </form>
+            </flux:modal>
+        @endif
     @endif
 </div>

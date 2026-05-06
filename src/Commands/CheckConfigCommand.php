@@ -82,6 +82,19 @@ class CheckConfigCommand extends Command
             }
         }
 
+        $ossDisk = config('mollie-billing.oss.disk');
+        if (is_string($ossDisk) && $ossDisk !== '') {
+            if (! array_key_exists($ossDisk, $disks)) {
+                $this->addError($scope, "oss.disk [{$ossDisk}] is not defined in config/filesystems.php disks.");
+            } else {
+                try {
+                    Storage::disk($ossDisk);
+                } catch (\Throwable $e) {
+                    $this->addError($scope, "oss.disk [{$ossDisk}] could not be resolved: {$e->getMessage()}");
+                }
+            }
+        }
+
         $format = (string) config('mollie-billing.invoices.serial_number.format', 'PP-YYCCCCCC');
         if ($format === '') {
             $this->addError($scope, 'invoices.serial_number.format must not be empty.');

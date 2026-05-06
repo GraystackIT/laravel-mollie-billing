@@ -9,7 +9,7 @@ This document provides an overview of the subscription states and transitions in
 | `new` | Billable created, no subscription yet |
 | `trial` | Free trial period, optionally with Mollie mandate |
 | `active` | Paid subscription, recurring payments active |
-| `past_due` | Payment failed, grace period before cancellation |
+| `past_due` | Payment failed, grace period before cancellation. Recovers either by paying the failed invoice or by switching plans — see [Past-Due reset](plan-changes.md#past-due-reset). |
 | `cancelled` | User-initiated cancellation, active until end of period |
 | `expired` | Subscription ended (trial expired or cancellation period over) |
 
