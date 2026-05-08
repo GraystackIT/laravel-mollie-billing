@@ -1,5 +1,19 @@
 @php($plan = $this->selectedPlan())
 @php($currencySymbol = config('mollie-billing.currency_symbol', '€'))
+@php($trialApplies = $this->trialApplies($plan_code, $interval))
+@php($trialDays = $trialApplies ? $this->planTrialDays($plan_code, $interval) : 0)
+@php($trialFirstChargeDate = $trialDays > 0 ? \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays($trialDays)->translatedFormat('d. M Y') : null)
+
+@if ($trialDays > 0)
+    <flux:callout icon="sparkles" color="lime" inline class="mt-4">
+        <flux:callout.heading>
+            {{ __('billing::checkout.trial_summary_heading', ['days' => $trialDays]) }}
+        </flux:callout.heading>
+        <flux:callout.text>
+            {{ __('billing::checkout.trial_summary_body', ['days' => $trialDays]) }}
+        </flux:callout.text>
+    </flux:callout>
+@endif
 
 <div class="grid gap-6 sm:grid-cols-2 mt-4">
     <section class="rounded-xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/2">
@@ -160,7 +174,11 @@
 </div>
 
 <flux:callout icon="shield-check" color="zinc" inline class="mt-4 mb-6">
-    {{ __('billing::checkout.redirect_notice') }}
+    @if ($trialDays > 0 && $trialFirstChargeDate !== null)
+        {{ __('billing::checkout.trial_redirect_notice', ['date' => $trialFirstChargeDate]) }}
+    @else
+        {{ __('billing::checkout.redirect_notice') }}
+    @endif
 </flux:callout>
 
 <div class="flex items-center justify-between pt-2">

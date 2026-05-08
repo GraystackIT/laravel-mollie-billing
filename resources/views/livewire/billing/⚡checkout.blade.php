@@ -163,6 +163,29 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return app(SubscriptionCatalogInterface::class)->trialDays($planCode, $interval);
     }
 
+    /**
+     * Whether the trial would actually fire on submit. Mirrors the gate in
+     * `StartSubscriptionCheckout::handle()`: a positive interval-level
+     * `trial_days` plus a billable that has not yet captured a Mollie mandate.
+     * Returning customers (mandate already on file) re-enter checkout at full
+     * price — the badge must not promise a trial that won't be granted.
+     *
+     * Uses the persisted ($billableId, $billableClass) pair on the component
+     * with a fallback to the request-scoped resolver, so the check works both
+     * before the billable is created (resolver only) and after (component
+     * properties carry the id across Livewire updates).
+     */
+    public function trialApplies(string $planCode, string $interval): bool
+    {
+        if ($this->planTrialDays($planCode, $interval) <= 0) {
+            return false;
+        }
+
+        $billable = $this->resolveBillable() ?? MollieBilling::resolveBillable(request());
+
+        return $billable === null || ! $billable->hasMollieMandate();
+    }
+
     /** @return array<string, array{included: int, overage_price: int|null}> */
     public function planUsages(string $planCode, string $interval): array
     {

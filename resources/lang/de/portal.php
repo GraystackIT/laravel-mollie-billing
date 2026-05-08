@@ -349,6 +349,7 @@ return [
     ],
     'flash' => [
         'cancelled' => 'Abo gekündigt.',
+        'trial_ended' => 'Testphase beendet. Dein Abo wurde gekündigt.',
         'resubscribed' => 'Abo reaktiviert.',
         'plan_changed' => 'Plan geändert.',
         'plan_scheduled' => 'Planwechsel geplant für :date.',
@@ -383,6 +384,13 @@ return [
         'body' => 'Dein Abo wird zum Ende der aktuellen Abrechnungsperiode gekündigt.',
         'keep' => 'Abo behalten',
         'confirm' => 'Kündigen',
+    ],
+    'end_trial' => 'Testphase beenden',
+    'end_trial_confirm' => [
+        'title' => 'Testphase beenden?',
+        'body' => 'Deine Testphase wird sofort beendet und dein Abo gekündigt. Du verlierst sofort den Zugriff auf den Plan. Es wurde keine Zahlung durchgeführt.',
+        'keep' => 'Testphase weiterführen',
+        'confirm' => 'Testphase beenden',
     ],
     'usage_history' => 'Verbrauchshistorie',
     'usage_history_subtitle' => 'Zeige deine Verbrauchstransaktionen für die aktuelle Abrechnungsperiode.',

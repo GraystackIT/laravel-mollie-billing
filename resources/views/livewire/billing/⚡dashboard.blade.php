@@ -142,6 +142,29 @@ new class extends Component {
         }
     }
 
+    public function endTrial(): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable || ! $billable->isOnBillingTrial()) {
+            return;
+        }
+        try {
+            // Immediate cancel: trial ends now, Mollie subscription cancelled,
+            // status flips to Cancelled with subscription_ends_at = now. The
+            // user did not pay, so there is no grace period to grant access
+            // against — `hasAccessibleBillingSubscription()` returns false from
+            // the next request on, but the billing portal itself stays
+            // reachable so the user can pick a new plan.
+            $billable->cancelBillingSubscription(immediately: true);
+            $this->flash = __('billing::portal.flash.trial_ended');
+            $this->flashError = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
+        }
+    }
+
     public function resubscribe(): void
     {
         $billable = $this->resolveBillable();
@@ -576,7 +599,11 @@ new class extends Component {
                         <flux:modal.trigger name="cancel-subscription">
                             <flux:button size="sm" variant="ghost" icon="x-circle">{{ __('billing::portal.cancel_subscription') }}</flux:button>
                         </flux:modal.trigger>
-                    @elseif ($d['isCancelled'])
+                    @elseif ($d['isTrial'])
+                        <flux:modal.trigger name="end-trial">
+                            <flux:button size="sm" variant="ghost" icon="x-circle">{{ __('billing::portal.end_trial') }}</flux:button>
+                        </flux:modal.trigger>
+                    @elseif ($d['isCancelled'] && $d['subscriptionEndsFuture'])
                         <flux:button size="sm" variant="primary" icon="arrow-path" wire:click="resubscribe">{{ __('billing::portal.resubscribe') }}</flux:button>
                     @endif
                 </div>
@@ -738,6 +765,24 @@ new class extends Component {
                     </flux:modal.close>
                     <flux:button variant="danger" wire:click="cancelSubscription" x-on:click="$flux.modal('cancel-subscription').close()">
                         {{ __('billing::portal.cancel_confirm.confirm') }}
+                    </flux:button>
+                </div>
+            </div>
+        </flux:modal>
+
+        {{-- End trial modal --}}
+        <flux:modal name="end-trial" class="max-w-md">
+            <div class="space-y-6">
+                <div class="space-y-2">
+                    <flux:heading size="lg">{{ __('billing::portal.end_trial_confirm.title') }}</flux:heading>
+                    <flux:text>{{ __('billing::portal.end_trial_confirm.body') }}</flux:text>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <flux:modal.close>
+                        <flux:button variant="ghost">{{ __('billing::portal.end_trial_confirm.keep') }}</flux:button>
+                    </flux:modal.close>
+                    <flux:button variant="danger" wire:click="endTrial" x-on:click="$flux.modal('end-trial').close()">
+                        {{ __('billing::portal.end_trial_confirm.confirm') }}
                     </flux:button>
                 </div>
             </div>
