@@ -45,6 +45,7 @@ return [
     'confirm_and_pay' => 'Bestätigen und bezahlen',
     'free_plan_no_payment' => 'Du nutzt einen kostenlosen Plan. Upgrade auf einen bezahlten Plan, um eine Zahlungsmethode hinzuzufügen.',
     'free_plan_no_paid_extras' => 'Du nutzt einen kostenlosen Plan. Upgrade auf einen bezahlten Plan, um kostenpflichtige Zusatzmodule oder zusätzliche Plätze zu nutzen.',
+    'free_plan_no_products' => 'Du nutzt einen kostenlosen Plan. Upgrade auf einen bezahlten Plan, um Einmalkäufe zu tätigen.',
     'free_plan_recurring_charge' => 'Kostenloser Plan — keine wiederkehrende Abrechnung',
     'invoices' => 'Rechnungen',
     'cancel_subscription' => 'Abo kündigen',

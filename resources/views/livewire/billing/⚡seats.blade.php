@@ -320,6 +320,11 @@ new class extends Component {
     $savedSeatCount = $billable?->getBillingSeatCount() ?? 0;
     $hasChanges = $this->seatCount !== null && $this->seatCount !== $savedSeatCount;
     $hasPendingPlanChange = $billable?->hasPendingBillingPlanChange() ?? false;
+    // Local subs (free plans, access grants) cannot bill for extra seats — no mandate.
+    // Hide the adjust-seats card entirely; the stat cards alone are informative.
+    $localBlocksPaidSeats = $billable && $billable->isLocalBillingSubscription();
+    // Layout: when there's no seat-price card (free plan) we have 3 cards → use a 3-col grid.
+    $statsCols = $seatPrice !== null ? 'lg:grid-cols-4' : 'lg:grid-cols-3';
 @endphp
 
 <div class="space-y-6">
@@ -360,7 +365,7 @@ new class extends Component {
         </flux:callout>
     @else
         {{-- Stat cards --}}
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 {{ $statsCols }}">
             {{-- Total seats --}}
             <flux:card class="p-5!">
                 <div class="flex items-start justify-between gap-2">
@@ -425,7 +430,8 @@ new class extends Component {
             @endif
         </div>
 
-        {{-- Adjust seats --}}
+        {{-- Adjust seats — hidden entirely on Local subs since no changes are billable. --}}
+        @if (! $localBlocksPaidSeats)
         <flux:card class="relative overflow-hidden p-0!">
             <div class="absolute inset-x-0 top-0 h-1 {{ $hasChanges ? 'bg-accent' : 'bg-transparent' }}"></div>
 
@@ -441,10 +447,6 @@ new class extends Component {
                 </div>
             </div>
 
-            @php
-                $localBlocksPaidSeats = $billable && $billable->isLocalBillingSubscription() && ($seatPrice ?? null) !== null && $seatPrice > 0;
-            @endphp
-
             <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-6 dark:border-zinc-700/50 dark:bg-white/[0.02]">
                 <div class="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
                     {{-- Stepper --}}
@@ -453,13 +455,13 @@ new class extends Component {
                         <div class="flex items-center gap-1">
                             <flux:button size="sm" variant="ghost" icon="minus"
                                 wire:click="decrement"
-                                :disabled="$currentSeats <= $includedSeats || $hasPendingPlanChange || $localBlocksPaidSeats"
+                                :disabled="$currentSeats <= $includedSeats || $hasPendingPlanChange"
                                 class="rounded-r-none"
                             />
-                            <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" :disabled="$hasPendingPlanChange || $localBlocksPaidSeats" class="w-20 text-center tabular-nums rounded-none! border-x-0!" x-on:blur="if (!$el.value || parseInt($el.value) < {{ $includedSeats }}) { $wire.set('seatCount', {{ $includedSeats }}) }" />
+                            <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" :disabled="$hasPendingPlanChange" class="w-20 text-center tabular-nums rounded-none! border-x-0!" x-on:blur="if (!$el.value || parseInt($el.value) < {{ $includedSeats }}) { $wire.set('seatCount', {{ $includedSeats }}) }" />
                             <flux:button size="sm" variant="ghost" icon="plus"
                                 wire:click="increment"
-                                :disabled="$hasPendingPlanChange || $localBlocksPaidSeats"
+                                :disabled="$hasPendingPlanChange"
                                 class="rounded-l-none"
                             />
                         </div>
@@ -525,14 +527,14 @@ new class extends Component {
                                                 wire:model="couponInput"
                                                 wire:keydown.enter.prevent="applyCoupon"
                                                 :placeholder="__('billing::portal.coupon_code_placeholder')"
-                                                :disabled="$hasPendingPlanChange || $localBlocksPaidSeats"
+                                                :disabled="$hasPendingPlanChange"
                                             />
                                             <flux:button
                                                 size="sm"
                                                 type="button"
                                                 wire:click="applyCoupon"
                                                 icon="check"
-                                                :disabled="$hasPendingPlanChange || $localBlocksPaidSeats"
+                                                :disabled="$hasPendingPlanChange"
                                             >
                                                 {{ __('billing::portal.coupon_redeem_button') }}
                                             </flux:button>
@@ -560,11 +562,12 @@ new class extends Component {
 
                 {{-- Action --}}
                 <div class="mt-5 flex justify-end">
-                    <flux:button variant="primary" size="sm" wire:click="syncSeats" :disabled="! $hasChanges || $hasPendingPlanChange || $localBlocksPaidSeats">
+                    <flux:button variant="primary" size="sm" wire:click="syncSeats" :disabled="! $hasChanges || $hasPendingPlanChange">
                         {{ __('billing::portal.seats_save') }}
                     </flux:button>
                 </div>
             </div>
         </flux:card>
+        @endif
     @endif
 </div>

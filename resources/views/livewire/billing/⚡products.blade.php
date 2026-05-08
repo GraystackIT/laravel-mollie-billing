@@ -343,12 +343,17 @@ new class extends Component {
 
         $boughtGroups = $groupProducts($bought);
 
+        $localBlocksProducts = $billable !== null
+            && $billable->isLocalBillingSubscription()
+            && ! (bool) config('mollie-billing.local_subscription.allow_one_time_orders', false);
+
         return [
             'billable' => $billable,
             'availableGroups' => $availableGroups,
             'boughtGroups' => $boughtGroups,
             'currencySymbol' => $currencySymbol,
             'reverseCharge' => $reverseCharge,
+            'localBlocksProducts' => $localBlocksProducts,
         ];
     }
 };
@@ -371,6 +376,15 @@ new class extends Component {
             {{ __('billing::portal.products.none_available') }}
         </flux:callout>
     @else
+        @if ($localBlocksProducts)
+            <flux:callout icon="information-circle" color="blue">
+                <span>{{ __('billing::portal.free_plan_no_products') }}</span>
+                <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                    {{ __('billing::portal.plan_change') }}
+                </flux:button>
+            </flux:callout>
+        @endif
+
         {{-- Available products --}}
         @if (! empty($availableGroups))
             <div class="space-y-6">
@@ -420,11 +434,17 @@ new class extends Component {
                                     </div>
 
                                     <div class="w-36">
-                                        <flux:modal.trigger name="purchase-{{ $product['code'] }}">
-                                            <flux:button class="w-full" variant="primary" size="sm" icon="shopping-cart">
+                                        @if ($localBlocksProducts)
+                                            <flux:button class="w-full" variant="ghost" size="sm" icon="shopping-cart" disabled>
                                                 {{ __('billing::portal.products.buy') }}
                                             </flux:button>
-                                        </flux:modal.trigger>
+                                        @else
+                                            <flux:modal.trigger name="purchase-{{ $product['code'] }}">
+                                                <flux:button class="w-full" variant="primary" size="sm" icon="shopping-cart">
+                                                    {{ __('billing::portal.products.buy') }}
+                                                </flux:button>
+                                            </flux:modal.trigger>
+                                        @endif
                                     </div>
                                 </div>
                             </div>

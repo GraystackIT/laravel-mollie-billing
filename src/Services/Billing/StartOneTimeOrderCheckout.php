@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Events\OneTimeOrderCompleted;
+use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionCannotPurchaseProductsException;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
@@ -38,6 +39,8 @@ class StartOneTimeOrderCheckout
      *
      * @throws \InvalidArgumentException if the product code does not exist in the catalog
      * @throws \RuntimeException if the product has a zero price
+     * @throws LocalSubscriptionCannotPurchaseProductsException if the billable is on a
+     *         Local subscription and config('mollie-billing.local_subscription.allow_one_time_orders') is false
      */
     public function handle(Billable $billable, array $request): array
     {
@@ -47,6 +50,12 @@ class StartOneTimeOrderCheckout
 
         if ($product === []) {
             throw new \InvalidArgumentException("Unknown product code: {$productCode}");
+        }
+
+        if ($billable->isLocalBillingSubscription()
+            && ! (bool) config('mollie-billing.local_subscription.allow_one_time_orders', false)
+        ) {
+            throw new LocalSubscriptionCannotPurchaseProductsException($billable, $productCode);
         }
 
         $priceNet = $this->catalog->productPriceNet($productCode);

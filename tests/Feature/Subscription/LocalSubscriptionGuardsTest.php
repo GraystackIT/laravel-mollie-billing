@@ -132,6 +132,17 @@ it('blocks adding paid extra seats to a Local subscription', function (): void {
     ]))->toThrow(LocalSubscriptionDoesNotSupportPaidExtrasException::class);
 });
 
+it('blocks adding extra seats on a Local subscription even when seat_price_net is null', function (): void {
+    // Free plan defined in beforeEach has included_seats=1, seat_price_net=null.
+    // Without a mandate the extra seats can never be billed, so the increase must
+    // be blocked regardless of whether seat_price_net is 0/null/positive.
+    $billable = makeLocalGuardBillable();
+
+    expect(fn () => app(UpdateSubscription::class)->update($billable, [
+        'seats' => 3,
+    ]))->toThrow(LocalSubscriptionDoesNotSupportPaidExtrasException::class);
+});
+
 it('blocks switching a Local subscription directly to a paid plan via UpdateSubscription', function (): void {
     $billable = makeLocalGuardBillable();
 

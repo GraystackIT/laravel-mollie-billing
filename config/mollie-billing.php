@@ -151,6 +151,20 @@ return [
 
     'show_yearly_savings' => env('BILLING_SHOW_YEARLY_SAVINGS', true),
 
+    // Behavior of free / Local subscriptions (subscription_source = local).
+    //
+    // Local subs have no Mollie mandate, so paid extras (add-ons, extra seats)
+    // can never be charged and are always blocked. One-time product purchases,
+    // however, are oneoff card payments and Mollie accepts them without a
+    // mandate — whether that fits your business model is up to you.
+    //
+    //   true  → free-plan users can purchase one-time products (token packs etc.)
+    //   false → purchase attempts throw LocalSubscriptionCannotPurchaseProductsException
+    //           and the products page hides the buy buttons with an upgrade hint.
+    'local_subscription' => [
+        'allow_one_time_orders' => env('BILLING_LOCAL_ALLOW_ONE_TIME_ORDERS', false),
+    ],
+
     'vat_rate_overrides' => [
         // 'DE' => 19.0,
     ],

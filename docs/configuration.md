@@ -63,6 +63,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Global default: carry over unused wallet credits across period changes. Overridable per plan. Default: `false`. |
 | `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL of the admin-panel KPI cache (seconds). Default: `300`. |
 | `show_yearly_savings` | `BILLING_SHOW_YEARLY_SAVINGS` | Shows the computed savings (yearly vs. monthly) in the plan selector. Default: `true`. |
+| `local_subscription.allow_one_time_orders` | `BILLING_LOCAL_ALLOW_ONE_TIME_ORDERS` | Whether free / Local subscribers may purchase one-time products. Default: `false` — purchase attempts throw `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons with an upgrade hint. Set `true` if your free plan is a default tier monetised through token packs etc. Paid add-ons and extra seats remain blocked on Local subs regardless of this flag (no mandate available). |
 | `billing_timezone` | `BILLING_TIMEZONE` | IANA timezone for the customer-portal display (fallback when `Billable::getBillingTimezone()` is not overridden). Persistence and computation always remain UTC; the admin panel also renders UTC. Default: `UTC`. See [docs/timezone.md](timezone.md). |
 
 ### Invoices (`invoices`)

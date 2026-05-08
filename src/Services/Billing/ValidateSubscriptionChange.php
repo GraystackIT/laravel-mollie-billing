@@ -140,16 +140,17 @@ class ValidateSubscriptionChange
             fn (string $code) => $this->catalog->addonPriceNet($code, $context->newInterval) > 0,
         ));
 
+        // Seats above the included quota are blocked on Local subscriptions even when
+        // seat_price_net is null/0: without a mandate we cannot bill for the extra capacity,
+        // and silently allowing it would let a free user expand seats indefinitely.
         $includedSeats = $this->catalog->includedSeats($context->newPlan);
         $extraSeats = max(0, $context->newSeats - $includedSeats);
-        $seatPriceNet = $this->catalog->seatPriceNet($context->newPlan, $context->newInterval) ?? 0;
-        $paidExtraSeats = ($seatPriceNet > 0 && $extraSeats > 0) ? $extraSeats : 0;
 
-        if ($paidAddons !== [] || $paidExtraSeats > 0) {
+        if ($paidAddons !== [] || $extraSeats > 0) {
             throw new LocalSubscriptionDoesNotSupportPaidExtrasException(
                 $billable,
                 $paidAddons,
-                $paidExtraSeats,
+                $extraSeats,
             );
         }
     }
