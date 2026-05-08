@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\IpGeolocation;
 
 use GraystackIT\MollieBilling\IpGeolocation\Contracts\IpGeolocationDriver;
+use GraystackIT\MollieBilling\IpGeolocation\Drivers\DbIpDriver;
 use GraystackIT\MollieBilling\IpGeolocation\Drivers\IpInfoLiteDriver;
 use GraystackIT\MollieBilling\IpGeolocation\Drivers\NullDriver;
 use GraystackIT\MollieBilling\Support\CountryResolver;
@@ -25,6 +26,13 @@ class IpGeolocationManager extends Manager
         $token = $this->config->get('mollie-billing.ip_geolocation.drivers.ipinfo_lite.token');
 
         return new IpInfoLiteDriver($token !== null ? (string) $token : null);
+    }
+
+    public function createDbIpDriver(): IpGeolocationDriver
+    {
+        $apiKey = $this->config->get('mollie-billing.ip_geolocation.drivers.db_ip.api_key');
+
+        return new DbIpDriver($apiKey !== null ? (string) $apiKey : null);
     }
 
     public function createNullDriver(): IpGeolocationDriver

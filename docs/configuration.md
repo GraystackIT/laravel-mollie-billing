@@ -104,6 +104,7 @@ Serial numbers are issued atomically by `InvoiceNumberGenerator`.
     'driver'  => env('BILLING_IP_DRIVER', 'ipinfo_lite'),
     'drivers' => [
         'ipinfo_lite' => ['token' => env('IPINFO_TOKEN')],
+        'db_ip'       => ['api_key' => env('DB_IP_API_KEY')],
         'null'        => [],
     ],
 ],
@@ -111,9 +112,52 @@ Serial numbers are issued atomically by `InvoiceNumberGenerator`.
 
 Used to pre-fill the country dropdown at checkout and in the billing-data portal. The lookup is cached for 24h per IP, gracefully falls back to `default_billing_country` when no token is configured / the lookup fails / the resolved country is not in `checkout_countries`. The IP country is **never persisted** on the billable — it is purely a UX default.
 
+Built-in drivers:
+
+- `ipinfo_lite` — uses [IPinfo Lite](https://ipinfo.io/lite). Requires `IPINFO_TOKEN`.
+- `db_ip` — uses the [DB-IP API](https://db-ip.com/api/doc.php). Set `DB_IP_API_KEY` for paid tiers; when empty, the driver falls back to the public free tier (rate-limited, not recommended for production).
+- `null` — disables lookups; every request resolves to `default_billing_country`.
+
 Custom drivers can be registered through `MollieBilling::ipGeolocation(...)`.
 
 > **Behind a reverse proxy / Cloudflare?** `request()->ip()` only returns the real client IP when Laravel's `App\Http\Middleware\TrustProxies` is configured for your environment. Without that, the geolocation will see the proxy IP and fall back to `default_billing_country`.
+
+### IP-based country gating
+
+```php
+'ip_block' => [
+    'enabled'       => env('BILLING_IP_BLOCK_ENABLED', false),
+    'mode'          => env('BILLING_IP_BLOCK_MODE', 'blocklist'), // blocklist | allowlist
+    'countries'     => array_values(array_filter(array_map(
+        fn (string $iso): string => strtoupper(trim($iso)),
+        explode(',', (string) env('BILLING_IP_BLOCK_COUNTRIES', ''))
+    ))),
+    'block_unknown' => env('BILLING_IP_BLOCK_UNKNOWN', false),
+],
+```
+
+Blocks requests originating from disallowed countries on every package route — checkout, billing portal, admin portal, promotion links — based on the same `ip_geolocation` driver used for the country dropdown. The Mollie webhook is **never** wrapped: webhook calls come from Mollie's servers, not from the buyer, and would otherwise be falsely blocked.
+
+When a request fails the gate, the user is redirected to a static blocked page (`/billing/blocked`) that names the detected country, explains that paid services are unavailable in their region, and links back to `/`. The page renders without any auth, tenant, or subscription middleware so it stays reachable in every flow.
+
+Modes:
+
+- `blocklist` — `countries` lists the codes to block. Everything else passes.
+- `allowlist` — `countries` lists the only codes allowed. Everything else is blocked.
+
+`block_unknown` controls what happens when geolocation returns no country (private IP, lookup failure, `null` driver). Defaults to `false` — unknown clients pass through. Set to `true` for strict allowlist setups.
+
+`countries` accepts a comma-separated list via the `BILLING_IP_BLOCK_COUNTRIES` env variable, e.g.:
+
+```env
+BILLING_IP_BLOCK_ENABLED=true
+BILLING_IP_BLOCK_MODE=blocklist
+BILLING_IP_BLOCK_COUNTRIES=RU,KP,IR
+```
+
+Whitespace is trimmed and codes are upper-cased automatically. The env value takes precedence over any inline array in the published config.
+
+> Combining the gate with `ip_geolocation.driver=null` effectively disables it (unknowns always pass) — `php artisan billing:check-config` warns about this combination.
 
 ### VAT / OSS
 
@@ -393,6 +437,7 @@ It reports two classes of issues:
   - `invoices.seller.*` fields empty (generated invoices will be incomplete)
   - `invoices.serial_number.prefix.{invoice|credit_note|one_time_order}` missing
   - `ip_geolocation.drivers.ipinfo_lite.token` empty when IPinfo is selected
+  - `ip_geolocation.drivers.db_ip.api_key` empty when DB-IP is selected (falls back to the public free tier)
   - `additional_countries.<ISO>.name` empty
   - Multiple plans sharing the same `tier` (ranking becomes ambiguous)
   - `included_usages` defines a quota without a matching `usage_overage_prices` entry — overages cannot be charged

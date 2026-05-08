@@ -146,6 +146,17 @@ it('fails when ip_geolocation driver is not declared in drivers', function (): v
         ->assertExitCode(1);
 });
 
+it('warns when db_ip driver is selected without an api key', function (): void {
+    config()->set('mollie-billing.ip_geolocation', [
+        'driver' => 'db_ip',
+        'drivers' => ['db_ip' => ['api_key' => null]],
+    ]);
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('ip_geolocation.drivers.db_ip.api_key is empty')
+        ->assertExitCode(0);
+});
+
 it('fails when checkout_countries.include contains invalid ISO codes', function (): void {
     config()->set('mollie-billing.checkout_countries.include', ['ch']);
 
@@ -260,5 +271,58 @@ it('warns when feature is defined but never referenced', function (): void {
 
     $this->artisan('billing:check-config')
         ->expectsOutputToContain('features.orphan is defined but not referenced')
+        ->assertExitCode(0);
+});
+
+it('errors on invalid ip_block.mode', function (): void {
+    config()->set('mollie-billing.ip_block', [
+        'enabled' => true,
+        'mode' => 'something',
+        'countries' => ['AT'],
+        'block_unknown' => false,
+    ]);
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain("ip_block.mode [something] must be 'blocklist' or 'allowlist'.")
+        ->assertExitCode(1);
+});
+
+it('errors on non-ISO ip_block.countries entries', function (): void {
+    config()->set('mollie-billing.ip_block', [
+        'enabled' => true,
+        'mode' => 'blocklist',
+        'countries' => ['ru'],
+        'block_unknown' => false,
+    ]);
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('ip_block.countries entries must be uppercase ISO-3166-1 alpha-2 codes')
+        ->assertExitCode(1);
+});
+
+it('errors when allowlist mode has no countries', function (): void {
+    config()->set('mollie-billing.ip_block', [
+        'enabled' => true,
+        'mode' => 'allowlist',
+        'countries' => [],
+        'block_unknown' => false,
+    ]);
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('every visitor will be blocked')
+        ->assertExitCode(1);
+});
+
+it('warns when ip_block is enabled but the geolocation driver is null', function (): void {
+    config()->set('mollie-billing.ip_block', [
+        'enabled' => true,
+        'mode' => 'blocklist',
+        'countries' => ['RU'],
+        'block_unknown' => false,
+    ]);
+    // The baseline already sets ip_geolocation.driver = 'null'.
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('ip_geolocation.driver is "null"')
         ->assertExitCode(0);
 });

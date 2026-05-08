@@ -446,4 +446,13 @@ return [
         'processing_title' => 'Abo wird aktiviert…',
         'processing_body' => 'Wir bestätigen deine Zahlung. Das dauert normalerweise nur wenige Sekunden.',
     ],
+
+    'blocked' => [
+        'title' => ':app · Service in deiner Region nicht verfügbar',
+        'heading' => 'Dieses Service ist in deiner Region nicht verfügbar',
+        'body_with_country' => 'Aus rechtlichen und regulatorischen Gründen bieten wir bezahlte Services in :country derzeit nicht an. Wir bitten um dein Verständnis.',
+        'body_unknown_country' => 'Aus rechtlichen und regulatorischen Gründen bieten wir bezahlte Services in deiner Region derzeit nicht an. Wir bitten um dein Verständnis.',
+        'detected_country' => 'Erkanntes Land: :code',
+        'back' => 'Zurück zur Startseite',
+    ],
 ];

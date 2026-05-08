@@ -6,9 +6,10 @@ use GraystackIT\MollieBilling\Http\Controllers\BillingAdminController;
 use GraystackIT\MollieBilling\Http\Controllers\InvoiceDownloadController;
 use GraystackIT\MollieBilling\Http\Controllers\OssExportDownloadController;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
+use GraystackIT\MollieBilling\Http\Middleware\BlockRestrictedCountries;
 use Illuminate\Support\Facades\Route;
 
-Route::middleware(AuthorizeBillingAdmin::class)
+Route::middleware([BlockRestrictedCountries::class, AuthorizeBillingAdmin::class])
     ->prefix('billing/admin')->name('billing.admin.')->group(function (): void {
         Route::get('/', [BillingAdminController::class, 'show'])
             ->defaults('screen', 'dashboard')->name('dashboard');

@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Features\FeatureAccess;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingPortal;
+use GraystackIT\MollieBilling\Http\Middleware\BlockRestrictedCountries;
 use GraystackIT\MollieBilling\Http\Middleware\RequireActiveSubscription;
 use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
@@ -116,6 +117,11 @@ class MollieBillingServiceProvider extends ServiceProvider
         //
         // Admin routes are tenant-agnostic, so they can be auto-loaded safely.
         $this->loadRoutesFrom(__DIR__.'/../routes/admin.php');
+
+        // The blocked-country page must be reachable without tenant context,
+        // auth, or any of the package middleware (otherwise the IP block
+        // middleware would loop the redirect target back through itself).
+        $this->loadRoutesFrom(__DIR__.'/../routes/blocked.php');
     }
 
     private function registerMiddleware(): void
@@ -127,6 +133,7 @@ class MollieBillingServiceProvider extends ServiceProvider
         $router->aliasMiddleware('billing.country-resolved', RequireResolvedCountryMismatch::class);
         $router->aliasMiddleware('billing.feature', RequirePlanFeature::class);
         $router->aliasMiddleware('billing.admin', AuthorizeBillingAdmin::class);
+        $router->aliasMiddleware('billing.ip-block', BlockRestrictedCountries::class);
 
         if (class_exists(Livewire::class)) {
             Livewire::addPersistentMiddleware([
