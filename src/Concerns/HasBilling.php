@@ -176,6 +176,42 @@ trait HasBilling
         return ! empty($meta['scheduled_change']);
     }
 
+    /**
+     * Track the Mollie payment ID of a freshly created first-checkout / mandate /
+     * upgrade payment so the post-redirect "waiting for payment" page can poll
+     * the payment's status directly (and surface failures fast) instead of
+     * waiting for the subscription to flip via webhook.
+     */
+    public function recordPendingFirstPayment(string $paymentId): void
+    {
+        if ($paymentId === '') {
+            return;
+        }
+
+        $meta = $this->getBillingSubscriptionMeta();
+        $meta['pending_first_payment_id'] = $paymentId;
+
+        $this->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    public function getPendingFirstPaymentId(): ?string
+    {
+        $id = $this->getBillingSubscriptionMeta()['pending_first_payment_id'] ?? null;
+
+        return is_string($id) && $id !== '' ? $id : null;
+    }
+
+    public function clearPendingFirstPayment(): void
+    {
+        $meta = $this->getBillingSubscriptionMeta();
+        if (! array_key_exists('pending_first_payment_id', $meta)) {
+            return;
+        }
+
+        unset($meta['pending_first_payment_id']);
+        $this->forceFill(['subscription_meta' => $meta])->save();
+    }
+
     public function getBillingPeriodStartsAt(): ?CarbonInterface
     {
         return $this->subscription_period_starts_at;

@@ -121,4 +121,5 @@ return [
     'error_billable_creation' => 'Das Abrechnungskonto konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
     'error_no_billable' => 'Das Abrechnungskonto konnte nicht aufgelöst werden. Bitte versuchen Sie es erneut.',
     'error_payment_creation' => 'Die Zahlung konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
+    'error_unexpected' => 'Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
 ];
