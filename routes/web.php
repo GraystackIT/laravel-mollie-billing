@@ -4,12 +4,13 @@ declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Http\Controllers\BillingPortalController;
 use GraystackIT\MollieBilling\Http\Controllers\InvoiceDownloadController;
+use GraystackIT\MollieBilling\Http\Middleware\BlockRestrictedCountries;
 use GraystackIT\MollieBilling\Http\Middleware\PropagateRouteDefaults;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('billing')
     ->name('billing.')
-    ->middleware(PropagateRouteDefaults::class)
+    ->middleware([BlockRestrictedCountries::class, PropagateRouteDefaults::class])
     ->group(function (): void {
         // Always reachable (also with an open country mismatch) — the user
         // needs the dashboard to open the self-service correction modal,

@@ -119,6 +119,8 @@ class CheckConfigCommand extends Command
             $this->addError($scope, "ip_geolocation.driver [{$driver}] is not defined in ip_geolocation.drivers.");
         } elseif ($driver === 'ipinfo_lite' && empty($drivers['ipinfo_lite']['token'])) {
             $this->addWarning($scope, 'ip_geolocation.drivers.ipinfo_lite.token is empty — IPinfo lookups will fail. Set IPINFO_TOKEN.');
+        } elseif ($driver === 'db_ip' && empty($drivers['db_ip']['api_key'])) {
+            $this->addWarning($scope, 'ip_geolocation.drivers.db_ip.api_key is empty — DB-IP lookups will fall back to the public free tier (rate-limited). Set DB_IP_API_KEY for production use.');
         }
 
         $this->validateCheckoutCountries($scope);
@@ -126,6 +128,36 @@ class CheckConfigCommand extends Command
         $this->validateBillingTimezone($scope);
         $this->validateOverageJobTime($scope);
         $this->validateUsageThreshold($scope);
+        $this->validateIpBlock($scope, $driver);
+    }
+
+    private function validateIpBlock(string $scope, string $geoDriver): void
+    {
+        $config = (array) config('mollie-billing.ip_block', []);
+
+        if (! ($config['enabled'] ?? false)) {
+            return;
+        }
+
+        $mode = (string) ($config['mode'] ?? 'blocklist');
+        if (! in_array($mode, ['blocklist', 'allowlist'], true)) {
+            $this->addError($scope, "ip_block.mode [{$mode}] must be 'blocklist' or 'allowlist'.");
+        }
+
+        $countries = (array) ($config['countries'] ?? []);
+        foreach ($countries as $iso) {
+            if (! is_string($iso) || ! preg_match('/^[A-Z]{2}$/', $iso)) {
+                $this->addError($scope, 'ip_block.countries entries must be uppercase ISO-3166-1 alpha-2 codes; got ['.var_export($iso, true).'].');
+            }
+        }
+
+        if ($mode === 'allowlist' && $countries === []) {
+            $this->addError($scope, 'ip_block.mode is allowlist but ip_block.countries is empty — every visitor will be blocked.');
+        }
+
+        if ($geoDriver === 'null') {
+            $this->addWarning($scope, 'ip_block.enabled is true but ip_geolocation.driver is "null" — no country will ever be resolved, so the gate is effectively disabled (or blocks everyone if ip_block.block_unknown is true).');
+        }
     }
 
     private function validateSerialNumberPrefixes(string $scope): void

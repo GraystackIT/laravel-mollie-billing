@@ -446,4 +446,13 @@ return [
         'processing_title' => 'Activating your subscription…',
         'processing_body' => 'We are confirming your payment. This usually takes just a few seconds.',
     ],
+
+    'blocked' => [
+        'title' => ':app · Service unavailable in your region',
+        'heading' => 'This service is unavailable in your region',
+        'body_with_country' => 'For legal and regulatory reasons we currently do not offer paid services in :country. We apologise for the inconvenience.',
+        'body_unknown_country' => 'For legal and regulatory reasons we currently do not offer paid services in your region. We apologise for the inconvenience.',
+        'detected_country' => 'Detected country: :code',
+        'back' => 'Back to homepage',
+    ],
 ];

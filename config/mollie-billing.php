@@ -133,8 +133,35 @@ return [
         'driver' => env('BILLING_IP_DRIVER', 'ipinfo_lite'),
         'drivers' => [
             'ipinfo_lite' => ['token' => env('IPINFO_TOKEN')],
+            'db_ip' => ['api_key' => env('DB_IP_API_KEY')],
             'null' => [],
         ],
+    ],
+
+    // IP-based country gating. Applied to every package route except the Mollie
+    // webhook (we don't know where webhooks come from). When a request resolves
+    // to a country that is not allowed, the user is sent to a static "blocked"
+    // page that explains why and links back to "/".
+    //
+    //   mode = 'blocklist' → 'countries' lists the COUNTRIES TO BLOCK; everything else passes.
+    //   mode = 'allowlist' → 'countries' lists the ONLY COUNTRIES ALLOWED; everything else is blocked.
+    //
+    // 'block_unknown' decides what happens when the geolocation lookup yields
+    // no country (private IP, lookup error, driver returned null). Default is
+    // false — unknowns pass through. Set to true for strict allowlist setups.
+    //
+    // 'countries' can be configured via the BILLING_IP_BLOCK_COUNTRIES env
+    // variable as a comma-separated list of ISO-3166-1 alpha-2 codes
+    // (e.g. "RU,KP,IR"). Whitespace is trimmed and codes are upper-cased. When
+    // set, the env value takes precedence over any inline array below.
+    'ip_block' => [
+        'enabled' => env('BILLING_IP_BLOCK_ENABLED', false),
+        'mode' => env('BILLING_IP_BLOCK_MODE', 'blocklist'),
+        'countries' => array_values(array_filter(array_map(
+            fn (string $iso): string => strtoupper(trim($iso)),
+            explode(',', (string) env('BILLING_IP_BLOCK_COUNTRIES', ''))
+        ))),
+        'block_unknown' => env('BILLING_IP_BLOCK_UNKNOWN', false),
     ],
 
     'overage_job_time' => env('BILLING_OVERAGE_JOB_TIME', '02:00'),
