@@ -1177,8 +1177,11 @@ class MollieWebhookController extends Controller
      * Country-mismatch correction reissue: create the BillingInvoice for a
      * confirmed correction payment, link it back to the mismatch's audit log,
      * and clear the pending state.
+     *
+     * Public so CleanupStalePendingCountryCorrectionJob can re-run the same
+     * code path when the webhook never arrives. Idempotent.
      */
-    protected function handleCountryCorrectionPaid(object $payment, Billable $billable, array $metadata): void
+    public function handleCountryCorrectionPaid(object $payment, Billable $billable, array $metadata): void
     {
         if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
             return;
@@ -1222,35 +1225,6 @@ class MollieWebhookController extends Controller
             return;
         }
 
-        $mismatch = \GraystackIT\MollieBilling\Models\BillingCountryMismatch::query()->whereKey($mismatchId)->first();
-        if ($mismatch !== null) {
-            $log = $mismatch->correctionInvoicesData();
-            $reissued = $log['reissued'];
-            $found = false;
-            foreach ($reissued as &$entry) {
-                if ((int) ($entry['original_invoice_id'] ?? 0) === $originalInvoiceId
-                    && (string) ($entry['mollie_payment_id'] ?? '') === $paymentId) {
-                    $entry['invoice_id'] = (int) $invoice->id;
-                    $found = true;
-                    break;
-                }
-            }
-            unset($entry);
-            if (! $found) {
-                $reissued[] = [
-                    'original_invoice_id' => $originalInvoiceId,
-                    'mollie_payment_id' => $paymentId,
-                    'invoice_id' => (int) $invoice->id,
-                ];
-            }
-            $log['reissued'] = $reissued;
-
-            $mismatch->forceFill([
-                'correction_invoices' => $log,
-                'corrective_invoice_id' => (int) $invoice->id,
-            ])->save();
-        }
-
         event(new PaymentSucceeded($billable, $invoice));
     }
 
@@ -1259,8 +1233,11 @@ class MollieWebhookController extends Controller
      * back to Pending so the user can retry the resolve flow, drop the pending
      * country_corrections entry so a future retry isn't double-counted, and
      * notify the billable's admins so manual follow-up is possible.
+     *
+     * Public so CleanupStalePendingCountryCorrectionJob can re-run the same
+     * code path when the webhook never arrives. Idempotent.
      */
-    protected function handleCountryCorrectionFailed(object $payment, Billable $billable, array $metadata): void
+    public function handleCountryCorrectionFailed(object $payment, Billable $billable, array $metadata): void
     {
         if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
             return;
@@ -1291,6 +1268,20 @@ class MollieWebhookController extends Controller
         $mismatch->forceFill([
             'status' => \GraystackIT\MollieBilling\Enums\CountryMismatchStatus::Pending,
         ])->save();
+
+        // Re-cancel at period end — the original cancel from the initial flag
+        // was undone when resolve() ran, so without this the billable would keep
+        // renewing while the unresolved mismatch (no reissue invoice) is sitting
+        // in the audit log. Mirrors the cancel in CountryMatchService::check().
+        try {
+            app(\GraystackIT\MollieBilling\Services\Billing\CancelSubscription::class)
+                ->handle($billable, immediately: false);
+        } catch (\Throwable $e) {
+            Log::warning('Country correction failed: cancel-at-period-end failed', [
+                'billable_id' => (string) ($billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : ''),
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         Log::warning('country_correction reissue failed at Mollie', [
             'mismatch_id' => $mismatchId,

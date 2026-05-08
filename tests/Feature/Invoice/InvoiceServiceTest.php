@@ -2,10 +2,13 @@
 
 declare(strict_types=1);
 
+use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Events\CreditNoteIssued;
 use GraystackIT\MollieBilling\Events\InvoiceCreated;
 use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
+use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
@@ -187,6 +190,117 @@ it('uses different prefixes for invoices and credit notes', function (): void {
 
     expect($invoice)->toStartWith('IN');
     expect($credit)->toStartWith('CR');
+});
+
+it('createForPayment links the invoice to an open country mismatch', function (): void {
+    $b = freshBillableForInvoice();
+
+    $mismatch = BillingCountryMismatch::create([
+        'billable_type' => $b->getMorphClass(),
+        'billable_id' => $b->getKey(),
+        'tax_country_user' => 'HU',
+        'tax_country_payment' => 'AT',
+        'tax_country_ip' => 'AT',
+        'status' => CountryMismatchStatus::Pending,
+    ]);
+
+    $payment = (object) ['id' => 'tr_inv_mismatch_1', 'subscriptionId' => null];
+    $lineItems = [[
+        'kind' => 'plan',
+        'label' => 'Pro',
+        'code' => 'pro',
+        'quantity' => 1,
+        'unit_price' => 1000,
+        'unit_price_net' => 1000,
+        'total_net' => 1000,
+    ]];
+
+    $invoice = app(InvoiceService::class)->createForPayment($payment, 'subscription', $lineItems, $b);
+
+    expect($invoice->mismatch_id)->toBe($mismatch->id);
+});
+
+it('createForPayment leaves mismatch_id null when no mismatch is open', function (): void {
+    $b = freshBillableForInvoice();
+
+    $payment = (object) ['id' => 'tr_inv_mismatch_2', 'subscriptionId' => null];
+    $lineItems = [[
+        'kind' => 'plan',
+        'label' => 'Pro',
+        'code' => 'pro',
+        'quantity' => 1,
+        'unit_price' => 1000,
+        'unit_price_net' => 1000,
+        'total_net' => 1000,
+    ]];
+
+    $invoice = app(InvoiceService::class)->createForPayment($payment, 'subscription', $lineItems, $b);
+
+    expect($invoice->mismatch_id)->toBeNull();
+});
+
+it('createForPayment ignores resolved mismatches', function (): void {
+    $b = freshBillableForInvoice();
+
+    BillingCountryMismatch::create([
+        'billable_type' => $b->getMorphClass(),
+        'billable_id' => $b->getKey(),
+        'tax_country_user' => 'HU',
+        'tax_country_payment' => 'AT',
+        'tax_country_ip' => 'AT',
+        'status' => CountryMismatchStatus::Resolved,
+        'chosen_country' => 'AT',
+        'resolved_at' => now(),
+    ]);
+
+    $payment = (object) ['id' => 'tr_inv_mismatch_3', 'subscriptionId' => null];
+    $lineItems = [[
+        'kind' => 'plan',
+        'label' => 'Pro',
+        'code' => 'pro',
+        'quantity' => 1,
+        'unit_price' => 1000,
+        'unit_price_net' => 1000,
+        'total_net' => 1000,
+    ]];
+
+    $invoice = app(InvoiceService::class)->createForPayment($payment, 'subscription', $lineItems, $b);
+
+    expect($invoice->mismatch_id)->toBeNull();
+});
+
+it('createInvoice links the invoice to an open country mismatch', function (): void {
+    $b = freshBillableForInvoice();
+
+    $mismatch = BillingCountryMismatch::create([
+        'billable_type' => $b->getMorphClass(),
+        'billable_id' => $b->getKey(),
+        'tax_country_user' => 'HU',
+        'tax_country_payment' => 'AT',
+        'tax_country_ip' => 'AT',
+        'status' => CountryMismatchStatus::Pending,
+    ]);
+
+    $lineItems = [[
+        'kind' => 'plan',
+        'description' => 'Pro',
+        'qty' => 1,
+        'unit_price_net' => 1000,
+        'amount_net' => 1000,
+        'vat_rate' => 19.0,
+        'vat_amount' => 190,
+        'amount_gross' => 1190,
+    ]];
+
+    $invoice = app(InvoiceService::class)->createInvoice(
+        billable: $b,
+        kind: InvoiceKind::Subscription,
+        molliePaymentId: 'tr_inv_mismatch_4',
+        mollieSubscriptionId: null,
+        lineItems: $lineItems,
+    );
+
+    expect($invoice->mismatch_id)->toBe($mismatch->id);
 });
 
 it('invoice has a download URL when PDF exists', function (): void {

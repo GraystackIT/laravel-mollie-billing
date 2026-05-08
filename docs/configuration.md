@@ -206,7 +206,7 @@ OSS exports run as a queued job (`GenerateOssExportJob`) — admins click "Gener
 ],
 ```
 
-All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `RevokeMollieMandateJob`, `RetrySubscriptionPatchJob`, `RetryRefundLineJob`, `CleanupStalePendingProrataChangeJob`, `PruneProcessedWebhooksJob`, `ApplyScheduledChangesJob`, `SyncSeatsJob`, `GenerateOssExportJob`) and the queued `PlanChangeFailedNotification` are dispatched onto this connection/queue.
+All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `RevokeMollieMandateJob`, `RetrySubscriptionPatchJob`, `RetryRefundLineJob`, `CleanupStalePendingProrataChangeJob`, `CleanupStalePendingCountryCorrectionJob`, `PruneProcessedWebhooksJob`, `ApplyScheduledChangesJob`, `SyncSeatsJob`, `GenerateOssExportJob`) and the queued `PlanChangeFailedNotification` are dispatched onto this connection/queue.
 
 Both keys default to `null`, which falls back to the framework default connection (`config('queue.default')`) and the default queue name. Set `BILLING_QUEUE_NAME=billing` (and a dedicated worker) when you want to isolate billing work from the rest of your application's queue.
 
