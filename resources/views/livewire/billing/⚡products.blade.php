@@ -347,6 +347,11 @@ new class extends Component {
             && $billable->isLocalBillingSubscription()
             && ! (bool) config('mollie-billing.local_subscription.allow_one_time_orders', false);
 
+        $isAccessGrant = $billable !== null
+            && $billable->isLocalBillingSubscription()
+            && $billable->getBillingSubscriptionStatus()->value !== 'cancelled'
+            && ($billable->getBillingSubscriptionEndsAt()?->isFuture() ?? false);
+
         return [
             'billable' => $billable,
             'availableGroups' => $availableGroups,
@@ -354,6 +359,7 @@ new class extends Component {
             'currencySymbol' => $currencySymbol,
             'reverseCharge' => $reverseCharge,
             'localBlocksProducts' => $localBlocksProducts,
+            'isAccessGrant' => $isAccessGrant,
         ];
     }
 };
@@ -378,7 +384,7 @@ new class extends Component {
     @else
         @if ($localBlocksProducts)
             <flux:callout icon="information-circle" color="blue">
-                <span>{{ __('billing::portal.free_plan_no_products') }}</span>
+                <span>{{ $isAccessGrant ? __('billing::portal.access_grant_no_products') : __('billing::portal.free_plan_no_products') }}</span>
                 <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
                     {{ __('billing::portal.plan_change') }}
                 </flux:button>

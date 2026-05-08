@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
@@ -22,6 +23,7 @@ class StartSubscriptionCheckout
         private readonly MollieCustomerResolver $customerResolver,
         private readonly StartMandateCheckout $mandateCheckout,
         private readonly ActivateLocalSubscription $activateLocal,
+        private readonly CouponService $couponService,
     ) {
     }
 
@@ -48,6 +50,37 @@ class StartSubscriptionCheckout
 
         $amountGross = (int) $request['amount_gross'];
         $urlParams = MollieBilling::resolveUrlParameters($billable);
+
+        // AccessGrant coupons activate a Local subscription directly via the
+        // CouponService — no Mollie mandate, no Mollie subscription. The grant's
+        // duration_days defines the access window; the customer must re-checkout
+        // after it expires.
+        if ($couponCode !== null && $couponCode !== '') {
+            $couponLookup = \GraystackIT\MollieBilling\Models\Coupon::query()
+                ->whereRaw('UPPER(code) = ?', [strtoupper($couponCode)])
+                ->first();
+
+            if ($couponLookup !== null && $couponLookup->type === CouponType::AccessGrant) {
+                // The strict-match check (plan/interval/addons/extra_seats must
+                // match the grant) is enforced by validate() itself — passing
+                // extraSeats + addonCodes here is what makes that work. Anything
+                // beyond the grant is rejected before redeem(), since the local
+                // subscription would otherwise be activated without ever
+                // charging for the user's extras.
+                $coupon = $this->couponService->validate($couponCode, $billable, [
+                    'planCode' => $request['plan_code'],
+                    'interval' => $request['interval'],
+                    'addonCodes' => $request['addon_codes'] ?? [],
+                    'extraSeats' => (int) ($request['extra_seats'] ?? 0),
+                    'orderAmountNet' => $amountGross,
+                    'allowed_types' => [CouponType::AccessGrant],
+                ]);
+
+                $this->couponService->redeem($coupon, $billable, []);
+
+                return ['checkout_url' => null, 'payment_id' => ''];
+            }
+        }
 
         if ($amountGross === 0) {
             $planIsFree = $this->catalog->basePriceNet($request['plan_code'], $request['interval']) === 0;
@@ -93,6 +126,7 @@ class StartSubscriptionCheckout
             description: "Subscription {$request['plan_code']}",
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            cancelUrl: route(BillingRoute::checkout(), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),

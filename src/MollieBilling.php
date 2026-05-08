@@ -85,11 +85,70 @@ class MollieBilling
 
     public static function resolveBillable(Request $request): ?Billable
     {
-        if (self::$resolveBillableCallback === null) {
+        if (self::$resolveBillableCallback !== null) {
+            $billable = (self::$resolveBillableCallback)($request);
+
+            if ($billable !== null) {
+                return $billable;
+            }
+        }
+
+        // Fallback: when no tenant-resolution middleware ran for this request
+        // (e.g. the checkout route is mounted outside any tenant prefix), look
+        // up the billable directly from the request's route or query parameters
+        // using the billable model's `getRouteKeyName()` as the matching column.
+        // This lets `?organization=lev-jimenez` resolve a billable on the
+        // checkout route without forcing the host app to mount custom
+        // middleware on the package's routes.
+        return self::resolveBillableFromRequestParameters($request);
+    }
+
+    /**
+     * Reserved query parameters used by package routes that must NEVER be
+     * interpreted as billable-model lookup values.
+     */
+    private const RESERVED_QUERY_KEYS = ['back', 'plan', 'interval', 'redirect', 'token'];
+
+    private static function resolveBillableFromRequestParameters(Request $request): ?Billable
+    {
+        $modelClass = config('mollie-billing.billable_model');
+        if (! is_string($modelClass) || $modelClass === '' || ! class_exists($modelClass)) {
             return null;
         }
 
-        return (self::$resolveBillableCallback)($request);
+        $model = app($modelClass);
+        if (! $model instanceof \Illuminate\Database\Eloquent\Model || ! $model instanceof Billable) {
+            return null;
+        }
+
+        // Route parameters first — a route-bound model takes precedence and
+        // is already an instance.
+        foreach ($request->route()?->parameters() ?? [] as $value) {
+            if ($value instanceof Billable) {
+                return $value;
+            }
+        }
+
+        $key = $model->getRouteKeyName();
+        $query = $request->query();
+        if (! is_array($query)) {
+            return null;
+        }
+
+        foreach ($query as $name => $value) {
+            if (! is_string($name) || in_array($name, self::RESERVED_QUERY_KEYS, true)) {
+                continue;
+            }
+            if (! is_string($value) || $value === '') {
+                continue;
+            }
+            $found = $model->newQuery()->where($key, $value)->first();
+            if ($found instanceof Billable) {
+                return $found;
+            }
+        }
+
+        return null;
     }
 
     /** @return iterable<int, mixed> */

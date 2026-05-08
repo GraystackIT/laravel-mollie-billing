@@ -4,15 +4,27 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
+use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\Sanitize;
 use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 
 class BillingPortalController extends Controller
 {
-    public function checkout(Request $request): View
+    public function checkout(Request $request): View|RedirectResponse
     {
+        $billable = MollieBilling::resolveBillable($request);
+
+        if ($billable !== null && $billable->hasAccessibleBillingSubscription()) {
+            return redirect()->route(
+                BillingRoute::name('index'),
+                MollieBilling::resolveUrlParameters($billable),
+            );
+        }
+
         return view('mollie-billing::layouts.checkout', [
             'livewireComponent' => 'mollie-billing::checkout',
             'backUrl' => Sanitize::backUrl($request->query('back')),

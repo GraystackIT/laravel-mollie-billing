@@ -191,6 +191,8 @@ MollieBilling::resolveBillableUsing(fn () => auth()->user()?->currentOrganizatio
 MollieBilling::authUsing(fn () => auth()->check());
 ```
 
+> **Checkout-route fallback:** the checkout route is mounted outside any tenant prefix, so a typical `resolveBillableUsing` closure that reads from a tenant context returns `null` there. When that happens the package falls back to looking up the billable from the request's query parameters, matching against the billable model's `getRouteKeyName()`. A returning customer hitting `/billing/checkout?organization=acme-corp` therefore re-uses the existing billable instead of being asked for the company details again. Reserved query keys (`back`, `plan`, `interval`, `redirect`, `token`) are skipped.
+
 Customize `config/mollie-billing-plans.php` to define your plans, addons and feature keys.
 
 ## First checkout

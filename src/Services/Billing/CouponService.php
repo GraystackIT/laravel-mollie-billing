@@ -349,6 +349,39 @@ class CouponService
             throw new InvalidCouponException($billable, $code, 'min_order_not_met');
         }
 
+        // AccessGrant strict-match: the grant defines exactly what the local
+        // subscription will be activated with — anything the user picked beyond
+        // that would be silently free. Reject upfront so the checkout UI can
+        // surface the mismatch before submit. Only applies when the consumer
+        // passes the relevant context keys (planCode/interval/addonCodes/extraSeats).
+        if ($coupon->type === CouponType::AccessGrant) {
+            $hasFullPlan = ! empty($coupon->grant_plan_code);
+
+            if ($hasFullPlan && $planCode !== null && $coupon->grant_plan_code !== $planCode) {
+                throw new InvalidCouponException($billable, $code, 'grant_plan_mismatch');
+            }
+
+            if (
+                $hasFullPlan
+                && $interval !== null
+                && $coupon->grant_interval !== null
+                && $coupon->grant_interval !== $interval
+            ) {
+                throw new InvalidCouponException($billable, $code, 'grant_interval_mismatch');
+            }
+
+            $grantedAddons = (array) ($coupon->grant_addon_codes ?? []);
+            foreach ($addonCodes as $addon) {
+                if (! in_array($addon, $grantedAddons, true)) {
+                    throw new InvalidCouponException($billable, $code, 'grant_addons_exceeded');
+                }
+            }
+
+            if ((int) ($context['extraSeats'] ?? 0) > 0) {
+                throw new InvalidCouponException($billable, $code, 'grant_seats_not_supported');
+            }
+        }
+
         if ($coupon->type !== CouponType::AccessGrant && $existingCouponIds !== []) {
             // The new coupon itself is not stackable → it can't be combined with anything else.
             if (! $coupon->stackable) {

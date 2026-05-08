@@ -6,7 +6,13 @@
         <div class="flex items-center gap-2">
             <flux:icon.building-office class="size-4 text-zinc-500" />
             <flux:heading size="sm">{{ __('billing::checkout.billing_details') }}</flux:heading>
+            @if ($billing_locked)
+                <flux:icon.lock-closed class="size-3.5 text-zinc-400 ml-auto" />
+            @endif
         </div>
+        @if ($billing_locked)
+            <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.billing_locked_hint') }}</p>
+        @endif
         <dl class="mt-4 space-y-3 text-sm">
             <div class="flex justify-between gap-6">
                 <dt class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.company_name') }}</dt>

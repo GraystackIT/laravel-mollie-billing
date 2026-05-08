@@ -620,6 +620,9 @@ new class extends Component {
         $headerIsTrial = $billable && $billable->isOnBillingTrial();
         $headerIsCancelled = $headerStatus?->value === 'cancelled';
         $headerIsLocal = $billable && $billable->isLocalBillingSubscription();
+        $headerIsAccessGrant = $headerIsLocal
+            && ! $headerIsCancelled
+            && ($billable?->getBillingSubscriptionEndsAt()?->isFuture() ?? false);
 
         if ($headerIsTrial) {
             $headerEndsAt = $billable->getBillingTrialEndsAt();
@@ -627,6 +630,9 @@ new class extends Component {
         } elseif ($headerIsCancelled) {
             $headerEndsAt = $billable?->getBillingSubscriptionEndsAt();
             $headerEndsLabel = __('billing::portal.valid_until');
+        } elseif ($headerIsAccessGrant) {
+            $headerEndsAt = $billable?->getBillingSubscriptionEndsAt();
+            $headerEndsLabel = __('billing::portal.access_grant_valid_until');
         } else {
             $headerEndsAt = $billable?->nextBillingDate();
             $headerEndsLabel = __('billing::portal.next_billing');
@@ -660,7 +666,7 @@ new class extends Component {
                         <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">
                             {{ $headerEndsLabel }}
                         </flux:subheading>
-                        @if ($headerIsLocal && ! $headerIsCancelled && ! $headerIsTrial)
+                        @if ($headerIsLocal && ! $headerIsCancelled && ! $headerIsTrial && ! $headerIsAccessGrant)
                             <flux:text class="font-semibold text-zinc-500 dark:text-zinc-400">
                                 {{ __('billing::portal.free_plan_recurring_charge') }}
                             </flux:text>

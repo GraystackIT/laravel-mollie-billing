@@ -68,6 +68,7 @@ return [
 
     // Step 4: confirm
     'billing_details' => 'Rechnungsdaten',
+    'billing_locked_hint' => 'Aus deinem Konto übernommen.',
     'order' => 'Bestellung',
     'plan' => 'Plan',
     'billing_interval' => 'Abrechnung',
@@ -110,6 +111,11 @@ return [
     'coupon_full_coverage_use_access_grant' => 'Dieser Gutschein würde den Gesamtbetrag auf null reduzieren. Bitte nutze stattdessen eine Zugangsgewährung (Access Grant) oder einen kostenlosen Plan.',
     'coupon_recurring_already_active' => 'Dieser Gutschein ist bereits auf Ihrem Abonnement aktiv und wird bei jeder Verlängerung automatisch angewendet.',
     'coupon_type_not_allowed_in_context' => 'Dieser Gutscheintyp kann hier nicht eingelöst werden.',
+    'coupon_grant_plan_mismatch' => 'Dieser Code gilt nur für einen bestimmten Plan. Bitte wählen Sie den passenden Plan aus.',
+    'coupon_grant_interval_mismatch' => 'Dieser Code gilt nur für ein bestimmtes Abrechnungsintervall. Bitte ändern Sie die Auswahl.',
+    'coupon_grant_addons_exceeded' => 'Dieser Code deckt nicht alle gewählten Add-ons ab. Bitte entfernen Sie die nicht abgedeckten Add-ons oder schließen Sie den Checkout regulär ab.',
+    'coupon_grant_seats_not_supported' => 'Dieser Code deckt keine zusätzlichen Sitze ab. Bitte setzen Sie die zusätzlichen Sitze auf 0 oder schließen Sie den Checkout regulär ab.',
+    'coupon_dropped_revisit' => 'Ihr Gutscheincode passt nicht mehr zur aktuellen Auswahl und wurde entfernt. Bitte prüfen Sie den oben angezeigten Hinweis und passen Sie Ihre Auswahl an oder geben Sie den Code erneut ein.',
 
     // Promo (existing)
     'coupon_applied' => 'Gutschein :code angewendet.',

@@ -133,6 +133,10 @@
 <flux:error name="plan_code" />
 
 <div class="flex items-center justify-between pt-2">
-    <flux:button wire:click="back" variant="ghost" icon="arrow-left">{{ __('billing::checkout.back') }}</flux:button>
+    @if ($billing_locked && $customStepCount === 0)
+        <div></div>
+    @else
+        <flux:button wire:click="back" variant="ghost" icon="arrow-left">{{ __('billing::checkout.back') }}</flux:button>
+    @endif
     <flux:button wire:click="next" variant="primary" icon:trailing="arrow-right">{{ __('billing::checkout.continue') }}</flux:button>
 </div>

@@ -68,6 +68,7 @@ return [
 
     // Step 4: confirm
     'billing_details' => 'Billing details',
+    'billing_locked_hint' => 'Loaded from your account profile.',
     'order' => 'Order',
     'plan' => 'Plan',
     'billing_interval' => 'Billing',
@@ -110,6 +111,11 @@ return [
     'coupon_full_coverage_use_access_grant' => 'This coupon would reduce the total to zero. Please use an access grant or a free plan instead.',
     'coupon_recurring_already_active' => 'This coupon is already active on your subscription and applies automatically on every renewal.',
     'coupon_type_not_allowed_in_context' => 'This coupon type cannot be redeemed here.',
+    'coupon_grant_plan_mismatch' => 'This code is only valid for a specific plan. Please select the matching plan.',
+    'coupon_grant_interval_mismatch' => 'This code is only valid for a specific billing interval. Please change the selection.',
+    'coupon_grant_addons_exceeded' => 'This code does not cover all selected add-ons. Please remove the unsupported add-ons or complete checkout regularly.',
+    'coupon_grant_seats_not_supported' => 'This code does not cover additional seats. Please set additional seats to 0 or complete checkout regularly.',
+    'coupon_dropped_revisit' => 'Your coupon code no longer matches the current selection and was removed. Please review the notice above and adjust your selection or re-apply the code.',
 
     // Promo (existing)
     'coupon_applied' => 'Coupon :code applied.',
