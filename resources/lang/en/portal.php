@@ -445,6 +445,14 @@ return [
         'to_dashboard' => 'Back to dashboard',
         'processing_title' => 'Activating your subscription…',
         'processing_body' => 'We are confirming your payment. This usually takes just a few seconds.',
+        'failed_title' => 'Payment was not successful',
+        'failed_body_failed' => 'Your payment was declined by the bank. Please try again or use a different payment method.',
+        'failed_body_canceled' => 'You canceled the payment. You can restart checkout whenever you are ready.',
+        'failed_body_expired' => 'Your payment session expired before it was completed. Please restart checkout.',
+        'try_again' => 'Try again',
+        'timeout_title' => 'This is taking longer than usual',
+        'timeout_body' => 'We have not yet received confirmation of your payment. If the funds have already been charged, you are good — activation is still running in the background. You can re-check at any time or head to your dashboard.',
+        'check_again' => 'Check again',
     ],
 
     'blocked' => [

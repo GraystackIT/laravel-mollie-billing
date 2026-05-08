@@ -445,6 +445,14 @@ return [
         'to_dashboard' => 'Zum Dashboard',
         'processing_title' => 'Abo wird aktiviert…',
         'processing_body' => 'Wir bestätigen deine Zahlung. Das dauert normalerweise nur wenige Sekunden.',
+        'failed_title' => 'Zahlung nicht erfolgreich',
+        'failed_body_failed' => 'Deine Zahlung wurde von der Bank abgelehnt. Bitte versuche es erneut oder wähle eine andere Zahlungsmethode.',
+        'failed_body_canceled' => 'Du hast die Zahlung abgebrochen. Du kannst den Checkout erneut starten, sobald du bereit bist.',
+        'failed_body_expired' => 'Deine Zahlungssitzung ist abgelaufen, bevor sie abgeschlossen wurde. Bitte starte den Checkout erneut.',
+        'try_again' => 'Erneut versuchen',
+        'timeout_title' => 'Das dauert länger als üblich',
+        'timeout_body' => 'Wir haben deine Zahlung noch nicht bestätigt bekommen. Falls das Geld bereits abgebucht wurde, ist alles gut — die Aktivierung läuft im Hintergrund. Du kannst jederzeit erneut prüfen oder zum Dashboard wechseln.',
+        'check_again' => 'Erneut prüfen',
     ],
 
     'blocked' => [

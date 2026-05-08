@@ -741,104 +741,127 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function submit(StartSubscriptionCheckout $checkout, VatCalculationService $vat): mixed
     {
-        $this->processing = true;
         $this->errorMessage = null;
 
+        // Validation runs BEFORE setting processing=true. ValidationException is
+        // re-thrown so Livewire can render field errors; processing stays false
+        // so the submit button doesn't lock up on a recoverable input error.
         $this->validateStep1();
         $this->validateStep2();
         if ($this->hasAddonsOrSeatsStep()) {
             $this->validateStep3();
         }
 
-        if ($this->billableId === null) {
-            try {
-                $this->createBillable();
-            } catch (\Throwable $e) {
-                report($e);
-                $this->errorMessage = __('billing::checkout.error_billable_creation');
-                $this->processing = false;
-
-                return null;
-            }
-        }
-
-        $billable = $this->resolveBillable();
-        if ($billable === null) {
-            $this->errorMessage = __('billing::checkout.error_no_billable');
-            $this->processing = false;
-
-            return null;
-        }
-        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
-        if ($billable->hasAccessibleBillingSubscription()) {
-            return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
-        }
-
-        // Update billing address on the billable (may have changed since step 1)
-        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
-        $billable->forceFill([
-            'name' => $this->company_name,
-            'billing_street' => $this->billing_street,
-            'billing_postal_code' => $this->billing_postal_code,
-            'billing_city' => $this->billing_city,
-            'billing_country' => $this->billing_country,
-            'tax_country_user' => $this->billing_country,
-            'tax_country_ip' => $this->resolveCurrentIpCountry(),
-            'vat_number' => $this->vat_number,
-        ])->save();
-
-        // Persist the VIES audit-trail entry that any subsequent invoice will
-        // reference. We check `currentVatValidation()` (not just "vat_number
-        // changed") because the billable may have been created above with the
-        // VAT number already set — in that case there is no prior persisted
-        // value to diff against, but there is also no audit entry yet.
-        if (filled($this->vat_number) && $billable->currentVatValidation() === null) {
-            try {
-                app(VatCalculationService::class)->validateAndPersist($billable, (string) $this->vat_number);
-            } catch (\GraystackIT\MollieBilling\Exceptions\ViesUnavailableException) {
-                $this->errorMessage = __('billing::checkout.vies_unavailable');
-                $this->processing = false;
-                return null;
-            }
-        }
-
-        // Run before-checkout hook
-        $blockReason = MollieBilling::runBeforeCheckout($billable);
-        if ($blockReason !== null) {
-            $this->errorMessage = $blockReason;
-            $this->processing = false;
-
-            return null;
-        }
-
-        $this->refreshAppliedCoupon();
+        $this->processing = true;
 
         try {
-            $result = $checkout->handle($billable, [
-                'plan_code' => $this->plan_code,
-                'interval' => $this->interval,
-                'addon_codes' => $this->addon_codes,
-                'extra_seats' => $this->extra_seats,
-                'coupon_code' => $this->applied_coupon['code'] ?? null,
-                'amount_gross' => $this->totals($vat)['gross'],
-            ]);
+            if ($this->billableId === null) {
+                try {
+                    $this->createBillable();
+                } catch (\Throwable $e) {
+                    report($e);
+                    $this->errorMessage = __('billing::checkout.error_billable_creation');
+
+                    return null;
+                }
+            }
+
+            $billable = $this->resolveBillable();
+            if ($billable === null) {
+                $this->errorMessage = __('billing::checkout.error_no_billable');
+
+                return null;
+            }
+            /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+            if ($billable->hasAccessibleBillingSubscription()) {
+                return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
+            }
+
+            // Update billing address on the billable (may have changed since step 1)
+            /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+            $billable->forceFill([
+                'name' => $this->company_name,
+                'billing_street' => $this->billing_street,
+                'billing_postal_code' => $this->billing_postal_code,
+                'billing_city' => $this->billing_city,
+                'billing_country' => $this->billing_country,
+                'tax_country_user' => $this->billing_country,
+                'tax_country_ip' => $this->resolveCurrentIpCountry(),
+                'vat_number' => $this->vat_number,
+            ])->save();
+
+            // Persist the VIES audit-trail entry that any subsequent invoice will
+            // reference. We check `currentVatValidation()` (not just "vat_number
+            // changed") because the billable may have been created above with the
+            // VAT number already set — in that case there is no prior persisted
+            // value to diff against, but there is also no audit entry yet.
+            if (filled($this->vat_number) && $billable->currentVatValidation() === null) {
+                try {
+                    app(VatCalculationService::class)->validateAndPersist($billable, (string) $this->vat_number);
+                } catch (\GraystackIT\MollieBilling\Exceptions\ViesUnavailableException) {
+                    $this->errorMessage = __('billing::checkout.vies_unavailable');
+
+                    return null;
+                }
+            }
+
+            // Run before-checkout hook
+            $blockReason = MollieBilling::runBeforeCheckout($billable);
+            if ($blockReason !== null) {
+                $this->errorMessage = $blockReason;
+
+                return null;
+            }
+
+            $this->refreshAppliedCoupon();
+
+            try {
+                $result = $checkout->handle($billable, [
+                    'plan_code' => $this->plan_code,
+                    'interval' => $this->interval,
+                    'addon_codes' => $this->addon_codes,
+                    'extra_seats' => $this->extra_seats,
+                    'coupon_code' => $this->applied_coupon['code'] ?? null,
+                    'amount_gross' => $this->totals($vat)['gross'],
+                ]);
+            } catch (\Throwable $e) {
+                report($e);
+                try {
+                    MollieBilling::runAfterCheckout($billable, false);
+                } catch (\Throwable $hookError) {
+                    report($hookError);
+                }
+                $this->errorMessage = __('billing::checkout.error_payment_creation');
+
+                return null;
+            }
+
+            if (! empty($result['payment_id'])) {
+                $billable->recordPendingFirstPayment((string) $result['payment_id']);
+            }
+
+            if (! empty($result['checkout_url'])) {
+                return $this->redirect($result['checkout_url'], navigate: false);
+            }
+
+            // Zero-amount / local subscription — no Mollie redirect needed
+            try {
+                MollieBilling::runAfterCheckout($billable, true);
+            } catch (\Throwable $hookError) {
+                report($hookError);
+            }
+
+            return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
         } catch (\Throwable $e) {
+            // Catchall: anything not handled above (unexpected DB/Mollie/network failure)
+            // must never leave the UI in a permanently disabled state.
             report($e);
-            MollieBilling::runAfterCheckout($billable, false);
-            $this->errorMessage = __('billing::checkout.error_payment_creation');
-            $this->processing = false;
+            $this->errorMessage = __('billing::checkout.error_unexpected');
 
             return null;
+        } finally {
+            $this->processing = false;
         }
-
-        if (! empty($result['checkout_url'])) {
-            return $this->redirect($result['checkout_url'], navigate: false);
-        }
-
-        // Zero-amount / local subscription — no Mollie redirect needed
-        MollieBilling::runAfterCheckout($billable, true);
-
-        return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
     }
 }; ?>
 

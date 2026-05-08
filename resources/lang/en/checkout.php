@@ -121,4 +121,5 @@ return [
     'error_billable_creation' => 'Could not create the billing account. Please try again.',
     'error_no_billable' => 'Could not resolve the billing account. Please try again.',
     'error_payment_creation' => 'Could not create the payment. Please try again.',
+    'error_unexpected' => 'An unexpected error occurred. Please try again or contact support.',
 ];

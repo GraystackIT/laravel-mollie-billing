@@ -410,6 +410,10 @@ new class extends Component {
                 'amount_gross' => $grossAmount,
             ]);
 
+            if (! empty($result['payment_id'])) {
+                $billable->recordPendingFirstPayment((string) $result['payment_id']);
+            }
+
             if (! empty($result['checkout_url'])) {
                 return $this->redirect($result['checkout_url'], navigate: false);
             }

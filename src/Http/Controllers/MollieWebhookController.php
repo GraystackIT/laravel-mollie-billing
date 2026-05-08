@@ -166,6 +166,18 @@ class MollieWebhookController extends Controller
             'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
         ]);
 
+        // Clear the pending-first-payment marker as soon as Mollie reports a
+        // terminal state for that exact payment, regardless of branch. The
+        // "waiting for payment" return page reads this to decide whether to
+        // keep polling — leaving it set after a final state would extend the
+        // poll loop unnecessarily.
+        if ($billable !== null && in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
+            $pendingId = $billable->getPendingFirstPaymentId();
+            if ($pendingId !== null && $pendingId === (string) ($payment->id ?? '')) {
+                $billable->clearPendingFirstPayment();
+            }
+        }
+
         if ($status === 'paid') {
             if ($billable === null) {
                 Log::warning('Paid webhook with unresolvable billable', ['id' => $payment->id]);

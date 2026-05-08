@@ -29,6 +29,9 @@ interface Billable
     public function getBillingSubscriptionSource(): ?string;
     public function getBillingSubscriptionStatus(): SubscriptionStatus;
     public function getBillingSubscriptionMeta(): array;
+    public function recordPendingFirstPayment(string $paymentId): void;
+    public function getPendingFirstPaymentId(): ?string;
+    public function clearPendingFirstPayment(): void;
     public function getActiveBillingAddonCodes(): array;
     public function getBillingPeriodStartsAt(): ?CarbonInterface;
     public function getBillingTrialEndsAt(): ?CarbonInterface;
