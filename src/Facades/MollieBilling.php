@@ -40,6 +40,8 @@ use Illuminate\Support\Facades\Facade;
  * @method static array resolveCheckoutSteps()
  * @method static void urlParametersUsing(\Closure $callback)
  * @method static array<string, mixed> resolveUrlParameters(?\GraystackIT\MollieBilling\Contracts\Billable $billable = null)
+ * @method static void cleanupOrphanedBillableUsing(\Closure $callback)
+ * @method static void runCleanupOrphanedBillable(\GraystackIT\MollieBilling\Contracts\Billable $billable)
  *
  * @see \GraystackIT\MollieBilling\MollieBilling
  */

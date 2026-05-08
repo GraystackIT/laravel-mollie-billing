@@ -1,6 +1,7 @@
 @props([
     'success' => null,
     'error' => null,
+    'errorHeading' => 'Something went wrong',
     'info' => null,
 ])
 
@@ -9,7 +10,10 @@
 @endif
 
 @if ($error)
-    <flux:callout variant="danger" icon="exclamation-triangle" inline>{{ $error }}</flux:callout>
+    <flux:callout variant="danger" icon="exclamation-triangle">
+        <flux:callout.heading>{{ $errorHeading }}</flux:callout.heading>
+        <flux:callout.text>{{ $error }}</flux:callout.text>
+    </flux:callout>
 @endif
 
 @if ($info)

@@ -166,6 +166,30 @@ return [
 
     'overage_job_time' => env('BILLING_OVERAGE_JOB_TIME', '02:00'),
 
+    // Cleanup of orphaned billables — billables that were created during a
+    // checkout flow but never reached an active subscription (user closed the
+    // tab, Mollie webhook never arrived, mandate was set up but the first
+    // payment was abandoned, …). The CleanupOrphanedBillablesJob runs every
+    // 15 minutes by default and deletes such records once they exceed
+    // `threshold_minutes` of age.
+    //
+    // Detection (hybrid):
+    //   - If the billable has a `pending_first_payment_id` in subscription_meta,
+    //     Mollie is polled and the record is only cleaned when the payment is
+    //     in a terminal failure state (failed/canceled/expired).
+    //   - Otherwise the billable is cleaned purely based on age + the absence
+    //     of an accessible subscription.
+    //
+    // The actual deletion is delegated to MollieBilling::cleanupOrphanedBillableUsing()
+    // when an app registers a closure (e.g. to also delete the related User /
+    // tenant record). When no closure is registered the package soft-deletes
+    // the billable directly via `$billable->delete()`.
+    'cleanup' => [
+        'enabled' => env('BILLING_CLEANUP_ORPHANED_ENABLED', true),
+        'threshold_minutes' => (int) env('BILLING_CLEANUP_ORPHANED_THRESHOLD_MINUTES', 60),
+        'cron_expression' => env('BILLING_CLEANUP_ORPHANED_CRON', '*/15 * * * *'),
+    ],
+
     'usage_threshold_percent' => env('BILLING_USAGE_THRESHOLD', 80),
 
     // Whether unused usage credits carry over to the next billing period.

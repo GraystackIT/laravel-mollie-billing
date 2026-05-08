@@ -42,6 +42,9 @@ new class extends Component {
     public ?int $grant_duration_days = null;
 
     /** @var array<int, string> */
+    public array $grant_addon_codes = [];
+
+    /** @var array<int, string> */
     public array $applicable_addons = [];
     /** @var array<int, string> */
     public array $applicable_products = [];
@@ -71,6 +74,7 @@ new class extends Component {
                 'grant_plan_code' => $this->grant_plan_code,
                 'grant_interval' => $this->grant_interval,
                 'grant_duration_days' => $this->grant_duration_days,
+                'grant_addon_codes' => $this->grant_addon_codes !== [] ? array_values($this->grant_addon_codes) : null,
                 'applicable_addons' => $this->applicable_addons !== [] ? array_values($this->applicable_addons) : null,
                 'applicable_products' => $this->applicable_products !== [] ? array_values($this->applicable_products) : null,
             ], fn ($v) => $v !== null && $v !== '');
@@ -98,7 +102,7 @@ new class extends Component {
         backLabel="Coupons"
     />
 
-    <x-mollie-billing::admin.flash :error="$error" />
+    <x-mollie-billing::admin.flash :error="$error" errorHeading="The coupon couldn't be created" />
 
     <form wire:submit="save" class="space-y-6">
         <x-mollie-billing::admin.section title="Basics" description="Coupon identifier and the kind of benefit it grants.">
@@ -245,10 +249,10 @@ new class extends Component {
         @if ($type === 'access_grant')
             <x-mollie-billing::admin.section
                 title="Access grant"
-                description="Grants a plan (and optional addons) for a duration, free of charge."
+                description="Grants a plan (and optional addons) for a duration, free of charge. For an addon-only grant, leave the plan empty and pick at least one addon below."
             >
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-                    <flux:select wire:model="grant_plan_code" label="Plan" description="Addon-only grants are also possible.">
+                    <flux:select wire:model.live="grant_plan_code" label="Plan" description="Leave empty for an addon-only grant.">
                         <flux:select.option value="">— Addon-only (no plan) —</flux:select.option>
                         @foreach ($planOptions as $code => $name)
                             <flux:select.option value="{{ $code }}">{{ $name }}</flux:select.option>
@@ -263,12 +267,34 @@ new class extends Component {
                         type="number"
                         wire:model="grant_duration_days"
                         label="Duration"
-                        description="Length of the grant."
+                        description="Length of the grant. Only applies to plan grants — addon-only grants run for the addon's regular billing period."
                         placeholder="30"
                         suffix="days"
                         min="1"
                     />
                 </div>
+
+                @if (! empty($addonOptions))
+                    <flux:separator variant="subtle" />
+
+                    <flux:field>
+                        <flux:label>Granted addons</flux:label>
+                        <flux:description>
+                            @if (empty($grant_plan_code))
+                                Required for addon-only grants — select at least one addon to grant.
+                            @else
+                                Optional. Addons granted alongside the plan for the same duration.
+                            @endif
+                        </flux:description>
+                        <flux:checkbox.group wire:model="grant_addon_codes">
+                            <div class="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
+                                @foreach ($addonOptions as $code => $name)
+                                    <flux:checkbox value="{{ $code }}" label="{{ $name }}" />
+                                @endforeach
+                            </div>
+                        </flux:checkbox.group>
+                    </flux:field>
+                @endif
             </x-mollie-billing::admin.section>
         @endif
 
@@ -290,10 +316,10 @@ new class extends Component {
             </x-mollie-billing::admin.section>
         @endif
 
-        @if (! empty($addonOptions))
+        @if (! empty($addonOptions) && in_array($type, ['single_payment', 'recurring']))
             <x-mollie-billing::admin.collapsible
                 title="Applicable addons"
-                description="Restrict the coupon to specific addons. Leave empty to allow any."
+                description="Restrict the discount to specific addons. Leave empty to allow any."
                 :badge="count($applicable_addons) > 0 ? count($applicable_addons).' selected' : null"
                 :open="count($applicable_addons) > 0"
             >
@@ -307,10 +333,10 @@ new class extends Component {
             </x-mollie-billing::admin.collapsible>
         @endif
 
-        @if (! empty($productOptions))
+        @if (! empty($productOptions) && in_array($type, ['single_payment', 'recurring']))
             <x-mollie-billing::admin.collapsible
                 title="Applicable products"
-                description="Restrict the coupon to specific one-time-order products. Leave empty to allow any."
+                description="Restrict the discount to specific one-time-order products. Leave empty to allow any."
                 :badge="count($applicable_products) > 0 ? count($applicable_products).' selected' : null"
                 :open="count($applicable_products) > 0"
             >

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling;
 
 use GraystackIT\MollieBilling\Commands\CheckConfigCommand;
+use GraystackIT\MollieBilling\Commands\CleanupOrphanedBillablesCommand;
 use GraystackIT\MollieBilling\Commands\OssExportCommand;
 use GraystackIT\MollieBilling\Commands\PrepareOverageCommand;
 use GraystackIT\MollieBilling\Commands\SyncPurchasedBalanceCommand;
@@ -18,6 +19,7 @@ use GraystackIT\MollieBilling\Http\Middleware\RequireActiveSubscription;
 use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
+use GraystackIT\MollieBilling\Jobs\CleanupOrphanedBillablesJob;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
 use GraystackIT\MollieBilling\Listeners\RevokePreviousMandate;
@@ -195,6 +197,7 @@ class MollieBillingServiceProvider extends ServiceProvider
             OssExportCommand::class,
             SyncPurchasedBalanceCommand::class,
             CheckConfigCommand::class,
+            CleanupOrphanedBillablesCommand::class,
         ]);
     }
 
@@ -208,6 +211,12 @@ class MollieBillingServiceProvider extends ServiceProvider
             $schedule->job(PruneProcessedWebhooksJob::class)
                 ->monthlyOn(1, '03:00')
                 ->timezone('UTC');
+
+            if ((bool) config('mollie-billing.cleanup.enabled', true)) {
+                $schedule->job(CleanupOrphanedBillablesJob::class)
+                    ->cron((string) config('mollie-billing.cleanup.cron_expression', '*/15 * * * *'))
+                    ->timezone('UTC');
+            }
         });
     }
 }

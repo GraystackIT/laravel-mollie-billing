@@ -39,7 +39,7 @@ class CouponService
     public function create(array $attributes): Coupon
     {
         if (! isset($attributes['code']) || trim((string) $attributes['code']) === '') {
-            throw new \InvalidArgumentException('Coupon code is required.');
+            throw new \InvalidArgumentException('Please enter a coupon code.');
         }
 
         $attributes['code'] = strtoupper(trim((string) $attributes['code']));
@@ -793,7 +793,7 @@ class CouponService
             case CouponType::SinglePayment:
                 if ($missing('discount_type') || $missing('discount_value')) {
                     throw new \InvalidArgumentException(
-                        'single_payment coupon requires discount_type and discount_value.'
+                        'Please choose a discount type and enter a discount value.'
                     );
                 }
                 $this->guardAgainstFullCoverageDiscount($attributes);
@@ -802,7 +802,7 @@ class CouponService
             case CouponType::Recurring:
                 if ($missing('discount_type') || $missing('discount_value')) {
                     throw new \InvalidArgumentException(
-                        'recurring coupon requires discount_type and discount_value.'
+                        'Please choose a discount type and enter a discount value.'
                     );
                 }
                 $hasMax = isset($attributes['max_redemptions_per_billable'])
@@ -810,7 +810,7 @@ class CouponService
                 $hasValidUntil = isset($attributes['valid_until']) && $attributes['valid_until'] !== null && $attributes['valid_until'] !== '';
                 if (! $hasMax && ! $hasValidUntil) {
                     throw new \InvalidArgumentException(
-                        'recurring coupon requires either max_redemptions_per_billable or valid_until.'
+                        'Recurring coupons need a limit. Set either "Max per billable" (number of billing periods the discount applies) or a "Valid until" date.'
                     );
                 }
                 $this->guardAgainstFullCoverageDiscount($attributes);
@@ -820,7 +820,7 @@ class CouponService
                 $payload = $attributes['credits_payload'] ?? [];
                 if (! is_array($payload) || $payload === []) {
                     throw new \InvalidArgumentException(
-                        'credits coupon requires a non-empty credits_payload.'
+                        'Credits coupons require a credits payload.'
                     );
                 }
                 break;
@@ -829,7 +829,7 @@ class CouponService
                 $days = (int) ($attributes['trial_extension_days'] ?? 0);
                 if ($days <= 0) {
                     throw new \InvalidArgumentException(
-                        'trial_extension coupon requires a positive trial_extension_days.'
+                        'Please enter how many days the trial should be extended by.'
                     );
                 }
                 break;
@@ -848,14 +848,14 @@ class CouponService
                         || $missing('grant_duration_days')
                     ) {
                         throw new \InvalidArgumentException(
-                            'full access_grant coupon requires grant_plan_code, grant_interval and grant_duration_days.'
+                            'Please pick a plan, an interval and enter a duration in days.'
                         );
                     }
                 } elseif ($hasAddonOnly) {
                     // ok
                 } else {
                     throw new \InvalidArgumentException(
-                        'access_grant coupon requires either a full grant (plan+interval+duration) or addon-only grant_addon_codes.'
+                        'Please pick a plan with interval and duration, or select at least one addon for an addon-only grant.'
                     );
                 }
                 break;
@@ -863,7 +863,7 @@ class CouponService
             case CouponType::PeriodExtension:
                 if ($missing('grant_duration_days') || (int) $attributes['grant_duration_days'] <= 0) {
                     throw new \InvalidArgumentException(
-                        'period_extension coupon requires a positive grant_duration_days.'
+                        'Please enter how many days the billing period should be extended by.'
                     );
                 }
                 break;

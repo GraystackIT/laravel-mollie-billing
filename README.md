@@ -229,6 +229,23 @@ MollieBilling::afterCheckoutUsing(function (Billable $billable, bool $success): 
         // e.g. delete the orphaned user
     }
 });
+
+// Optional: cascade-delete logic for billables abandoned mid-checkout. The
+// CleanupOrphanedBillablesJob runs every 15 minutes and identifies billables
+// that never reached an active subscription. When a closure is registered it
+// receives the billable and is responsible for cascading cleanup (e.g.
+// deleting tenants, users with no other organizations, etc.). Without a
+// closure the package falls back to `$billable->delete()`.
+MollieBilling::cleanupOrphanedBillableUsing(function (Billable $billable): void {
+    DB::transaction(function () use ($billable): void {
+        foreach ($billable->users()->get() as $user) {
+            if ($user->organizations()->where('id', '!=', $billable->id)->doesntExist()) {
+                $user->forceDelete();
+            }
+        }
+        $billable->forceDelete();
+    });
+});
 ```
 
 ### Link to checkout
@@ -710,6 +727,12 @@ php artisan billing:oss-export 2026
 
 # Validate the syntax and semantic integrity of mollie-billing.php and mollie-billing-plans.php
 php artisan billing:check-config
+
+# Delete billables that were created during checkout but never reached an active
+# subscription (abandoned tabs, expired Mollie sessions, captured-but-unused
+# mandates). Runs every 15 minutes via the scheduler in normal operation; this
+# command is for manual / on-demand cleanup.
+php artisan billing:cleanup-orphans
 ```
 
 `billing:check-config` reports two classes of issues:
