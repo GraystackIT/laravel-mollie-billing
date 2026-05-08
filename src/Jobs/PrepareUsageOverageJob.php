@@ -7,11 +7,8 @@ namespace GraystackIT\MollieBilling\Jobs;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
-use GraystackIT\MollieBilling\Events\TrialConverted;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
-use GraystackIT\MollieBilling\Notifications\TrialConvertedNotification;
-use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -163,7 +160,6 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     ): void {
         $nextBilling = $billable->nextBillingDate();
         $endsAt = $billable->getBillingSubscriptionEndsAt();
-        $trialEnd = $billable->getBillingTrialEndsAt();
 
         $renewsTomorrow = $nextBilling !== null
             && $nextBilling->betweenIncluded($tomorrowStart, $tomorrowEnd);
@@ -175,18 +171,9 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $hasMandate = $billable->hasMollieMandate();
         $isCancelled = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Cancelled;
 
-        // Trial transitions
-        if ($trialEnd !== null && $trialEnd->betweenIncluded($tomorrowStart, $tomorrowEnd)) {
-            if ($hasMandate) {
-                $this->notifyBillable($billable, new TrialConvertedNotification($billable));
-                event(new TrialConverted(
-                    $billable,
-                    $billable->getBillingSubscriptionPlanCode() ?? '',
-                ));
-            } else {
-                $this->notifyBillable($billable, new TrialEndingSoonNotification($billable));
-            }
-        }
+        // Trial-lifecycle notifications and expiry transitions live in
+        // ProcessTrialLifecycleJob — this job is concerned with overage charging
+        // and renewal-period bookkeeping only.
 
         // Case A — Mollie subscription continues, charge overages now.
         if ($isMollie && $renewsTomorrow && ! $isCancelled && $hasMandate) {

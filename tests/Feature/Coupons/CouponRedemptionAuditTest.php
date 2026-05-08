@@ -22,7 +22,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.basic', [
         'name' => 'Basic',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -35,7 +34,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.premium', [
         'name' => 'Premium',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],

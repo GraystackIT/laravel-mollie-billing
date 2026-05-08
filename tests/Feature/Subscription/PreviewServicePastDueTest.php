@@ -16,7 +16,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.starter', [
         'name' => 'Starter',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -28,7 +27,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.business', [
         'name' => 'Business',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 3,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -106,7 +104,6 @@ it('Past-Due → Free preview sets isPastDueReset but results in zero charge', f
     config()->set('mollie-billing-plans.plans.free', [
         'name' => 'Free',
         'tier' => 0,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],

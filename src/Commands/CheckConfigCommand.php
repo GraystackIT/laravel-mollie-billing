@@ -318,8 +318,8 @@ class CheckConfigCommand extends Command
                 $tiers[(int) $plan['tier']][] = (string) $code;
             }
 
-            if (isset($plan['trial_days']) && (! is_int($plan['trial_days']) || $plan['trial_days'] < 0)) {
-                $this->addError($scope, "{$where}.trial_days must be a non-negative integer.");
+            if (array_key_exists('trial_days', $plan)) {
+                $this->addError($scope, "{$where}.trial_days is no longer supported at plan level. Move the value into each interval (e.g. {$where}.intervals.monthly.trial_days).");
             }
 
             if (isset($plan['included_seats']) && (! is_int($plan['included_seats']) || $plan['included_seats'] < 1)) {
@@ -376,6 +376,18 @@ class CheckConfigCommand extends Command
         if (array_key_exists('seat_price_net', $interval) && $interval['seat_price_net'] !== null) {
             if (! is_int($interval['seat_price_net']) || $interval['seat_price_net'] < 0) {
                 $this->addError($scope, "{$base}.seat_price_net must be null or a non-negative integer.");
+            }
+        }
+
+        if (array_key_exists('trial_days', $interval) && $interval['trial_days'] !== null) {
+            if (! is_int($interval['trial_days']) || $interval['trial_days'] < 0) {
+                $this->addError($scope, "{$base}.trial_days must be a non-negative integer.");
+            } elseif ($interval['trial_days'] > 0) {
+                $basePrice = is_int($interval['base_price_net'] ?? null) ? (int) $interval['base_price_net'] : 0;
+                $seatPrice = $interval['seat_price_net'] ?? null;
+                if ($basePrice === 0 && $seatPrice === null) {
+                    $this->addWarning($scope, "{$base}.trial_days is set but the interval is free (no base or seat price) — the trial flow only applies to paid intervals and will be ignored.");
+                }
             }
         }
 

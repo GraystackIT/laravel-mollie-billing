@@ -166,6 +166,12 @@ return [
 
     'overage_job_time' => env('BILLING_OVERAGE_JOB_TIME', '02:00'),
 
+    // Daily run-time for ProcessTrialLifecycleJob (UTC). The job sends
+    // trial-ending notifications and expires trials whose `trial_ends_at`
+    // has passed without a successful first charge. Scheduled separately
+    // from the overage job so trial-lifecycle bookkeeping stays decoupled.
+    'trial_lifecycle_job_time' => env('BILLING_TRIAL_LIFECYCLE_JOB_TIME', '02:05'),
+
     // Cleanup of orphaned billables — billables that were created during a
     // checkout flow but never reached an active subscription (user closed the
     // tab, Mollie webhook never arrived, mandate was set up but the first

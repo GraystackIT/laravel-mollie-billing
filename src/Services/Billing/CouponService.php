@@ -922,6 +922,19 @@ class CouponService
      * added after the apply are NOT silently discounted along — only the
      * subscription state the user originally agreed to is covered.
      */
+    /**
+     * Public entry-point for setting the recurring-coupon marker without going
+     * through redeem(). Used by the trial-activation webhook path: when a trial
+     * is started together with a recurring coupon, the marker is set immediately
+     * so that `computeMarkerDiscount()` already applies on the first charge after
+     * the trial. The redemption row is created on that first charge through the
+     * existing renewal pipeline; setting the marker here does not redeem.
+     */
+    public function applyRecurringMarker(Coupon $coupon, Billable $billable, int $baseAmountNet): void
+    {
+        $this->setActiveRecurringCouponMarker($coupon, $billable, $baseAmountNet);
+    }
+
     private function setActiveRecurringCouponMarker(Coupon $coupon, Billable $billable, int $baseAmountNet): void
     {
         if (! $billable instanceof Model) {

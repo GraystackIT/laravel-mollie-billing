@@ -40,6 +40,39 @@ User -> StartSubscriptionCheckout -> Mollie first payment
 
 **Service:** `StartSubscriptionCheckout`, `MollieCustomerResolver`, `CreateSubscription`
 
+### Trial Flow
+
+A trial starts when the chosen `(planCode, interval)` carries a positive `trial_days` value in the catalog and the billable does **not** yet have a Mollie mandate. Trials only fire on a fresh checkout — `ChangePlan`, `EnableAddon`, and other plan-change services never start or extend trials.
+
+```
+User -> StartSubscriptionCheckout (catalog->trialDays() > 0, no mandate yet)
+  -> StartMandateCheckout (0 EUR, sequenceType=first, metadata.pending_subscription_*)
+    -> Mollie hosted page captures mandate
+      -> Webhook: handleMandateOnlyPaid -> activateSubscriptionAfterMandate
+        -> activateTrialSubscriptionAfterMandate
+          -> CreateSubscription::handle() with trial_days
+            -> Mollie subscription with startDate = now + trial_days, full plan amount
+            -> Local: status=trial, trial_ends_at=now+trial_days, source=mollie
+          -> Stash coupon (if any) for the first paid charge:
+              Recurring -> apply marker via CouponService::applyRecurringMarker()
+              SinglePayment -> park in subscription_meta.pending_first_charge_coupon
+          -> Hydrate wallet aliquot: ceil(included * trial_days / intervalDays)
+          -> TrialStarted event
+```
+
+Key properties:
+
+- **No invoice is generated**, no `PaymentSucceeded`, no money flows during the trial. The customer's wallet is still hydrated so they can use the product immediately.
+- **Wallet hydration is aliquot** to the trial length. For a 14-day trial on a monthly plan with 10 included Tokens: `ceil(10 * 14 / 30) = 5` tokens. For a 60-day trial: `ceil(10 * 60 / 30) = 20` tokens (2× full quota). Always rounded up so a positive included quota credits at least 1.
+- **Mollie's first real charge** fires at `startDate = now + trial_days`. When that webhook arrives, `handleSubscriptionPaymentPaid` flips status from `trial` to `active`, consumes any parked SinglePayment coupon (discounts the line items + creates a redemption), and lets the recurring marker apply for the first time.
+- **Trials never repeat for a returning customer**. Once `mollie_mandate_id` is set, the trial branch is skipped — even on a fresh checkout — and the customer pays the full first period.
+
+If the trial expires without a successful first charge (mandate failure, mandate revoked, customer never paid), `ProcessTrialLifecycleJob` flips the billable to `past_due`, dispatches `TrialExpired`, and notifies via `TrialExpiredNotification`. `RequireActiveSubscription` then routes the user back to checkout.
+
+**Services:** `StartSubscriptionCheckout`, `StartMandateCheckout`, `CreateSubscription`, `MollieWebhookController::activateTrialSubscriptionAfterMandate`, `CouponService::applyRecurringMarker`, `ProcessTrialLifecycleJob`
+
+**Configuration:** `intervals.{monthly|yearly}.trial_days` per plan — see [Configuration](configuration.md#plans). Plan-level `trial_days` is not supported.
+
 ### Local Subscription Activation (Free Plan / Coupon)
 
 ```

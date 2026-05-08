@@ -49,7 +49,11 @@ class CreateSubscription
     }
 
     /**
-     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string}  $spec
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string,trial_days?:int}  $spec
+     *         `trial_days` is set exclusively by the trial-activation webhook path.
+     *         When present and > 0, the Mollie subscription's startDate is pushed
+     *         out to `now + trial_days` (no charge during the trial), the local
+     *         status is set to Trial, and `trial_ends_at` is populated.
      */
     public function handle(Billable $billable, array $spec): void
     {
@@ -59,6 +63,8 @@ class CreateSubscription
         $addonCodes = $spec['addon_codes'] ?? [];
         $extraSeats = (int) ($spec['extra_seats'] ?? 0);
         $recurringDiscountNet = max(0, (int) ($spec['recurring_discount_net'] ?? 0));
+        $trialDays = max(0, (int) ($spec['trial_days'] ?? 0));
+        $isTrial = $trialDays > 0;
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
         $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
@@ -91,10 +97,14 @@ class CreateSubscription
         // Mollie schedules the first recurring charge at $startDate. Default cadence:
         // the first billing period is already paid via the checkout's first-payment,
         // so Mollie's first recurring charge must happen one full period later.
+        // Trial override: first charge fires exactly at trial end (now + trialDays).
         // Full-coverage override: skip past the discount lifetime.
-        $startDate = $isFullCoverage
-            ? $this->fullCoverageStartDate($billable, $interval)
-            : ($interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth());
+        $startDate = match (true) {
+            $isTrial => BillingTime::nowUtc()->addDays($trialDays),
+            $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
+            $interval === 'yearly' => BillingTime::nowUtc()->addYear(),
+            default => BillingTime::nowUtc()->addMonth(),
+        };
 
         $subscription = Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
@@ -117,13 +127,14 @@ class CreateSubscription
 
         $billable->forceFill([
             'subscription_source' => SubscriptionSource::Mollie,
-            'subscription_status' => SubscriptionStatus::Active,
+            'subscription_status' => $isTrial ? SubscriptionStatus::Trial : SubscriptionStatus::Active,
             'subscription_plan_code' => $planCode,
             'subscription_interval' => SubscriptionInterval::from($interval),
             'active_addon_codes' => $addonCodes,
             'subscription_meta' => $meta,
             'subscription_period_starts_at' => BillingTime::nowUtc(),
             'subscription_ends_at' => null,
+            'trial_ends_at' => $isTrial ? BillingTime::nowUtc()->addDays($trialDays) : $billable->trial_ends_at,
         ])->save();
 
         SubscriptionCreated::dispatch($billable, $planCode, $interval);

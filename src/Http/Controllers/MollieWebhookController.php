@@ -295,11 +295,15 @@ class MollieWebhookController extends Controller
     }
 
     /**
-     * Activate a subscription after a 0-EUR Mandate-Only payment for the
-     * 100%-single_payment-coupon flow. Mirrors handleFirstPaymentPaid()'s
-     * post-mandate steps without re-using it (handleFirstPaymentPaid expects
-     * a non-zero charge and recomputes the coupon discount against the paid
-     * gross — neither applies here).
+     * Dispatch a subscription activation after a 0-EUR Mandate-Only payment.
+     * Two flavours share the entry-point:
+     *   - Trial activation (when `pending_subscription_trial_days > 0`):
+     *     no charge, no invoice, status becomes Trial, Mollie subscription's
+     *     startDate = now + trialDays. Coupons are deferred until the first
+     *     paid charge (single_payment) or set as a recurring marker (recurring).
+     *   - 100%-coupon activation: full plan + a single negative coupon line are
+     *     persisted as an audit invoice; the Mollie subscription is created with
+     *     the default startDate.
      *
      * @param  array<string, mixed>  $metadata
      */
@@ -314,6 +318,7 @@ class MollieWebhookController extends Controller
         $addonCodes = (array) ($metadata['pending_subscription_addon_codes'] ?? []);
         $extraSeats = (int) ($metadata['pending_subscription_extra_seats'] ?? 0);
         $couponCode = (string) ($metadata['pending_subscription_coupon_code'] ?? '');
+        $trialDays = (int) ($metadata['pending_subscription_trial_days'] ?? 0);
 
         if ($planCode === '') {
             return;
@@ -339,6 +344,33 @@ class MollieWebhookController extends Controller
         } catch (\Throwable $e) {
             Log::warning('Country match check failed during mandate-only activation', ['error' => $e->getMessage()]);
         }
+
+        if ($trialDays > 0) {
+            $this->activateTrialSubscriptionAfterMandate(
+                $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode, $trialDays
+            );
+
+            return;
+        }
+
+        $this->activateCouponSubscriptionAfterMandate(
+            $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode
+        );
+    }
+
+    /**
+     * @param  array<int, string>  $addonCodes
+     */
+    protected function activateCouponSubscriptionAfterMandate(
+        object $payment,
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addonCodes,
+        int $extraSeats,
+        string $couponCode,
+    ): void {
+        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
 
         // Coupon must validate to a 100% discount; if not, abort the activation
         // (the customer hasn't paid, and we won't activate without a valid pricing path).
@@ -455,6 +487,168 @@ class MollieWebhookController extends Controller
         $this->notifyInvoiceAvailable($billable, $invoice);
 
         MollieBilling::runAfterCheckout($billable, true);
+    }
+
+    /**
+     * Activate a Trial subscription after a 0-EUR Mandate-Only payment.
+     *
+     * Differences from the coupon flow:
+     *   - No invoice generated (no money flowed). Therefore no PaymentSucceeded
+     *     event and no invoice notification.
+     *   - Subscription status set to Trial, `trial_ends_at` populated.
+     *   - Mollie subscription created with `startDate = now + trialDays` so the
+     *     first real charge fires exactly at trial end.
+     *   - Wallet hydrated **aliquot** to the trial length: each included usage
+     *     is credited as `ceil(included * trialDays / intervalDays)` (intervalDays
+     *     = 30 for monthly, 365 for yearly). Min-1 guarantee via ceil for any
+     *     positive included quota.
+     *   - Coupons handled defensively:
+     *       Recurring coupon → marker set immediately so computeMarkerDiscount()
+     *         applies on the first charge.
+     *       SinglePayment coupon → parked in `subscription_meta` as
+     *         `pending_first_charge_coupon` and consumed on the first charge.
+     *
+     * @param  array<int, string>  $addonCodes
+     */
+    protected function activateTrialSubscriptionAfterMandate(
+        object $payment,
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addonCodes,
+        int $extraSeats,
+        string $couponCode,
+        int $trialDays,
+    ): void {
+        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+
+        // Coupon pre-step. Failing to price a coupon is non-fatal here — the
+        // trial still activates, the coupon is silently dropped. Logged so the
+        // app owner can investigate. The coupon is *not* redeemed here in any
+        // case; redemption happens on the first paid charge (single_payment) or
+        // on the first marker discount (recurring).
+        $pricedCoupon = null;
+        if ($couponCode !== '') {
+            try {
+                $pricedCoupon = $this->priceFirstPaymentCoupon(
+                    $billable, $couponCode, $planCode, $interval, $addonCodes, $extraSeats
+                );
+            } catch (\Throwable $e) {
+                Log::warning('Trial activation: coupon pricing failed, proceeding without coupon', [
+                    'billable_id' => $billable->getKey(),
+                    'coupon_code' => $couponCode,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Pre-set plan + interval so anything reading them between here and the
+        // CreateSubscription call sees the trial state coherently.
+        $billable->forceFill([
+            'subscription_plan_code' => $planCode,
+            'subscription_interval' => \GraystackIT\MollieBilling\Enums\SubscriptionInterval::from($interval),
+            'subscription_period_starts_at' => BillingTime::nowUtc(),
+        ])->save();
+
+        try {
+            $this->createSubscription->handle($billable, [
+                'plan_code' => $planCode,
+                'interval' => $interval,
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'recurring_discount_net' => 0,
+                'mandate_id' => $billable->mollie_mandate_id,
+                'trial_days' => $trialDays,
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('CreateSubscription during trial activation failed', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'plan_code' => $planCode,
+                'interval' => $interval,
+                'error' => $e->getMessage(),
+            ]);
+
+            event(new SubscriptionActivationFailed(
+                $billable,
+                $planCode,
+                $interval,
+                (string) ($payment->id ?? ''),
+                null,
+                $e->getMessage(),
+            ));
+
+            return;
+        }
+
+        // Belt-and-braces. CreateSubscription already sets these for the trial
+        // path, but keeping them here makes the activation seam explicit.
+        $billable->forceFill([
+            'subscription_status' => SubscriptionStatus::Trial,
+            'trial_ends_at' => BillingTime::nowUtc()->addDays($trialDays),
+        ])->save();
+
+        // Coupon handover: persist the coupon for the first charge after trial.
+        if ($pricedCoupon !== null) {
+            $this->stashTrialCoupon($billable, $pricedCoupon, $planCode, $interval, $addonCodes, $extraSeats);
+        }
+
+        // Aliquot wallet hydration: ceil(included * trialDays / intervalDays).
+        $intervalDays = $interval === 'yearly' ? 365 : 30;
+        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $included) {
+            $included = (int) $included;
+            if ($included <= 0) {
+                continue;
+            }
+            $credit = (int) ceil($included * $trialDays / $intervalDays);
+            if ($credit > 0) {
+                $this->walletService->credit($billable, (string) $type, $credit, 'subscription_trial_start');
+            }
+        }
+
+        event(new SubscriptionCreated($billable, $planCode, $interval));
+        event(new \GraystackIT\MollieBilling\Events\TrialStarted($billable, $planCode, $trialDays));
+
+        MollieBilling::runAfterCheckout($billable, true);
+    }
+
+    /**
+     * Persist a trial-pricing coupon for application on the first charge after
+     * the trial. Recurring coupons set the marker immediately; single-payment
+     * coupons are parked in subscription_meta and consumed by the first
+     * subscription-payment webhook (see consumePendingTrialCoupon).
+     *
+     * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
+     * @param  array<int, string>  $addonCodes
+     */
+    protected function stashTrialCoupon(
+        Billable $billable,
+        array $pricedCoupon,
+        string $planCode,
+        string $interval,
+        array $addonCodes,
+        int $extraSeats,
+    ): void {
+        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+        $coupon = $pricedCoupon['coupon'];
+
+        if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
+            $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
+            $baseRecurringNet = SubscriptionAmount::net(
+                $this->catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes
+            );
+            $this->couponService->applyRecurringMarker($coupon, $billable, $baseRecurringNet);
+
+            return;
+        }
+
+        if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta['pending_first_charge_coupon'] = [
+                'code' => (string) $coupon->code,
+            ];
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
     }
 
     protected function handleFirstPaymentPaid(object $payment, Billable $billable, array $metadata): void
@@ -699,8 +893,20 @@ class MollieWebhookController extends Controller
 
         $seats = $this->catalog->includedSeats($planCode) + $extraSeats;
         $expectedNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
+
+        // First charge after a trial activation may carry a parked
+        // SinglePayment-coupon. Consume it here so the very first paid period
+        // gets the discount the user signed up for. The slot is cleared after
+        // pricing — subsequent charges go through the normal recurring path.
+        $pendingTrialCoupon = $this->resolvePendingTrialCoupon(
+            $billable, $planCode, $interval, $addonCodes, $extraSeats
+        );
+        $pendingTrialDiscountNet = $pendingTrialCoupon !== null
+            ? max(0, (int) $pendingTrialCoupon['discount_net'])
+            : 0;
+
         $couponDiscountNet = $this->couponService->computeMarkerDiscount($billable, $expectedNet);
-        $netForCharge = max(0, $expectedNet - $couponDiscountNet);
+        $netForCharge = max(0, $expectedNet - $couponDiscountNet - $pendingTrialDiscountNet);
         $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $netForCharge, $billable);
         $actualGross = $this->amountFromMolliePayment($payment);
 
@@ -723,6 +929,20 @@ class MollieWebhookController extends Controller
                 'amount_gross' => -($couponDiscountNet + $vatAmount),
             ];
         }
+        if ($pendingTrialCoupon !== null && $pendingTrialDiscountNet > 0) {
+            $vatRate = (float) ($vat['rate'] ?? 0.0);
+            $vatAmount = (int) round($pendingTrialDiscountNet * $vatRate / 100);
+            $lineItems[] = [
+                'kind' => 'coupon',
+                'description' => 'Coupon '.$pendingTrialCoupon['coupon']->code,
+                'qty' => 1,
+                'unit_price_net' => -$pendingTrialDiscountNet,
+                'amount_net' => -$pendingTrialDiscountNet,
+                'vat_rate' => $vatRate,
+                'vat_amount' => -$vatAmount,
+                'amount_gross' => -($pendingTrialDiscountNet + $vatAmount),
+            ];
+        }
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
 
         if ($couponDiscountNet > 0) {
@@ -738,6 +958,17 @@ class MollieWebhookController extends Controller
                     'error' => $e->getMessage(),
                 ]);
             }
+        }
+
+        if ($pendingTrialCoupon !== null) {
+            $this->redeemPricedFirstPaymentCoupon(
+                $billable,
+                $pendingTrialCoupon,
+                $planCode,
+                $interval,
+                (int) $invoice->id,
+            );
+            $this->clearPendingTrialCouponSlot($billable);
         }
 
         if ($this->couponService->markerExpired($billable)) {
@@ -810,14 +1041,72 @@ class MollieWebhookController extends Controller
             $meta['seat_count'] = $derivedSeatCount;
         }
 
-        $billable->forceFill([
+        $updates = [
             'subscription_period_starts_at' => $periodStartsAt,
             'subscription_meta' => $meta,
-        ])->save();
+        ];
+
+        // First successful recurring charge after a trial graduates the
+        // billable from Trial to Active. `trial_ends_at` is intentionally
+        // preserved as historical data for audit / admin views.
+        if ($billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial) {
+            $updates['subscription_status'] = SubscriptionStatus::Active;
+            event(new \GraystackIT\MollieBilling\Events\TrialConverted($billable, $planCode));
+        }
+
+        $billable->forceFill($updates)->save();
 
         event(new PaymentSucceeded($billable, $invoice));
 
         $this->notifyInvoiceAvailable($billable, $invoice);
+    }
+
+    /**
+     * Resolve a parked SinglePayment-coupon stashed at trial start. Returns the
+     * priced coupon (suitable for line-item + redemption) or null if no slot
+     * exists / the coupon no longer prices.
+     *
+     * @param  array<int, string>  $addonCodes
+     * @return array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net:int, order_amount_net:int}|null
+     */
+    protected function resolvePendingTrialCoupon(
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addonCodes,
+        int $extraSeats,
+    ): ?array {
+        $slot = $billable->getBillingSubscriptionMeta()['pending_first_charge_coupon'] ?? null;
+        if (! is_array($slot) || empty($slot['code'])) {
+            return null;
+        }
+
+        try {
+            return $this->priceFirstPaymentCoupon(
+                $billable, (string) $slot['code'], $planCode, $interval, $addonCodes, $extraSeats
+            );
+        } catch (\Throwable $e) {
+            Log::warning('Pending trial coupon could not be priced — dropping silently', [
+                'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                'coupon_code' => (string) $slot['code'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    protected function clearPendingTrialCouponSlot(Billable $billable): void
+    {
+        if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+        $meta = $billable->getBillingSubscriptionMeta();
+        if (! array_key_exists('pending_first_charge_coupon', $meta)) {
+            return;
+        }
+        unset($meta['pending_first_charge_coupon']);
+        $billable->forceFill(['subscription_meta' => $meta])->save();
     }
 
     protected function handleSingleChargePaid(object $payment, Billable $billable, string $type, array $metadata): void

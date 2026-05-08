@@ -119,6 +119,29 @@ class StartSubscriptionCheckout
             );
         }
 
+        // Trial branch: when the (plan, interval) carries a positive trialDays
+        // and the billable has not yet captured a Mollie mandate, route to the
+        // Mandate-Only flow. The mandate is captured at 0 EUR; the actual Mollie
+        // subscription is created in the webhook with startDate = now + trialDays
+        // (no charge during the trial window). Trials only fire on first checkout —
+        // the `! hasMollieMandate()` guard prevents granting a fresh trial to a
+        // returning customer who has previously paid.
+        $trialDays = $this->catalog->trialDays($request['plan_code'], $request['interval']);
+        if ($trialDays > 0 && ! $billable->hasMollieMandate()) {
+            return $this->mandateCheckout->handle(
+                $billable,
+                redirectUrl: route(BillingRoute::name('return'), $urlParams),
+                subscriptionSpec: [
+                    'plan_code' => $request['plan_code'],
+                    'interval' => $request['interval'],
+                    'addon_codes' => $request['addon_codes'] ?? [],
+                    'extra_seats' => $request['extra_seats'] ?? 0,
+                    'coupon_code' => $couponCode,
+                    'trial_days' => $trialDays,
+                ],
+            );
+        }
+
         $customerId = $this->customerResolver->resolve($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
