@@ -45,6 +45,7 @@ return [
     'confirm_and_pay' => 'Confirm and pay',
     'free_plan_no_payment' => "You're on a free plan. Upgrade to a paid plan to add a payment method.",
     'free_plan_no_paid_extras' => "You're on a free plan. Upgrade to a paid plan to add paid add-ons or extra seats.",
+    'free_plan_no_products' => "You're on a free plan. Upgrade to a paid plan to buy one-time products.",
     'free_plan_recurring_charge' => 'Free plan — no recurring charge',
     'invoices' => 'Invoices',
     'cancel_subscription' => 'Cancel subscription',

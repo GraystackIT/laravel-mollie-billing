@@ -149,6 +149,24 @@ In both cases, purchased credits that were not consumed survive the renewal.
 | Month 2 | Use 0 | 170 |
 | Month 3 start | Credit 100 (additive) | 270 |
 
+## Local subscriptions (free plans, access grants)
+
+Local subscriptions (`subscription_source = local`) have no Mollie mandate, so **no money can flow**. This is by design — see [README.md](../README.md#local-subscriptions) for the full matrix of what is and isn't allowed.
+
+For metered usage specifically:
+
+| Behavior | Local subscription |
+|---|---|
+| Plan-quota credit on activation | yes — `included_usages` from the plan/interval are credited like any other source |
+| Plan-quota refill on renewal | yes — `PrepareUsageOverageJob` resets the wallet at each period boundary (`resetLocalQuota`) |
+| Tracking consumption past zero (negative balance) | yes — `recordBillingUsage()` does not block on source |
+| **Charging the resulting overage** | **never** — `PrepareUsageOverageJob` only routes `Mollie + mandate` billables to `ChargeUsageOverageDirectly`. Local users keep using the app; the negative balance is reset on the next period boundary. |
+| Buying purchased credits via one-time orders | **opt-in** via `config('mollie-billing.local_subscription.allow_one_time_orders')`. Default `false` — `StartOneTimeOrderCheckout` throws `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons. Set to `true` if your free plan is intended as a default tier monetised through token packs etc. |
+
+In short: a Local user can exceed the included quota, but you will not collect for it automatically. If your business model requires charging Local users for overages, do not make that plan free — price it at the lowest non-zero amount so Mollie collects a mandate during checkout. If you want free users to top up credits manually, enable `local_subscription.allow_one_time_orders`.
+
+The same applies to `access_grant` coupon redemptions and `Mollie → Free` downgrades, which both produce a Local subscription with the same constraints.
+
 ## Plan Change: Usage Settlement
 
 When a user changes plans mid-period, the old plan's usage is settled proportionally before the new plan's quota is applied. This prevents abuse (e.g. consuming an entire yearly quota in month 1, then downgrading).

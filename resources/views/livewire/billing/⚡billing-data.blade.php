@@ -402,26 +402,26 @@ new class extends Component {
                         @endif
                         <flux:error name="billing_country" />
                     </flux:field>
-                    <flux:field>
+                    <flux:field class="block w-full min-w-0">
                         <flux:label>{{ __('billing::checkout.vat_number') }}</flux:label>
-                        <flux:input.group>
-                            <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" />
+                        <flux:input.group class="w-full">
+                            <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" class="min-w-0 grow" />
 
-                            <flux:input.group.suffix class="text-zinc-500 dark:text-zinc-400" wire:loading.flex wire:target="vat_number,billing_country">
-                                <flux:icon.loading class="size-4" />
+                            {{-- Always-rendered suffix; see step-billing.blade.php for the rationale. --}}
+                            <flux:input.group.suffix>
+                                <span wire:loading.flex wire:target="vat_number,billing_country" class="text-zinc-500 dark:text-zinc-400">
+                                    <flux:icon.loading class="size-4" />
+                                </span>
+                                <span wire:loading.remove wire:target="vat_number,billing_country" class="flex items-center">
+                                    @if ($vatNumberValid === true)
+                                        <flux:icon.check-circle class="size-4 text-emerald-700 dark:text-emerald-400" />
+                                    @elseif ($vatNumberValid === false)
+                                        <flux:icon.x-circle class="size-4 text-red-600 dark:text-red-400" />
+                                    @else
+                                        <flux:icon.information-circle class="size-4 text-zinc-300 dark:text-zinc-600" />
+                                    @endif
+                                </span>
                             </flux:input.group.suffix>
-
-                            <div wire:loading.remove wire:target="vat_number,billing_country" class="contents">
-                                @if ($vatNumberValid === true)
-                                    <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
-                                        <flux:icon.check-circle class="size-4" />
-                                    </flux:input.group.suffix>
-                                @elseif ($vatNumberValid === false)
-                                    <flux:input.group.suffix class="text-red-600 dark:text-red-400">
-                                        <flux:icon.x-circle class="size-4" />
-                                    </flux:input.group.suffix>
-                                @endif
-                            </div>
                         </flux:input.group>
                         <div wire:loading.remove wire:target="vat_number,billing_country">
                             <flux:error name="vat_number" />

@@ -6,31 +6,35 @@
         <flux:input wire:model.live.debounce.500ms="billing_city" :label="__('billing::checkout.city')" type="text" required />
     </div>
     <div class="error-reserve grid gap-5 sm:grid-cols-2">
-        <flux:select wire:model.live="billing_country" :label="__('billing::checkout.country')" required>
+        <flux:select wire:model.live="billing_country" :label="__('billing::checkout.country')" required class="min-w-0">
             @foreach ($this->countries() as $iso => $name)
                 <flux:select.option value="{{ $iso }}">{{ $name }}</flux:select.option>
             @endforeach
         </flux:select>
-        <flux:field>
+        <flux:field class="block w-full min-w-0">
             <flux:label>{{ __('billing::checkout.vat_number') }}</flux:label>
-            <flux:input.group>
-                <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" />
+            <flux:input.group class="w-full">
+                <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" class="min-w-0 grow" />
 
-                <flux:input.group.suffix class="text-zinc-500 dark:text-zinc-400" wire:loading.flex wire:target="vat_number,billing_country">
-                    <flux:icon.loading class="size-4" />
+                {{-- Suffix is ALWAYS rendered so the input.group's border-welding stays
+                     consistent (otherwise the input would lose its right border + radius
+                     when the suffix appears/disappears, making the empty state look broken).
+                     The icon inside swaps based on validation state. --}}
+                <flux:input.group.suffix>
+                    <span wire:loading.flex wire:target="vat_number,billing_country" class="text-zinc-500 dark:text-zinc-400">
+                        <flux:icon.loading class="size-4" />
+                    </span>
+                    <span wire:loading.remove wire:target="vat_number,billing_country" class="flex items-center">
+                        @if ($vatNumberValid === true)
+                            <flux:icon.check-circle class="size-4 text-emerald-700 dark:text-emerald-400" />
+                        @elseif ($vatNumberValid === false)
+                            <flux:icon.x-circle class="size-4 text-red-600 dark:text-red-400" />
+                        @else
+                            {{-- Neutral idle state: keep the suffix slot occupied with a hairline-grey info dot --}}
+                            <flux:icon.information-circle class="size-4 text-zinc-300 dark:text-zinc-600" />
+                        @endif
+                    </span>
                 </flux:input.group.suffix>
-
-                <div wire:loading.remove wire:target="vat_number,billing_country" class="contents">
-                    @if ($vatNumberValid === true)
-                        <flux:input.group.suffix class="text-emerald-700 dark:text-emerald-400">
-                            <flux:icon.check-circle class="size-4" />
-                        </flux:input.group.suffix>
-                    @elseif ($vatNumberValid === false)
-                        <flux:input.group.suffix class="text-red-600 dark:text-red-400">
-                            <flux:icon.x-circle class="size-4" />
-                        </flux:input.group.suffix>
-                    @endif
-                </div>
             </flux:input.group>
             <div wire:loading.remove wire:target="vat_number,billing_country">
                 <flux:error name="vat_number" />

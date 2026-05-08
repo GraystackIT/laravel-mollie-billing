@@ -21,6 +21,7 @@ class StartSubscriptionCheckout
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly MollieCustomerResolver $customerResolver,
         private readonly StartMandateCheckout $mandateCheckout,
+        private readonly ActivateLocalSubscription $activateLocal,
     ) {
     }
 
@@ -48,14 +49,30 @@ class StartSubscriptionCheckout
         $amountGross = (int) $request['amount_gross'];
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
-        // Full-coverage single_payment coupon → first charge is 0 €. Mollie rejects
-        // 0-EUR subscription charges, so we route to the Mandate-Only flow instead:
-        // a 0-EUR mandate-collection payment, with the subscription spec embedded in
-        // metadata. The webhook activates the subscription once the mandate is captured.
-        // Note: auto-apply coupons (PromotionController) only set the session code —
-        // they don't recompute amount_gross, so a 100%-single_payment auto-apply does
-        // not currently end up here. Out of scope for this implementation.
         if ($amountGross === 0) {
+            $planIsFree = $this->catalog->basePriceNet($request['plan_code'], $request['interval']) === 0;
+            $hasCoupon = $couponCode !== null && $couponCode !== '';
+
+            // Free plan with no coupon → activate as a Local subscription directly.
+            // No Mollie mandate is required; the dashboard is reachable immediately.
+            if ($planIsFree && ! $hasCoupon) {
+                $this->activateLocal->handle(
+                    $billable,
+                    planCode: $request['plan_code'],
+                    interval: $request['interval'],
+                    addonCodes: $request['addon_codes'] ?? [],
+                );
+
+                return ['checkout_url' => null, 'payment_id' => ''];
+            }
+
+            // Full-coverage single_payment coupon → first charge is 0 €. Mollie rejects
+            // 0-EUR subscription charges, so we route to the Mandate-Only flow instead:
+            // a 0-EUR mandate-collection payment, with the subscription spec embedded in
+            // metadata. The webhook activates the subscription once the mandate is captured.
+            // Note: auto-apply coupons (PromotionController) only set the session code —
+            // they don't recompute amount_gross, so a 100%-single_payment auto-apply does
+            // not currently end up here. Out of scope for this implementation.
             return $this->mandateCheckout->handle(
                 $billable,
                 redirectUrl: route(BillingRoute::name('return'), $urlParams),

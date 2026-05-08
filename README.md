@@ -554,6 +554,8 @@ The package distinguishes two subscription sources via the `subscription_source`
 
 ### What is allowed on a Local subscription?
 
+A Local subscription has no Mollie mandate, so **no money can flow from the customer**. Anything that would result in a charge is blocked.
+
 | Operation | Allowed? |
 |---|---|
 | Free addons (price 0) | yes |
@@ -561,7 +563,12 @@ The package distinguishes two subscription sources via the `subscription_source`
 | Extra seats on a plan with `seat_price_net > 0` | **no** — same exception |
 | Switch to another free plan | yes |
 | Switch directly to a paid plan via `UpdateSubscription` | **no** — `LocalSubscriptionUpgradeRequiresMolliePathException`. Use `UpgradeLocalToMollie` instead (the bundled plan-change UI does this automatically). |
+| Track metered usage (`recordBillingUsage`) | yes — included quota is credited and reset at period boundaries |
+| Charge the customer for usage overages | **no** — `PrepareUsageOverageJob` only charges `Mollie + mandate` billables. Negative balances on Local subs are silently reset at the next period. See [docs/usage-billing.md](docs/usage-billing.md#local-subscriptions-free-plans-access-grants). |
+| Purchase one-time products | **opt-in** via `config('mollie-billing.local_subscription.allow_one_time_orders')`. Default is `false` — purchase attempts throw `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons. Set to `true` if your business model treats the free plan as a default tier monetised through token packs etc. |
 | Cancel | yes — status switches to `cancelled`, wallets are kept until `subscription_ends_at`. |
+
+If you need to bill free-tier users for usage overages or sell them seat upgrades, do **not** ship the plan at price 0. Set the lowest non-zero amount that still makes commercial sense — that triggers the regular Mollie checkout, captures a mandate, and makes the user a paid (`Mollie`-source) subscriber.
 
 ### Local → Mollie upgrade
 
