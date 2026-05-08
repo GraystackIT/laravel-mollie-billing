@@ -55,6 +55,7 @@ class UpgradeLocalToMollie
             description: "Upgrade to {$request['plan_code']}",
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            cancelUrl: route(BillingRoute::name('plan'), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: [
                 'billable_type' => $billable->getMorphClass(),

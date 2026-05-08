@@ -208,10 +208,19 @@ new class extends Component {
                 <flux:button variant="primary" wire:click="retry">
                     {{ __('billing::portal.return.check_again') }}
                 </flux:button>
-                <flux:button variant="ghost" href="{{ $this->returnUrl() }}">
-                    {{ __('billing::portal.return.to_dashboard') }}
-                </flux:button>
+                @if (Route::has('logout'))
+                    <flux:button variant="ghost"
+                        x-on:click.prevent="$refs.logoutForm.submit()"
+                    >
+                        {{ __('billing::portal.return.logout') }}
+                    </flux:button>
+                @endif
             </div>
+            @if (Route::has('logout'))
+                <form x-ref="logoutForm" method="POST" action="{{ route('logout') }}" class="hidden">
+                    @csrf
+                </form>
+            @endif
         @else
             <div class="flex justify-center">
                 <flux:icon.arrow-path class="size-12 text-zinc-400 animate-spin" />

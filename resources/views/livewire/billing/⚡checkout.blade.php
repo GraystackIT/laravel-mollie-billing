@@ -58,6 +58,14 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public ?string $billableId = null;
     public ?string $billableClass = null;
 
+    /**
+     * True when the checkout was entered with a pre-existing billable that already
+     * carries persisted billing data (e.g. after a previously cancelled subscription
+     * or an access-grant-activated local subscription). The billing-address step is
+     * skipped and the data is shown read-only on the confirm step.
+     */
+    public bool $billing_locked = false;
+
     // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
@@ -67,6 +75,31 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $this->backUrl = Sanitize::backUrl(request()->query('back'));
 
         $this->billing_country = MollieBilling::ipGeolocation()->defaultCountryFor(request()->ip());
+
+        // If a billable is already resolvable from the request (e.g. checkout
+        // entered after a force-cancelled local subscription), pre-fill the
+        // billing-address fields and lock the billing step. The controller
+        // already redirects away when an active subscription exists, so this
+        // branch only runs for billables without an accessible subscription.
+        $existing = MollieBilling::resolveBillable(request());
+        if ($existing !== null && $this->hasPersistedBillingData($existing)) {
+            $this->billableId = (string) $existing->getKey();
+            $this->billableClass = $existing->getMorphClass();
+            $this->company_name = (string) ($existing->name ?? '');
+            $this->billing_street = (string) $existing->getBillingStreet();
+            $this->billing_postal_code = (string) $existing->getBillingPostalCode();
+            $this->billing_city = (string) $existing->getBillingCity();
+            $this->billing_country = (string) $existing->getBillingCountry();
+            $this->vat_number = $existing->vat_number;
+            // VAT number is treated as confirmed when it was previously persisted
+            // — the audit trail captured the VIES result at the time it was set.
+            if (filled($this->vat_number)) {
+                $this->vatNumberValid = true;
+            }
+            $this->billing_locked = true;
+            // Skip the billing step — start at the plan step (offset by any custom steps).
+            $this->step = $this->customStepCount() + 2;
+        }
 
         // Pre-select plan and/or interval from query parameters
         $plan = request()->query('plan');
@@ -78,6 +111,14 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         if ($interval !== null && in_array($interval, ['monthly', 'yearly'], true)) {
             $this->interval = $interval;
         }
+    }
+
+    private function hasPersistedBillingData(Billable $billable): bool
+    {
+        return filled($billable->getBillingStreet())
+            && filled($billable->getBillingPostalCode())
+            && filled($billable->getBillingCity())
+            && filled($billable->getBillingCountry());
     }
 
     // -------------------------------------------------------------------------
@@ -208,19 +249,30 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         $base = $this->hasAddonsOrSeatsStep() ? 4 : 3;
 
+        if ($this->billing_locked) {
+            $base--;
+        }
+
         return $this->customStepCount() + $base;
     }
 
     public function displayStep(): int
     {
         $offset = $this->customStepCount();
+        $step = $this->step;
 
         // When addons step is skipped, the confirm step is still stored as offset+4 internally
-        if (! $this->hasAddonsOrSeatsStep() && $this->step === $offset + 4) {
-            return $offset + 3;
+        if (! $this->hasAddonsOrSeatsStep() && $step === $offset + 4) {
+            $step = $offset + 3;
         }
 
-        return $this->step;
+        // When billing step is locked it does not appear in the timeline, so
+        // every package step shifts down by one.
+        if ($this->billing_locked && $step > $offset) {
+            $step--;
+        }
+
+        return $step;
     }
 
     public function stepHeadline(): string
@@ -261,22 +313,25 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function timelineSteps(): array
     {
         $steps = [];
-        $offset = $this->customStepCount();
+        $key = 0;
 
         // Custom steps first
-        foreach ($this->customSteps() as $i => $customStep) {
-            $steps[] = ['key' => $i + 1, 'label' => $customStep['label']];
+        foreach ($this->customSteps() as $customStep) {
+            $steps[] = ['key' => ++$key, 'label' => $customStep['label']];
         }
 
-        // Package steps
-        $steps[] = ['key' => $offset + 1, 'label' => __('billing::checkout.step_billing_details')];
-        $steps[] = ['key' => $offset + 2, 'label' => __('billing::checkout.step_plan')];
+        // Package steps — the billing step is hidden when the data is locked
+        // (a pre-existing billable already carries persisted billing data).
+        if (! $this->billing_locked) {
+            $steps[] = ['key' => ++$key, 'label' => __('billing::checkout.step_billing_details')];
+        }
+        $steps[] = ['key' => ++$key, 'label' => __('billing::checkout.step_plan')];
 
         if ($this->hasAddonsOrSeatsStep()) {
-            $steps[] = ['key' => $offset + 3, 'label' => __('billing::checkout.step_addons')];
-            $steps[] = ['key' => $offset + 4, 'label' => __('billing::checkout.step_confirm')];
+            $steps[] = ['key' => ++$key, 'label' => __('billing::checkout.step_addons')];
+            $steps[] = ['key' => ++$key, 'label' => __('billing::checkout.step_confirm')];
         } else {
-            $steps[] = ['key' => $offset + 3, 'label' => __('billing::checkout.step_confirm')];
+            $steps[] = ['key' => ++$key, 'label' => __('billing::checkout.step_confirm')];
         }
 
         return $steps;
@@ -448,6 +503,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'planCode' => $this->plan_code,
                 'interval' => $this->interval,
                 'addonCodes' => $this->addon_codes,
+                'extraSeats' => $this->extra_seats,
                 'orderAmountNet' => $this->subtotalNet(),
                 'allowed_types' => [
                     \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
@@ -480,10 +536,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $this->couponError = null;
     }
 
-    private function refreshAppliedCoupon(): void
+    /**
+     * Re-validate the currently applied coupon against the live form state
+     * (plan, interval, addons, extra seats). Returns null on success, or a
+     * reason string when the coupon no longer fits — in which case the
+     * applied_coupon is cleared. The caller decides whether to abort the
+     * current action (e.g. submit) or just surface a banner warning
+     * (e.g. on step navigation).
+     */
+    private function refreshAppliedCoupon(): ?string
     {
         if ($this->applied_coupon === null) {
-            return;
+            return null;
         }
 
         try {
@@ -491,6 +555,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'planCode' => $this->plan_code,
                 'interval' => $this->interval,
                 'addonCodes' => $this->addon_codes,
+                'extraSeats' => $this->extra_seats,
                 'orderAmountNet' => $this->subtotalNet(),
                 'allowed_types' => [
                     \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
@@ -499,13 +564,19 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
                 ],
             ]);
+        } catch (InvalidCouponException $e) {
+            $this->applied_coupon = null;
+
+            return $e->reason();
         } catch (\Throwable) {
             $this->applied_coupon = null;
 
-            return;
+            return 'failed';
         }
 
         $this->applied_coupon['discount_net'] = $this->calculateCouponDiscount($coupon);
+
+        return null;
     }
 
     private function calculateCouponDiscount(Coupon $coupon): int
@@ -569,6 +640,10 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
             'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
             'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
+            'grant_plan_mismatch' => __('billing::checkout.coupon_grant_plan_mismatch'),
+            'grant_interval_mismatch' => __('billing::checkout.coupon_grant_interval_mismatch'),
+            'grant_addons_exceeded' => __('billing::checkout.coupon_grant_addons_exceeded'),
+            'grant_seats_not_supported' => __('billing::checkout.coupon_grant_seats_not_supported'),
             default => __('billing::checkout.coupon_failed'),
         };
     }
@@ -597,11 +672,29 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // Skip addons step if plan doesn't need it
         if ($pkg === 2 && ! $this->hasAddonsOrSeatsStep()) {
             $this->step = $offset + 4;
+            $this->revalidateCouponOnEnterConfirm();
 
             return;
         }
 
         $this->step++;
+
+        // After advancing into the confirm step, re-validate any applied coupon
+        // against the form state the user is about to submit. If it no longer
+        // fits (plan/addons/seats changed earlier), drop it and surface the
+        // reason — the submit() check is the hard guard, this is the soft
+        // heads-up so the user sees the price change before clicking submit.
+        if ($this->packageStep() === 4) {
+            $this->revalidateCouponOnEnterConfirm();
+        }
+    }
+
+    private function revalidateCouponOnEnterConfirm(): void
+    {
+        $reason = $this->refreshAppliedCoupon();
+        if ($reason !== null) {
+            $this->couponError = $this->couponErrorMessage($reason);
+        }
     }
 
     public function back(): void
@@ -612,6 +705,15 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // Skip addons step backwards
         if ($pkg === 4 && ! $this->hasAddonsOrSeatsStep()) {
             $this->step = $offset + 2;
+
+            return;
+        }
+
+        // Skip the locked billing step backwards: from the plan step jump
+        // straight to the last custom step when one exists, otherwise stay
+        // on the plan step (there is nothing earlier to navigate to).
+        if ($this->billing_locked && $pkg === 2) {
+            $this->step = $offset > 0 ? $offset : $this->step;
 
             return;
         }
@@ -777,18 +879,22 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
             }
 
-            // Update billing address on the billable (may have changed since step 1)
-            /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
-            $billable->forceFill([
-                'name' => $this->company_name,
-                'billing_street' => $this->billing_street,
-                'billing_postal_code' => $this->billing_postal_code,
-                'billing_city' => $this->billing_city,
-                'billing_country' => $this->billing_country,
-                'tax_country_user' => $this->billing_country,
-                'tax_country_ip' => $this->resolveCurrentIpCountry(),
-                'vat_number' => $this->vat_number,
-            ])->save();
+            // Update billing address on the billable (may have changed since step 1).
+            // When the billing data is locked it was loaded from the existing
+            // billable in mount() and is shown read-only — skip the write.
+            if (! $this->billing_locked) {
+                /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+                $billable->forceFill([
+                    'name' => $this->company_name,
+                    'billing_street' => $this->billing_street,
+                    'billing_postal_code' => $this->billing_postal_code,
+                    'billing_city' => $this->billing_city,
+                    'billing_country' => $this->billing_country,
+                    'tax_country_user' => $this->billing_country,
+                    'tax_country_ip' => $this->resolveCurrentIpCountry(),
+                    'vat_number' => $this->vat_number,
+                ])->save();
+            }
 
             // Persist the VIES audit-trail entry that any subsequent invoice will
             // reference. We check `currentVatValidation()` (not just "vat_number
@@ -813,7 +919,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 return null;
             }
 
-            $this->refreshAppliedCoupon();
+            // Final safety check: re-validate the applied coupon against the
+            // live form state. If the user navigated back, changed plan / addons
+            // / seats and returned to confirm, the coupon may no longer fit —
+            // refuse to submit instead of silently dropping it and charging
+            // (or activating) something different than what the user sees.
+            $couponDropReason = $this->refreshAppliedCoupon();
+            if ($couponDropReason !== null) {
+                $this->couponError = $this->couponErrorMessage($couponDropReason);
+                $this->errorMessage = __('billing::checkout.coupon_dropped_revisit');
+
+                return null;
+            }
 
             try {
                 $result = $checkout->handle($billable, [
@@ -851,7 +968,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 report($hookError);
             }
 
-            return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
+            // Mirror the post-Mollie return flow: respect the host app's
+            // configured post-checkout target (typically the app dashboard),
+            // and only fall back to the billing portal when nothing is set.
+            $configured = config('mollie-billing.redirect_after_return');
+            $params = MollieBilling::resolveUrlParameters($billable);
+            $target = $configured
+                ? route($configured, $params)
+                : BillingRoute::url('index', $billable);
+
+            return $this->redirect($target, navigate: false);
         } catch (\Throwable $e) {
             // Catchall: anything not handled above (unexpected DB/Mollie/network failure)
             // must never leave the UI in a permanently disabled state.

@@ -387,6 +387,12 @@ new class extends Component {
             'trialEnds' => BillingTime::display($b->getBillingTrialEndsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
             'subscriptionEnds' => BillingTime::display($b->getBillingSubscriptionEndsAt(), $b)?->translatedFormat('d. M Y'),
             'subscriptionEndsFuture' => $b->getBillingSubscriptionEndsAt()?->isFuture() ?? false,
+            // AccessGrant: a Local subscription with a finite end date that is
+            // still in the future and not (yet) cancelled. Free Local plans have
+            // no end date; cancelled subs are surfaced via the cancelled banner.
+            'isAccessGrant' => $b->isLocalBillingSubscription()
+                && $status !== SubscriptionStatus::Cancelled
+                && ($b->getBillingSubscriptionEndsAt()?->isFuture() ?? false),
             'scheduledChange' => $this->resolveScheduledChange($b),
             'usageTypes' => $usageTypes,
             'invoices' => $invoices,
@@ -580,11 +586,16 @@ new class extends Component {
                 <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-5 dark:border-zinc-700/50 dark:bg-white/[0.02]">
                     <div class="grid grid-cols-2 gap-x-8 gap-y-5 sm:grid-cols-4">
                         <div class="mb-3">
-                            <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.next_billing') }}</flux:subheading>
-                            @if ($billable && $billable->isLocalBillingSubscription() && $d['status']?->value !== 'cancelled')
-                                <flux:text class="mt-1 font-semibold text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.free_plan_recurring_charge') }}</flux:text>
+                            @if ($d['isAccessGrant'])
+                                <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.access_grant_valid_until') }}</flux:subheading>
+                                <flux:text class="mt-1 font-semibold">{{ $d['subscriptionEnds'] }}</flux:text>
                             @else
-                                <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
+                                <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.next_billing') }}</flux:subheading>
+                                @if ($billable && $billable->isLocalBillingSubscription() && $d['status']?->value !== 'cancelled')
+                                    <flux:text class="mt-1 font-semibold text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.free_plan_recurring_charge') }}</flux:text>
+                                @else
+                                    <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
+                                @endif
                             @endif
                         </div>
                         <div class="mb-3">
