@@ -158,6 +158,11 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         );
     }
 
+    public function planTrialDays(string $planCode, string $interval): int
+    {
+        return app(SubscriptionCatalogInterface::class)->trialDays($planCode, $interval);
+    }
+
     /** @return array<string, array{included: int, overage_price: int|null}> */
     public function planUsages(string $planCode, string $interval): array
     {

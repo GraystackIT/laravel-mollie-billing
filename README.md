@@ -443,7 +443,6 @@ return [
         'pro' => [
             'name' => 'Pro',
             'tier' => 2,
-            'trial_days' => 14,
             'included_seats' => 3,
             'feature_keys' => ['dashboard', 'advanced-reports'],
             'allowed_addons' => ['softdrinks'],
@@ -451,6 +450,7 @@ return [
                 'monthly' => [
                     'base_price_net' => 2900,
                     'seat_price_net' => 990,
+                    'trial_days' => 14, // optional, per-interval trial length
                     // Included quota per billing period (here: per month)
                     'included_usages' => ['tokens' => 100, 'sms' => 50],
                     // Cents per unit over quota; omit a key for "no overage"
@@ -459,6 +459,7 @@ return [
                 'yearly' => [
                     'base_price_net' => 29000,
                     'seat_price_net' => 9900,
+                    'trial_days' => 14,
                     // Included quota per billing period (here: per year)
                     'included_usages' => ['tokens' => 1500, 'sms' => 600],
                     'usage_overage_prices' => ['tokens' => 10, 'sms' => 15],
@@ -758,7 +759,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 
 This package wraps `mollie/laravel-mollie` ^4 and adds a VAT/OSS layer (`mpociot/vat-calculator` plus VIES), a wallet layer for metered billing (`bavix/laravel-wallet`), a coupon engine, a built-in first-checkout wizard, an admin panel and a Livewire 4 customer portal. Subscription lifecycle is split into single-purpose service classes per action (Start, Create, Activate, Change, Cancel, Resubscribe, EnableAddon, DisableAddon, SyncSeats) — the `HasBilling` trait delegates to them via the container, so apps customize behavior by rebinding services rather than subclassing models. Extension points are provided via facade callbacks (`createBillableUsing`, `beforeCheckoutUsing`, `afterCheckoutUsing`, `resolveBillableUsing`, etc.) and events.
 
-Free or zero-price plans run as `SubscriptionSource::Local` without a Mollie subscription; paid plans are `SubscriptionSource::Mollie`. The trial flow seamlessly converts Local subscriptions to Mollie ones the moment a mandate is added.
+Free or zero-price plans run as `SubscriptionSource::Local` without a Mollie subscription; paid plans are `SubscriptionSource::Mollie`. Paid plans with a configured `trial_days` go through a Mandate-Only checkout (0 EUR, captures the payment method) and create the Mollie subscription with `startDate = now + trial_days` — no charge during the trial, status = `trial`, wallet hydrated aliquot to the trial length. See [Subscription Lifecycle](docs/subscription-lifecycle.md#trial-flow).
 
 ## License
 

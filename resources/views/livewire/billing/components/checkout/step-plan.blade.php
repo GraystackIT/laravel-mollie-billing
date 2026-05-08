@@ -56,10 +56,11 @@
                         <span class="text-3xl font-bold tracking-tight tabular-nums">{{ $currencySymbol }}{{ number_format($amount, 0) }}</span>
                         <span class="text-sm text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
                     </div>
-                    @if (! empty($plan['trial_days']))
+                    @php($trialDays = $this->planTrialDays($code, $interval))
+                    @if ($trialDays > 0)
                         <div class="mt-2">
                             <flux:badge size="sm" color="lime">
-                                {{ __('billing::checkout.trial_days', ['days' => $plan['trial_days']]) }}
+                                {{ __('billing::checkout.trial_days', ['days' => $trialDays]) }}
                             </flux:badge>
                         </div>
                     @endif

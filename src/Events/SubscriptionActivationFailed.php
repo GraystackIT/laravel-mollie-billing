@@ -9,10 +9,13 @@ use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
 /**
- * The first payment for a subscription was received from Mollie, but creating
- * the corresponding Mollie subscription afterwards failed. The invoice has
- * been persisted (the customer paid) but the billable has no active Mollie
- * subscription — manual intervention is required.
+ * Subscription activation failed after Mollie processed the initial payment or
+ * mandate. Two flavours:
+ *   - First-payment flow: the invoice has been persisted (the customer paid)
+ *     but the Mollie subscription couldn't be created — manual intervention.
+ *     `$invoiceId` references that invoice.
+ *   - Trial flow: the mandate was captured but the Mollie subscription couldn't
+ *     be created. No invoice exists (no money flowed), so `$invoiceId` is null.
  */
 class SubscriptionActivationFailed
 {
@@ -24,7 +27,7 @@ class SubscriptionActivationFailed
         public readonly string $planCode,
         public readonly string $interval,
         public readonly string $paymentId,
-        public readonly int $invoiceId,
+        public readonly ?int $invoiceId,
         public readonly string $reason,
     ) {}
 }

@@ -17,7 +17,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.free', [
         'name' => 'Free',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -29,7 +28,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.starter', [
         'name' => 'Starter',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => ['print-gateway'],
@@ -41,7 +39,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.enterprise', [
         'name' => 'Enterprise',
         'tier' => 3,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => ['print-gateway', 'example-addon'],

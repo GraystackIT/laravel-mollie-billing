@@ -21,7 +21,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.free', [
         'name' => 'Free',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => ['paid-addon', 'free-addon'],
@@ -34,7 +33,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.paid', [
         'name' => 'Paid',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => ['paid-addon'],
@@ -47,7 +45,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.free-with-paid-seats', [
         'name' => 'Free with paid extra seats',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -156,7 +153,6 @@ it('allows switching between two free plans on a Local subscription', function (
     config()->set('mollie-billing-plans.plans.free-other', [
         'name' => 'Other Free',
         'tier' => 1,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -184,7 +180,6 @@ it('blocks plan change that would silently drop paid extra seats', function (): 
     config()->set('mollie-billing-plans.plans.pro-with-paid-seats', [
         'name' => 'Pro with paid seats',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -221,7 +216,6 @@ it('allows the same change when seats are explicitly set (drop-extras path)', fu
     config()->set('mollie-billing-plans.plans.pro-with-paid-seats', [
         'name' => 'Pro with paid seats',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -295,7 +289,6 @@ it('returns paid_seats_lost error in preview when paid extras would be dropped',
     config()->set('mollie-billing-plans.plans.pro-with-paid-seats', [
         'name' => 'Pro with paid seats',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -359,7 +352,6 @@ it('clears the paid_seats_lost error when seats are explicitly set', function ()
     config()->set('mollie-billing-plans.plans.pro-with-paid-seats', [
         'name' => 'Pro with paid seats',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 1,
         'feature_keys' => [],
         'allowed_addons' => [],

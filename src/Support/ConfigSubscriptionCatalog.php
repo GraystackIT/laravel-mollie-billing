@@ -51,6 +51,13 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return $value === null ? null : (int) $value;
     }
 
+    public function trialDays(string $planCode, string $interval): int
+    {
+        $value = $this->plan($planCode)['intervals'][$interval]['trial_days'] ?? null;
+
+        return is_int($value) ? max(0, $value) : 0;
+    }
+
     public function isFreePlan(string $planCode, string $interval): bool
     {
         return $this->basePriceNet($planCode, $interval) === 0

@@ -51,7 +51,6 @@ beforeEach(function (): void {
         'pro' => [
             'name' => 'Pro',
             'tier' => 2,
-            'trial_days' => 0,
             'included_seats' => 1,
             'feature_keys' => ['dashboard'],
             'allowed_addons' => ['softdrinks'],

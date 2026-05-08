@@ -59,6 +59,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Set before the first migration** — affects FK column shapes. Default: `uuid`. |
 | `user_key_type` | `BILLING_USER_KEY_TYPE` | `uuid` / `ulid` / `int`. Primary key type of your auth user model — used for columns like `billing_country_mismatches.resolved_by_user_id`. **Set before the first migration**. Default: `int`. |
 | `overage_job_time` | `BILLING_OVERAGE_JOB_TIME` | Time of day (`HH:MM`) for `PrepareOverageCommand`. Default: `02:00`. |
+| `trial_lifecycle_job_time` | `BILLING_TRIAL_LIFECYCLE_JOB_TIME` | Time of day (`HH:MM`) for `ProcessTrialLifecycleJob`. Sends trial-ending notifications and expires stale trials. Default: `02:05`. |
 | `usage_threshold_percent` | `BILLING_USAGE_THRESHOLD` | Threshold for usage-warning events (in %). Default: `80`. |
 | `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Global default: carry over unused wallet credits across period changes. Overridable per plan. Default: `false`. |
 | `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL of the admin-panel KPI cache (seconds). Default: `300`. |
@@ -237,7 +238,6 @@ Each plan is keyed by its `planCode`.
     'name'           => 'Pro',                              // fallback when no translation exists
     'description'    => null,
     'tier'           => 2,                                  // numeric tier (upgrade/downgrade detection)
-    'trial_days'     => 14,
     'included_seats' => 3,
     'feature_keys'   => ['dashboard', 'advanced-reports'],  // references into 'features'
     'allowed_addons' => ['softdrinks'],                     // references into 'addons'
@@ -246,12 +246,14 @@ Each plan is keyed by its `planCode`.
         'monthly' => [
             'base_price_net'        => 2900,                // cents — base plan price
             'seat_price_net'        => 990,                 // cents per additional seat above included_seats, or null
+            'trial_days'            => 14,                  // optional — interval-scoped trial length
             'included_usages'       => ['Tokens' => 100, 'SMS' => 50],
             'usage_overage_prices'  => ['Tokens' => 10, 'SMS' => 15],   // cents per unit
         ],
         'yearly' => [
             'base_price_net'        => 29000,
             'seat_price_net'        => 9900,
+            'trial_days'            => 14,
             'included_usages'       => ['Tokens' => 1500, 'SMS' => 600],
             'usage_overage_prices'  => ['Tokens' => 10, 'SMS' => 15],
         ],
@@ -263,12 +265,13 @@ Each plan is keyed by its `planCode`.
 |-------|-------------|
 | `name`, `description` | Display values. If a translation exists under `billing::plans.<code>.{name,description}` it overrides these. |
 | `tier` | Integer. Higher = more expensive/larger. Drives upgrade/downgrade detection in `UpdateSubscription`. |
-| `trial_days` | Trial length in days. `0` = no trial. |
 | `included_seats` | Number of seats included in the base price. `SyncSeats` charges anything above this as additional seats. |
 | `feature_keys` | List of feature keys from the `features` block. Resolved together with addon features by `FeatureAccess`. |
 | `allowed_addons` | Whitelist of addons. Other addons cannot be enabled on this plan. |
 | `usage_rollover` *(optional)* | `true` / `false`. Overrides `mollie-billing.usage_rollover`. |
 | `intervals` | Required — one block per supported interval (`monthly`, `yearly`). |
+
+> **Breaking change**: Plan-level `trial_days` is no longer supported. Move the value into each interval that should offer a trial (`intervals.monthly.trial_days`, `intervals.yearly.trial_days`). `php artisan billing:check-config` will fail with a migration hint until the config is updated.
 
 **Per interval block:**
 
@@ -276,10 +279,11 @@ Each plan is keyed by its `planCode`.
 |-------|----------|-------------|
 | `base_price_net` | ✓ | Net base price in cents. |
 | `seat_price_net` | ✓ | Net price per additional seat in cents, or `null` if the plan does not allow seat upgrades. |
+| `trial_days` *(optional)* | | Trial length in days for this specific interval. Missing or `0` means no trial. Trials only apply on fresh checkout — never on plan changes. See [Trial flow](subscription-lifecycle.md#trial-flow). |
 | `included_usages` | ✓ | Map `usage_type => quantity`. These quantities are credited additively to the wallet on every period rollover (negative balances from prior overage are preserved). |
 | `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. |
 
-> **Important:** `included_usages` and `usage_overage_prices` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
+> **Important:** `included_usages`, `usage_overage_prices`, and `trial_days` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
 
 ### `features`
 
@@ -438,7 +442,7 @@ It reports two classes of issues:
   - `plans` empty
   - Plan / addon `feature_keys` referencing undefined features
   - Plan `allowed_addons` referencing undefined addons
-  - Plan `tier` missing or non-integer; `trial_days` / `included_seats` invalid
+  - Plan `tier` missing or non-integer; `included_seats` invalid; `trial_days` set at plan root (must move into `intervals.{interval}.trial_days`)
   - Interval `base_price_net` / `seat_price_net` missing or negative
   - Plan / addon defining an unknown interval (only `monthly` and `yearly` are recognised)
   - Product `group` referencing an undefined product group

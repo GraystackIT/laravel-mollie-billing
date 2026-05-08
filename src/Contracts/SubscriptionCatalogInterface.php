@@ -34,6 +34,13 @@ interface SubscriptionCatalogInterface
     public function seatPriceNet(string $planCode, string $interval): ?int;
 
     /**
+     * Trial-period length in days for a (plan, interval). Strictly per-interval —
+     * fehlt der Wert für ein Interval, gibt es für dieses Interval keine Trial.
+     * Always returns >= 0; negative or non-integer values are clamped to 0.
+     */
+    public function trialDays(string $planCode, string $interval): int;
+
+    /**
      * Whether the plan is free in the given interval — base price 0 and no extra seats sold.
      *
      * Used to decide whether a Mollie subscription is needed at all (free → Local source)

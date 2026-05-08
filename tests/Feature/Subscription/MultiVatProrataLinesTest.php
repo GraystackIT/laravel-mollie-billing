@@ -15,7 +15,7 @@ use GraystackIT\MollieBilling\Testing\TestBillable;
 beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.starter', [
         'name' => 'Starter',
-        'tier' => 1, 'trial_days' => 0, 'included_seats' => 1,
+        'tier' => 1, 'included_seats' => 1,
         'feature_keys' => [], 'allowed_addons' => ['gateway-a', 'addon-b'],
         'intervals' => ['monthly' => ['base_price_net' => 1000, 'seat_price_net' => 500, 'included_usages' => []]],
     ]);

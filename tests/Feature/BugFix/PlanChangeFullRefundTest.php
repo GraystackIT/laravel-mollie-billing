@@ -17,7 +17,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.business', [
         'name' => 'Business',
         'tier' => 2,
-        'trial_days' => 0,
         'included_seats' => 3,
         'feature_keys' => [],
         'allowed_addons' => [],
@@ -29,7 +28,6 @@ beforeEach(function (): void {
     config()->set('mollie-billing-plans.plans.enterprise', [
         'name' => 'Enterprise',
         'tier' => 3,
-        'trial_days' => 0,
         'included_seats' => 10,
         'feature_keys' => [],
         'allowed_addons' => ['example-addon'],

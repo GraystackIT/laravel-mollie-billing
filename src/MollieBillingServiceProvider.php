@@ -22,6 +22,7 @@ use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\CleanupOrphanedBillablesJob;
 use GraystackIT\MollieBilling\Jobs\CleanupStalePendingCountryCorrectionJob;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
+use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
 use GraystackIT\MollieBilling\Listeners\RevokePreviousMandate;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
@@ -207,6 +208,10 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
             $schedule->job(PrepareUsageOverageJob::class)
                 ->dailyAt(config('mollie-billing.overage_job_time', '02:00'))
+                ->timezone('UTC');
+
+            $schedule->job(ProcessTrialLifecycleJob::class)
+                ->dailyAt(config('mollie-billing.trial_lifecycle_job_time', '02:05'))
                 ->timezone('UTC');
 
             $schedule->job(PruneProcessedWebhooksJob::class)

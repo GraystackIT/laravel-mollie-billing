@@ -18,11 +18,13 @@ class StartMandateCheckout
     /**
      * @param  ?string  $redirectUrl  Optional override for the post-checkout redirect URL.
      *                                Defaults to the package "return" route.
-     * @param  ?array{plan_code?:string,interval?:string,addon_codes?:array<int,string>,extra_seats?:int,coupon_code?:?string}  $subscriptionSpec
+     * @param  ?array{plan_code?:string,interval?:string,addon_codes?:array<int,string>,extra_seats?:int,coupon_code?:?string,trial_days?:int}  $subscriptionSpec
      *         When set, the resulting Mandate-Only payment carries the spec in its
      *         metadata under `pending_subscription_*` keys. The webhook then activates
-     *         a Mollie subscription after the mandate is captured. Used by the
-     *         100%-single_payment-coupon checkout flow where the first charge is 0 €.
+     *         a Mollie subscription after the mandate is captured. Two activation
+     *         flows share this transport:
+     *           - 100%-single_payment-coupon checkout where the first charge is 0 €.
+     *           - Trial checkout (`trial_days > 0`) where the first interval is free.
      * @return array{checkout_url:?string,payment_id:string}
      */
     public function handle(Billable $billable, ?string $redirectUrl = null, ?array $subscriptionSpec = null): array
@@ -53,6 +55,9 @@ class StartMandateCheckout
             }
             if (! empty($subscriptionSpec['coupon_code'])) {
                 $metadata['pending_subscription_coupon_code'] = (string) $subscriptionSpec['coupon_code'];
+            }
+            if (isset($subscriptionSpec['trial_days'])) {
+                $metadata['pending_subscription_trial_days'] = (int) $subscriptionSpec['trial_days'];
             }
         }
 

@@ -8,7 +8,6 @@ return [
             'name' => 'Free',
             'description' => null,
             'tier' => 1,
-            'trial_days' => 0,
             'included_seats' => 1,
             'feature_keys' => ['dashboard'],
             'allowed_addons' => [],
@@ -31,20 +30,24 @@ return [
             'name' => 'Pro',
             'description' => null,
             'tier' => 2,
-            'trial_days' => 14,
             'included_seats' => 3,
             'feature_keys' => ['dashboard', 'advanced-reports'],
             'allowed_addons' => ['softdrinks'],
+            // Trial periods are configured per (plan, interval) under
+            // `intervals.{monthly|yearly}.trial_days`. Setting it at plan
+            // root is no longer supported and CheckConfigCommand will fail.
             'intervals' => [
                 'monthly' => [
                     'base_price_net' => 2900,
                     'seat_price_net' => 990,
+                    'trial_days' => 14,
                     'included_usages' => ['Tokens' => 100, 'SMS' => 50],
                     'usage_overage_prices' => ['Tokens' => 10, 'SMS' => 15],
                 ],
                 'yearly' => [
                     'base_price_net' => 29000,
                     'seat_price_net' => 9900,
+                    'trial_days' => 14,
                     'included_usages' => ['Tokens' => 1500, 'SMS' => 600],
                     'usage_overage_prices' => ['Tokens' => 10, 'SMS' => 15],
                 ],
