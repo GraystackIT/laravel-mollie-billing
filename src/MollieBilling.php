@@ -49,6 +49,9 @@ class MollieBilling
     /** @var Closure(?Billable): array<string, mixed>|null */
     protected static ?Closure $urlParametersCallback = null;
 
+    /** @var Closure(Billable): void|null */
+    protected static ?Closure $cleanupOrphanedBillableCallback = null;
+
     protected static ?MollieBillingFake $fake = null;
 
     public static function authUsing(Closure $callback): void
@@ -172,6 +175,32 @@ class MollieBilling
     {
         if (self::$afterCheckoutCallback !== null) {
             (self::$afterCheckoutCallback)($billable, $success);
+        }
+    }
+
+    /**
+     * Register a closure that performs the actual deletion when
+     * CleanupOrphanedBillablesJob identifies an abandoned-checkout billable.
+     *
+     * The closure receives the Billable and is responsible for cascading
+     * cleanup (e.g. removing related users, tenants, organizations). When no
+     * closure is registered the package falls back to `$billable->delete()`.
+     */
+    public static function cleanupOrphanedBillableUsing(Closure $callback): void
+    {
+        self::$cleanupOrphanedBillableCallback = $callback;
+    }
+
+    public static function runCleanupOrphanedBillable(Billable $billable): void
+    {
+        if (self::$cleanupOrphanedBillableCallback !== null) {
+            (self::$cleanupOrphanedBillableCallback)($billable);
+
+            return;
+        }
+
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $billable->delete();
         }
     }
 

@@ -65,6 +65,18 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `show_yearly_savings` | `BILLING_SHOW_YEARLY_SAVINGS` | Shows the computed savings (yearly vs. monthly) in the plan selector. Default: `true`. |
 | `local_subscription.allow_one_time_orders` | `BILLING_LOCAL_ALLOW_ONE_TIME_ORDERS` | Whether free / Local subscribers may purchase one-time products. Default: `false` — purchase attempts throw `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons with an upgrade hint. Set `true` if your free plan is a default tier monetised through token packs etc. Paid add-ons and extra seats remain blocked on Local subs regardless of this flag (no mandate available). |
 | `billing_timezone` | `BILLING_TIMEZONE` | IANA timezone for the customer-portal display (fallback when `Billable::getBillingTimezone()` is not overridden). Persistence and computation always remain UTC; the admin panel also renders UTC. Default: `UTC`. See [docs/timezone.md](timezone.md). |
+| `cleanup.enabled` | `BILLING_CLEANUP_ORPHANED_ENABLED` | Master switch for `CleanupOrphanedBillablesJob`. Default: `true`. |
+| `cleanup.threshold_minutes` | `BILLING_CLEANUP_ORPHANED_THRESHOLD_MINUTES` | Minimum age before an orphaned billable is eligible for deletion. Default: `60`. |
+| `cleanup.cron_expression` | `BILLING_CLEANUP_ORPHANED_CRON` | Cron expression for the cleanup schedule. Default: `*/15 * * * *` (every 15 minutes). |
+
+#### Orphaned-billable cleanup (`cleanup`)
+
+Removes billables that were created during a checkout flow but never reached an active subscription — abandoned tabs, expired Mollie sessions, captured-but-unused mandates. Detection is hybrid:
+
+- When the billable has a `pending_first_payment_id` in `subscription_meta` the job polls Mollie and only cleans up when the payment is in a terminal failure state (`failed`/`canceled`/`expired`).
+- Otherwise the billable is cleaned purely based on age plus the absence of any accessible subscription (`subscription_source` is `none`/`null` and `subscription_status` is `new`/`null`).
+
+Cascading cleanup (e.g. removing tenants and orphaned users) is delegated to the closure registered via `MollieBilling::cleanupOrphanedBillableUsing(...)`. When no closure is registered the package falls back to `$billable->delete()`. A captured Mollie mandate is revoked best-effort before the billable is removed so we don't leave permission-to-charge floating in Mollie. The job dispatches a `CheckoutAbandoned` event before running the closure so apps can hook into the cleanup for additional side-effects (logging, notifications).
 
 ### Invoices (`invoices`)
 
