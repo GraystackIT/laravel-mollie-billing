@@ -349,6 +349,7 @@ return [
     ],
     'flash' => [
         'cancelled' => 'Subscription cancelled.',
+        'trial_ended' => 'Trial ended. Your subscription has been cancelled.',
         'resubscribed' => 'Subscription reactivated.',
         'plan_changed' => 'Plan changed.',
         'plan_scheduled' => 'Plan change scheduled for :date.',
@@ -383,6 +384,13 @@ return [
         'body' => 'Your subscription will be cancelled at the end of the current billing period.',
         'keep' => 'Keep subscription',
         'confirm' => 'Cancel',
+    ],
+    'end_trial' => 'End trial',
+    'end_trial_confirm' => [
+        'title' => 'End trial?',
+        'body' => 'Your trial will end immediately and your subscription will be cancelled. You will lose access to the plan right away. No charge has been made.',
+        'keep' => 'Keep trial',
+        'confirm' => 'End trial',
     ],
     'usage_history' => 'Usage history',
     'usage_history_subtitle' => 'View your usage transactions for the current billing period.',

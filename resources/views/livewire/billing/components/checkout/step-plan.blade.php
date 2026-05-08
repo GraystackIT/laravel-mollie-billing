@@ -56,7 +56,7 @@
                         <span class="text-3xl font-bold tracking-tight tabular-nums">{{ $currencySymbol }}{{ number_format($amount, 0) }}</span>
                         <span class="text-sm text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
                     </div>
-                    @php($trialDays = $this->planTrialDays($code, $interval))
+                    @php($trialDays = $this->trialApplies($code, $interval) ? $this->planTrialDays($code, $interval) : 0)
                     @if ($trialDays > 0)
                         <div class="mt-2">
                             <flux:badge size="sm" color="lime">

@@ -35,7 +35,7 @@ interface SubscriptionCatalogInterface
 
     /**
      * Trial-period length in days for a (plan, interval). Strictly per-interval —
-     * fehlt der Wert für ein Interval, gibt es für dieses Interval keine Trial.
+     * if the value is missing for an interval, there is no trial for that interval.
      * Always returns >= 0; negative or non-integer values are clamped to 0.
      */
     public function trialDays(string $planCode, string $interval): int;
