@@ -451,7 +451,7 @@ return [
         'status' => 'Status',
         'status_active' => 'Aktiv',
         'status_revoked' => 'Widerrufen',
-        'benefit_days' => ':days Tage',
+        'benefit_days' => '{1} :days Tag|[2,*] :days Tage',
         'benefit_credits' => 'Guthaben',
     ],
     'return' => [

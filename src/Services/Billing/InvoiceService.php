@@ -126,6 +126,7 @@ class InvoiceService
         $invoice->payment_method_details = self::extractPaymentMethodDetails($payment);
         $invoice->refunded_net = 0;
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
+        $invoice->mismatch_id = $billable->latestOpenCountryMismatch()?->id;
         $invoice->save();
 
         $this->generateAndStorePdf($invoice, $billable);
@@ -723,6 +724,14 @@ class InvoiceService
         // this is the entry that justifies the reverse-charge decision (or its
         // absence) reflected in the new VAT amounts.
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
+        // Anchor the reissue to the resolved mismatch for audit traceability.
+        // The mismatch itself is no longer Pending here (resolve() has flipped
+        // it), so latestOpenCountryMismatch() would return null — read the id
+        // from the pending state instead.
+        $reissueMismatchId = (int) ($pending['mismatch_id'] ?? 0);
+        if ($reissueMismatchId > 0) {
+            $invoice->mismatch_id = $reissueMismatchId;
+        }
         // Customer-facing explanation rendered on the PDF (same template as the
         // matching credit note).
         $invoice->refund_reason_text = $this->correctionReissueReason($original, $pending);
@@ -887,6 +896,7 @@ class InvoiceService
         $invoice->period_end = $periodEnd;
         $invoice->refunded_net = 0;
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
+        $invoice->mismatch_id = $billable->latestOpenCountryMismatch()?->id;
         $invoice->save();
 
         $this->generateAndStorePdf($invoice, $billable);

@@ -20,6 +20,7 @@ use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\CleanupOrphanedBillablesJob;
+use GraystackIT\MollieBilling\Jobs\CleanupStalePendingCountryCorrectionJob;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
 use GraystackIT\MollieBilling\Listeners\RevokePreviousMandate;
@@ -210,6 +211,10 @@ class MollieBillingServiceProvider extends ServiceProvider
 
             $schedule->job(PruneProcessedWebhooksJob::class)
                 ->monthlyOn(1, '03:00')
+                ->timezone('UTC');
+
+            $schedule->job(CleanupStalePendingCountryCorrectionJob::class)
+                ->hourly()
                 ->timezone('UTC');
 
             if ((bool) config('mollie-billing.cleanup.enabled', true)) {

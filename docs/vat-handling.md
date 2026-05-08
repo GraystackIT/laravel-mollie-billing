@@ -86,7 +86,7 @@ The flag is idempotent: only one Pending row per billable. Repeated `check()` ca
 When a mismatch is flagged, the service performs all of these atomically:
 
 1. Insert a `BillingCountryMismatch` row with `status=Pending` and the three country values.
-2. Mark every existing positive-net invoice of the billable (any `invoice_kind` except `Refund`) with `mismatch_id = $mismatch->id` so the resolve flow knows exactly which invoices to refund and reissue.
+2. Mark every existing positive-net invoice of the billable (any `invoice_kind` except `Refund`) with `mismatch_id = $mismatch->id` so the resolve flow knows exactly which invoices to refund and reissue. Invoices created **after** the flag (e.g. the recurring payment whose webhook triggered the check, persisted by `InvoiceService::createForPayment()` after `countryMatchService->check()` runs) are linked automatically: the service reads `latestOpenCountryMismatch()` at save time and sets `mismatch_id` on the new row. This guarantees that the invoice that *caused* the mismatch is always part of the resolve set.
 3. Set `country_mismatch_flagged_at` on the billable for downstream filtering.
 4. Cancel the subscription at end of period via `CancelSubscription::handle($billable, immediately: false)`. The current paid period stays active; no further Mollie renewal will fire.
 5. Dispatch the `CountryMismatchFlagged` event.
@@ -115,7 +115,23 @@ Triggered from the user modal or the admin override. Steps, in order:
 3. **Issue a Mollie correction charge** per refunded invoice via `InvoiceService::issueCorrectionCharge()` with metadata `type=country_correction`. The customer-facing reissue invoice is created when the `country_correction` payment confirms (in `MollieWebhookController::handleCountryCorrectionPaid()`, which preserves the original invoice's `period_start` / `period_end` for OSS-correct accounting).
 4. Dispatch `CountryMismatchResolved`.
 
-**Idempotency.** If a re-charge fails (e.g. mandate revoked) the webhook handler `handleCountryCorrectionFailed` rolls the mismatch back to Pending, drops the failed payment from `subscription_meta.country_corrections`, and notifies the billable's admins via `CountryMismatchReissueFailedNotification`. The user can retry the resolve modal: refunds with an existing credit note are skipped (`refunded_net >= amount_net`), and re-charges with a still-pending entry in `subscription_meta.country_corrections` are skipped (no double charge). Only the missing pieces are retried.
+**Idempotency / recovery on reissue failure.** If a re-charge fails (e.g. mandate revoked) the webhook handler `handleCountryCorrectionFailed`:
+
+1. drops the failed payment from `subscription_meta.country_corrections`;
+2. rolls the mismatch back to `Pending` so the dashboard banner reappears;
+3. **re-cancels the subscription at period end** (the original cancel from the initial flag was undone when `resolve()` ran — without the re-cancel the billable would keep renewing while the unresolved mismatch sits in the audit log);
+4. notifies the billable's admins via `CountryMismatchReissueFailedNotification`.
+
+The user can retry the resolve modal. The retry path through `retryPendingReissues()` skips refunds that already have a credit note (`refunded_net >= amount_net`) and skips re-charges with a still-pending entry in `subscription_meta.country_corrections` — only the missing pieces are retried, no double refund.
+
+**Hung-webhook safety net.** If the `country_correction` webhook never arrives (Mollie outage, webhook-URL misconfig, app downtime that exhausted Mollie's retry window), `CleanupStalePendingCountryCorrectionJob` runs hourly and reconciles the hang by polling Mollie's payment status directly:
+
+- entries younger than 1h are left alone (webhooks normally arrive in seconds);
+- `paid` → run `handleCountryCorrectionPaid` inline (idempotent — the duplicate webhook arriving later sees the invoice already persisted and no-ops);
+- `failed`/`canceled`/`expired` → run `handleCountryCorrectionFailed` inline (full recovery as above);
+- still pending after 24h → synthesise a `failed` payment object and run `handleCountryCorrectionFailed`, so the user gets the same recovery experience (Pending banner + cancel-at-period-end) as a real Mollie failure. The original refund already happened, so the user's next resolve attempt will only retry the missing reissue charge.
+
+**Audit trail.** The reissue invoice persisted by `createCorrectionInvoice()` carries `mismatch_id` pointing back to the resolved mismatch, so `BillingCountryMismatch::invoices()` returns the full set (originals + their reissues) for forensic queries.
 
 **No auto-reactivate.** Mollie subscriptions cannot be un-cancelled — `ResubscribeSubscription` creates a new Mollie subscription via `CreateSubscription`, which can trigger an immediate charge at the next renewal day. The package therefore never auto-resumes after a resolve. The user clicks the explicit `Reactivate subscription` button on the dashboard.
 
