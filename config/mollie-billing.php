@@ -204,6 +204,15 @@ return [
         'cron_expression' => env('BILLING_CLEANUP_ORPHANED_CRON', '*/15 * * * *'),
     ],
 
+    // Auto-cancel of subscriptions stuck in `past_due`. After this many days
+    // without a successful recovery payment, PrepareUsageOverageJob Pass 3
+    // transitions the billable to `cancelled` with `subscription_ends_at = now`.
+    // The next Pass 3 run then flips `cancelled → expired`, releasing access
+    // permanently. Recovery (PastDue → Active) still works as long as Mollie
+    // succeeds within this window. Set BILLING_PAST_DUE_MAX_DAYS=0 to disable
+    // the auto-cancel (PastDue then lives forever until manual action).
+    'past_due_max_days' => (int) env('BILLING_PAST_DUE_MAX_DAYS', 30),
+
     'usage_threshold_percent' => env('BILLING_USAGE_THRESHOLD', 80),
 
     // Whether unused usage credits carry over to the next billing period.

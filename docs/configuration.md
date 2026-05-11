@@ -70,6 +70,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `cleanup.enabled` | `BILLING_CLEANUP_ORPHANED_ENABLED` | Master switch for `CleanupOrphanedBillablesJob`. Default: `true`. |
 | `cleanup.threshold_minutes` | `BILLING_CLEANUP_ORPHANED_THRESHOLD_MINUTES` | Minimum age before an orphaned billable is eligible for deletion. Default: `60`. |
 | `cleanup.cron_expression` | `BILLING_CLEANUP_ORPHANED_CRON` | Cron expression for the cleanup schedule. Default: `*/15 * * * *` (every 15 minutes). |
+| `past_due_max_days` | `BILLING_PAST_DUE_MAX_DAYS` | Days a billable may sit in `past_due` before `PrepareUsageOverageJob` Pass 3a auto-cancels the subscription (`past_due → cancelled` with `subscription_ends_at = now`, then Pass 3b finalises to `expired` on the next run). Recovery (Mollie retries succeeding, manual portal payment) still works up to the cutoff. Set to `0` to disable and keep the legacy behavior (PastDue lives forever until manual action). Default: `30`. See [docs/lifecycle-and-cleanup.md](lifecycle-and-cleanup.md). |
 
 #### Orphaned-billable cleanup (`cleanup`)
 

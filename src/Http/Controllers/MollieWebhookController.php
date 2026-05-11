@@ -26,6 +26,7 @@ use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminPaidWithoutBillableNotification;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
 use GraystackIT\MollieBilling\Notifications\PlanChangeFailedNotification;
@@ -201,7 +202,7 @@ class MollieWebhookController extends Controller
 
         if ($status === 'paid') {
             if ($billable === null) {
-                Log::warning('Paid webhook with unresolvable billable', ['id' => $payment->id]);
+                $this->reportPaidWithoutBillable($payment, $metadata);
                 return;
             }
 
@@ -1259,6 +1260,8 @@ class MollieWebhookController extends Controller
             'failed_at' => BillingTime::nowUtc()->toIso8601String(),
             'reason' => (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown'),
         ];
+        $meta['past_due_since'] = $meta['past_due_since']
+            ?? BillingTime::nowUtc()->toIso8601String();
 
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::PastDue,
@@ -1454,7 +1457,7 @@ class MollieWebhookController extends Controller
             // because Mollie's PATCH (with forceResetStartDate) reset the
             // recurring schedule to now + 1 interval.
             if ($wasPastDue) {
-                unset($meta['payment_failure']);
+                unset($meta['payment_failure'], $meta['past_due_since']);
             }
 
             $billable->forceFill([
@@ -1741,6 +1744,47 @@ class MollieWebhookController extends Controller
         }
 
         return $type::find($id);
+    }
+
+    /**
+     * Mollie reports a successful payment whose metadata points to a billable
+     * we can no longer resolve locally (record deleted between checkout and
+     * webhook, or stale metadata). The money already cleared at Mollie but we
+     * cannot run any of the normal handlers — no invoice, no wallet credit,
+     * no subscription transition. Surface this so admins can reconcile.
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function reportPaidWithoutBillable(object $payment, array $metadata): void
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        $billableType = isset($metadata['billable_type']) ? (string) $metadata['billable_type'] : null;
+        $billableId = isset($metadata['billable_id']) ? (string) $metadata['billable_id'] : null;
+        $amountCents = $this->amountFromMolliePayment($payment);
+        $currency = isset($payment->amount->currency) ? (string) $payment->amount->currency : null;
+
+        Log::warning('Paid webhook with unresolvable billable', [
+            'payment_id' => $paymentId,
+            'billable_type' => $billableType,
+            'billable_id' => $billableId,
+            'amount_cents' => $amountCents,
+            'currency' => $currency,
+        ]);
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+        if ($admins !== []) {
+            Notification::send(
+                $admins,
+                new AdminPaidWithoutBillableNotification(
+                    paymentId: $paymentId,
+                    billableType: $billableType,
+                    billableId: $billableId,
+                    amountCents: $amountCents,
+                    currency: $currency,
+                ),
+            );
+        }
     }
 
     /**
