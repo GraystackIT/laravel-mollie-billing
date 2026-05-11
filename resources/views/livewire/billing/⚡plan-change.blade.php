@@ -253,7 +253,7 @@ new class extends Component {
         if (! $billable) return;
 
         try {
-            $service->clearPendingPlanChange($billable);
+            $service->cancelPendingPlanChange($billable);
             \Flux::toast(__('billing::portal.flash.pending_change_cancelled'), variant: 'success');
         } catch (\Throwable $e) {
             report($e);

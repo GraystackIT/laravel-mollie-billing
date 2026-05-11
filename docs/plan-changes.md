@@ -51,6 +51,9 @@ Phase 2b — Webhook: payment failed
   3. PlanChangeFailed event dispatched
   4. PlanChangeFailedNotification sent to billing admins
   -> Plan remains unchanged
+  Note: if the local pending state is already gone when the failed/expired
+  webhook arrives (user clicked "cancel pending change" first), the webhook
+  is a silent no-op — no failed marker, no event, no notification.
 ```
 
 ## Validation Rules
@@ -287,7 +290,9 @@ Plan definitions, pricing, quotas, and addon compatibility all come from `Subscr
 
 | Scenario | Behavior |
 |----------|----------|
-| User cancels pending change, then payment succeeds | Invoice is created (money was collected), but no `pending_plan_change` exists, so plan stays unchanged. Admin must refund manually. |
+| User cancels pending change via "Ausstehende Änderung abbrechen" | `UpdateSubscription::cancelPendingPlanChange()` issues a `CancelPaymentRequest` against Mollie if the payment is still `isCancelable=true` (typical for cards, SEPA) and then clears local state. Some methods (e.g. paypal) report `isCancelable=false` — those expire on their own at Mollie; local state is still cleared. |
+| User cancels pending change, then payment succeeds anyway | Invoice is created (money was collected), but no `pending_plan_change` exists, so plan stays unchanged. Admin must refund manually. This window is small because `cancelPendingPlanChange()` actively cancels the Mollie payment when possible. |
+| User cancels pending change, Mollie payment then expires/fails | The failed/expired webhook becomes a no-op: no `plan_change_failed_at` marker, no `PlanChangeFailed` event, no admin notification. The user already decided this charge should not apply — surfacing a failure toast would be misleading. |
 | Webhook arrives before Phase 1 transaction commits | Row lock blocks the webhook until commit. |
 | Phase 2 validation fails after payment | Logged, pending stays in meta for admin review. `PlanChangeFailed` event + notification sent. |
 | Local → Local plan switch | Never enters the deferred path. Applies immediately, source stays Local. |

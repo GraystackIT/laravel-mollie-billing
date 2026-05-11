@@ -705,6 +705,52 @@ class UpdateSubscription
     }
 
     /**
+     * User-initiated cancel of a pending plan change. Cancels the open Mollie
+     * payment if Mollie still allows it (some methods like paypal report
+     * isCancelable=false — those expire on their own), then clears the local
+     * pending state.
+     *
+     * Returns true if the Mollie payment was cancelled via API, false if it
+     * could not be cancelled (already final, not cancelable, or not found).
+     * Local state is cleared in either case.
+     */
+    public function cancelPendingPlanChange(Billable $billable): bool
+    {
+        if (! ($billable instanceof Model)) {
+            return false;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $paymentId = (string) ($meta['prorata_pending_payment_id'] ?? '');
+
+        $cancelled = false;
+        if ($paymentId !== '') {
+            try {
+                $payment = \Mollie\Laravel\Facades\Mollie::send(
+                    new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId),
+                );
+
+                if (($payment->isCancelable ?? false) === true) {
+                    \Mollie\Laravel\Facades\Mollie::send(
+                        new \Mollie\Api\Http\Requests\CancelPaymentRequest($paymentId),
+                    );
+                    $cancelled = true;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Pending plan change cancel: Mollie payment lookup/cancel failed — clearing local state anyway', [
+                    'billable' => $billable->getKey(),
+                    'payment_id' => $paymentId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->clearPendingPlanChange($billable);
+
+        return $cancelled;
+    }
+
+    /**
      * Build a SubscriptionChangeContext from the current billable state and the DTO.
      */
     private function buildContext(Billable $billable, SubscriptionUpdateRequest $dto): SubscriptionChangeContext
