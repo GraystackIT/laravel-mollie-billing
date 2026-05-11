@@ -50,6 +50,8 @@ The package wraps `mollie/laravel-mollie` ^4 (Mollie's official Laravel SDK, whi
 
 The controller must stay **idempotent** (deduped via `BillingProcessedWebhook`) and must branch on the `mandate_only` metadata for zero-amount first payments. After a successful recurring payment, wallets are recharged via `$this->catalog->includedUsages($planCode, $interval)` (additive — preserve negative balances from overage).
 
+Idempotency has two layers: (1) `reserve()` skips re-deliveries that already reached a final state; (2) `invoiceAlreadyExistsForPayment($payment)` short-circuits every handler that creates an invoice — Mollie re-delivers if a previous run threw *after* invoice persistence (reservation gets deleted in `__invoke()`'s catch), and the `billing_invoices.mollie_payment_id` unique index would otherwise trap the webhook in a 500-retry loop. Any new handler that calls `createForPayment` / `createInvoice` MUST add the guard before the non-idempotent side-effects (coupon redemptions, wallet credits, Mollie API calls).
+
 Note on signature validation: Mollie does **not** sign legacy webhooks — `X-Mollie-Signature` only exists on next-gen event webhooks (payment links, sales invoices). `ValidatesWebhookSignatures` would therefore be a no-op pass-through for our route and is intentionally **not** applied. The `BillingProcessedWebhook` dedup table and the fact that every incoming webhook triggers a `GetPaymentRequest` against Mollie (which fails for spoofed IDs) are the real integrity guarantees.
 
 ### Events as the extension seam
