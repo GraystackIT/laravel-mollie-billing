@@ -122,6 +122,31 @@ it('does not flip an active billable whose trial_ends_at lies in the past', func
     Event::assertNotDispatched(TrialExpired::class);
 });
 
+it('honors trial_ending_soon_notice_days when set to a longer notice window', function (): void {
+    config()->set('mollie-billing.trial_ending_soon_notice_days', 7);
+
+    $inWindow = makeTrialingBillable();
+    $inWindow->forceFill([
+        'subscription_status' => SubscriptionStatus::Trial,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'trial_ends_at' => BillingTime::nowUtc()->copy()->addDays(7)->addHours(2),
+    ])->save();
+
+    $tomorrow = makeTrialingBillable();
+    $tomorrow->forceFill([
+        'subscription_status' => SubscriptionStatus::Trial,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'trial_ends_at' => BillingTime::nowUtc()->copy()->addDay()->addHours(2),
+    ])->save();
+
+    (new ProcessTrialLifecycleJob)->handle();
+
+    Notification::assertSentTo($inWindow, TrialEndingSoonNotification::class);
+    Notification::assertNotSentTo($tomorrow, TrialEndingSoonNotification::class);
+});
+
 it('does not touch a trial billable whose trial is still in the future', function (): void {
     $billable = makeTrialingBillable();
 

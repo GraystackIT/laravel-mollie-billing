@@ -60,6 +60,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `user_key_type` | `BILLING_USER_KEY_TYPE` | `uuid` / `ulid` / `int`. Primary key type of your auth user model — used for columns like `billing_country_mismatches.resolved_by_user_id`. **Set before the first migration**. Default: `int`. |
 | `overage_job_time` | `BILLING_OVERAGE_JOB_TIME` | Time of day (`HH:MM`) for `PrepareOverageCommand`. Default: `02:00`. |
 | `trial_lifecycle_job_time` | `BILLING_TRIAL_LIFECYCLE_JOB_TIME` | Time of day (`HH:MM`) for `ProcessTrialLifecycleJob`. Sends trial-ending notifications and expires stale trials. Default: `02:05`. |
+| `trial_ending_soon_notice_days` | `BILLING_TRIAL_ENDING_SOON_NOTICE_DAYS` | Days before `trial_ends_at` at which `TrialEndingSoonNotification` / `TrialConvertedNotification` is dispatched. Missed windows are **not** backfilled when this value is increased. Default: `1`. |
 | `usage_threshold_percent` | `BILLING_USAGE_THRESHOLD` | Threshold for usage-warning events (in %). Default: `80`. |
 | `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Global default: carry over unused wallet credits across period changes. Overridable per plan. Default: `false`. |
 | `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL of the admin-panel KPI cache (seconds). Default: `300`. |

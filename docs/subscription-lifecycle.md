@@ -69,9 +69,11 @@ Key properties:
 
 If the trial expires without a successful first charge (mandate failure, mandate revoked, customer never paid), `ProcessTrialLifecycleJob` flips the billable to `past_due`, dispatches `TrialExpired`, and notifies via `TrialExpiredNotification`. `RequireActiveSubscription` then routes the user back to checkout.
 
+Ahead of expiry, the same daily job sends a single advance-notice email — `TrialEndingSoonNotification` (no mandate yet) or `TrialConvertedNotification` (mandate captured, charge upcoming) — when `trial_ends_at` falls on the calendar day exactly `trial_ending_soon_notice_days` ahead (default: `1`, i.e. tomorrow). Configurable via [`trial_ending_soon_notice_days`](configuration.md#core) / `BILLING_TRIAL_ENDING_SOON_NOTICE_DAYS`. Missed windows are not backfilled when the value is increased.
+
 **Services:** `StartSubscriptionCheckout`, `StartMandateCheckout`, `CreateSubscription`, `MollieWebhookController::activateTrialSubscriptionAfterMandate`, `CouponService::applyRecurringMarker`, `ProcessTrialLifecycleJob`
 
-**Configuration:** `intervals.{monthly|yearly}.trial_days` per plan — see [Configuration](configuration.md#plans). Plan-level `trial_days` is not supported.
+**Configuration:** `intervals.{monthly|yearly}.trial_days` per plan — see [Configuration](configuration.md#plans). Plan-level `trial_days` is not supported. Notice window: `trial_ending_soon_notice_days` (default `1`).
 
 ### Local Subscription Activation (Free Plan / Coupon)
 
