@@ -17,6 +17,9 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use GraystackIT\MollieBilling\Tests\Support\SpyUpdateSubscription;
 use Illuminate\Support\Facades\Event;
+use Mollie\Api\Http\Requests\CancelPaymentRequest;
+use Mollie\Api\Http\Requests\GetPaymentRequest;
+use Mollie\Laravel\Facades\Mollie;
 
 beforeEach(function (): void {
     SpyUpdateSubscription::$calls = [];
@@ -181,6 +184,98 @@ it('clears pending plan change without applying', function (): void {
     // Pending state cleared.
     expect($meta['pending_plan_change'] ?? null)->toBeNull();
     expect($meta['prorata_pending_payment_id'] ?? null)->toBeNull();
+});
+
+it('cancelPendingPlanChange cancels the open Mollie payment when isCancelable=true', function (): void {
+    $b = makeMollieSubBillable();
+
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['pending_plan_change'] = ['plan_code' => 'pro', 'interval' => 'monthly'];
+    $meta['pending_prorata_change'] = ['charge_payment_id' => 'tr_cancelable_1'];
+    $meta['prorata_pending_payment_id'] = 'tr_cancelable_1';
+    $b->forceFill(['subscription_meta' => $meta])->save();
+
+    $cancelRequestSent = false;
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$cancelRequestSent) {
+        if ($request instanceof GetPaymentRequest) {
+            return (object) ['id' => 'tr_cancelable_1', 'status' => 'open', 'isCancelable' => true];
+        }
+        if ($request instanceof CancelPaymentRequest) {
+            $cancelRequestSent = true;
+            return (object) ['id' => 'tr_cancelable_1', 'status' => 'canceled'];
+        }
+        throw new \LogicException('Unexpected: '.get_class($request));
+    });
+
+    $result = app(UpdateSubscription::class)->cancelPendingPlanChange($b);
+
+    expect($result)->toBeTrue();
+    expect($cancelRequestSent)->toBeTrue();
+
+    $b->refresh();
+    $meta = $b->getBillingSubscriptionMeta();
+    expect($meta['pending_plan_change'] ?? null)->toBeNull();
+    expect($meta['pending_prorata_change'] ?? null)->toBeNull();
+    expect($meta['prorata_pending_payment_id'] ?? null)->toBeNull();
+});
+
+it('cancelPendingPlanChange skips Mollie cancel when isCancelable=false but still clears local state', function (): void {
+    $b = makeMollieSubBillable();
+
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['pending_plan_change'] = ['plan_code' => 'pro', 'interval' => 'monthly'];
+    $meta['pending_prorata_change'] = ['charge_payment_id' => 'tr_not_cancelable_1'];
+    $meta['prorata_pending_payment_id'] = 'tr_not_cancelable_1';
+    $b->forceFill(['subscription_meta' => $meta])->save();
+
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) {
+        if ($request instanceof GetPaymentRequest) {
+            return (object) ['id' => 'tr_not_cancelable_1', 'status' => 'open', 'isCancelable' => false];
+        }
+        if ($request instanceof CancelPaymentRequest) {
+            throw new \LogicException('CancelPaymentRequest must not be sent when isCancelable=false');
+        }
+        throw new \LogicException('Unexpected: '.get_class($request));
+    });
+
+    $result = app(UpdateSubscription::class)->cancelPendingPlanChange($b);
+
+    expect($result)->toBeFalse();
+
+    $b->refresh();
+    $meta = $b->getBillingSubscriptionMeta();
+    expect($meta['pending_plan_change'] ?? null)->toBeNull();
+    expect($meta['pending_prorata_change'] ?? null)->toBeNull();
+    expect($meta['prorata_pending_payment_id'] ?? null)->toBeNull();
+});
+
+it('cancelPendingPlanChange clears local state even when Mollie API throws', function (): void {
+    $b = makeMollieSubBillable();
+
+    $meta = $b->getBillingSubscriptionMeta();
+    $meta['pending_plan_change'] = ['plan_code' => 'pro', 'interval' => 'monthly'];
+    $meta['prorata_pending_payment_id'] = 'tr_api_error_1';
+    $b->forceFill(['subscription_meta' => $meta])->save();
+
+    Mollie::shouldReceive('send')->andThrow(new \RuntimeException('Mollie API down'));
+
+    $result = app(UpdateSubscription::class)->cancelPendingPlanChange($b);
+
+    expect($result)->toBeFalse();
+
+    $b->refresh();
+    $meta = $b->getBillingSubscriptionMeta();
+    expect($meta['pending_plan_change'] ?? null)->toBeNull();
+    expect($meta['prorata_pending_payment_id'] ?? null)->toBeNull();
+});
+
+it('cancelPendingPlanChange is a no-op when no pending payment id exists', function (): void {
+    $b = makeMollieSubBillable();
+
+    // No Mollie::shouldReceive — any call here would fail the test
+    $result = app(UpdateSubscription::class)->cancelPendingPlanChange($b);
+
+    expect($result)->toBeFalse();
 });
 
 it('throws when a second plan change is attempted while one is pending', function (): void {

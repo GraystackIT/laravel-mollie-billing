@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
+use GraystackIT\MollieBilling\Events\PlanChangeFailed;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
@@ -98,6 +99,41 @@ it('reserves idempotency row and handles mandate-only payment', function (): voi
     $row = BillingProcessedWebhook::where('mollie_payment_id', 'tr_mandate_123')->first();
     expect($row)->not->toBeNull();
     expect($row->event_signature)->toBe('tr_mandate_123:paid');
+});
+
+it('prorata_charge failed webhook is a no-op when local pending state is already cleared (user-cancel race)', function (): void {
+    Event::fake([PlanChangeFailed::class]);
+
+    $b = webhookBillable();
+    // Note: no pending_prorata_change / pending_plan_change in meta — simulates
+    // a user who hit "cancel pending change" before Mollie reported the final
+    // status. The expired/failed webhook must not surface a plan-change-failed
+    // toast or notification in this case.
+    $b->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_plan_code' => 'business',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+    ])->save();
+
+    FakeWebhookController::$nextPayment = fakePayment([
+        'id' => 'tr_user_cancelled_race',
+        'status' => 'expired',
+        'metadata' => [
+            'type' => 'prorata_charge',
+            'billable_type' => $b->getMorphClass(),
+            'billable_id' => (string) $b->getKey(),
+        ],
+    ]);
+
+    $response = $this->postJson(route('billing.webhook'), ['id' => 'tr_user_cancelled_race']);
+    $response->assertStatus(200);
+
+    $b->refresh();
+    $meta = $b->getBillingSubscriptionMeta();
+    expect($meta['plan_change_failed_at'] ?? null)->toBeNull();
+    expect($meta['plan_change_failed_reason'] ?? null)->toBeNull();
+
+    Event::assertNotDispatched(PlanChangeFailed::class);
 });
 
 it('handleCountryCorrectionFailed flips the mismatch back to Pending and re-cancels the subscription', function (): void {
