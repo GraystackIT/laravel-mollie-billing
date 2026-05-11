@@ -240,7 +240,7 @@ class SubscriptionPaymentHandler
         $meta['payment_failure'] = [
             'payment_id' => (string) $payment->id,
             'failed_at' => BillingTime::nowUtc()->toIso8601String(),
-            'reason' => (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown'),
+            'reason' => (string) ($payment->details?->failureReason ?? $payment->status ?? 'unknown'),
         ];
         $meta['past_due_since'] = $meta['past_due_since']
             ?? BillingTime::nowUtc()->toIso8601String();
