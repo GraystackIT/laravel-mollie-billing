@@ -29,7 +29,8 @@ use Throwable;
  * registered by MollieBillingServiceProvider.
  *
  * Two passes:
- *   A. Notify billables whose trial ends tomorrow.
+ *   A. Notify billables whose trial ends in exactly N days, where N is
+ *      `mollie-billing.trial_ending_soon_notice_days` (default 1, i.e. tomorrow).
  *      - With a Mollie mandate captured: send TrialConvertedNotification, dispatch TrialConverted.
  *      - Without mandate: send TrialEndingSoonNotification (call-to-action to add a payment method).
  *   B. Expire billables whose trial_ends_at lies in the past while status is still Trial.
@@ -71,19 +72,20 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $tomorrowStart = BillingTime::nowUtc()->copy()->addDay()->startOfDay();
-        $tomorrowEnd = BillingTime::nowUtc()->copy()->addDay()->endOfDay();
+        $noticeDays = max(1, (int) config('mollie-billing.trial_ending_soon_notice_days', 1));
+        $windowStart = BillingTime::nowUtc()->copy()->addDays($noticeDays)->startOfDay();
+        $windowEnd = BillingTime::nowUtc()->copy()->addDays($noticeDays)->endOfDay();
         $now = BillingTime::nowUtc();
 
-        $this->runEndingSoonPass($billableClass, $tomorrowStart, $tomorrowEnd);
+        $this->runEndingSoonPass($billableClass, $windowStart, $windowEnd);
         $this->runExpiryPass($billableClass, $now);
     }
 
-    private function runEndingSoonPass(string $billableClass, \Carbon\CarbonInterface $tomorrowStart, \Carbon\CarbonInterface $tomorrowEnd): void
+    private function runEndingSoonPass(string $billableClass, \Carbon\CarbonInterface $windowStart, \Carbon\CarbonInterface $windowEnd): void
     {
         $billableClass::query()
             ->where('subscription_status', SubscriptionStatus::Trial->value)
-            ->whereBetween('trial_ends_at', [$tomorrowStart, $tomorrowEnd])
+            ->whereBetween('trial_ends_at', [$windowStart, $windowEnd])
             ->chunk(200, function ($billables): void {
                 foreach ($billables as $billable) {
                     try {

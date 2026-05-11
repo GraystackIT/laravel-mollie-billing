@@ -172,6 +172,14 @@ return [
     // from the overage job so trial-lifecycle bookkeeping stays decoupled.
     'trial_lifecycle_job_time' => env('BILLING_TRIAL_LIFECYCLE_JOB_TIME', '02:05'),
 
+    // How many days before `trial_ends_at` the TrialEndingSoonNotification /
+    // TrialConvertedNotification (with mandate) is sent. The job runs daily
+    // and matches billables whose trial ends on the calendar day exactly
+    // `trial_ending_soon_notice_days` ahead. Missed windows are NOT
+    // backfilled — increasing this value will not retroactively notify
+    // billables whose window already passed.
+    'trial_ending_soon_notice_days' => (int) env('BILLING_TRIAL_ENDING_SOON_NOTICE_DAYS', 1),
+
     // Cleanup of orphaned billables — billables that were created during a
     // checkout flow but never reached an active subscription (user closed the
     // tab, Mollie webhook never arrived, mandate was set up but the first
