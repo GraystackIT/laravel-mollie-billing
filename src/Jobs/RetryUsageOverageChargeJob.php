@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminOverageBillingFailedNotification;
 use GraystackIT\MollieBilling\Notifications\OverageBillingFailedNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -86,6 +87,8 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
 
             if ($attempts >= 3) {
                 $meta['usage_overage_status'] = 'failed';
+                $meta['past_due_since'] = $meta['past_due_since']
+                    ?? BillingTime::nowUtc()->toIso8601String();
                 $billable->forceFill([
                     'subscription_meta' => $meta,
                     'subscription_status' => SubscriptionStatus::PastDue,

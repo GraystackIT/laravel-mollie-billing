@@ -111,7 +111,50 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                 }
             });
 
-        // ── Pass 3: expire ended subscriptions ──
+        // ── Pass 3a: auto-cancel long-stuck past_due subscriptions ──
+        // After `past_due_max_days` without a successful recovery payment we
+        // transition the billable to `cancelled` with `subscription_ends_at = now`.
+        // The next run's Pass 3b then flips `cancelled → expired`. Recovery
+        // (PastDue → Active) still works until this cut-off — Mollie retries
+        // the recurring charge on its own schedule and a successful webhook
+        // clears `past_due_since`. Set `past_due_max_days` to 0 to disable.
+        $maxDays = (int) config('mollie-billing.past_due_max_days', 30);
+        if ($maxDays > 0) {
+            $cutoff = BillingTime::nowUtc()->subDays($maxDays)->toIso8601String();
+
+            $billableClass::query()
+                ->where('subscription_status', SubscriptionStatus::PastDue->value)
+                ->whereNotNull('subscription_meta')
+                ->chunk(200, function ($billables) use ($cutoff): void {
+                    foreach ($billables as $billable) {
+                        $meta = $billable->getBillingSubscriptionMeta();
+                        $since = $meta['past_due_since'] ?? null;
+
+                        if (! is_string($since) || $since === '' || $since >= $cutoff) {
+                            continue;
+                        }
+
+                        try {
+                            $billable->forceFill([
+                                'subscription_status' => SubscriptionStatus::Cancelled,
+                                'subscription_ends_at' => BillingTime::nowUtc(),
+                            ])->save();
+
+                            Log::info('PrepareUsageOverageJob: auto-cancelled past_due billable', [
+                                'billable_id' => $billable->getKey(),
+                                'past_due_since' => $since,
+                            ]);
+                        } catch (Throwable $e) {
+                            Log::error('PrepareUsageOverageJob: failed auto-cancelling past_due billable', [
+                                'billable_id' => $billable->getKey(),
+                                'exception' => $e->getMessage(),
+                            ]);
+                        }
+                    }
+                });
+        }
+
+        // ── Pass 3b: expire ended subscriptions ──
         $billableClass::query()
             ->where('subscription_status', SubscriptionStatus::Cancelled->value)
             ->whereNotNull('subscription_ends_at')

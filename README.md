@@ -752,6 +752,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Configuration](docs/configuration.md) — `mollie-billing.php` and `mollie-billing-plans.php` reference
 - [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
+- [Lifecycle and Cleanup](docs/lifecycle-and-cleanup.md) — orphaned checkouts, billable deletion cascade, past-due auto-cancel, paid-without-billable reconciliation, mandate policy
 - [VAT Handling](docs/vat-handling.md) — VAT calculation, VIES, OSS, country reconciliation, automatic resolution
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
 
