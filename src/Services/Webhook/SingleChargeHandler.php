@@ -127,7 +127,7 @@ class SingleChargeHandler
 
         if (in_array($type, ['prorata', 'addon', 'seats'], true) && $billable instanceof Model) {
             $pendingChange = $billable->getBillingSubscriptionMeta()['pending_plan_change'] ?? null;
-            $reason = (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown');
+            $reason = (string) ($payment->details?->failureReason ?? $payment->status ?? 'unknown');
 
             $this->updateSubscription->clearPendingPlanChange($billable);
 

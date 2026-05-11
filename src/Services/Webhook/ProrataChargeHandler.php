@@ -218,7 +218,7 @@ class ProrataChargeHandler
             $meta['prorata_pending_payment_id'],
         );
 
-        $reason = (string) ($payment->details->failureReason ?? $payment->status ?? 'unknown');
+        $reason = (string) ($payment->details?->failureReason ?? $payment->status ?? 'unknown');
         $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
         $meta['plan_change_failed_reason'] = $reason;
         $billable->forceFill(['subscription_meta' => $meta])->save();
