@@ -9,7 +9,6 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
-use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -20,6 +19,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Throwable;
@@ -49,7 +49,6 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     public function handle(
         ChargeUsageOverageDirectly $chargeService,
         WalletUsageService $walletService,
-        ScheduleSubscriptionChange $scheduler,
     ): void {
         $billableClass = (string) config('mollie-billing.billable_model');
 
@@ -137,16 +136,9 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $billableClass::query()
             ->whereNotNull('scheduled_change_at')
             ->where('scheduled_change_at', '<=', BillingTime::nowUtc())
-            ->chunk(200, function ($billables) use ($scheduler): void {
+            ->chunk(200, function ($billables) use ($billableClass): void {
                 foreach ($billables as $billable) {
-                    try {
-                        $scheduler->apply($billable);
-                    } catch (Throwable $e) {
-                        Log::error('PrepareUsageOverageJob: scheduled change apply failed', [
-                            'billable_id' => $billable->getKey(),
-                            'exception' => $e->getMessage(),
-                        ]);
-                    }
+                    ApplyScheduledChangesJob::dispatch($billableClass, $billable->getKey());
                 }
             });
     }
@@ -244,19 +236,21 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
 
         $included = $catalog->includedUsages($planCode, $interval);
 
-        foreach ($included as $type => $quantity) {
-            if ((int) $quantity > 0) {
-                if ($rollover) {
-                    $walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_renewal_rollover');
-                } else {
-                    $walletService->resetAndCredit($billable, (string) $type, (int) $quantity, 'subscription_renewal');
+        DB::transaction(function () use ($billable, $walletService, $included, $rollover, $tomorrowStart): void {
+            foreach ($included as $type => $quantity) {
+                if ((int) $quantity > 0) {
+                    if ($rollover) {
+                        $walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_renewal_rollover');
+                    } else {
+                        $walletService->resetAndCredit($billable, (string) $type, (int) $quantity, 'subscription_renewal');
+                    }
                 }
             }
-        }
 
-        $billable->forceFill([
-            'subscription_period_starts_at' => $tomorrowStart,
-        ])->save();
+            $billable->forceFill([
+                'subscription_period_starts_at' => $tomorrowStart,
+            ])->save();
+        });
     }
 
     private function notifyBillable(Model $billable, $notification): void

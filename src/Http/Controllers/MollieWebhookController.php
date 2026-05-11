@@ -147,6 +147,27 @@ class MollieWebhookController extends Controller
         }
     }
 
+    /**
+     * Returns true if an invoice already exists for this payment. Mollie may re-deliver
+     * the same webhook after a transient handler failure (the reservation row is then
+     * deleted in __invoke() and Mollie retries). Without this guard, the second run
+     * would hit the mollie_payment_id unique index on billing_invoices and trap the
+     * webhook in a 500-retry loop. Handlers must short-circuit on true to avoid running
+     * non-idempotent side-effects (coupon redemptions, wallet credits, Mollie API calls)
+     * a second time.
+     */
+    protected function invoiceAlreadyExistsForPayment(object $payment): bool
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        if ($paymentId === '') {
+            return false;
+        }
+
+        return BillingInvoice::query()
+            ->where('mollie_payment_id', $paymentId)
+            ->exists();
+    }
+
     protected function route(object $payment, ?Billable $billable): void
     {
         $status = (string) ($payment->status ?? 'unknown');
@@ -395,6 +416,14 @@ class MollieWebhookController extends Controller
                 'order_amount_net' => $pricedCoupon['order_amount_net'] ?? null,
             ]);
 
+            return;
+        }
+
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable->getKey(),
+            ]);
             return;
         }
 
@@ -677,6 +706,14 @@ class MollieWebhookController extends Controller
             return;
         }
 
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for first-payment, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable->getKey(),
+            ]);
+            return;
+        }
+
         $invoice = $this->persistFirstPaymentArtifacts($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
 
         $pricedCoupon = $this->priceFirstPaymentCoupon(
@@ -766,6 +803,14 @@ class MollieWebhookController extends Controller
         $extraSeats = (int) ($metadata['extra_seats'] ?? 0);
 
         if ($planCode === '') {
+            return;
+        }
+
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for local-to-Mollie upgrade, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable->getKey(),
+            ]);
             return;
         }
 
@@ -872,6 +917,14 @@ class MollieWebhookController extends Controller
     protected function handleSubscriptionPaymentPaid(object $payment, Billable $billable, array $metadata): void
     {
         if (! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
+            return;
+        }
+
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for recurring payment, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable->getKey(),
+            ]);
             return;
         }
 
@@ -1115,6 +1168,15 @@ class MollieWebhookController extends Controller
             return;
         }
 
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for single charge, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable->getKey(),
+                'type' => $type,
+            ]);
+            return;
+        }
+
         $lineItems = (array) ($metadata['line_items'] ?? []);
         if (empty($lineItems)) {
             $actual = $this->amountFromMolliePayment($payment);
@@ -1262,10 +1324,17 @@ class MollieWebhookController extends Controller
             return;
         }
 
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for prorata charge, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable->getKey(),
+            ]);
+            return;
+        }
+
         $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
         if (empty($pending)) {
-            // Pending-State fehlt — möglicherweise schon verarbeitet (idempotent) oder Out-of-Band.
-            // createInvoice ist idempotent via UNIQUE-Index auf mollie_payment_id.
+            // Pending-State fehlt — möglicherweise schon verarbeitet oder Out-of-Band.
             return;
         }
 
@@ -1868,6 +1937,15 @@ class MollieWebhookController extends Controller
         if ($productCode === '') {
             Log::warning('One-time order webhook with missing product_code', ['id' => $payment->id]);
 
+            return;
+        }
+
+        if ($this->invoiceAlreadyExistsForPayment($payment)) {
+            Log::info('Webhook re-delivery: invoice exists for one-time order, skipping', [
+                'payment_id' => $payment->id ?? null,
+                'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
+                'product_code' => $productCode,
+            ]);
             return;
         }
 

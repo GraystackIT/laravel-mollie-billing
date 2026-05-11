@@ -9,7 +9,10 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
+use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Testing\TestBillable;
@@ -181,4 +184,63 @@ it('is idempotent on second delivery of the same payment', function (): void {
     $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_dup'])->assertStatus(200);
 
     expect(BillingProcessedWebhook::where('mollie_payment_id', 'tr_mandate_dup')->count())->toBe(1);
+});
+
+it('does not retry-loop when an invoice already exists for the payment (handler crash recovery)', function (): void {
+    // Scenario: a previous webhook delivery successfully persisted the invoice but
+    // crashed afterwards (e.g. wallet recharge threw). The reservation row was
+    // deleted by __invoke()'s catch, so Mollie re-delivers. Without the idempotency
+    // guard the second run would hit the unique index on billing_invoices and trap
+    // the webhook in a 500-retry loop. With the guard, the handler short-circuits
+    // and returns 200 without producing duplicate invoices or side-effects.
+
+    $billable = webhookBillable();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => now()->subDays(5),
+        'mollie_customer_id' => 'cst_test',
+        'mollie_mandate_id' => 'mdt_test',
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_test'],
+    ])->save();
+
+    // Simulate the first run's leftover: invoice persisted, then a crash.
+    BillingInvoice::query()->forceCreate([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'mollie_payment_id' => 'tr_renewal_replay',
+        'serial_number' => 'IN-26000099',
+        'invoice_kind' => InvoiceKind::Subscription,
+        'status' => InvoiceStatus::Paid,
+        'country' => 'DE',
+        'currency' => 'EUR',
+        'amount_net' => 1000,
+        'amount_vat' => 190,
+        'amount_gross' => 1190,
+        'line_items' => [],
+        'refunded_net' => 0,
+    ]);
+
+    FakeWebhookController::$nextPayment = fakePayment([
+        'id' => 'tr_renewal_replay',
+        'status' => 'paid',
+        'amount' => (object) ['value' => '11.90', 'currency' => 'EUR'],
+        'subscriptionId' => 'sub_test',
+        'metadata' => [
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+        ],
+    ]);
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_renewal_replay'])->assertStatus(200);
+
+    // Still exactly one invoice for this payment.
+    expect(BillingInvoice::where('mollie_payment_id', 'tr_renewal_replay')->count())->toBe(1);
+
+    // Reservation is final so a third delivery would be skipped at the reserve() level.
+    $row = BillingProcessedWebhook::where('mollie_payment_id', 'tr_renewal_replay')->first();
+    expect($row)->not->toBeNull();
+    expect($row->processed_at)->not->toBeNull();
 });
