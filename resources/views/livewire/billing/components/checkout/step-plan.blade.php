@@ -12,7 +12,16 @@
     </flux:text>
 </div>
 
-<div class="grid gap-4 md:grid-cols-3">
+@php
+    $planCount = count($this->plans());
+    $gridClass = match (true) {
+        $planCount === 1 => 'mx-auto w-full max-w-md',
+        $planCount === 2 => 'grid gap-4 sm:grid-cols-2 mx-auto w-full max-w-3xl',
+        default          => 'grid gap-4 md:grid-cols-3',
+    };
+@endphp
+
+<div class="{{ $gridClass }}">
     @foreach ($this->plans() as $code => $plan)
         @php
             $currencySymbol = config('mollie-billing.currency_symbol', '€');
