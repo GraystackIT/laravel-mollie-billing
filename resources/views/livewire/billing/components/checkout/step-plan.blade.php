@@ -38,7 +38,7 @@
 
         <div class="grid gap-6 p-6 md:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)] md:gap-10 md:p-8">
             {{-- Left: identity + price --}}
-            <div class="flex flex-col justify-center gap-3 border-b border-zinc-200 pb-6 md:border-b-0 md:border-r md:pb-0 md:pr-10 dark:border-white/10">
+            <div class="flex flex-col justify-center gap-4 border-b border-zinc-200 pb-8 pr-0 md:border-b-0 md:border-r md:pb-0 md:pr-12 lg:pr-16 dark:border-white/10">
                 <div class="text-2xl font-semibold text-zinc-900 dark:text-white">{{ $plan['name'] }}</div>
 
                 <div class="flex flex-wrap items-baseline gap-x-3 gap-y-2">

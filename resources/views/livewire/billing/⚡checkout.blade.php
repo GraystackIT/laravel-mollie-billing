@@ -111,6 +111,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         if ($interval !== null && in_array($interval, ['monthly', 'yearly'], true)) {
             $this->interval = $interval;
         }
+
+        // If only a single plan is configured, auto-select it — there's no
+        // meaningful choice to make and the validator would otherwise reject
+        // the form with "plan code field is required".
+        if ($this->plan_code === '') {
+            $plans = $this->plans();
+            if (count($plans) === 1) {
+                $this->plan_code = (string) array_key_first($plans);
+            }
+        }
     }
 
     private function hasPersistedBillingData(Billable $billable): bool
