@@ -41,18 +41,17 @@
             <div class="flex flex-col justify-center gap-3 border-b border-zinc-200 pb-6 md:border-b-0 md:border-r md:pb-0 md:pr-10 dark:border-white/10">
                 <div class="text-2xl font-semibold text-zinc-900 dark:text-white">{{ $plan['name'] }}</div>
 
-                <div class="flex items-baseline gap-1.5">
-                    <span class="text-5xl font-bold tracking-tight tabular-nums">{{ $currencySymbol }}{{ number_format($amount, 0) }}</span>
-                    <span class="text-base text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
-                </div>
-
-                @if ($trialDays > 0)
-                    <div>
-                        <flux:badge size="sm" color="lime">
+                <div class="flex flex-wrap items-baseline gap-x-3 gap-y-2">
+                    <div class="flex items-baseline gap-1.5">
+                        <span class="text-5xl font-bold tracking-tight tabular-nums">{{ $currencySymbol }}{{ number_format($amount, 0) }}</span>
+                        <span class="text-base text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
+                    </div>
+                    @if ($trialDays > 0)
+                        <flux:badge size="sm" color="lime" class="ms-auto self-center">
                             {{ __('billing::checkout.trial_days', ['days' => $trialDays]) }}
                         </flux:badge>
-                    </div>
-                @endif
+                    @endif
+                </div>
             </div>
 
             {{-- Right: quotas + features + addons --}}
