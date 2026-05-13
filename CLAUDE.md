@@ -84,6 +84,3 @@ MollieBilling::urlParametersUsing(fn (?Billable $b) => $b ? ['organization' => $
 - **VAT rate from country lookup, never reverse-engineered from gross** — `MollieWebhookController` computes expected gross from net + country and compares against Mollie's actual amount; mismatch → `PaymentAmountMismatch` event, invoice persisted with the actually-paid amount as source of truth.
 - **Test fixture shape** — when writing fixtures, follow the (planCode, interval) shape used in `tests/Feature/Wallet/WalletUsageServiceTest.php`: `included_usages` / `usage_overage_prices` go **inside each `intervals.{monthly|yearly}` block**, not at plan top level.
 
-## Laravel 13 install note
-
-`mpociot/vat-calculator` does not yet declare Laravel 13 compatibility upstream. Apps install via the `GraystackIT/laravel-vat-calculator` fork as a VCS repository (see README) — Composer then transparently resolves the upstream package through the fork.
