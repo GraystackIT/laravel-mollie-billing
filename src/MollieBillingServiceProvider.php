@@ -35,6 +35,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Livewire\Livewire;
+use Livewire\Volt\Volt;
 
 class MollieBillingServiceProvider extends ServiceProvider
 {
@@ -172,10 +173,16 @@ class MollieBillingServiceProvider extends ServiceProvider
 
     private function doRegisterLivewireComponents(): void
     {
+        $viewPath = __DIR__.'/../resources/views/livewire/billing';
+
         Livewire::addNamespace(
             namespace: 'mollie-billing',
-            viewPath: __DIR__.'/../resources/views/livewire/billing',
+            viewPath: $viewPath,
         );
+
+        if (class_exists(Volt::class)) {
+            Volt::mount([$viewPath]);
+        }
     }
 
     private function registerTranslations(): void
