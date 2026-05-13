@@ -1,10 +1,11 @@
 # graystackit/laravel-mollie-billing
 
-> Mollie billing for Laravel with VAT, metered billing, coupons, access grants and admin panel.
+> Batteries-included Mollie billing for Laravel: VAT/OSS compliance, wallet-based metered billing, coupons, scheduled plan changes, trial flow, admin panel and a Livewire 4 customer portal.
 
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/graystackit/laravel-mollie-billing.svg?style=flat-square)](https://packagist.org/packages/graystackit/laravel-mollie-billing)
 [![PHP Version](https://img.shields.io/packagist/php-v/graystackit/laravel-mollie-billing.svg?style=flat-square)](https://packagist.org/packages/graystackit/laravel-mollie-billing)
 [![Laravel Version](https://img.shields.io/badge/Laravel-11.x%20%7C%2012.x%20%7C%2013.x-FF2D20?style=flat-square&logo=laravel)](https://laravel.com)
+[![Tests](https://img.shields.io/github/actions/workflow/status/GraystackIT/laravel-mollie-billing/tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/GraystackIT/laravel-mollie-billing/actions/workflows/tests.yml)
 [![Total Downloads](https://img.shields.io/packagist/dt/graystackit/laravel-mollie-billing.svg?style=flat-square)](https://packagist.org/packages/graystackit/laravel-mollie-billing)
 [![License](https://img.shields.io/packagist/l/graystackit/laravel-mollie-billing.svg?style=flat-square)](LICENSE)
 
@@ -25,7 +26,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - Trial flow with Local-to-Mollie subscription conversion
 - Feature gating via `@planFeature` Blade directive and `billing.feature` middleware
 - Built-in first-checkout flow with configurable country list, VAT/VIES validation and coupon support
-- Livewire 4 SFC customer portal with optional Flux Pro admin panel
+- Livewire 4 SFC customer portal and admin panel, both built on Flux Pro
 - Promotion links via signed `/promotion/{token}` URLs
 - Localized notifications (English and German out of the box)
 - All Livewire SFC views publishable and overridable
@@ -36,7 +37,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - Laravel 11, 12 or 13
 - A Mollie account with API key
 - Livewire 4 (for the customer portal views)
-- `livewire/flux-pro` for the billing portal and the admin panel
+- `livewire/flux-pro` — required for the customer portal, the checkout flow and the admin panel
 
 ## Installation
 
@@ -78,6 +79,15 @@ Then run migrations:
 ```bash
 php artisan migrate
 ```
+
+### Frontend assets
+
+The package ships server-rendered Blade/Livewire views but **no compiled CSS or JS** — it relies on your host app's Vite pipeline. The shipped layouts (`portal`, `checkout`, `admin`) call `@vite(['resources/css/app.css', 'resources/js/app.js'])`, so your app must:
+
+1. Expose those two entry points in `vite.config.js` (the Laravel default).
+2. Scan the package's Blade views in your Tailwind build, otherwise utility classes used inside the package will be purged and the portal/checkout will render unstyled. See [Tailwind CSS content source](#tailwind-css-content-source) below for the one-line `@source` (Tailwind v4) or `content` (v3) entry to add.
+
+If you publish the views (`--tag=mollie-billing-views`) and Tailwind already scans `resources/views/**`, the published copies are picked up automatically — but the `@source` line for the vendor path is still needed for any unpublished views.
 
 Verify your configuration before deploying — the package ships a validator that checks both `mollie-billing.php` and `mollie-billing-plans.php` for syntax errors, broken references (unknown `feature_keys`, `allowed_addons`, product `group`, …) and likely misconfigurations:
 
@@ -651,7 +661,7 @@ app(WalletUsageService::class)->credit($organization, 'tokens', 500, 'goodwill b
 
 ## Admin panel
 
-The admin panel lives at `/billing/admin` and requires `livewire/flux-pro`. Authorize access by implementing `AuthorizesBillingAdmin` directly on your user model. The `billing.admin` middleware checks `auth()->user() instanceof AuthorizesBillingAdmin && canAccessBillingAdmin()`; users without the interface receive a 403.
+The admin panel lives at `/billing/admin`. Authorize access by implementing `AuthorizesBillingAdmin` directly on your user model. The `billing.admin` middleware checks `auth()->user() instanceof AuthorizesBillingAdmin && canAccessBillingAdmin()`; users without the interface receive a 403.
 
 ```php
 <?php

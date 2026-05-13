@@ -325,27 +325,35 @@ it('returns paid_seats_lost error in preview when paid extras would be dropped',
 });
 
 it('exposes prorata remaining and total days in the preview', function (): void {
-    /** @var TestBillable $billable */
-    $billable = TestBillable::create(['name' => 'Acme', 'email' => 'acme@example.test']);
-    $billable->forceFill([
-        'subscription_source' => SubscriptionSource::Mollie,
-        'subscription_status' => SubscriptionStatus::Active,
-        'subscription_plan_code' => 'paid',
-        'subscription_interval' => SubscriptionInterval::Monthly,
-        'subscription_period_starts_at' => now()->subDays(10),
-        'billing_country' => 'AT',
-        'subscription_meta' => ['seat_count' => 1],
-    ])->save();
-    $billable->refresh();
+    // Pin "now" to a date where the surrounding month has exactly 30 days
+    // so the assertion is deterministic regardless of when the suite runs.
+    \Carbon\Carbon::setTestNow('2026-04-15 12:00:00');
 
-    $preview = app(PreviewService::class)->previewUpdate($billable, new SubscriptionUpdateRequest(
-        planCode: 'free',
-        interval: 'monthly',
-    ));
+    try {
+        /** @var TestBillable $billable */
+        $billable = TestBillable::create(['name' => 'Acme', 'email' => 'acme@example.test']);
+        $billable->forceFill([
+            'subscription_source' => SubscriptionSource::Mollie,
+            'subscription_status' => SubscriptionStatus::Active,
+            'subscription_plan_code' => 'paid',
+            'subscription_interval' => SubscriptionInterval::Monthly,
+            'subscription_period_starts_at' => now()->subDays(10),
+            'billing_country' => 'AT',
+            'subscription_meta' => ['seat_count' => 1],
+        ])->save();
+        $billable->refresh();
 
-    // Period: now -10 → now +20 (30 days), remaining = 20
-    expect($preview['prorataTotalDays'])->toBe(30);
-    expect($preview['prorataRemainingDays'])->toBe(20);
+        $preview = app(PreviewService::class)->previewUpdate($billable, new SubscriptionUpdateRequest(
+            planCode: 'free',
+            interval: 'monthly',
+        ));
+
+        // Period: 2026-04-05 → 2026-05-05 (30 days), remaining = 20
+        expect($preview['prorataTotalDays'])->toBe(30);
+        expect($preview['prorataRemainingDays'])->toBe(20);
+    } finally {
+        \Carbon\Carbon::setTestNow();
+    }
 });
 
 it('clears the paid_seats_lost error when seats are explicitly set', function (): void {

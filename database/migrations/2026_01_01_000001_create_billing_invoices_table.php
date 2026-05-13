@@ -19,9 +19,6 @@ return new class extends Migration
             // UNIQUE-Index erlaubt mehrere NULL-Werte (MySQL/SQLite/Postgres).
             $table->string('mollie_payment_id')->nullable()->unique();
             $table->string('mollie_subscription_id')->nullable();
-            $table->string('serial_number')->nullable()->unique();
-            $table->string('pdf_disk')->nullable();
-            $table->string('pdf_path')->nullable();
 
             $table->string('invoice_kind'); // subscription | overage | one_time_order | refund
             $table->string('status');       // InvoiceStatus enum

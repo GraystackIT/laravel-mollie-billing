@@ -304,7 +304,11 @@ new class extends Component {
             'extraCost' => $seatPrice !== null ? $extraSeats * $seatPrice : null,
             'interval' => $interval,
             'currencySymbol' => $currencySymbol,
-            'hasSeats' => $seatPrice !== null || $includedSeats > 0,
+            // Seats management is only meaningful when the active plan sells
+            // extra seats (seat_price_net !== null). A plan with only an
+            // included quota cannot be changed by the user — show the
+            // "not available" callout instead of an inert adjust form.
+            'hasSeats' => $seatPriceNet !== null,
             'reverseCharge' => $reverseCharge,
         ];
     }
