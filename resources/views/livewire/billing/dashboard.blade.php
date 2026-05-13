@@ -397,7 +397,10 @@ new class extends Component {
             'hasSubscription' => $planCode !== null,
             'planName' => $b->getCurrentBillingPlanName() ?? __('billing::portal.no_subscription'),
             'interval' => $interval,
-            'nextBilling' => BillingTime::display($b->nextBillingDate(), $b)?->translatedFormat('d. M Y') ?? '—',
+            'nextBilling' => BillingTime::display(
+                $status === SubscriptionStatus::Trial ? $b->getBillingTrialEndsAt() : $b->nextBillingDate(),
+                $b,
+            )?->translatedFormat('d. M Y') ?? '—',
             'periodStart' => BillingTime::display($b->getBillingPeriodStartsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
             'seatCount' => $b->getBillingSeatCount(),
             'includedSeats' => $b->getIncludedBillingSeats(),

@@ -190,9 +190,9 @@ new class extends Component {
                                             $redemption->discount_amount_net > 0
                                                 => $currency . number_format($redemption->discount_amount_net / 100, 2),
                                             ($redemption->trial_days_added ?? 0) > 0
-                                                => __('billing::portal.redemptions.benefit_days', ['days' => $redemption->trial_days_added]),
+                                                => trans_choice('billing::portal.redemptions.benefit_days', (int) $redemption->trial_days_added, ['days' => $redemption->trial_days_added]),
                                             ($redemption->grant_days_added ?? 0) > 0
-                                                => __('billing::portal.redemptions.benefit_days', ['days' => $redemption->grant_days_added]),
+                                                => trans_choice('billing::portal.redemptions.benefit_days', (int) $redemption->grant_days_added, ['days' => $redemption->grant_days_added]),
                                             ! empty($redemption->credits_applied)
                                                 => __('billing::portal.redemptions.benefit_credits'),
                                             default => '—',
