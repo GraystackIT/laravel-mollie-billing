@@ -8,8 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Laravel 13 support. `bavix/laravel-wallet` constraint widened to `^11.5|^12.0`; Pest constraint widened to `^3.0|^4.0`.
-- `GraystackIT/laravel-vat-calculator-fork` v3.26 published with Laravel 13 compatibility; declared as a VCS repository in `composer.json` so the package installs on Laravel 13 without extra Composer setup.
+- Laravel 13 support. `bavix/laravel-wallet` constraint widened to `^11.5|^12.0`; Pest constraint widened to `^3.0|^4.0`; `mpociot/vat-calculator` constraint bumped to `^3.26` (Laravel-13-compatible release available directly on Packagist).
 - CI matrix expanded to test PHP 8.3/8.4 × Laravel 12/13.
 
 ### Changed

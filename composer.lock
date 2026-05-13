@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "3360f2368a9cc3de14e5fc57bd0e5c3b",
+    "content-hash": "7102c45d6aae845621aa2160cbbc4a57",
     "packages": [
         {
             "name": "bavix/laravel-wallet",
@@ -2993,13 +2993,13 @@
             "version": "v3.26.0",
             "source": {
                 "type": "git",
-                "url": "https://github.com/GraystackIT/laravel-vat-calculator-fork.git",
-                "reference": "de22b489fe294d4c5557e2b07c5bdb4e59c762f9"
+                "url": "https://github.com/laravel/vat-calculator.git",
+                "reference": "2e56a6bda813a4f54328f522869326face2d2663"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/GraystackIT/laravel-vat-calculator-fork/zipball/de22b489fe294d4c5557e2b07c5bdb4e59c762f9",
-                "reference": "de22b489fe294d4c5557e2b07c5bdb4e59c762f9",
+                "url": "https://api.github.com/repos/laravel/vat-calculator/zipball/2e56a6bda813a4f54328f522869326face2d2663",
+                "reference": "2e56a6bda813a4f54328f522869326face2d2663",
                 "shasum": ""
             },
             "require": {
@@ -3015,16 +3015,16 @@
             },
             "type": "library",
             "extra": {
-                "branch-alias": {
-                    "dev-master": "3.x-dev"
-                },
                 "laravel": {
-                    "providers": [
-                        "Mpociot\\VatCalculator\\VatCalculatorServiceProvider"
-                    ],
                     "aliases": {
                         "VatCalculator": "Mpociot\\VatCalculator\\Facades\\VatCalculator"
-                    }
+                    },
+                    "providers": [
+                        "Mpociot\\VatCalculator\\VatCalculatorServiceProvider"
+                    ]
+                },
+                "branch-alias": {
+                    "dev-master": "3.x-dev"
                 }
             },
             "autoload": {
@@ -3032,11 +3032,7 @@
                     "Mpociot\\VatCalculator\\": "src/"
                 }
             },
-            "autoload-dev": {
-                "psr-4": {
-                    "Tests\\": "tests"
-                }
-            },
+            "notification-url": "https://packagist.org/downloads/",
             "license": [
                 "MIT"
             ],
@@ -3052,18 +3048,19 @@
             ],
             "description": "EU VAT calculation, the way it should be.",
             "keywords": [
-                "Cashier",
-                "EU MOSS",
-                "Tax",
-                "Tax calculation",
-                "VAT",
+                "EU Moss",
                 "VAT ID",
-                "VAT calculation"
+                "cashier",
+                "tax",
+                "tax calculation",
+                "vat",
+                "vat calculation"
             ],
             "support": {
-                "source": "https://github.com/GraystackIT/laravel-vat-calculator-fork/tree/v3.26.0"
+                "issues": "https://github.com/laravel/vat-calculator/issues",
+                "source": "https://github.com/laravel/vat-calculator/tree/v3.26.0"
             },
-            "time": "2026-05-13T05:51:11+00:00"
+            "time": "2026-04-15T13:01:15+00:00"
         },
         {
             "name": "nesbot/carbon",
