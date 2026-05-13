@@ -32,8 +32,15 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, bcmath, intl, fileinfo
           coverage: none
+          tools: composer:v2
+
+      - name: Reset Composer auth (avoid stale GITHUB_TOKEN)
+        run: |
+          composer config --global --unset github-oauth.github.com || true
 
       - name: Install dependencies
+        env:
+          COMPOSER_AUTH: '{}'
         run: |
           composer require "laravel/framework:${{ matrix.laravel }}" "orchestra/testbench:${{ matrix.testbench }}" --no-interaction --no-update
           composer update --prefer-dist --no-interaction --no-progress
