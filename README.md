@@ -4,7 +4,7 @@
 
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/graystackit/laravel-mollie-billing.svg?style=flat-square)](https://packagist.org/packages/graystackit/laravel-mollie-billing)
 [![PHP Version](https://img.shields.io/packagist/php-v/graystackit/laravel-mollie-billing.svg?style=flat-square)](https://packagist.org/packages/graystackit/laravel-mollie-billing)
-[![Laravel Version](https://img.shields.io/badge/Laravel-11.x%20%7C%2012.x%20%7C%2013.x-FF2D20?style=flat-square&logo=laravel)](https://laravel.com)
+[![Laravel Version](https://img.shields.io/badge/Laravel-12.x%20%7C%2013.x-FF2D20?style=flat-square&logo=laravel)](https://laravel.com)
 [![Tests](https://img.shields.io/github/actions/workflow/status/GraystackIT/laravel-mollie-billing/tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/GraystackIT/laravel-mollie-billing/actions/workflows/tests.yml)
 [![Total Downloads](https://img.shields.io/packagist/dt/graystackit/laravel-mollie-billing.svg?style=flat-square)](https://packagist.org/packages/graystackit/laravel-mollie-billing)
 [![License](https://img.shields.io/packagist/l/graystackit/laravel-mollie-billing.svg?style=flat-square)](LICENSE)
@@ -34,10 +34,10 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 ## Requirements
 
 - PHP 8.3+
-- Laravel 11, 12 or 13
+- Laravel 12 or 13
 - A Mollie account with API key
 - Livewire 4 (for the customer portal views)
-- `livewire/flux-pro` — required for the customer portal, the checkout flow and the admin panel
+- `livewire/flux-pro` — required for the customer portal, the checkout flow and the admin panel. Not pulled in by this package (commercial license needed); install it separately in your application: `composer require livewire/flux-pro`.
 
 ## Installation
 
@@ -49,7 +49,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 > ]
 > ```
 >
-> Composer will then transparently resolve `mpociot/vat-calculator` through the fork. Laravel 11 and 12 consumers can skip this step.
+> Composer will then transparently resolve `mpociot/vat-calculator` through the fork. Laravel 12 consumers can skip this step.
 
 ```bash
 composer require graystackit/laravel-mollie-billing

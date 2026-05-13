@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Package
 
-`graystackit/laravel-mollie-billing` — namespace `GraystackIT\MollieBilling\…`, GitHub `GraystackIT/laravel-mollie-billing`. PHP 8.3+, Laravel 11/12/13. Auto-discovered service provider: `MollieBillingServiceProvider`. Facade: `MollieBilling`.
+`graystackit/laravel-mollie-billing` — namespace `GraystackIT\MollieBilling\…`, GitHub `GraystackIT/laravel-mollie-billing`. PHP 8.3+, Laravel 12/13. Auto-discovered service provider: `MollieBillingServiceProvider`. Facade: `MollieBilling`.
 
 ## Source of truth
 
@@ -38,7 +38,7 @@ The package wraps `mollie/laravel-mollie` ^4 (Mollie's official Laravel SDK, whi
 3. **Subscription lifecycle services** (`Services/Billing/`) — one class per action: `Start*`, `Create`, `Activate{,Local}`, `ChangePlan`, `Cancel`, `Resubscribe`, `EnableAddon`, `DisableAddon`, `SyncSeats`, plus the `UpdateSubscription` orchestrator and `ScheduleSubscriptionChange` for end-of-period changes. **`HasBilling` delegates to these via the container** — apps override behavior by `app->bind`ing the service, not by subclassing models.
 4. **Local vs Mollie subscriptions** — free/zero-price plans run as `SubscriptionSource::Local` without a Mollie subscription; paid plans are `SubscriptionSource::Mollie`. Services branch on this. The trial flow converts Local→Mollie when a mandate arrives.
 5. **Feature + plan gating** — `Features/FeatureAccess` resolves features from the active plan **plus** all active addons. Surfaced via `MollieBilling::features()`, the `@planFeature` Blade directive, and `billing.feature:<key>[,<key>]` middleware (OR semantics).
-6. **Livewire 4 + Flux Pro UI** — `livewire/flux-pro` is a **hard dependency**. All portal/admin views use `<flux:…>` components directly — no fallback wrappers, no `FluxPro::isInstalled()` checks. The package provides both the checkout flow and the post-signup portal (dashboard, plan change, invoices, return). `PromotionController`, `RequireActiveSubscription` middleware, and `TrialExpiredNotification` all redirect to `BillingRoute::checkout()`, which dynamically resolves the correct route name including any prefix (e.g. `tenant.billing.checkout`).
+6. **Livewire 4 + Flux Pro UI** — `livewire/flux-pro` is a **hard runtime dependency** but listed under `suggest` (not `require`) in composer.json because it is commercial and the consuming app must install it with its own license. All portal/admin views use `<flux:…>` components directly — no fallback wrappers, no `FluxPro::isInstalled()` checks. The package provides both the checkout flow and the post-signup portal (dashboard, plan change, invoices, return). `PromotionController`, `RequireActiveSubscription` middleware, and `TrialExpiredNotification` all redirect to `BillingRoute::checkout()`, which dynamically resolves the correct route name including any prefix (e.g. `tenant.billing.checkout`).
 
 ### Catalog: where plan/interval data comes from
 
