@@ -120,8 +120,8 @@ new class extends Component {
         // Stats for the filtered result set — use the unordered base query so
         // grouped aggregations work on Postgres (no leftover ORDER BY columns).
         $statsQuery = $baseQuery;
-        $totalDebits = (clone $statsQuery)->where('type', Transaction::TYPE_WITHDRAW)->sum('amount');
-        $totalCredits = (clone $statsQuery)->where('type', Transaction::TYPE_DEPOSIT)->sum('amount');
+        $totalDebits = (clone $statsQuery)->where('type', 'withdraw')->sum('amount');
+        $totalCredits = (clone $statsQuery)->where('type', 'deposit')->sum('amount');
         $totalTransactions = (clone $statsQuery)->count();
 
         $debitsAbs = abs((int) $totalDebits);
@@ -131,7 +131,7 @@ new class extends Component {
         // Daily debit series for sparkline + peak/avg.
         // reorder() clears any inherited ORDER BY so Postgres' GROUP BY check passes.
         $dailyRows = (clone $statsQuery)
-            ->where('type', Transaction::TYPE_WITHDRAW)
+            ->where('type', 'withdraw')
             ->reorder()
             ->selectRaw('DATE(created_at) as day, SUM(amount) as amt')
             ->groupBy('day')
@@ -173,7 +173,7 @@ new class extends Component {
             if ($this->usageType !== '' && $wallet->slug !== $this->usageType) continue;
 
             $abs = abs((int) (clone $statsQuery)
-                ->where('type', Transaction::TYPE_WITHDRAW)
+                ->where('type', 'withdraw')
                 ->where('wallet_id', $wallet->id)
                 ->sum('amount'));
             if ($abs > 0) {
@@ -446,7 +446,8 @@ new class extends Component {
                     @foreach ($transactions as $tx)
                         @php
                             $meta = $tx->meta ?? [];
-                            $isDebit = $tx->type === 'withdraw';
+                            $txType = $tx->type instanceof \BackedEnum ? $tx->type->value : $tx->type;
+                            $isDebit = $txType === 'withdraw';
                             $reasonKey = $meta['reason'] ?? null;
                             $langKey = $reasonKey ? "billing::portal.usage_reasons.{$reasonKey}" : null;
                             $translatedReason = $langKey && __($langKey) !== $langKey ? __($langKey) : ($reasonKey ?? '—');
