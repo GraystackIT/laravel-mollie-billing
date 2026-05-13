@@ -41,15 +41,15 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 
 ## Installation
 
-> **Laravel 13 note** — `mpociot/vat-calculator` does not yet declare Laravel 13 compatibility upstream. We maintain a drop-in fork at [GraystackIT/laravel-vat-calculator](https://github.com/GraystackIT/laravel-vat-calculator) that loosens the constraint and `replace`s the original package. Add it as a VCS repository **before** requiring the billing package in your root `composer.json`:
+> **Laravel 13 note** — `mpociot/vat-calculator` does not yet declare Laravel 13 compatibility upstream. We maintain a drop-in fork at [GraystackIT/laravel-vat-calculator-fork](https://github.com/GraystackIT/laravel-vat-calculator-fork) (v3.26+) that widens the constraint to include Laravel 13. Add it as a VCS repository **before** requiring the billing package in your root `composer.json`:
 >
 > ```json
 > "repositories": [
->     { "type": "vcs", "url": "https://github.com/GraystackIT/laravel-vat-calculator" }
+>     { "type": "vcs", "url": "https://github.com/GraystackIT/laravel-vat-calculator-fork" }
 > ]
 > ```
 >
-> Composer will then transparently resolve `mpociot/vat-calculator` through the fork. Laravel 12 consumers can skip this step.
+> Composer will then transparently resolve `mpociot/vat-calculator` through the fork. Laravel 12 consumers can skip this step — the upstream package supports Laravel 12 directly.
 
 ```bash
 composer require graystackit/laravel-mollie-billing

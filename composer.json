@@ -28,26 +28,32 @@
         "issues": "https://github.com/GraystackIT/laravel-mollie-billing/issues",
         "source": "https://github.com/GraystackIT/laravel-mollie-billing"
     },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/GraystackIT/laravel-vat-calculator-fork"
+        }
+    ],
     "require": {
         "php": "^8.3",
+        "bavix/laravel-wallet": "^11.5|^12.0",
+        "elegantly/laravel-invoices": "^4.8",
         "illuminate/contracts": "^12.0|^13.0",
         "illuminate/database": "^12.0|^13.0",
         "illuminate/support": "^12.0|^13.0",
-        "mollie/laravel-mollie": "^4.1",
-        "mpociot/vat-calculator": "^3.0",
-        "bavix/laravel-wallet": "^11.5",
-        "elegantly/laravel-invoices": "^4.8",
+        "livewire/flux": "^2.0",
         "livewire/livewire": "^4.0",
-        "livewire/flux": "^2.0"
+        "mollie/laravel-mollie": "^4.1",
+        "mpociot/vat-calculator": "^3.0"
     },
     "suggest": {
         "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license."
     },
     "require-dev": {
         "mockery/mockery": "^1.6",
-        "orchestra/testbench": "^10.0|^11.0|^12.0",
-        "pestphp/pest": "^3.0",
-        "pestphp/pest-plugin-laravel": "^3.0"
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0"
     },
     "autoload": {
         "psr-4": {
