@@ -1,9 +1,33 @@
 {
     "name": "graystackit/laravel-mollie-billing",
-    "description": "Mollie billing for Laravel with VAT, metered billing, coupons, access grants and admin panel.",
+    "description": "Batteries-included Mollie billing for Laravel: VAT/OSS compliance, wallet-based metered billing, coupons, scheduled plan changes, trial flow, admin panel and a Livewire 4 customer portal.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["laravel", "mollie", "billing", "subscriptions", "vat", "oss", "coupons"],
+    "keywords": [
+        "laravel",
+        "laravel-package",
+        "mollie",
+        "billing",
+        "subscriptions",
+        "recurring-payments",
+        "metered-billing",
+        "wallet",
+        "vat",
+        "oss",
+        "coupons",
+        "livewire",
+        "flux"
+    ],
+    "authors": [
+        {
+            "name": "Graystack IT GmbH",
+            "homepage": "https://github.com/GraystackIT"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/GraystackIT/laravel-mollie-billing/issues",
+        "source": "https://github.com/GraystackIT/laravel-mollie-billing"
+    },
     "require": {
         "php": "^8.3",
         "illuminate/contracts": "^11.0|^12.0|^13.0",
@@ -32,6 +56,9 @@
         "psr-4": {
             "GraystackIT\\MollieBilling\\Tests\\": "tests/"
         }
+    },
+    "scripts": {
+        "test": "./vendor/bin/pest --compact"
     },
     "extra": {
         "laravel": {

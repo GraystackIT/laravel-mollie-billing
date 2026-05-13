@@ -280,7 +280,7 @@ Each plan is keyed by its `planCode`.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `base_price_net` | ✓ | Net base price in cents. |
-| `seat_price_net` | ✓ | Net price per additional seat in cents, or `null` if the plan does not allow seat upgrades. |
+| `seat_price_net` | ✓ | Net price per additional seat in cents, or `null` if the plan does not allow seat upgrades. When `null` for every plan/interval in your config, the portal hides the **Seats** sidebar entry and the `/billing/seats` page returns the "not available" callout — there is nothing for the user to change. The server-side guard in `ValidateSubscriptionChange` also rejects explicit seat increases above `included_seats` for plans with `seat_price_net === null`. |
 | `trial_days` *(optional)* | | Trial length in days for this specific interval. Missing or `0` means no trial. Trials only apply on fresh checkout — never on plan changes. See [Trial flow](subscription-lifecycle.md#trial-flow). |
 | `included_usages` | ✓ | Map `usage_type => quantity`. These quantities are credited additively to the wallet on every period rollover (negative balances from prior overage are preserved). |
 | `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. |
@@ -385,6 +385,14 @@ One-off purchases (top-ups, consulting hours, etc.). Sold through the one-time-o
 | `quantity` | — | See `usage_type`. |
 | `onetimeonly` | — | When `true`, the product can only be purchased once per billable. |
 | `group` | — | Reference into `product_groups`. |
+
+> **Sidebar visibility.** The portal sidebar dynamically hides entries that
+> have nothing to manage:
+>
+> - **Addons** — hidden when `mollie-billing-plans.addons` is empty.
+> - **Seats** — hidden when no plan in your config defines `seat_price_net`
+>   for any interval (i.e. seats are not purchasable anywhere).
+> - **Products** — hidden when `mollie-billing-plans.products` is empty.
 
 ---
 

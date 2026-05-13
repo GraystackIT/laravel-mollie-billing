@@ -82,15 +82,31 @@ class ValidateSubscriptionChange
      */
     protected function validateSeats(Billable $billable, SubscriptionChangeContext $context): void
     {
-        // When seats were explicitly provided by the caller, respect the value.
+        $newIncludedSeats = $this->catalog->includedSeats($context->newPlan);
+        $seatPriceNet = $this->catalog->seatPriceNet($context->newPlan, $context->newInterval);
+
+        // When seats were explicitly provided by the caller, respect the value —
+        // except when the new plan does not sell extra seats. Without
+        // `seat_price_net` we would charge nothing for the extra capacity, so
+        // any explicit increase above the included quota is rejected.
+        //
+        // Local subscriptions are skipped here so that
+        // validateLocalSubscriptionExtras() can throw its dedicated
+        // LocalSubscriptionDoesNotSupportPaidExtrasException with the richer
+        // upgrade-path messaging.
         if ($context->seatsExplicit) {
+            if (
+                $seatPriceNet === null
+                && $context->newSeats > $newIncludedSeats
+                && ! $billable->isLocalBillingSubscription()
+            ) {
+                throw new SeatDowngradeRequiredException($billable, $context->newSeats, $newIncludedSeats);
+            }
             return;
         }
 
         $usedSeats = $billable->getUsedBillingSeats();
         $currentSeatCount = $billable->getBillingSeatCount();
-        $newIncludedSeats = $this->catalog->includedSeats($context->newPlan);
-        $seatPriceNet = $this->catalog->seatPriceNet($context->newPlan, $context->newInterval);
 
         if ($seatPriceNet === null) {
             if ($usedSeats > $newIncludedSeats) {

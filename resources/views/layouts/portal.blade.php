@@ -1,4 +1,6 @@
 @php
+    use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+    use GraystackIT\MollieBilling\Facades\MollieBilling;
     use GraystackIT\MollieBilling\Support\BillingRoute;
 
     $logoUrl = config('mollie-billing.logo_url');
@@ -8,6 +10,23 @@
     $faviconUrl = config('mollie-billing.favicon_url', '/favicon.ico');
     $primaryColor = config('mollie-billing.primary_color', 'teal');
     $hasProducts = ! empty(config('mollie-billing-plans.products', []));
+    $hasAddons = ! empty(config('mollie-billing-plans.addons', []));
+
+    // Seats nav entry: shown when any configured plan sells extra seats
+    // (seat_price_net !== null in at least one interval). Plans with only an
+    // `included_seats` quota but no purchasable extras don't justify a
+    // dedicated portal page — there is nothing for the user to change.
+    $sidebarCatalog = app(SubscriptionCatalogInterface::class);
+    $hasSeats = false;
+    foreach ($sidebarCatalog->allPlans() as $sidebarPlanCode) {
+        foreach (['monthly', 'yearly'] as $sidebarInterval) {
+            if ($sidebarCatalog->seatPriceNet($sidebarPlanCode, $sidebarInterval) !== null) {
+                $hasSeats = true;
+                break 2;
+            }
+        }
+    }
+
     $dashboardUrl = config('mollie-billing.dashboard_url');
     if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
         $dashboardUrl = route(substr($dashboardUrl, 6));
@@ -68,12 +87,16 @@
             <flux:navlist.item icon="chart-bar" href="{{ route(BillingRoute::name('usage')) }}" :current="$currentRoute === BillingRoute::name('usage')">
                 {{ __('billing::portal.nav.usage') }}
             </flux:navlist.item>
-            <flux:navlist.item icon="puzzle-piece" href="{{ route(BillingRoute::name('addons')) }}" :current="$currentRoute === BillingRoute::name('addons')">
-                {{ __('billing::portal.nav.addons') }}
-            </flux:navlist.item>
-            <flux:navlist.item icon="users" href="{{ route(BillingRoute::name('seats')) }}" :current="$currentRoute === BillingRoute::name('seats')">
-                {{ __('billing::portal.nav.seats') }}
-            </flux:navlist.item>
+            @if ($hasAddons)
+                <flux:navlist.item icon="puzzle-piece" href="{{ route(BillingRoute::name('addons')) }}" :current="$currentRoute === BillingRoute::name('addons')">
+                    {{ __('billing::portal.nav.addons') }}
+                </flux:navlist.item>
+            @endif
+            @if ($hasSeats)
+                <flux:navlist.item icon="users" href="{{ route(BillingRoute::name('seats')) }}" :current="$currentRoute === BillingRoute::name('seats')">
+                    {{ __('billing::portal.nav.seats') }}
+                </flux:navlist.item>
+            @endif
             @if ($hasProducts)
                 <flux:navlist.item icon="shopping-bag" href="{{ route(BillingRoute::name('products')) }}" :current="$currentRoute === BillingRoute::name('products')">
                     {{ __('billing::portal.nav.products') }}

@@ -17,7 +17,7 @@ return new class extends Migration
         }
 
         $model = config('mollie-billing.billable_model');
-        if (! $model) {
+        if (! is_string($model) || $model === '' || ! class_exists($model)) {
             return;
         }
 
