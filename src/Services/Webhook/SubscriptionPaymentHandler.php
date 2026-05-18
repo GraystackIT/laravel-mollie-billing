@@ -220,6 +220,7 @@ class SubscriptionPaymentHandler
 
         if ($billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial) {
             $updates['subscription_status'] = SubscriptionStatus::Active;
+            $updates['trial_ends_at'] = null;
             event(new TrialConverted($billable, $planCode));
         }
 

@@ -132,6 +132,37 @@ it('sets subscription_status = Trial and trial_ends_at when trial_days > 0', fun
         ->toBe(BillingTime::nowUtc()->addDays(14)->toDateString());
 });
 
+it('clears trial_ends_at when a non-trial subscription is created on a billable that was on trial', function (): void {
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create([
+        'name' => 'Trialing Co',
+        'email' => 'trialing@x.test',
+        'billing_country' => 'AT',
+        'mollie_customer_id' => 'cust_trialing',
+    ]);
+
+    // Simulate a billable mid-trial — trial_ends_at is in the future and the
+    // status is Trial (typical state when the dashboard banner is visible).
+    $billable->forceFill([
+        'subscription_status' => SubscriptionStatus::Trial,
+        'trial_ends_at' => BillingTime::nowUtc()->addDays(7),
+    ])->save();
+
+    Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 'sub_post_trial']);
+
+    app(CreateSubscription::class)->handle($billable->fresh(), [
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'addon_codes' => [],
+        'extra_seats' => 0,
+    ]);
+
+    $billable->refresh();
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Active);
+    expect($billable->trial_ends_at)->toBeNull();
+    expect($billable->isOnBillingTrial())->toBeFalse();
+});
+
 it('uses default startDate (now + 1 interval) when no trial_days is given', function (): void {
     /** @var TestBillable $billable */
     $billable = TestBillable::create([

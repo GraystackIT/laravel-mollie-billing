@@ -134,7 +134,7 @@ class CreateSubscription
             'subscription_meta' => $meta,
             'subscription_period_starts_at' => BillingTime::nowUtc(),
             'subscription_ends_at' => null,
-            'trial_ends_at' => $isTrial ? BillingTime::nowUtc()->addDays($trialDays) : $billable->trial_ends_at,
+            'trial_ends_at' => $isTrial ? BillingTime::nowUtc()->addDays($trialDays) : null,
         ])->save();
 
         SubscriptionCreated::dispatch($billable, $planCode, $interval);

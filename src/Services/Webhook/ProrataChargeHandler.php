@@ -33,12 +33,12 @@ class ProrataChargeHandler
     }
 
     /**
-     * Phase-2-Trigger für die neue Plan-Change-Charge-Logik (Multi-VAT-Sammel-Charges).
+     * Phase-2 trigger for the plan-change charge flow (multi-VAT collected charges).
      *
-     * 1. Charge-Invoice via InvoiceService::createInvoice persistieren.
-     * 2. Mollie-Subscription-PATCH via MollieSubscriptionPatcher::updateForIntent.
-     * 3. Geplante Refunds (aus Pending-State) via InvoiceService::createRefund ausführen.
-     * 4. Pending-State löschen.
+     * 1. Persist the charge invoice via InvoiceService::createInvoice.
+     * 2. PATCH the Mollie subscription via MollieSubscriptionPatcher::updateForIntent.
+     * 3. Execute scheduled refunds (from the pending state) via InvoiceService::createRefund.
+     * 4. Clear the pending state.
      *
      * @param  array<string, mixed>  $metadata
      */
@@ -142,6 +142,7 @@ class ProrataChargeHandler
 
         $billable->refresh();
         $wasPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
+        $wasTrial = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial;
         if ($intentData !== null) {
             $meta = $billable->getBillingSubscriptionMeta();
 
@@ -160,10 +161,11 @@ class ProrataChargeHandler
                 'active_addon_codes' => array_keys((array) ($intentData['new_addons'] ?? [])),
                 'subscription_meta' => $meta,
                 ...($startsNewPeriod ? ['subscription_period_starts_at' => $newPeriodStart] : []),
-                ...($wasPastDue ? [
+                ...($wasPastDue || $wasTrial ? [
                     'subscription_status' => SubscriptionStatus::Active,
                     'subscription_ends_at' => null,
                 ] : []),
+                ...($wasTrial ? ['trial_ends_at' => null] : []),
             ])->save();
         }
 
@@ -190,7 +192,7 @@ class ProrataChargeHandler
     }
 
     /**
-     * Charge-Webhook failed: Pending-State löschen, kein PATCH-Rollback nötig (PATCH lief noch nicht).
+     * Charge webhook failed: clear the pending state. No PATCH rollback is needed because the PATCH has not run yet.
      *
      * @param  array<string, mixed>  $metadata
      */
