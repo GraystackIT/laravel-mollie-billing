@@ -20,13 +20,13 @@ use Illuminate\Support\Facades\Notification;
 use Throwable;
 
 /**
- * Retry für Mollie-Subscription-PATCH (für künftige Recurring-Perioden).
+ * Retry for Mollie subscription PATCH (for future recurring periods).
  *
- * Backoff: 1min, 5min, 30min, 2h, dann jede 2h.
- * Hard-Limit: 24h. Danach Admin-Notification + Job stoppt.
+ * Backoff: 1min, 5min, 30min, 2h, then every 2h.
+ * Hard limit: 24h. After that an admin notification is sent and the job stops.
  *
- * Selbst-heilende Eigenschaft: der Recurring-Webhook nutzt live Billable-State,
- * also ist der Mollie-Subscription-Betrag nur ein Anzeige-Issue, kein Geld-Issue.
+ * Self-healing property: the recurring webhook uses live billable state,
+ * so the Mollie subscription amount is only a display issue, not a money issue.
  */
 class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
 {

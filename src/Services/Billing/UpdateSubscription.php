@@ -131,10 +131,10 @@ class UpdateSubscription
                 // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
                 $hasPendingCharge = ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
 
-                // Only echte Plan-Wechsel (plan or interval) defer the local switch and surface
+                // Only real plan switches (plan or interval) defer the local switch and surface
                 // the legacy `pending_plan_change` marker that the plan-change-modal cancel-button
-                // operates on. Sitz-/Addon-Änderungen laufen synchron weiter — sie kommen ohnehin
-                // sofort in Mollie an und der Webhook räumt das `pending_prorata_change`-Marker auf.
+                // operates on. Seat/addon changes continue synchronously — they reach Mollie
+                // immediately anyway, and the webhook clears the `pending_prorata_change` marker.
                 if ($hasPendingCharge && ($context->planChanged || $context->intervalChanged)) {
                     $meta = $billable->getBillingSubscriptionMeta();
                     $meta['pending_plan_change'] = [

@@ -41,9 +41,9 @@ class InvoiceService
     ) {}
 
     /**
-     * Mappt einen Mollie-`metadata.type`-String auf den passenden InvoiceKind.
-     * Subtypen (`'prorata'`, `'addon'`, `'seats'`) werden alle als `Subscription` klassifiziert —
-     * der Subtyp ist via line_items[*].kind ablesbar.
+     * Maps a Mollie `metadata.type` string to the matching InvoiceKind.
+     * Subtypes (`'prorata'`, `'addon'`, `'seats'`) are all classified as `Subscription` —
+     * the subtype is readable via line_items[*].kind.
      */
     public static function mapTypeToInvoiceKind(string $type): InvoiceKind
     {
@@ -82,9 +82,9 @@ class InvoiceService
         $invoice->billable_id = $billable->getKey();
         $invoice->mollie_payment_id = (string) $payment->id;
         $invoice->mollie_subscription_id = $payment->subscriptionId ?? null;
-        // Mapping vom Mollie-metadata-type-String auf InvoiceKind. Heute-Werte (`'prorata'`,
-        // `'addon'`, `'seats'`) werden alle als Subscription-Buchung klassifiziert. Der Subtyp
-        // ist aus den line_items[*].kind ablesbar.
+        // Map the Mollie metadata-type string onto an InvoiceKind. Today's values (`'prorata'`,
+        // `'addon'`, `'seats'`) are all classified as Subscription bookings. The subtype is
+        // readable from line_items[*].kind.
         $invoiceKindEnum = self::mapTypeToInvoiceKind($invoiceKind);
         $invoice->serial_number = $this->numberGenerator->generate($invoiceKindEnum->value);
         $invoice->invoice_kind = $invoiceKindEnum;
@@ -152,15 +152,15 @@ class InvoiceService
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
         }
 
-        // VAT-Rate aus dem ersten Original-Line-Item lesen (Per-Item-VAT als Source of Truth).
+        // Read VAT rate from the first original line item (per-item VAT as source of truth).
         $originalLines = (array) ($original->line_items ?? []);
         $firstLine = $originalLines[0] ?? null;
         $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
         $creditVat = (int) round($amountNet * $rate / 100);
         $creditGross = $amountNet + $creditVat;
 
-        // Bei Custom-line_items: User übergibt komplette Lines (mit eigenen vat_rate-Feldern).
-        // Bei null: ein generischer Refund-Line-Eintrag mit Verweis auf Original-Line[0].
+        // For custom line_items: caller passes complete lines (with their own vat_rate fields).
+        // When null: a generic refund line entry referencing original line[0].
         if ($lineItems !== null) {
             $resolvedLineItems = $lineItems;
         } else {
@@ -178,7 +178,7 @@ class InvoiceService
                 'period_end' => ($original->period_end ?? BillingTime::nowUtc())->toIso8601String(),
                 'parent_invoice_id' => $original->id,
                 'parent_line_item_index' => 0,
-                'mollie_refund_id' => null, // wird vom Aufrufer gesetzt falls Mollie-Refund-ID bekannt ist
+                'mollie_refund_id' => null, // set by the caller if the Mollie refund ID is known
             ]];
         }
 
@@ -338,7 +338,7 @@ class InvoiceService
             // Per-item billing_period or description only — no fallback to global period.
             $description = $item['description'] ?? $item['billing_period'] ?? null;
 
-            // Per-Item-VAT: line_item.vat_rate ist Source of Truth.
+            // Per-item VAT: line_item.vat_rate is the source of truth.
             $taxPercentage = (float) ($item['vat_rate'] ?? 0);
 
             $items[] = new PdfInvoiceItem(
@@ -888,17 +888,17 @@ class InvoiceService
     }
 
     // ========================================================================
-    // Neue API für Plan-Change-Sammel-Charges/Refunds (Multi-VAT-Lines)
+    // New API for plan-change batch charges/refunds (multi-VAT lines)
     // ========================================================================
 
     /**
-     * Generische Charge-Invoice-Persistierung für Webhook-Routing.
-     * Wird vom Webhook gerufen für alle paid-Events (Recurring-Subscription, Mid-cycle,
-     * Plan-Change-Sammel-Charges, Overage, OneTimeOrder).
+     * Generic charge-invoice persistence for webhook routing.
+     * Called by the webhook for all paid events (recurring subscription, mid-cycle,
+     * plan-change batch charges, overage, one-time order).
      *
-     * KEIN Mollie-Call hier — der ist vorher passiert (Webhook reagiert nur auf paid).
+     * NO Mollie call here — that already happened earlier (the webhook only reacts to paid).
      *
-     * @param  array<int, array<string, mixed>>  $lineItems  jedes mit kind/code/label/quantity/
+     * @param  array<int, array<string, mixed>>  $lineItems  each with kind/code/label/quantity/
      *   unit_price_net/amount_net/vat_rate/vat_amount/amount_gross/period_start/period_end
      */
     public function createInvoice(
@@ -950,13 +950,13 @@ class InvoiceService
     }
 
     /**
-     * Phase 1 für Plan-Change: schickt CreatePaymentRequest mit metadata.type='prorata_charge'
-     * und persistiert Pending-State in subscription_meta.pending_prorata_change.
+     * Phase 1 for plan change: sends CreatePaymentRequest with metadata.type='prorata_charge'
+     * and persists the pending state in subscription_meta.pending_prorata_change.
      *
-     * Persistierung der Charge-Invoice geschieht später im Webhook via createInvoice().
+     * Persistence of the charge invoice happens later in the webhook via createInvoice().
      *
      * @param  list<ProrataLine>  $chargeLines
-     * @param  list<ProrataLine>  $pendingRefundLines  Werden nach Charge-Webhook-OK ausgeführt
+     * @param  list<ProrataLine>  $pendingRefundLines  Executed after charge-webhook OK
      */
     public function createCharge(
         Billable $billable,
@@ -1006,18 +1006,18 @@ class InvoiceService
     }
 
     /**
-     * Macht intern N Mollie-Refund-Calls (gegen originalInvoice.mollie_payment_id pro Line)
-     * und persistiert das Ergebnis als BillingInvoice mit invoice_kind=Refund.
+     * Internally makes N Mollie refund calls (against originalInvoice.mollie_payment_id per line)
+     * and persists the result as a BillingInvoice with invoice_kind=Refund.
      *
-     * Mollie-409-Idempotenz pro Line: existiert bereits ein Refund-line_item mit
-     * (parent_invoice_id, parent_line_item_index, amount_net) → übersprungen.
+     * Mollie 409 idempotency per line: if a refund line_item already exists with
+     * (parent_invoice_id, parent_line_item_index, amount_net) → skipped.
      *
-     * Coupon-covered Lines werden gefiltert.
+     * Coupon-covered lines are filtered out.
      *
-     * Fehlgeschlagene Lines kommen in subscription_meta.pending_refund_retries.
+     * Failed lines are stored in subscription_meta.pending_refund_retries.
      *
-     * @param  list<ProrataLine>  $refundLines  alle direction='refund'
-     * @return BillingInvoice|null  null wenn alle Lines coupon-covered oder fehlgeschlagen
+     * @param  list<ProrataLine>  $refundLines  all direction='refund'
+     * @return BillingInvoice|null  null when all lines are coupon-covered or failed
      */
     public function createRefund(
         Billable $billable,
@@ -1156,7 +1156,7 @@ class InvoiceService
             }
         }
 
-        // Failed Lines in pending_refund_retries für Retry-Job.
+        // Failed lines stored in pending_refund_retries for the retry job.
         if (! empty($failedLines)) {
             $meta = $billable->getBillingSubscriptionMeta();
             $existing = (array) ($meta['pending_refund_retries'] ?? []);
@@ -1168,7 +1168,7 @@ class InvoiceService
             return null;
         }
 
-        // Sammel-Refund-Invoice persistieren.
+        // Persist the batch refund invoice.
         $sumNet = 0;
         $sumVat = 0;
         $sumGross = 0;
@@ -1211,8 +1211,8 @@ class InvoiceService
     }
 
     /**
-     * Saldo-0-Sidegrade: lokale Plan-Switch-Invoice mit Charge- und Refund-Lines (Saldo=0).
-     * KEIN Mollie-Call. Nur lokale Buchhaltungs-Invoice für den Audit-Trail.
+     * Saldo-zero sidegrade: local plan-switch invoice with charge and refund lines (saldo=0).
+     * NO Mollie call. Only a local accounting invoice for the audit trail.
      *
      * @param  list<ProrataLine>  $chargeLines
      * @param  list<ProrataLine>  $refundLines

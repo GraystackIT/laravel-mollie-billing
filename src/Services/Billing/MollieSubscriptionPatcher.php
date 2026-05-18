@@ -19,12 +19,12 @@ use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscripti
 use Mollie\Laravel\Facades\Mollie;
 
 /**
- * Verantwortlich für Mollie-Subscription-Änderungen für künftige Perioden.
+ * Responsible for Mollie subscription changes for future periods.
  *
- * Logik wurde aus UpdateSubscription extrahiert:
- * - cancelAndRecreateMollieSubscription → updateRecurringAmount() (intern: cancel + create)
+ * Logic was extracted from UpdateSubscription:
+ * - cancelAndRecreateMollieSubscription → updateRecurringAmount() (internally: cancel + create)
  * - cancelMollieSubscriptionForFreeDowngrade → cancelForFreeDowngrade()
- * - updateMollieSubscription → in-place PATCH (kommt im Phase-2-Pfad)
+ * - updateMollieSubscription → in-place PATCH (runs in the phase-2 path)
  */
 class MollieSubscriptionPatcher
 {
@@ -34,9 +34,9 @@ class MollieSubscriptionPatcher
     ) {}
 
     /**
-     * Wendet einen PlanChangeIntent auf die Mollie-Subscription an.
+     * Applies a PlanChangeIntent to the Mollie subscription.
      * - newPlan = Free → cancelForFreeDowngrade()
-     * - sonst → updateRecurringAmount() mit neuen Plan/Sitzen/Addons
+     * - otherwise → updateRecurringAmount() with new plan/seats/addons
      */
     public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
     {
@@ -131,19 +131,19 @@ class MollieSubscriptionPatcher
     }
 
     /**
-     * PATCH der Mollie-Subscription mit neuem aggregierten Recurring-Betrag.
+     * PATCH the Mollie subscription with the new aggregated recurring amount.
      *
-     * Mollie's `PATCH /subscriptions/:id` ändert nur den Betrag für die *nächste* Recurring-Periode —
-     * es löst keinen sofortigen Charge aus. Das ist genau das gewünschte Verhalten: laufende Periode
-     * unangetastet, neuer Betrag ab der nächsten Abrechnung.
+     * Mollie's `PATCH /subscriptions/:id` only changes the amount for the *next* recurring period —
+     * it does not trigger an immediate charge. This is exactly the desired behavior: the current
+     * period stays untouched, and the new amount applies from the next billing onwards.
      *
-     * KEIN cancel+recreate-Fallback bei PATCH-Failures: `CreateSubscriptionRequest` würde Mollie
-     * sofort einen ersten Charge senden lassen → doppelte Abbuchung. Failures werden geloggt und
-     * bei Bedarf vom RetrySubscriptionPatchJob aufgegriffen.
+     * NO cancel+recreate fallback on PATCH failures: `CreateSubscriptionRequest` would cause Mollie
+     * to immediately issue a first charge → double debit. Failures are logged and picked up by the
+     * RetrySubscriptionPatchJob when needed.
      *
      * @param  array<int, string>  $addons
      *
-     * @throws \Throwable  When the Mollie PATCH call fails (Retry-Job kann darauf reagieren).
+     * @throws \Throwable  When the Mollie PATCH call fails (the retry job can react to this).
      */
     public function updateRecurringAmount(
         Billable $billable,
@@ -232,10 +232,10 @@ class MollieSubscriptionPatcher
     }
 
     /**
-     * Verschiebt das Datum der nächsten Mollie-Abrechnung um die angegebene
-     * Anzahl Tage in die Zukunft. Wird vom PeriodExtension-Coupon-Type genutzt.
-     * Nach erfolgreichem PATCH wird ein Override im Subscription-Meta gesetzt,
-     * damit `nextBillingDate()` den verschobenen Wert zurückgibt.
+     * Shifts the date of the next Mollie billing into the future by the given
+     * number of days. Used by the PeriodExtension coupon type.
+     * After a successful PATCH an override is set in the subscription meta so
+     * that `nextBillingDate()` returns the shifted value.
      */
     public function pushNextChargeDate(Billable $billable, int $days): void
     {
@@ -269,7 +269,7 @@ class MollieSubscriptionPatcher
     }
 
     /**
-     * Cancelt die Mollie-Subscription beim Free-Downgrade. Tolerant für API-Failures.
+     * Cancels the Mollie subscription on a free downgrade. Tolerant of API failures.
      */
     public function cancelForFreeDowngrade(Billable $billable): void
     {

@@ -11,14 +11,14 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Zwei-Phasen-Orchestrator für Plan-Change-Pro-rata.
+ * Two-phase orchestrator for plan-change pro-rata.
  *
- * Phase 1 (synchron, hier):
- * - Sidegrade-0 → lokale Plan-Switch-Invoice + Mollie-Subscription-PATCH (kein Mollie-Charge).
- * - Mit Charge-Lines → Mollie-CreatePaymentRequest + Pending-State (PATCH wartet auf Phase 2).
- * - Nur Refund-Lines → Mollie-Subscription-PATCH + sofortige Refunds.
+ * Phase 1 (synchronous, here):
+ * - Sidegrade-0 → local plan-switch invoice + Mollie subscription PATCH (no Mollie charge).
+ * - With charge lines → Mollie CreatePaymentRequest + pending-state (PATCH waits for phase 2).
+ * - Refund lines only → Mollie subscription PATCH + immediate refunds.
  *
- * Phase 2 (asynchron, vom Webhook getriggert) lebt im MollieWebhookController.
+ * Phase 2 (asynchronous, triggered by the webhook) lives in MollieWebhookController.
  */
 class ProrataExecutor
 {
@@ -28,7 +28,7 @@ class ProrataExecutor
     ) {}
 
     /**
-     * @param  list<ProrataLine>  $lines  vom ProrataComposer
+     * @param  list<ProrataLine>  $lines  from the ProrataComposer
      * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
      *         path ∈ {'noop', 'sidegrade', 'deferred_charge', 'refund'}.
      *         invoice is filled for sidegrade and refund (immediate redemption with that invoice id).
@@ -37,19 +37,19 @@ class ProrataExecutor
      */
     public function execute(Billable $billable, PlanChangeIntent $intent, array $lines): array
     {
-        // Idempotenz: bereits laufender Plan-Change → No-Op.
+        // Idempotency: plan change already in flight → no-op.
         if ($this->hasPendingProrataChange($billable)) {
             return ['path' => 'noop', 'invoice' => null];
         }
 
         [$chargeLines, $refundLines] = $this->partition($lines);
 
-        // Coupon-covered Lines werden in den Service-Methoden gefiltert; hier nur leere Listen prüfen.
+        // Coupon-covered lines are filtered in the service methods; here we only check for empty lists.
         if (empty($chargeLines) && empty($refundLines)) {
             return ['path' => 'noop', 'invoice' => null];
         }
 
-        // Sidegrade: echter Plan-Wechsel + Charge-Summe == |Refund-Summe|.
+        // Sidegrade: real plan switch + charge total == |refund total|.
         if ($this->isSaldoZeroPlanSwitch($intent, $chargeLines, $refundLines)) {
             $invoice = $this->invoices->createPlanSwitchInvoice($billable, $chargeLines, $refundLines);
             $this->safelyPatch($billable, $intent);
@@ -57,14 +57,14 @@ class ProrataExecutor
         }
 
         if (! empty($chargeLines)) {
-            // Phase 1: Mollie-Charge + Pending-State (PATCH läuft erst in Phase 2 nach Charge-OK).
+            // Phase 1: Mollie charge + pending state (PATCH only runs in phase 2 after charge OK).
             $this->invoices->createCharge($billable, $chargeLines, $refundLines, $intent);
             return ['path' => 'deferred_charge', 'invoice' => null];
         }
 
-        // Reine Refund-Phase: PATCH (best-effort) + Refunds direkt.
-        // Ein PATCH-Fail darf den Refund nicht blockieren — er wird in pending_subscription_patch
-        // persistiert und vom RetrySubscriptionPatchJob aufgegriffen.
+        // Pure refund phase: PATCH (best-effort) + refunds directly.
+        // A PATCH failure must not block the refund — it is persisted to pending_subscription_patch
+        // and picked up by the RetrySubscriptionPatchJob.
         $this->safelyPatch($billable, $intent);
         $refundInvoice = $this->invoices->createRefund($billable, $refundLines);
         return ['path' => 'refund', 'invoice' => $refundInvoice];
@@ -131,7 +131,7 @@ class ProrataExecutor
         $chargeGross = array_sum(array_map(fn (ProrataLine $l) => $l->amountGross, $chargeLines));
         $refundGross = array_sum(array_map(fn (ProrataLine $l) => $l->amountGross, $refundLines));
 
-        // Charge ist positiv, Refund negativ → Summe = 0 bedeutet Saldo 0.
+        // Charge is positive, refund is negative — sum == 0 means net balance is zero.
         return ($chargeGross + $refundGross) === 0 && $chargeGross > 0;
     }
 

@@ -78,10 +78,10 @@ class RetryRefundLineJob implements ShouldQueue
             $line = ProrataLine::fromArray($this->lineData);
             $invoices->createRefund($billable, [$line], 'Refund retry');
 
-            // Bei Erfolg: pending_refund_retries-Eintrag löschen
+            // On success: delete the pending_refund_retries entry
             $this->removeFromPendingRetries($billable);
         } catch (Throwable $e) {
-            throw $e; // Job-Retry mit Backoff
+            throw $e; // job retry with backoff
         }
     }
 
@@ -134,10 +134,10 @@ class RetryRefundLineJob implements ShouldQueue
         $invoiceId = $line['parent_invoice_id'] ?? null;
         $lineIndex = $line['parent_line_item_index'] ?? null;
 
-        // Refund-Lines haben per Design immer parent_invoice_id + parent_line_item_index (siehe ProrataLine).
-        // Fehlt eines davon, deutet das auf manuell editiertes oder fehlerhaft serialisiertes Meta hin —
-        // wir bauen dann eine garantiert eindeutige Signatur, damit verschiedene kaputte Einträge nicht
-        // kollabieren, und loggen laut.
+        // Refund lines by design always carry parent_invoice_id + parent_line_item_index (see ProrataLine).
+        // If either is missing, that indicates manually edited or corrupted serialized meta —
+        // in that case we build a guaranteed-unique signature so different broken entries don't
+        // collapse, and log loudly.
         if ($invoiceId === null || $lineIndex === null) {
             Log::warning('RetryRefundLineJob: pending_refund_retries-Line ohne parent_invoice_id oder parent_line_item_index', [
                 'billable_class' => $this->billableClass,

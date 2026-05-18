@@ -84,8 +84,8 @@ class RefundHandler
     }
 
     /**
-     * Idempotenz-Check: existiert eine Refund-Invoice für diesen Billable, die diese mollie_refund_id
-     * in einem ihrer line_items trägt?
+     * Idempotency check: does a refund invoice exist for this billable that carries
+     * this mollie_refund_id in any of its line_items?
      */
     public function refundIdAlreadyPersisted(string $billableType, mixed $billableId, string $refundId): bool
     {

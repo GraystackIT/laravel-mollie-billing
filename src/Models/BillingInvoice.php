@@ -212,9 +212,9 @@ class BillingInvoice extends Model
     }
 
     /**
-     * Tage von $reference bis line_item.period_end (immer relativ zu jetzt — der
-     * $reference-Parameter ist legacy und wird ignoriert; Single-Source-of-Truth
-     * ist BillingPolicy::prorataPeriodDays).
+     * Days from $reference to line_item.period_end (always relative to now — the
+     * $reference parameter is legacy and is ignored; the single source of truth
+     * is BillingPolicy::prorataPeriodDays).
      */
     public function lineItemDaysRemaining(int $index, ?CarbonInterface $reference = null): int
     {
@@ -232,14 +232,14 @@ class BillingInvoice extends Model
     }
 
     /**
-     * Alle paid Original-Line-Items, deren Periode den aktuellen Zeitpunkt umfasst
-     * (line_item.period_start <= now <= line_item.period_end), gefiltert nach (kind, optional code),
-     * die noch nicht vollständig refundiert wurden.
+     * All paid original line items whose period contains the current moment
+     * (line_item.period_start <= now <= line_item.period_end), filtered by (kind, optional code),
+     * that have not yet been fully refunded.
      *
-     * Sortiert nach line.period_start DESC, secondary nach line_index DESC (deterministisch).
+     * Sorted by line.period_start DESC, secondary by line_index DESC (deterministic).
      *
-     * remaining_quantity = original_line.quantity - bereits_refundierte_quantity (Summe aller
-     * Refund-Invoice-line_items mit parent_invoice_id=invoice.id, parent_line_item_index=line_index).
+     * remaining_quantity = original_line.quantity - already_refunded_quantity (sum of all
+     * refund invoice line_items with parent_invoice_id=invoice.id, parent_line_item_index=line_index).
      *
      * @return list<array{invoice: self, line_index: int, remaining_quantity: int}>
      */
@@ -267,8 +267,8 @@ class BillingInvoice extends Model
             return [];
         }
 
-        // 1. Alle Charge-Invoices (Subscription/OneTimeOrder/Overage) für den Billable mit paid status,
-        //    die mind. eine line haben mit (kind, ggf. code) und deren line.period den now umfasst.
+        // 1. All charge invoices (Subscription/OneTimeOrder/Overage) for the billable with paid status,
+        //    that have at least one line with (kind, optionally code) whose line.period contains now.
         $invoices = self::query()
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
@@ -276,19 +276,19 @@ class BillingInvoice extends Model
             ->whereIn('invoice_kind', [InvoiceKind::Subscription, InvoiceKind::OneTimeOrder, InvoiceKind::Overage])
             ->get();
 
-        // 2. Pre-load alle Refund-Invoices des Billables für die Mengenrechnung.
+        // 2. Pre-load all refund invoices of the billable for the quantity calculation.
         $refundInvoices = self::query()
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
             ->where('invoice_kind', InvoiceKind::Refund)
             ->get();
 
-        // Mengen-Aggregation für Stück-für-Stück-Refunds (z.B. Sitz reduzieren).
-        // NUR strukturierte Refund-Lines (kind plan/seats/addon) zählen — generische
-        // Cash-Refund-Lines (kind 'refund', vom Webhook nach Dashboard-Refund oder
-        // Kulanz-Vollrefund) refundieren einen Geld-Betrag auf Invoice-Ebene und
-        // dürfen nicht als "1 Plan-Stück verbraucht" gezählt werden, sonst blockt
-        // ein einzelner Cash-Refund alle weiteren Plan-Wechsel.
+        // Quantity aggregation for per-unit refunds (e.g. reducing a seat).
+        // ONLY structured refund lines (kind plan/seats/addon) count — generic
+        // cash refund lines (kind 'refund', from the webhook after a dashboard refund or
+        // goodwill full refund) refund a monetary amount at the invoice level and
+        // must not be counted as "1 plan unit consumed", otherwise a single
+        // cash refund would block all further plan changes.
         $alreadyRefunded = []; // [parent_invoice_id][parent_line_item_index] => quantity
         foreach ($refundInvoices as $refund) {
             foreach ((array) ($refund->line_items ?? []) as $rline) {
@@ -314,8 +314,8 @@ class BillingInvoice extends Model
                     continue;
                 }
 
-                // Periode auflösen: Line, dann Invoice (kein Billable-Fallback —
-                // periodenlose Items dürfen nicht rückwirkend zur aktuellen Periode gezählt werden).
+                // Resolve period: line, then invoice (no billable fallback —
+                // periodless items must not be retroactively counted toward the current period).
                 $rawStart = $line['period_start'] ?? $invoice->period_start;
                 $rawEnd = $line['period_end'] ?? $invoice->period_end;
                 if ($rawStart === null || $rawEnd === null) {
@@ -325,12 +325,12 @@ class BillingInvoice extends Model
                 $start = \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawStart);
                 $end = \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawEnd);
 
-                // Line muss in der aktuellen Billable-Subscription-Periode laufen:
-                // - line_start liegt nicht nach billable.period_end (nicht in der Zukunft)
-                // - line_end stimmt mit billable.period_end überein (Toleranz 1 Tag).
-                //   Damit fallen Items aus alten/abgelösten Perioden raus, deren period_end
-                //   nicht zur aktuellen Billable-Periode passt (z.B. monatliche Invoices nach
-                //   Wechsel auf jährlich).
+                // Line must fall within the current billable subscription period:
+                // - line_start is not after billable.period_end (not in the future)
+                // - line_end matches billable.period_end (tolerance 1 day).
+                //   This excludes items from old/superseded periods whose period_end
+                //   does not match the current billable period (e.g. monthly invoices after
+                //   switching to yearly).
                 if ($start->greaterThan($billablePeriodEnd)) {
                     continue;
                 }
@@ -350,17 +350,17 @@ class BillingInvoice extends Model
                     'invoice' => $invoice,
                     'line_index' => $idx,
                     'remaining_quantity' => $remaining,
-                    '_period_start' => $start, // intern für Sortierung
-                    '_invoice_id' => (int) $invoice->getKey(), // intern für Sortierung
+                    '_period_start' => $start, // internal, used for sorting
+                    '_invoice_id' => (int) $invoice->getKey(), // internal, used for sorting
                 ];
             }
         }
 
-        // Sortierung nach period_start DESC, dann invoice_id DESC, dann line_index DESC.
-        // Der invoice_id-Tiebreaker ist wichtig, weil mehrere Invoices in derselben
-        // Subscription-Periode (z.B. Mid-Cycle Sitz-Käufe) identisches period_start haben.
-        // Wir wollen die NEUESTE Invoice zuerst refundieren — sonst läuft der Refund
-        // gegen ein Mollie-Payment, das bereits voll refundiert wurde (Mollie 409).
+        // Sort by period_start DESC, then invoice_id DESC, then line_index DESC.
+        // The invoice_id tiebreaker is important because multiple invoices in the same
+        // subscription period (e.g. mid-cycle seat purchases) share the same period_start.
+        // We want to refund the NEWEST invoice first — otherwise the refund runs
+        // against a Mollie payment that has already been fully refunded (Mollie 409).
         usort($result, function (array $a, array $b): int {
             $cmp = $b['_period_start']->getTimestamp() <=> $a['_period_start']->getTimestamp();
             if ($cmp !== 0) {
@@ -373,7 +373,7 @@ class BillingInvoice extends Model
             return $b['line_index'] <=> $a['line_index'];
         });
 
-        // Sortierungs-Schlüssel entfernen.
+        // Remove the sort keys.
         return array_map(fn ($r) => [
             'invoice' => $r['invoice'],
             'line_index' => $r['line_index'],

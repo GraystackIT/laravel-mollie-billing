@@ -8,19 +8,19 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 
 /**
- * Repräsentiert eine geplante Charge- oder Refund-Position innerhalb einer Plan-Change-Operation.
+ * Represents a planned charge or refund line item within a plan change operation.
  *
- * Refund-Lines tragen Original-Invoice-Referenzen + Original-Line-Item-Snapshot der VAT.
- * Charge-Lines arbeiten mit Listenpreisen + live-VAT aus Billable.
+ * Refund lines carry original invoice references + a snapshot of the original line item's VAT.
+ * Charge lines work with list prices + live VAT derived from the billable.
  */
 final class ProrataLine
 {
-    public ?string $mollieRefundId = null; // wird vom InvoiceService nach Mollie-Refund-Call gesetzt
+    public ?string $mollieRefundId = null; // set by InvoiceService after the Mollie refund call
 
     /**
-     * Notiz für die UI, wenn die Refund-Höhe gegen den Restbetrag der Original-Invoice
-     * gekürzt werden musste (z.B. nachdem schon Kulanz-Refunds gewährt wurden).
-     * `null` wenn nichts gekürzt wurde.
+     * Note for the UI when the refund amount had to be capped against the remaining
+     * amount of the original invoice (e.g. after goodwill refunds were already granted).
+     * `null` when nothing was capped.
      *
      * @var array{
      *   alreadyRefundedNet: int,
@@ -38,8 +38,8 @@ final class ProrataLine
         public readonly ?string $code,          // plan_code | null (seats) | addon_code | coupon_code
         public readonly string $label,
         public readonly int $quantity,
-        public readonly int $amountNet,         // negativ Refund / positiv Charge / 0 coupon-covered
-        public readonly float $vatRate,         // Refund: aus Original-Line; Charge: live
+        public readonly int $amountNet,         // negative refund / positive charge / 0 coupon-covered
+        public readonly float $vatRate,         // refund: from original line; charge: live
         public readonly int $amountVat,
         public readonly int $amountGross,
         public readonly CarbonInterface $periodStart,
@@ -51,8 +51,8 @@ final class ProrataLine
     ) {}
 
     /**
-     * Serialisiert für Preview-Output UND Persistierung im line_items JSON-Feld.
-     * Bei Charge-Lines sind die parent_*-Felder null, bei Refund-Lines gesetzt.
+     * Serialized for preview output AND persistence in the line_items JSON field.
+     * For charge lines the parent_* fields are null, for refund lines they are set.
      *
      * @return array<string, mixed>
      */
@@ -84,8 +84,8 @@ final class ProrataLine
     }
 
     /**
-     * Erzeugt eine ProrataLine aus serialisiertem Pending-State.
-     * Original-Invoice wird per find($id) aufgelöst.
+     * Creates a ProrataLine from serialized pending state.
+     * The original invoice is resolved via find($id).
      *
      * @param  array<string, mixed>  $data
      */

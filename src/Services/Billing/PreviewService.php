@@ -473,10 +473,10 @@ class PreviewService
             'isDowngrade' => BillingPolicy::isDowngrade(
                 $this->catalog, $currentPlan, $currentInterval, $newPlan, $newInterval,
             ),
-            // Multi-VAT-Aufschlüsselung via Composer (UI-Source-of-Truth für die neue Preview).
-            // Aggregat-Felder oben (prorataChargeNet etc.) bleiben für Backwards-Compat.
-            // Coupon-Discount-Lines werden als negative Zeilen angehängt — der Composer
-            // selbst hat keine Coupon-Awareness, das passiert hier.
+            // Multi-VAT breakdown via Composer (UI source of truth for the new preview).
+            // The aggregate fields above (prorataChargeNet etc.) remain for backwards compatibility.
+            // Coupon discount lines are appended as negative rows — the Composer
+            // itself has no coupon awareness, that happens here.
             ...$this->prorataLinesPreview(
                 $billable,
                 $currentPlan,
@@ -525,7 +525,7 @@ class PreviewService
     }
 
     /**
-     * Baut die prorataLines via ProrataComposer für die neue UI-Aufschlüsselung.
+     * Builds the prorataLines via ProrataComposer for the new UI breakdown.
      *
      * @param  array<string, int>  $currentAddons
      * @param  array<string, int>  $newAddons
@@ -565,8 +565,8 @@ class PreviewService
 
             $lines = app(ProrataComposer::class)->compose($intent);
         } catch (\Throwable) {
-            // Bei Daten-Inkonsistenz (z.B. fehlende Original-Lines) leer zurückgeben.
-            // Composer wirft RuntimeException — Preview soll nicht crashen.
+            // On data inconsistency (e.g. missing original lines) return empty.
+            // Composer throws RuntimeException — the preview must not crash.
             return ['prorataLines' => [], 'prorataTotalNet' => 0, 'prorataTotalVat' => 0, 'prorataTotalGross' => 0, 'prorataRefundCapNotices' => []];
         }
 

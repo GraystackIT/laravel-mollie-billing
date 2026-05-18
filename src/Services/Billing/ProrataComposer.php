@@ -14,14 +14,14 @@ use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 
 /**
- * Pure Berechnung der Pro-rata-Lines für einen Plan-Change-Intent.
+ * Pure computation of pro-rata lines for a plan-change intent.
  *
- * Liefert eine gemischte Liste aus Charge- und Refund-Zeilen.
- * Charges vor Refunds, innerhalb gleicher Direction: plan, seats, addons.
+ * Returns a mixed list of charge and refund lines.
+ * Charges before refunds; within the same direction: plan, seats, addons.
  *
- * Free-Plan-Origin (currentPlan = Free): leere Liste — Free→Mollie läuft über UpgradeLocalToMollie.
- * Mollie→Free: nur Refunds, kein Charge.
- * Mollie→Mollie: Plan-Wechsel = Refund alter + Charge neuer Plan, getrennt.
+ * Free-plan origin (currentPlan = Free): empty list — Free→Mollie runs through UpgradeLocalToMollie.
+ * Mollie→Free: refunds only, no charge.
+ * Mollie→Mollie: plan switch = refund of the old + charge of the new plan, separately.
  */
 class ProrataComposer
 {
@@ -37,7 +37,7 @@ class ProrataComposer
     {
         $billable = $intent->billable;
 
-        // Free-Origin: gar nichts (Free→Mollie läuft über UpgradeLocalToMollie).
+        // Free origin: nothing at all (Free→Mollie runs through UpgradeLocalToMollie).
         if ($this->catalog->isFreePlan($intent->currentPlan, $intent->currentInterval)) {
             return [];
         }
@@ -61,7 +61,7 @@ class ProrataComposer
         $charges = [];
         $refunds = [];
 
-        // Plan-Wechsel
+        // Plan switch
         $planChanged = $intent->currentPlan !== $intent->newPlan;
         $intervalChanged = $intent->currentInterval !== $intent->newInterval;
 
@@ -129,9 +129,9 @@ class ProrataComposer
         // Mid-cycle change (same plan, same interval) — only diff what's actually
         // different. Existing seats and addons stay at the price they were bought.
 
-        // Sitz-Änderung — wir betrachten nur EXTRA-Sitze (über includedSeats hinaus).
-        // Inkludierte Sitze sind im Plan-Preis enthalten und werden bereits über die
-        // Plan-Refund/Charge-Line abgerechnet — sie dürfen nicht doppelt erscheinen.
+        // Seat change — we only consider EXTRA seats (beyond includedSeats).
+        // Included seats are part of the plan price and are already billed via the
+        // plan refund/charge line — they must not appear twice.
         $currentExtraSeats = max(0, $intent->currentSeats - $this->catalog->includedSeats($intent->currentPlan));
         $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
         $seatDiff = $newExtraSeats - $currentExtraSeats;
@@ -145,7 +145,7 @@ class ProrataComposer
             }
         }
 
-        // Addon-Änderungen
+        // Addon changes
         $currentAddons = $intent->currentAddons;
         $newAddons = $intent->newAddons;
         $allCodes = array_unique(array_merge(array_keys($currentAddons), array_keys($newAddons)));
@@ -182,7 +182,7 @@ class ProrataComposer
      * that are coupon-covered are passed through unchanged.
      *
      * The (possibly reduced) line carries a `refundCapNote` so the UI can render
-     * "gekürzt wg. X bereits erstattet".
+     * "reduced because X already refunded".
      *
      * @param  list<ProrataLine>  $refundLines
      * @return list<ProrataLine>
@@ -260,10 +260,10 @@ class ProrataComposer
     {
         $candidates = BillingInvoice::currentPeriodLines($intent->billable, 'plan', $intent->currentPlan);
         if (empty($candidates)) {
-            // Keine offene Plan-Line in der aktuellen Periode — z.B. wenn die Original-
-            // Subscription-Invoice aus Kulanz vollständig refundiert wurde. Dann gibt es
-            // nichts mehr zu refundieren; der neue Plan wird einfach ohne Pro-rata-
-            // Gegenbuchung gechargt. Free→* wurde weiter oben bereits abgefangen.
+            // No open plan line in the current period — e.g. when the original
+            // subscription invoice was fully refunded as a goodwill credit. In that
+            // case there is nothing left to refund; the new plan is simply charged
+            // without a pro-rata counter-entry. Free→* was already caught above.
             return null;
         }
 
@@ -467,7 +467,7 @@ class ProrataComposer
 
         $candidates = BillingInvoice::currentPeriodLines($billable, 'seats', null);
         if (empty($candidates)) {
-            return []; // keine Original-Sitz-Lines (z.B. Plan ohne Extra-Sitze)
+            return []; // no original seat lines (e.g. plan without extra seats)
         }
 
         $remaining = $reduction;
@@ -610,10 +610,10 @@ class ProrataComposer
     }
 
     /**
-     * Baut eine Refund-Zeile für eine bestimmte Original-Line mit gegebener Mengen-Reduktion.
+     * Builds a refund line for a specific original line with a given quantity reduction.
      *
-     * Liefert null, wenn auf der Original-Invoice nichts mehr offen ist (z.B. nach
-     * vorherigem Kulanz-Vollrefund). Die Aufrufer filtern null.
+     * Returns null if nothing is left open on the original invoice (e.g. after a
+     * previous goodwill full refund). Callers filter null.
      */
     private function buildRefundLine(BillingInvoice $invoice, int $idx, string $kind, ?string $code, int $quantity): ?ProrataLine
     {
@@ -626,7 +626,7 @@ class ProrataComposer
         $originalCashNet = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
         $vatRate = (float) ($line['vat_rate'] ?? 0);
 
-        // Periode auflösen mit Fallback auf Billable-Period (für Legacy-Invoices ohne line/invoice period).
+        // Resolve period with fallback to billable period (for legacy invoices without line/invoice period).
         /** @var Billable&\Illuminate\Database\Eloquent\Model $billable */
         $billable = $invoice->billable()->first();
         $billableStart = $billable?->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
@@ -695,11 +695,11 @@ class ProrataComposer
     }
 
     /**
-     * Baut ein konsistentes Label für eine Refund-Zeile, mit Plan-Kontext aus der Original-Invoice.
+     * Builds a consistent label for a refund line, with plan context from the original invoice.
      *
-     * Der Plan-Code wird aus dem ersten plan-Line-Item der Original-Invoice gelesen — falls keiner
-     * existiert (z.B. Mid-cycle Sitz-Increase-Invoice ohne plan-Line), fallback auf den aktuellen
-     * Plan des Billable.
+     * The plan code is read from the first plan line item of the original invoice — if none
+     * exists (e.g. mid-cycle seat-increase invoice without a plan line), it falls back to the
+     * current plan of the billable.
      */
     private function buildRefundLabel(BillingInvoice $invoice, string $kind, ?string $code, int $quantity): string
     {
@@ -719,8 +719,8 @@ class ProrataComposer
     }
 
     /**
-     * Liest den Plan-Code aus dem ersten plan-Line-Item der Invoice. Mid-cycle-Charge-Invoices
-     * (z.B. nur Sitz-Erhöhung) tragen oft keinen plan-Line — dann return null.
+     * Reads the plan code from the first plan line item of the invoice. Mid-cycle charge invoices
+     * (e.g. seat increase only) often carry no plan line — then return null.
      */
     private function resolveOriginalPlanCode(BillingInvoice $invoice): ?string
     {

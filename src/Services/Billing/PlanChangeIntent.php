@@ -7,10 +7,10 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 
 /**
- * Composer-Input. Standalone konstruierbar — kein Coupling an SubscriptionChangeContext.
+ * Composer input. Standalone-constructible — no coupling to SubscriptionChangeContext.
  *
- * Addons werden als `code => quantity`-Map modelliert. Heute meist `quantity = 1` (boolean),
- * künftig ggf. quantitativ (z.B. ['print-gateway' => 3]).
+ * Addons are modeled as a `code => quantity` map. Today usually `quantity = 1` (boolean),
+ * possibly quantitative in the future (e.g. ['print-gateway' => 3]).
  */
 final class PlanChangeIntent
 {
@@ -36,7 +36,7 @@ final class PlanChangeIntent
     ) {}
 
     /**
-     * Serialisiert für Persistierung im Pending-State.
+     * Serialized for persistence in the pending state.
      *
      * @return array<string, mixed>
      */

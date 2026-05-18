@@ -9,8 +9,8 @@ use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 /**
- * Admin-Notification für dauerhafte Plan-Change-Failures (Mollie-PATCH oder Refund-Lines,
- * die nach Hard-Limit-Backoff nicht erfolgreich waren).
+ * Admin notification for permanent plan change failures (Mollie PATCH or refund lines
+ * that did not succeed after the hard-limit backoff).
  */
 class AdminPlanChangeFailedNotification extends Notification
 {

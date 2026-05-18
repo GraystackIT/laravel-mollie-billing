@@ -15,16 +15,16 @@ class OssProtocolService
      * Generate an OSS quarterly export CSV for the given calendar year and
      * write it to the configured filesystem disk (S3-compatible or local).
      *
-     * Aggregiert pro line_item nach (quarter, country, vat_rate). Eine Multi-VAT-Invoice
-     * trägt zu mehreren Buckets bei (eine pro line_item.vat_rate).
+     * Aggregates per line_item by (quarter, country, vat_rate). A multi-VAT invoice
+     * contributes to multiple buckets (one per line_item.vat_rate).
      *
      * Columns: quarter, country, sales_count, net_amount_eur, vat_amount_eur, vat_rate
      */
     public function export(int $year): OssExportResult
     {
-        // Quartalsabgrenzung in UTC, damit der Export deterministisch ist und
-        // nicht von app.timezone abhängt (ein Datensatz vom 31.12. 23:30 UTC
-        // soll immer in Q4 des Vorjahres landen, nicht in Q1 des Folgejahres).
+        // Quarter boundaries in UTC so the export is deterministic and
+        // doesn't depend on app.timezone (a record from 31 Dec 23:30 UTC
+        // should always land in Q4 of that year, not Q1 of the following year).
         $start = Carbon::create($year, 1, 1, 0, 0, 0, 'UTC');
         $end = Carbon::create($year, 12, 31, 23, 59, 59, 'UTC');
 
@@ -105,7 +105,7 @@ class OssProtocolService
         $quarter = (int) ceil(((int) $createdAt->month) / 3);
         $country = strtoupper((string) $invoice->country);
 
-        // Sammle Lines nach VAT-Rate, damit eine Invoice pro Rate genau einmal als sale zählt.
+        // Collect lines by VAT rate so an invoice counts exactly once as a sale per rate.
         $linesByRate = [];
         foreach ((array) ($invoice->line_items ?? []) as $line) {
             $rate = number_format((float) ($line['vat_rate'] ?? 0), 2, '.', '');
@@ -149,7 +149,7 @@ class OssProtocolService
     private function buildPath(int $year): string
     {
         $base = trim((string) config('mollie-billing.oss.path', 'billing/oss-exports'), '/');
-        // Timestamp im Pfad behält frühere Exporte als Audit-Spur.
+        // Timestamp in the path preserves earlier exports as an audit trail.
         $stamp = Carbon::now('UTC')->format('Ymd-His');
 
         return "{$base}/oss-export-{$year}-{$stamp}.csv";

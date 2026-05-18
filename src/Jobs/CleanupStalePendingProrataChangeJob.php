@@ -20,16 +20,16 @@ use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 /**
- * Daily-Cron: pollt Mollie für hängende pending_prorata_change-States > 24h.
+ * Daily cron: polls Mollie for stuck pending_prorata_change states older than 24h.
  *
- * Wenn der Charge-Webhook nie kommt (Mollie-Outage oder Webhook-Konfigfehler), bleibt
- * der Pending-State stehen. Dieser Job löst den Hänger auf:
+ * If the charge webhook never arrives (Mollie outage or webhook misconfiguration),
+ * the pending state lingers. This job resolves the stuck entry:
  *
- * - Mollie-Payment-Status `paid` → manuelles Phase-2-Triggering.
- * - Status `failed`/`canceled`/`expired` → Pending-State löschen.
- * - Mollie nicht erreichbar > 7 Tage → Pending löschen + Admin-Notification.
+ * - Mollie payment status `paid` → manually trigger Phase 2.
+ * - Status `failed`/`canceled`/`expired` → delete the pending state.
+ * - Mollie unreachable for > 7 days → delete pending + admin notification.
  *
- * Sollte täglich via Scheduler laufen.
+ * Should run daily via the scheduler.
  */
 class CleanupStalePendingProrataChangeJob implements ShouldQueue
 {
@@ -55,8 +55,8 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
         $threshold = BillingTime::nowUtc()->subHours(24);
 
-        // Suche Billables mit hängendem Pending-State.
-        // (JSON-Query — funktioniert in MySQL/Postgres/SQLite.)
+        // Find billables with a stuck pending state.
+        // (JSON query — works in MySQL/Postgres/SQLite.)
         $billables = $billableClass::query()
             ->whereNotNull('subscription_meta')
             ->get()
@@ -84,17 +84,17 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
         $paymentId = (string) ($pending['charge_payment_id'] ?? '');
         if ($paymentId === '') {
-            // Pending ohne Payment-ID — alt + nutzlos, löschen.
+            // Pending without payment ID — old and useless, delete it.
             unset($meta['pending_prorata_change']);
             $billable->forceFill(['subscription_meta' => $meta])->save();
             return;
         }
 
-        // Hard-Limit: 7 Tage.
+        // Hard limit: 7 days.
         if (! isset($pending['created_at'])) {
-            // Fehlt durch Datenkorruption oder manuellen Edit — InvoiceService schreibt created_at immer mit.
-            // Wir behandeln den Eintrag als alt genug zum Aufräumen, loggen aber laut, weil das auf einen
-            // Bug an der Schreibstelle hindeutet.
+            // Missing due to data corruption or manual edit — InvoiceService always writes created_at.
+            // We treat the entry as old enough for cleanup, but log loudly because this indicates
+            // a bug at the write site.
             Log::warning('CleanupStalePendingProrataChangeJob: pending_prorata_change ohne created_at — behandle als >7 Tage alt', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $paymentId,
@@ -120,20 +120,20 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             $payment = Mollie::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('CleanupStalePendingProrataChangeJob: Mollie unreachable for payment '.$paymentId, ['error' => $e->getMessage()]);
-            return; // beim nächsten Lauf nochmal probieren
+            return; // retry on the next run
         }
 
         $status = (string) ($payment->status ?? '');
 
         if ($status === 'paid') {
-            // Manuell die Phase-2-Logik triggern (analog zum Webhook-Handler).
-            // Wir simulieren den Webhook indem wir createInvoice direkt aufrufen.
-            // Für Vollständigkeit: idealerweise Webhook-Endpoint manuell aufrufen,
-            // aber zur Vereinfachung machen wir das hier inline.
+            // Manually trigger the Phase 2 logic (analogous to the webhook handler).
+            // We simulate the webhook by calling createInvoice directly.
+            // For completeness: ideally invoke the webhook endpoint manually,
+            // but for simplicity we do this inline here.
             $controller = app(\GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController::class);
-            // Webhook braucht Request-Kontext; einfacher: re-dispatch via Mollie-Webhook-Aufruf.
-            // Pragmatisch: wir loggen und überlassen es einem manuellen Webhook-Resend, oder
-            // implementieren einen direkten Trigger (TODO für Cleanup-Erweiterung).
+            // Webhook needs request context; simpler: re-dispatch via a Mollie webhook call.
+            // Pragmatic approach: we log and leave it to a manual webhook resend, or
+            // implement a direct trigger (TODO for cleanup extension).
             Log::info('CleanupStalePendingProrataChangeJob: payment is paid but webhook missing — manual webhook resend needed', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $paymentId,
@@ -149,6 +149,6 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             return;
         }
 
-        // Status pending/open/authorized: warten weiter.
+        // Status pending/open/authorized: keep waiting.
     }
 }
