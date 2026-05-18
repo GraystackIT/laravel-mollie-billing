@@ -85,7 +85,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         if ($existing !== null && $this->hasPersistedBillingData($existing)) {
             $this->billableId = (string) $existing->getKey();
             $this->billableClass = $existing->getMorphClass();
-            $this->company_name = (string) ($existing->name ?? '');
+            $this->company_name = $existing->getBillingName();
             $this->billing_street = (string) $existing->getBillingStreet();
             $this->billing_postal_code = (string) $existing->getBillingPostalCode();
             $this->billing_city = (string) $existing->getBillingCity();
@@ -922,8 +922,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             // billable in mount() and is shown read-only — skip the write.
             if (! $this->billing_locked) {
                 /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+                // The company/billing name is routed through setBillingName() so
+                // apps that use a User as the billable can persist it into a
+                // dedicated attribute (e.g. `practice_name`) without colliding
+                // with the user's personal `name` column.
+                $billable->setBillingName($this->company_name);
                 $billable->forceFill([
-                    'name' => $this->company_name,
                     'billing_street' => $this->billing_street,
                     'billing_postal_code' => $this->billing_postal_code,
                     'billing_city' => $this->billing_city,

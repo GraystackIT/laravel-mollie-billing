@@ -16,6 +16,8 @@ return new class extends Migration
             $table->id();
             $table->string('name')->nullable();
             $table->string('email')->nullable();
+            // Used by HasBillingNameOverrideTest to verify $billingNameAttribute / setBillingName().
+            $table->string('practice_name')->nullable();
 
             $table->string('mollie_customer_id')->nullable()->index();
             $table->string('mollie_mandate_id')->nullable();

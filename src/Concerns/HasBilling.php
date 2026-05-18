@@ -95,9 +95,33 @@ trait HasBilling
         return $this->email;
     }
 
+    /**
+     * The model attribute that holds the company/billing name surfaced in
+     * checkout, invoices and Mollie. Override on the consuming model when the
+     * billable model already uses `name` for something else (e.g. the personal
+     * name of the owning user on a User-as-billable setup):
+     *
+     *     protected function billingNameAttribute(): string
+     *     {
+     *         return 'practice_name';
+     *     }
+     *
+     * Apps that need a fully computed value should override `getBillingName()`
+     * and `setBillingName()` directly instead.
+     */
+    protected function billingNameAttribute(): string
+    {
+        return 'name';
+    }
+
     public function getBillingName(): string
     {
-        return $this->name;
+        return (string) ($this->{$this->billingNameAttribute()} ?? '');
+    }
+
+    public function setBillingName(string $name): void
+    {
+        $this->{$this->billingNameAttribute()} = $name;
     }
 
     public function getBillingStreet(): ?string

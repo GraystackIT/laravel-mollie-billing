@@ -508,6 +508,38 @@ The seat count is used during plan-change previews to calculate whether extra se
 - `latestBillingInvoice()` and `billingInvoices()` morph relation
 - `getWallet($type)` / `hasWallet($type)` / `createWallet($data)` — overridden bavix wrappers that resolve usage-type slugs **case-insensitively** (so `tokens`, `Tokens`, and `TOKENS` all hit the same wallet, and `createWallet` will not insert a duplicate row when a casing variant already exists). Catalog lookups (`includedUsage`, `usageOveragePrice`) follow the same case-insensitive rule. See [Usage Billing — Casing of usage-type identifiers](docs/usage-billing.md#casing-of-usage-type-identifiers).
 
+### Billing name vs. personal name
+
+The checkout collects a *company name* and writes it through the `getBillingName()` / `setBillingName()` pair on the billable. By default both methods read and write the model's `name` column, which is fine when the billable is a dedicated Organization / Tenant model.
+
+When your billable is the `User` model, however, `name` typically already stores the user's personal name. To keep the personal name intact while still letting the customer enter a company name for invoices, override the two methods (or `billingNameAttribute()`) on the billable model:
+
+```php
+class User extends Authenticatable implements Billable
+{
+    use HasBilling;
+
+    // Option A — point both accessor and mutator at a different column:
+    protected function billingNameAttribute(): string
+    {
+        return 'practice_name';
+    }
+
+    // Option B — full control, e.g. compute or fall back:
+    public function getBillingName(): string
+    {
+        return $this->practice_name ?? '';
+    }
+
+    public function setBillingName(string $name): void
+    {
+        $this->practice_name = $name;
+    }
+}
+```
+
+The `name` key passed to your `createBillableUsing` callback always carries the *company* name from the checkout form — your callback decides which attribute to persist it into.
+
 ## Coupon types
 
 | Type | Behavior | Quick example |
@@ -690,7 +722,7 @@ Every state change dispatches a Laravel event so apps can react via listeners. N
 - `TrialStarted`, `TrialConverted`, `TrialExpired`, `TrialExtended`
 - `MandateUpdated`
 - `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`, `DuplicatePaymentReceived`
-- `InvoiceCreated`, `InvoiceRefunded`, `CreditNoteIssued`
+- `InvoiceCreated`, `InvoiceRefunded`, `CreditNoteIssued`, `InvoicePdfRegenerated`
 - `OverageCharged`, `OverageChargeFailed`
 - `CouponRedeemed`, `GrantRevoked`
 - `CountryMismatchFlagged`, `CountryMismatchResolved`

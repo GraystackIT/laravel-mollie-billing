@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Events\CreditNoteIssued;
 use GraystackIT\MollieBilling\Events\InvoiceCreated;
+use GraystackIT\MollieBilling\Events\InvoicePdfRegenerated;
 use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
@@ -246,6 +247,49 @@ class InvoiceService
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Re-render the PDF for an existing invoice. Deletes the previous file (if any)
+     * before writing the new one to avoid orphaned blobs on the disk. Serial number,
+     * line items and amounts are unchanged — this only regenerates the rendered PDF.
+     *
+     * Returns true when a fresh PDF was persisted, false when the underlying renderer
+     * failed (errors are already logged by generateAndStorePdf()).
+     */
+    public function regeneratePdf(BillingInvoice $invoice): bool
+    {
+        /** @var Billable|null $billable */
+        $billable = $invoice->billable()->first();
+        if ($billable === null) {
+            throw new \LogicException("Cannot regenerate PDF: invoice {$invoice->id} has no billable.");
+        }
+
+        if ($invoice->pdf_path !== null && $invoice->pdf_disk !== null) {
+            try {
+                Storage::disk($invoice->pdf_disk)->delete($invoice->pdf_path);
+            } catch (\Throwable $e) {
+                Log::warning('Could not delete previous invoice PDF before regeneration', [
+                    'invoice_id' => $invoice->id,
+                    'disk' => $invoice->pdf_disk,
+                    'path' => $invoice->pdf_path,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+            $invoice->pdf_disk = null;
+            $invoice->pdf_path = null;
+            $invoice->save();
+        }
+
+        $this->generateAndStorePdf($invoice, $billable);
+
+        $success = $invoice->fresh()?->hasPdf() === true;
+
+        if ($success) {
+            event(new InvoicePdfRegenerated($billable, $invoice->fresh() ?? $invoice));
+        }
+
+        return $success;
     }
 
     /**

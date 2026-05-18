@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
@@ -172,6 +173,37 @@ new class extends Component {
             $this->error = 'Unable to process refund. The payment provider rejected the request — the invoice may already be fully refunded.';
         }
     }
+
+    public function regeneratePdf(int $invoiceId, InvoiceService $service): void
+    {
+        $this->flash = $this->error = null;
+
+        $billable = $this->billable();
+        if (! $billable) {
+            $this->error = 'Billable not found.';
+            return;
+        }
+
+        $invoice = $billable->billingInvoices()->where('id', $invoiceId)->first();
+        if (! $invoice) {
+            $this->error = 'Invoice not found.';
+            return;
+        }
+
+        try {
+            $success = $service->regeneratePdf($invoice);
+            $this->flash = $success
+                ? 'PDF regenerated.'
+                : 'PDF regeneration failed. Check the application log for details.';
+            if (! $success) {
+                $this->error = $this->flash;
+                $this->flash = null;
+            }
+        } catch (\Throwable $e) {
+            report($e);
+            $this->error = 'Unable to regenerate PDF: '.$e->getMessage();
+        }
+    }
 };
 
 ?>
@@ -244,6 +276,17 @@ new class extends Component {
                                             <flux:button size="xs" variant="ghost" aria-label="Refund" icon="arrow-uturn-left" wire:click="openRefund({{ $inv->id }})"/>
                                         </flux:tooltip>
                                         @endif
+                                        <flux:tooltip :content="$inv->hasPdf() ? 'Regenerate PDF' : 'Generate PDF'">
+                                            <flux:button
+                                                size="xs"
+                                                variant="ghost"
+                                                icon="arrow-path"
+                                                aria-label="Regenerate invoice PDF"
+                                                wire:click="regeneratePdf({{ $inv->id }})"
+                                                wire:loading.attr="disabled"
+                                                wire:target="regeneratePdf({{ $inv->id }})"
+                                            />
+                                        </flux:tooltip>
                                         @if ($pdfUrl)
                                             <flux:tooltip content="Download PDF">
                                                 <flux:button size="xs" variant="ghost" icon="arrow-down-tray" :href="$pdfUrl" target="_blank" aria-label="Download invoice PDF" />

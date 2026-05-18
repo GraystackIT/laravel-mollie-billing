@@ -19,7 +19,7 @@ Coupons are first-class entities in the system. They are stored in `coupons`, re
 - `single_payment` is *only* accepted on Checkout and One-Time-Order purchases. Plan-change / seat-sync / addon-enable changes the price of an existing Mollie subscription — a one-shot discount that fully covers the prorata charge would leave the local plan switched while Mollie keeps charging the old amount. Use `recurring` for those flows.
 - `recurring` is *not* accepted on One-Time-Order purchases — there are no follow-up charges to attach the recurring marker to, so it would have no effect.
 
-The admin creates coupons via `admin/coupons/⚡create.blade.php` — a single form with conditional fields per type.
+The admin creates coupons via `admin/coupons/⚡create.blade.php` — a single form with conditional fields per type. For `credits` coupons, the form renders one numeric input per usage type declared in `SubscriptionCatalogInterface::allUsageTypes()` and writes the entered amounts into `credits_payload`; empty or zero fields are dropped on save. If no usage types are declared in the plans config, the form surfaces a warning instead — the coupon cannot be saved until at least one usage type exists, because `credits_payload` would be empty and the domain validator (`Credits coupons require a credits payload.`) would reject it.
 
 ## Coupon types
 

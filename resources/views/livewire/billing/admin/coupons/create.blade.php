@@ -18,6 +18,7 @@ new class extends Component {
             'productOptions' => collect($catalog->allProducts())
                 ->mapWithKeys(fn (string $code) => [$code => $catalog->productName($code) ?: $code])
                 ->all(),
+            'usageTypeOptions' => $catalog->allUsageTypes(),
         ];
     }
 
@@ -44,6 +45,9 @@ new class extends Component {
     /** @var array<int, string> */
     public array $grant_addon_codes = [];
 
+    /** @var array<string, int|string|null> */
+    public array $credits_payload = [];
+
     /** @var array<int, string> */
     public array $applicable_addons = [];
     /** @var array<int, string> */
@@ -55,6 +59,14 @@ new class extends Component {
     {
         $this->error = null;
         try {
+            $creditsPayload = [];
+            foreach ($this->credits_payload as $usageType => $quantity) {
+                $qty = (int) $quantity;
+                if ($qty > 0) {
+                    $creditsPayload[(string) $usageType] = $qty;
+                }
+            }
+
             $attrs = array_filter([
                 'code' => strtoupper(trim($this->code)),
                 'name' => $this->name ?: $this->code,
@@ -75,6 +87,7 @@ new class extends Component {
                 'grant_interval' => $this->grant_interval,
                 'grant_duration_days' => $this->grant_duration_days,
                 'grant_addon_codes' => $this->grant_addon_codes !== [] ? array_values($this->grant_addon_codes) : null,
+                'credits_payload' => $creditsPayload !== [] ? $creditsPayload : null,
                 'applicable_addons' => $this->applicable_addons !== [] ? array_values($this->applicable_addons) : null,
                 'applicable_products' => $this->applicable_products !== [] ? array_values($this->applicable_products) : null,
             ], fn ($v) => $v !== null && $v !== '');
@@ -220,11 +233,29 @@ new class extends Component {
         @if ($type === 'credits')
             <x-mollie-billing::admin.section
                 title="Credits"
-                description="Credits are issued via a dedicated credit grant flow. This coupon type currently has no additional configuration."
+                description="On redemption, the specified amount is credited to each wallet listed below. Leave a field empty (or 0) to skip that wallet."
             >
-                <flux:callout variant="secondary" icon="information-circle" inline>
-                    Use the auto-apply token below to wire this coupon into a signup URL.
-                </flux:callout>
+                @if (empty($usageTypeOptions))
+                    <flux:callout variant="warning" icon="exclamation-triangle" inline>
+                        No usage types are declared in your plans config (<code>included_usages</code> / <code>usage_overage_prices</code>). Define at least one usage type before creating a credits coupon.
+                    </flux:callout>
+                @else
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                        @foreach ($usageTypeOptions as $usageType)
+                            <flux:input
+                                type="number"
+                                wire:model="credits_payload.{{ $usageType }}"
+                                :label="$usageType"
+                                placeholder="0"
+                                :suffix="$usageType"
+                                min="0"
+                            />
+                        @endforeach
+                    </div>
+                    <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
+                        At least one wallet must receive a positive amount. The values represent whole units (e.g. tokens, SMS) that are credited on redemption.
+                    </flux:text>
+                @endif
             </x-mollie-billing::admin.section>
         @endif
 

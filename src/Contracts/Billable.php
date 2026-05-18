@@ -14,6 +14,7 @@ interface Billable
     // Contact / billing address
     public function getBillingEmail(): string;
     public function getBillingName(): string;
+    public function setBillingName(string $name): void;
     public function getBillingStreet(): ?string;
     public function getBillingCity(): ?string;
     public function getBillingPostalCode(): ?string;

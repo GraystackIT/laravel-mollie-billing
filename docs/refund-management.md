@@ -210,6 +210,8 @@ The admin panel includes a refund modal at `/billing/admin` that calls `RefundIn
 - All reason codes with optional text
 - Optional user notification toggle
 
+The same invoice list also exposes a **Regenerate PDF** action per row. It calls `InvoiceService::regeneratePdf($invoice)`, which deletes the previous file from the configured disk before re-rendering with the current template / seller config. Invoice data, serial number and amounts are untouched — this is purely a re-render of the PDF blob. Useful when the original render failed silently, the stored file was corrupted, or the seller details on the PDF need to reflect updated config without re-issuing the invoice itself. The action dispatches `InvoicePdfRegenerated` (`billable`, `invoice`) for auditing.
+
 ## Exceptions
 
 | Exception | When |
