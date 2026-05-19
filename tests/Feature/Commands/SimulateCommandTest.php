@@ -152,3 +152,4 @@ it('rejects a missing billable id with a clear error', function (): void {
         ->expectsOutputToContain('not found')
         ->assertFailed();
 });
+

@@ -26,8 +26,9 @@ Three classes of transitions need to be testable:
 ## `billing:simulate`
 
 ```bash
-# Interactive walkthrough — prompts for billable id, then offers each flow with
-# run / skip / abort. Destructive transitions require explicit confirmation.
+# Interactive walkthrough — searchable billable picker (arrow keys), then a
+# multi-select of flows (space to toggle, enter to confirm). Destructive
+# transitions still require an explicit confirm.
 php artisan billing:simulate
 
 # Single flow (scriptable, no prompts):

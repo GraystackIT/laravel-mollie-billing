@@ -47,10 +47,7 @@ class LifecycleSimulator
 
     public function resolveBillable(int|string $id): Billable
     {
-        $class = (string) config('mollie-billing.billable_model');
-        if ($class === '' || ! class_exists($class)) {
-            throw new RuntimeException('mollie-billing.billable_model is not configured.');
-        }
+        $class = $this->billableClass();
 
         $billable = $class::query()->find($id);
         if ($billable === null) {
@@ -62,6 +59,49 @@ class LifecycleSimulator
         }
 
         return $billable;
+    }
+
+    /**
+     * Returns id => "label" pairs matching the search term, capped at 20 entries.
+     * Used by the interactive `billing:simulate` picker.
+     *
+     * @return array<int|string, string>
+     */
+    public function searchBillables(string $term): array
+    {
+        $class = $this->billableClass();
+        $term = trim($term);
+
+        $query = $class::query()->limit(20)->orderBy('id', 'desc');
+
+        if ($term !== '') {
+            $query->where(function ($q) use ($term): void {
+                $q->where('id', $term)
+                    ->orWhere('email', 'like', "%{$term}%")
+                    ->orWhere('name', 'like', "%{$term}%");
+            });
+        }
+
+        $rows = [];
+        foreach ($query->get() as $b) {
+            if (! $b instanceof Billable) {
+                continue;
+            }
+            $id = $b->getKey();
+            $status = $b->getBillingSubscriptionStatus()->value;
+            $rows[$id] = "#{$id} — {$b->getBillingEmail()} [{$status}]";
+        }
+
+        return $rows;
+    }
+
+    private function billableClass(): string
+    {
+        $class = (string) config('mollie-billing.billable_model');
+        if ($class === '' || ! class_exists($class)) {
+            throw new RuntimeException('mollie-billing.billable_model is not configured.');
+        }
+        return $class;
     }
 
     public function trialEndingSoon(Billable $billable): void

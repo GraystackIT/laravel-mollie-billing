@@ -10,10 +10,15 @@ use Illuminate\Console\Command;
 use Illuminate\Contracts\Foundation\Application;
 use Throwable;
 
+use function Laravel\Prompts\confirm;
+use function Laravel\Prompts\multiselect;
+use function Laravel\Prompts\search;
+use function Laravel\Prompts\text;
+
 class SimulateCommand extends Command
 {
     protected $signature = 'billing:simulate
-        {flow? : Single flow to run (skips the interactive runner)}
+        {flow? : Single flow to run (skips the interactive picker)}
         {--billable= : Billable id for the chosen flow}
         {--usage-type= : Usage type for the overage-charge flow}
         {--withdraw= : Units to withdraw before the overage-charge flow}
@@ -22,6 +27,26 @@ class SimulateCommand extends Command
         {--yes : Skip all confirmation prompts}';
 
     protected $description = 'Simulate subscription lifecycle flows on a non-production system.';
+
+    private const LABELS = [
+        'trial-ending-soon' => 'Trial ending soon (T-1 notification)',
+        'trial-expired' => 'Trial expired → PastDue + notification',
+        'renewal' => 'Renewal (real Mollie sandbox payment + webhook)',
+        'apply-scheduled-change' => 'Apply scheduled plan change at period end',
+        'overage-charge' => 'Overage charge (negative wallet balance)',
+        'past-due-auto-cancel' => 'Past-due → auto-cancelled after max days',
+        'cancelled-to-expired' => 'Cancelled → Expired at period end',
+    ];
+
+    private const BLURBS = [
+        'trial-ending-soon' => 'Sets trial_ends_at = tomorrow, runs ProcessTrialLifecycleJob → expects TrialEndingSoonNotification.',
+        'trial-expired' => 'Sets trial_ends_at = yesterday, runs ProcessTrialLifecycleJob → expects status=PastDue + TrialExpiredNotification.',
+        'renewal' => 'Creates a real recurring payment in the Mollie sandbox, polls until paid, then invokes our webhook.',
+        'apply-scheduled-change' => 'Sets scheduled_change_at = now-1min, runs PrepareUsageOverageJob → ApplyScheduledChangesJob picks it up.',
+        'overage-charge' => 'Withdraws units from a wallet (negative balance), runs PrepareUsageOverageJob → triggers a Mollie overage payment.',
+        'past-due-auto-cancel' => 'Sets past_due_since older than past_due_max_days, runs PrepareUsageOverageJob → expects status=Cancelled.',
+        'cancelled-to-expired' => 'Sets subscription_ends_at = past, runs PrepareUsageOverageJob → expects status=Expired.',
+    ];
 
     public function handle(Application $app, LifecycleSimulator $sim): int
     {
@@ -56,37 +81,39 @@ class SimulateCommand extends Command
     private function runInteractive(LifecycleSimulator $sim): int
     {
         $this->components->info('Subscription lifecycle simulator (non-production)');
-        $this->line('Walks through each flow in order. Pick "skip" to jump one, "abort" to stop.');
-        $this->newLine();
 
-        $billable = $this->resolveBillableFromOptions($sim) ?? $this->promptForBillable($sim);
+        $billable = $this->resolveBillableFromOptions($sim) ?? $this->pickBillable($sim);
         if ($billable === null) {
             return self::FAILURE;
         }
 
-        $this->line("Target billable: <info>#{$billable->getKey()}</info> ({$billable->getBillingEmail()})");
+        $this->line(" Target: <info>#{$billable->getKey()}</info> {$billable->getBillingEmail()}");
         $this->newLine();
 
-        foreach (LifecycleSimulator::FLOWS as $flow) {
-            $choice = $this->choice(
-                "Run flow [{$flow}]?",
-                ['run', 'skip', 'abort'],
-                default: 'run',
-            );
-
-            if ($choice === 'abort') {
-                $this->warn('Aborted by user.');
-                return self::SUCCESS;
-            }
-            if ($choice === 'skip') {
-                continue;
-            }
-
-            $this->dispatch($sim, $flow, $billable, interactive: true);
-            $this->newLine();
+        $options = [];
+        foreach (LifecycleSimulator::FLOWS as $key) {
+            $options[$key] = self::LABELS[$key];
         }
 
-        $this->components->info('All flows processed.');
+        $selected = multiselect(
+            label: 'Which flows do you want to run?',
+            options: $options,
+            required: false,
+            hint: 'Space to toggle, Enter to confirm. Flows run in the order you see here.',
+        );
+
+        if ($selected === []) {
+            $this->warn('No flows selected — nothing to do.');
+            return self::SUCCESS;
+        }
+
+        foreach ($selected as $flow) {
+            $this->newLine();
+            $this->dispatch($sim, $flow, $billable, interactive: true);
+        }
+
+        $this->newLine();
+        $this->components->info('Done.');
         return self::SUCCESS;
     }
 
@@ -105,16 +132,20 @@ class SimulateCommand extends Command
         }
     }
 
-    private function promptForBillable(LifecycleSimulator $sim): ?Billable
+    private function pickBillable(LifecycleSimulator $sim): ?Billable
     {
-        $id = $this->ask('Billable id?');
-        if ($id === null || $id === '') {
-            $this->error('Billable id required.');
-            return null;
-        }
-
         try {
-            return $sim->resolveBillable($id);
+            $id = search(
+                label: 'Pick a billable',
+                options: function (string $value) use ($sim): array {
+                    return $sim->searchBillables($value);
+                },
+                placeholder: 'Type id, name or email…',
+                scroll: 10,
+                hint: 'Arrow keys to navigate, Enter to pick.',
+            );
+
+            return $sim->resolveBillable((string) $id);
         } catch (Throwable $e) {
             $this->error($e->getMessage());
             return null;
@@ -123,21 +154,22 @@ class SimulateCommand extends Command
 
     private function dispatch(LifecycleSimulator $sim, string $flow, Billable $billable, bool $interactive): bool
     {
-        $this->line("──── <comment>{$flow}</comment> ────");
-        $this->describe($flow);
+        $label = self::LABELS[$flow] ?? $flow;
+        $this->line("──── <comment>{$label}</comment> ────");
+        $this->line('  '.(self::BLURBS[$flow] ?? ''));
 
         $before = $this->snapshot($billable);
 
         try {
             match ($flow) {
                 'trial-ending-soon' => $sim->trialEndingSoon($billable),
-                'trial-expired' => $this->confirmAnd($interactive, 'Set trial to expired and run trial lifecycle job?')
+                'trial-expired' => $this->confirmAnd($interactive, 'Force trial to expired (sets status=PastDue)?')
                     ? $sim->trialExpired($billable)
                     : $this->note('skipped'),
                 'renewal' => $this->runRenewal($sim, $billable, $interactive),
                 'apply-scheduled-change' => $sim->applyScheduledChange($billable, $this->resolvePlanOption($interactive)),
                 'overage-charge' => $this->runOverage($sim, $billable, $interactive),
-                'past-due-auto-cancel' => $this->confirmAnd($interactive, 'Force billable to auto-cancel (PastDue → Cancelled)?')
+                'past-due-auto-cancel' => $this->confirmAnd($interactive, 'Force auto-cancel (PastDue → Cancelled)?')
                     ? $sim->pastDueAutoCancel($billable)
                     : $this->note('skipped'),
                 'cancelled-to-expired' => $this->confirmAnd($interactive, 'Force billable to Expired?')
@@ -159,11 +191,11 @@ class SimulateCommand extends Command
     private function runRenewal(LifecycleSimulator $sim, Billable $billable, bool $interactive): void
     {
         if ($billable->getMollieMandateId() === null) {
-            $this->warn('No Mollie mandate on this billable — renewal flow skipped. Complete a checkout first.');
+            $this->warn('  No Mollie mandate on this billable — renewal flow skipped. Complete a checkout first.');
             return;
         }
 
-        if (! $this->confirmAnd($interactive, 'This will create a REAL payment in the Mollie sandbox. Continue?')) {
+        if (! $this->confirmAnd($interactive, 'This creates a REAL payment in the Mollie sandbox. Continue?')) {
             $this->note('skipped');
             return;
         }
@@ -186,13 +218,21 @@ class SimulateCommand extends Command
         $type = (string) ($this->option('usage-type') ?? '');
         $units = (int) ($this->option('withdraw') ?? 0);
 
-        if ($interactive) {
-            if ($type === '') {
-                $type = (string) $this->ask('Usage type to withdraw (e.g. tokens, sms)?');
-            }
-            if ($units <= 0) {
-                $units = (int) $this->ask('Units to withdraw?', '100');
-            }
+        if ($interactive && $type === '') {
+            $type = (string) text(
+                label: 'Usage type to withdraw',
+                placeholder: 'tokens, sms, …',
+                required: true,
+            );
+        }
+
+        if ($interactive && $units <= 0) {
+            $units = (int) text(
+                label: 'Units to withdraw',
+                default: '100',
+                required: true,
+                validate: fn (string $v) => ((int) $v) > 0 ? null : 'Must be a positive integer.',
+            );
         }
 
         if ($type === '' || $units <= 0) {
@@ -215,22 +255,12 @@ class SimulateCommand extends Command
             return null;
         }
 
-        $answer = $this->ask('Plan code to schedule (leave empty to reuse existing scheduled_change)?');
-        return $answer !== null && $answer !== '' ? (string) $answer : null;
-    }
-
-    private function describe(string $flow): void
-    {
-        $blurbs = [
-            'trial-ending-soon' => 'Sets trial_ends_at = tomorrow, runs ProcessTrialLifecycleJob → expects TrialEndingSoonNotification.',
-            'trial-expired' => 'Sets trial_ends_at = yesterday, runs ProcessTrialLifecycleJob → expects status=PastDue + TrialExpiredNotification.',
-            'renewal' => 'Creates a real recurring payment in the Mollie sandbox, polls until paid, then triggers our webhook.',
-            'apply-scheduled-change' => 'Sets scheduled_change_at = now-1min, runs PrepareUsageOverageJob → ApplyScheduledChangesJob picks it up.',
-            'overage-charge' => 'Withdraws units from a wallet (negative balance), runs PrepareUsageOverageJob → triggers a Mollie overage payment.',
-            'past-due-auto-cancel' => 'Sets past_due_since older than past_due_max_days, runs PrepareUsageOverageJob → expects status=Cancelled.',
-            'cancelled-to-expired' => 'Sets subscription_ends_at = past, runs PrepareUsageOverageJob → expects status=Expired.',
-        ];
-        $this->line('  '.($blurbs[$flow] ?? ''));
+        $answer = text(
+            label: 'Plan code to schedule',
+            placeholder: 'leave empty to reuse existing scheduled_change',
+            required: false,
+        );
+        return $answer !== '' ? (string) $answer : null;
     }
 
     private function confirmAnd(bool $interactive, string $question): bool
@@ -238,7 +268,7 @@ class SimulateCommand extends Command
         if (! $interactive || $this->option('yes')) {
             return true;
         }
-        return $this->confirm($question, false);
+        return confirm(label: $question, default: false);
     }
 
     private function note(string $msg): void
