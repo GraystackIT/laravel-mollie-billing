@@ -169,12 +169,14 @@ The output path is returned by the artisan command and printed to stdout.
 
 `IpGeolocationManager::defaultCountryFor(?string $ip): string` is used by both checkout and billing-data Livewire components to pre-select a country in the dropdown when no billable country is yet persisted. It is:
 
-- Cached per IP for 24 h.
+- Cached per IP for 24 h on success, 1 h on failure (negative cache).
 - Skipped for empty / private / loopback IPs.
 - Validated against the configured `checkout_countries` allowlist.
 - Always falls back to `default_billing_country` (config) when the lookup is inconclusive.
 
 The IP country is **never persisted** on the billable. It is purely a UX hint — what the user submits is what counts.
+
+Caching lives in `IpGeolocationManager::getCountry()`, so the country-block middleware (`BlockRestrictedCountries`) shares the same cache and does not trigger one driver call per request.
 
 ## Live payment-country warning in billing-data
 

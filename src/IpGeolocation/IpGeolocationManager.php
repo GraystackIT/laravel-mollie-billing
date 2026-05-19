@@ -40,11 +40,6 @@ class IpGeolocationManager extends Manager
         return new NullDriver();
     }
 
-    public function getCountry(string $ip): ?string
-    {
-        return $this->driver()->getCountry($ip);
-    }
-
     /**
      * Sentinel value cached when a lookup yields no usable country, so we don't
      * re-hit the driver on every page load. `Cache::remember` does not persist
@@ -53,36 +48,34 @@ class IpGeolocationManager extends Manager
     private const NEGATIVE_CACHE_SENTINEL = '_';
 
     /**
-     * Resolve a UX default country for the given client IP.
+     * Resolve the country for a client IP via the active driver, cached.
      *
      * Cached per IP for 24h on success and for 1h on failure (negative cache).
-     * Returns the configured fallback when the IP is empty/private, the driver
-     * answers null/throws, or the resolved country is not in the country
-     * selector allowlist.
+     * Returns null for empty/private/invalid IPs and when the driver answers
+     * null or throws. Result is upper-cased ISO 3166-1 alpha-2.
+     *
+     * This is the single entry point both the UX default-country resolver and
+     * the country-block middleware go through, so both share the same cache.
      */
-    public function defaultCountryFor(?string $ip): string
+    public function getCountry(string $ip): ?string
     {
-        $fallback = (string) $this->config->get('mollie-billing.default_billing_country', 'AT');
-
-        if ($ip === null || $ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false || IpUtils::isPrivateIp($ip)) {
-            return $fallback;
+        if ($ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false || IpUtils::isPrivateIp($ip)) {
+            return null;
         }
 
         $cacheKey = "billing:ip:country:{$ip}";
         $cached = Cache::get($cacheKey);
 
         if ($cached === self::NEGATIVE_CACHE_SENTINEL) {
-            return $fallback;
+            return null;
         }
 
         if (is_string($cached) && $cached !== '') {
-            $allowed = array_keys(CountryResolver::resolve());
-
-            return in_array($cached, $allowed, true) ? $cached : $fallback;
+            return $cached;
         }
 
         try {
-            $resolved = $this->getCountry($ip);
+            $resolved = $this->driver()->getCountry($ip);
         } catch (Throwable) {
             $resolved = null;
         }
@@ -90,11 +83,35 @@ class IpGeolocationManager extends Manager
         if ($resolved === null || $resolved === '') {
             Cache::put($cacheKey, self::NEGATIVE_CACHE_SENTINEL, now()->addHour());
 
-            return $fallback;
+            return null;
         }
 
         $resolved = strtoupper($resolved);
         Cache::put($cacheKey, $resolved, now()->addDay());
+
+        return $resolved;
+    }
+
+    /**
+     * Resolve a UX default country for the given client IP.
+     *
+     * Thin wrapper over getCountry() that applies the country-selector
+     * allowlist and returns the configured fallback when no usable country
+     * can be determined.
+     */
+    public function defaultCountryFor(?string $ip): string
+    {
+        $fallback = (string) $this->config->get('mollie-billing.default_billing_country', 'AT');
+
+        if ($ip === null) {
+            return $fallback;
+        }
+
+        $resolved = $this->getCountry($ip);
+
+        if ($resolved === null) {
+            return $fallback;
+        }
 
         $allowed = array_keys(CountryResolver::resolve());
 

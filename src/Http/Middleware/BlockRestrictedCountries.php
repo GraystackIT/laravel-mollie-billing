@@ -7,8 +7,6 @@ namespace GraystackIT\MollieBilling\Http\Middleware;
 use Closure;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use Illuminate\Http\Request;
-use Symfony\Component\HttpFoundation\IpUtils;
-use Throwable;
 
 /**
  * Blocks requests originating from disallowed countries based on the
@@ -37,7 +35,8 @@ class BlockRestrictedCountries
         $countries = array_map('strtoupper', (array) ($config['countries'] ?? []));
         $blockUnknown = (bool) ($config['block_unknown'] ?? false);
 
-        $country = $this->resolveCountry($request->ip());
+        $ip = $request->ip();
+        $country = $ip !== null ? $this->geolocation->getCountry($ip) : null;
 
         if ($country === null) {
             if ($blockUnknown) {
@@ -55,21 +54,6 @@ class BlockRestrictedCountries
         }
 
         return $next($request);
-    }
-
-    private function resolveCountry(?string $ip): ?string
-    {
-        if ($ip === null || $ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false || IpUtils::isPrivateIp($ip)) {
-            return null;
-        }
-
-        try {
-            $country = $this->geolocation->getCountry($ip);
-        } catch (Throwable) {
-            return null;
-        }
-
-        return is_string($country) && $country !== '' ? strtoupper($country) : null;
     }
 
     private function redirectToBlocked(Request $request, ?string $country)
