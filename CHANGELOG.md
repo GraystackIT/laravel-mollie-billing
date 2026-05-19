@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-05-19
+
 ### Changed
 
 - **BREAKING**: `SubscriptionCatalogInterface::usageRollover()` now takes a usage type instead of a plan code. Configure rollover per usage type via the new `usage_types.<type>.rollover` block in `config/mollie-billing-plans.php`.
