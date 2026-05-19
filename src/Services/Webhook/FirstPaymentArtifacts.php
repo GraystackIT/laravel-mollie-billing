@@ -25,6 +25,11 @@ class FirstPaymentArtifacts
      * Persist mandate, customer ID, country, and create the invoice for a first
      * payment (real first-time activation or local→Mollie upgrade).
      *
+     * The country-match check is intentionally NOT run here: callers must run it
+     * AFTER the subscription has been fully activated, otherwise a mismatch-driven
+     * cancel-at-period-end would be overwritten by the activation flow's final
+     * status=Active forceFill. See {@see runCountryMatchCheck()}.
+     *
      * @param  array<int, string>  $addonCodes
      */
     public function persist(
@@ -41,14 +46,22 @@ class FirstPaymentArtifacts
             'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),
         ])->save();
 
+        $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
+
+        return $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
+    }
+
+    /**
+     * Run the three-way country reconciliation. Call this only after the
+     * subscription has been fully activated so a mismatch-triggered
+     * cancel-at-period-end survives.
+     */
+    public function runCountryMatchCheck(Billable $billable): void
+    {
         try {
             $this->countryMatchService->check($billable);
         } catch (\Throwable $e) {
             Log::warning('Country match check failed', ['error' => $e->getMessage()]);
         }
-
-        $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
-
-        return $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
     }
 }

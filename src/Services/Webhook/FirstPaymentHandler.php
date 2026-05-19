@@ -126,6 +126,8 @@ class FirstPaymentHandler
             }
         }
 
+        $this->firstPaymentArtifacts->runCountryMatchCheck($billable);
+
         event(new SubscriptionCreated($billable, $planCode, $interval));
         event(new PaymentSucceeded($billable, $invoice));
 

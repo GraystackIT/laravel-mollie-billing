@@ -101,23 +101,25 @@ class MandateOnlyPaymentHandler
             'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),
         ])->save();
 
+        // Activate FIRST so plan_code/interval/source land on the billable even when the
+        // country-match check below cancels the subscription. CancelSubscription only
+        // touches status + ends_at, so ResubscribeSubscription can still recover the
+        // billable once the user resolves the mismatch.
+        if ($trialDays > 0) {
+            $this->activateTrialSubscriptionAfterMandate(
+                $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode, $trialDays
+            );
+        } else {
+            $this->activateCouponSubscriptionAfterMandate(
+                $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode
+            );
+        }
+
         try {
             $this->countryMatchService->check($billable);
         } catch (\Throwable $e) {
             Log::warning('Country match check failed during mandate-only activation', ['error' => $e->getMessage()]);
         }
-
-        if ($trialDays > 0) {
-            $this->activateTrialSubscriptionAfterMandate(
-                $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode, $trialDays
-            );
-
-            return;
-        }
-
-        $this->activateCouponSubscriptionAfterMandate(
-            $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode
-        );
     }
 
     /**

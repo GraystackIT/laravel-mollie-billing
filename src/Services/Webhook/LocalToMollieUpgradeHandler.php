@@ -104,6 +104,8 @@ class LocalToMollieUpgradeHandler
             $this->walletAdjuster->adjust($billable, $oldPlan, $oldInterval, $planCode, $interval);
         }
 
+        $this->firstPaymentArtifacts->runCountryMatchCheck($billable);
+
         event(new SubscriptionUpgradedFromLocal(
             $billable,
             $oldPlan,
