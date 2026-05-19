@@ -408,12 +408,13 @@ class MollieWebhookController extends Controller
         if ($admins !== []) {
             Notification::send(
                 $admins,
-                new AdminPaidWithoutBillableNotification(
-                    paymentId: $paymentId,
-                    billableType: $billableType,
-                    billableId: $billableId,
-                    amountCents: $amountCents,
-                    currency: $currency,
+                MollieBilling::resolveNotification(
+                    AdminPaidWithoutBillableNotification::class,
+                    $paymentId,
+                    $billableType,
+                    $billableId,
+                    $amountCents,
+                    $currency,
                 ),
             );
         }

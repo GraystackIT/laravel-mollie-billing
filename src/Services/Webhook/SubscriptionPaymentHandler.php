@@ -255,7 +255,7 @@ class SubscriptionPaymentHandler
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);
         if (! empty($recipients)) {
-            Notification::send($recipients, new SubscriptionPaymentFailedNotification($billable, (string) $payment->id));
+            Notification::send($recipients, MollieBilling::resolveNotification(SubscriptionPaymentFailedNotification::class, $billable, (string) $payment->id));
         }
     }
 

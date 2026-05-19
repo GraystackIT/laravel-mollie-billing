@@ -111,7 +111,7 @@ class RefundInvoiceService
 
                 $recipients = MollieBilling::notifyAdmin();
                 if ($billable !== null && ! empty($recipients)) {
-                    Notification::send($recipients, new AdminRefundFailedNotification($billable, $e));
+                    Notification::send($recipients, MollieBilling::resolveNotification(AdminRefundFailedNotification::class, $billable, $e));
                 }
 
                 throw $e;
@@ -142,7 +142,7 @@ class RefundInvoiceService
                 if ($notifyUser) {
                     $recipients = MollieBilling::notifyBillingAdmins($billable);
                     if (! empty($recipients)) {
-                        Notification::send($recipients, new RefundProcessedNotification($billable, $creditNote));
+                        Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $billable, $creditNote));
                     }
                 }
             }

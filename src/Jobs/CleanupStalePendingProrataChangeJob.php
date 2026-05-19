@@ -108,9 +108,10 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             $admins = MollieBilling::notifyAdmin();
             $admins = is_array($admins) ? $admins : iterator_to_array($admins);
             if ($admins !== []) {
-                Notification::send($admins, new AdminPlanChangeFailedNotification(
-                    reason: 'pending_prorata_change wurde nach 7 Tagen ohne Webhook gelöscht',
-                    context: ['payment_id' => $paymentId, 'billable_id' => $billable->getKey()],
+                Notification::send($admins, MollieBilling::resolveNotification(
+                    AdminPlanChangeFailedNotification::class,
+                    'pending_prorata_change wurde nach 7 Tagen ohne Webhook gelöscht',
+                    ['payment_id' => $paymentId, 'billable_id' => $billable->getKey()],
                 ));
             }
             return;

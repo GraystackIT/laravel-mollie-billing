@@ -52,6 +52,9 @@ class MollieBilling
     /** @var Closure(Billable): void|null */
     protected static ?Closure $cleanupOrphanedBillableCallback = null;
 
+    /** @var array<class-string, class-string> */
+    protected static array $notificationMap = [];
+
     protected static ?MollieBillingFake $fake = null;
 
     public static function authUsing(Closure $callback): void
@@ -261,6 +264,46 @@ class MollieBilling
         if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
             $billable->delete();
         }
+    }
+
+    /**
+     * Replace one of the package's notifications with a custom class. The app's
+     * class is instantiated with the same constructor arguments as the original,
+     * so it should accept the same signature (typically a Billable, optionally
+     * additional context like an invoice or amount).
+     *
+     * @param  class-string  $original   Fully qualified class name of the package notification to replace.
+     * @param  class-string  $replacement  Fully qualified class name of the app's notification.
+     */
+    public static function useNotification(string $original, string $replacement): void
+    {
+        self::$notificationMap[$original] = $replacement;
+    }
+
+    /**
+     * Instantiate a notification, honoring any class swap registered via
+     * `useNotification()`. All jobs/services that dispatch package notifications
+     * go through this resolver so apps can override the mail template, channels,
+     * or routing without touching package code.
+     *
+     * @template T of object
+     * @param  class-string<T>  $class
+     * @return T
+     */
+    public static function resolveNotification(string $class, mixed ...$args): object
+    {
+        $resolved = self::$notificationMap[$class] ?? $class;
+
+        return new $resolved(...$args);
+    }
+
+    /**
+     * Reset all class-swap registrations. Used by tests to avoid leaking
+     * configuration between cases; apps generally don't need to call this.
+     */
+    public static function flushNotificationMap(): void
+    {
+        self::$notificationMap = [];
     }
 
     public static function checkoutUrl(?string $backUrl = null, ?string $plan = null, ?string $interval = null): string

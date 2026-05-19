@@ -49,7 +49,7 @@ class WebhookSupport
             return;
         }
 
-        Notification::send($recipients, new InvoiceAvailableNotification($billable, $invoice));
+        Notification::send($recipients, MollieBilling::resolveNotification(InvoiceAvailableNotification::class, $billable, $invoice));
     }
 
     public function reportSubscriptionActivationFailure(
@@ -86,9 +86,10 @@ class WebhookSupport
         if ($admins !== []) {
             Notification::send(
                 $admins,
-                new AdminPlanChangeFailedNotification(
-                    reason: 'Subscription activation after first payment failed — Mollie subscription was not created',
-                    context: [
+                MollieBilling::resolveNotification(
+                    AdminPlanChangeFailedNotification::class,
+                    'Subscription activation after first payment failed — Mollie subscription was not created',
+                    [
                         'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
                         'plan_code' => $planCode,
                         'interval' => $interval,

@@ -104,7 +104,7 @@ class SingleChargeHandler
 
                     $recipients = MollieBilling::notifyBillingAdmins($billable);
                     if (! empty($recipients)) {
-                        Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+                        Notification::send($recipients, MollieBilling::resolveNotification(PlanChangeFailedNotification::class, $billable, (string) $payment->id));
                     }
                 }
             }
@@ -141,7 +141,7 @@ class SingleChargeHandler
 
                 $recipients = MollieBilling::notifyBillingAdmins($billable);
                 if (! empty($recipients)) {
-                    Notification::send($recipients, new PlanChangeFailedNotification($billable, (string) $payment->id));
+                    Notification::send($recipients, MollieBilling::resolveNotification(PlanChangeFailedNotification::class, $billable, (string) $payment->id));
                 }
             }
         }

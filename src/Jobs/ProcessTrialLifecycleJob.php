@@ -90,10 +90,10 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
                 foreach ($billables as $billable) {
                     try {
                         if ($billable->hasMollieMandate()) {
-                            $this->notify($billable, new TrialConvertedNotification($billable));
+                            $this->notify($billable, MollieBilling::resolveNotification(TrialConvertedNotification::class, $billable));
                             event(new TrialConverted($billable, $billable->getBillingSubscriptionPlanCode() ?? ''));
                         } else {
-                            $this->notify($billable, new TrialEndingSoonNotification($billable));
+                            $this->notify($billable, MollieBilling::resolveNotification(TrialEndingSoonNotification::class, $billable));
                         }
                     } catch (Throwable $e) {
                         Log::error('ProcessTrialLifecycleJob: trial-ending notify failed', [
@@ -119,7 +119,7 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
                         ])->save();
 
                         event(new TrialExpired($billable));
-                        $this->notify($billable, new TrialExpiredNotification($billable));
+                        $this->notify($billable, MollieBilling::resolveNotification(TrialExpiredNotification::class, $billable));
                     } catch (Throwable $e) {
                         Log::error('ProcessTrialLifecycleJob: trial expiry failed', [
                             'billable_id' => $billable->getKey(),

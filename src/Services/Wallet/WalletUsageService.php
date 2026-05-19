@@ -264,7 +264,7 @@ class WalletUsageService
         if ($recipients !== []) {
             Notification::send(
                 $recipients,
-                new UsageThresholdNotification($billable, $type, $percent),
+                MollieBilling::resolveNotification(UsageThresholdNotification::class, $billable, $type, $percent),
             );
         }
     }

@@ -108,9 +108,10 @@ class RetryRefundLineJob implements ShouldQueue
         if ($admins !== []) {
             Notification::send(
                 $admins,
-                new AdminPlanChangeFailedNotification(
-                    reason: 'Refund-Line dauerhaft fehlgeschlagen (>7 Tage Retries)',
-                    context: $this->lineData,
+                MollieBilling::resolveNotification(
+                    AdminPlanChangeFailedNotification::class,
+                    'Refund-Line dauerhaft fehlgeschlagen (>7 Tage Retries)',
+                    $this->lineData,
                 ),
             );
         }

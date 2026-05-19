@@ -240,7 +240,7 @@ class StartOneTimeOrderCheckout
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);
         if (! empty($recipients)) {
-            Notification::send($recipients, new InvoiceAvailableNotification($billable, $invoice));
+            Notification::send($recipients, MollieBilling::resolveNotification(InvoiceAvailableNotification::class, $billable, $invoice));
         }
 
         return [

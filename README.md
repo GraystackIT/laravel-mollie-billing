@@ -790,6 +790,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
 - [Lifecycle and Cleanup](docs/lifecycle-and-cleanup.md) — orphaned checkouts, billable deletion cascade, past-due auto-cancel, paid-without-billable reconciliation, mandate policy
 - [VAT Handling](docs/vat-handling.md) — VAT calculation, VIES, OSS, country reconciliation, automatic resolution
+- [Notifications](docs/notifications.md) — recipient resolution, translation overrides, swapping notification classes with `useNotification()`
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
 
 ## Architecture

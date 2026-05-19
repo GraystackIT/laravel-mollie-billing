@@ -42,6 +42,9 @@ use Illuminate\Support\Facades\Facade;
  * @method static array<string, mixed> resolveUrlParameters(?\GraystackIT\MollieBilling\Contracts\Billable $billable = null)
  * @method static void cleanupOrphanedBillableUsing(\Closure $callback)
  * @method static void runCleanupOrphanedBillable(\GraystackIT\MollieBilling\Contracts\Billable $billable)
+ * @method static void useNotification(string $original, string $replacement)
+ * @method static object resolveNotification(string $class, mixed ...$args)
+ * @method static void flushNotificationMap()
  *
  * @see \GraystackIT\MollieBilling\MollieBilling
  */

@@ -80,7 +80,7 @@ class CancelSubscription
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);
         if (! empty($recipients)) {
-            Notification::send($recipients, new SubscriptionCancelledNotification($billable));
+            Notification::send($recipients, MollieBilling::resolveNotification(SubscriptionCancelledNotification::class, $billable));
         }
     }
 }

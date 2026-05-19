@@ -305,7 +305,7 @@ class CountryMatchService
 
     private function notifyBillable(Billable $billable, BillingCountryMismatch $mismatch): void
     {
-        $notification = new CountryMismatchSelfNotification($billable, $mismatch);
+        $notification = MollieBilling::resolveNotification(CountryMismatchSelfNotification::class, $billable, $mismatch);
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);
         if (! empty($recipients)) {

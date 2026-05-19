@@ -99,7 +99,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
                 if ($billingAdmins !== []) {
                     Notification::send(
                         $billingAdmins,
-                        new OverageBillingFailedNotification($billable),
+                        MollieBilling::resolveNotification(OverageBillingFailedNotification::class, $billable),
                     );
                 }
 
@@ -108,7 +108,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
                 if ($admins !== []) {
                     Notification::send(
                         $admins,
-                        new AdminOverageBillingFailedNotification($billable, $e),
+                        MollieBilling::resolveNotification(AdminOverageBillingFailedNotification::class, $billable, $e),
                     );
                 }
 

@@ -137,7 +137,7 @@ class CountryCorrectionHandler
         if (! empty($recipients)) {
             Notification::send(
                 $recipients,
-                new CountryMismatchReissueFailedNotification($billable, $mismatch, $reason),
+                MollieBilling::resolveNotification(CountryMismatchReissueFailedNotification::class, $billable, $mismatch, $reason),
             );
         }
     }

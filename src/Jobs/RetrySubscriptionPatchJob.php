@@ -87,9 +87,10 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
 
         Notification::send(
             $admins,
-            new AdminPlanChangeFailedNotification(
-                reason: 'Mollie Subscription PATCH dauerhaft fehlgeschlagen (>24h Retries)',
-                context: $this->intentData,
+            MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'Mollie Subscription PATCH continously failed (>24h Retries)',
+                $this->intentData,
             ),
         );
     }

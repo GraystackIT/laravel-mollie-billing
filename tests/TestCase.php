@@ -56,6 +56,7 @@ abstract class TestCase extends Orchestra
     protected function tearDown(): void
     {
         BillingRoute::flush();
+        MollieBilling::flushNotificationMap();
         parent::tearDown();
     }
 }
