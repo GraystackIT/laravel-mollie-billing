@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\Sanitize;
 use Illuminate\Contracts\View\View;
@@ -14,11 +15,19 @@ use Illuminate\Routing\Controller;
 
 class BillingPortalController extends Controller
 {
-    public function checkout(Request $request): View|RedirectResponse
+    public function checkout(Request $request, MollieSubscriptionGate $mollieGate): View|RedirectResponse
     {
         $billable = MollieBilling::resolveBillable($request);
 
-        if ($billable !== null && $billable->hasAccessibleBillingSubscription()) {
+        // Local PastDue + still-live Mollie subscription can coexist (e.g. trial
+        // expired before Mollie's first charge fell due). Re-entering checkout
+        // would 422 on CreateSubscriptionRequest with "same description already
+        // exists"; redirect to the dashboard instead so the user sees the
+        // upcoming-charge state.
+        if ($billable !== null && (
+            $billable->hasAccessibleBillingSubscription()
+            || $mollieGate->hasLiveMollieSubscription($billable)
+        )) {
             return redirect()->route(
                 BillingRoute::name('index'),
                 MollieBilling::resolveUrlParameters($billable),

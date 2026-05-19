@@ -7,6 +7,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -180,6 +181,20 @@ new class extends Component {
         }
     }
 
+    public function forceImmediateMollieCharge(MollieSubscriptionGate $gate): void
+    {
+        $billable = $this->resolveBillable();
+        if (! $billable) return;
+
+        if ($gate->forceImmediateCharge($billable)) {
+            $this->flash = __('billing::portal.flash.force_charge_scheduled');
+            $this->flashError = false;
+        } else {
+            $this->flash = __('billing::portal.flash.error');
+            $this->flashError = true;
+        }
+    }
+
     public function cancelScheduledChange(): void
     {
         $billable = $this->resolveBillable();
@@ -346,6 +361,23 @@ new class extends Component {
             $addonCodes,
         );
 
+        // PastDue but Mollie still has a live subscription (e.g. trial expired
+        // before the first charge fell due). Surface the scheduled charge date
+        // and offer a "charge now" button instead of the generic past-due
+        // banner — the user has nothing to fix; the money is on its way.
+        $pendingMollieCharge = null;
+        if ($status === SubscriptionStatus::PastDue) {
+            $snapshot = app(MollieSubscriptionGate::class)->snapshot($b);
+            if ($snapshot !== null
+                && $snapshot->startDate !== null
+                && $snapshot->startDate->isFuture()
+            ) {
+                $pendingMollieCharge = [
+                    'date' => BillingTime::display($snapshot->startDate, $b)?->translatedFormat('d. M Y') ?? '—',
+                ];
+            }
+        }
+
         $openMismatch = $b->latestOpenCountryMismatch();
         $allowedFixCountries = $openMismatch !== null
             ? array_values(array_unique(array_filter([
@@ -408,6 +440,7 @@ new class extends Component {
             'addonLabels' => $addonLabels,
             'isTrial' => $status === SubscriptionStatus::Trial,
             'isPastDue' => $status === SubscriptionStatus::PastDue,
+            'pendingMollieCharge' => $pendingMollieCharge,
             'isActive' => $status === SubscriptionStatus::Active,
             'isCancelled' => $status === SubscriptionStatus::Cancelled,
             'trialEnds' => BillingTime::display($b->getBillingTrialEndsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
@@ -479,6 +512,15 @@ new class extends Component {
         @elseif ($d['isTrial'])
             <flux:callout icon="clock" color="amber" inline>
                 {{ __('billing::portal.trial_banner', ['date' => $d['trialEnds']]) }}
+            </flux:callout>
+        @elseif ($d['isPastDue'] && $d['pendingMollieCharge'])
+            <flux:callout icon="clock" color="amber" inline>
+                <div class="flex items-center justify-between gap-4 w-full">
+                    <span>{{ __('billing::portal.pending_mollie_charge_banner', ['date' => $d['pendingMollieCharge']['date']]) }}</span>
+                    <flux:button size="sm" variant="primary" wire:click="forceImmediateMollieCharge">
+                        {{ __('billing::portal.force_charge_now') }}
+                    </flux:button>
+                </div>
             </flux:callout>
         @elseif ($d['isPastDue'])
             <flux:callout icon="exclamation-triangle" color="red" inline>

@@ -211,13 +211,26 @@ class SubscriptionPaymentHandler
             $meta['seat_count'] = $derivedSeatCount;
         }
 
+        $currentStatus = $billable->getBillingSubscriptionStatus();
+        $wasTrial = $currentStatus === SubscriptionStatus::Trial;
+        $wasPastDue = $currentStatus === SubscriptionStatus::PastDue;
+
+        // A successful recurring charge recovers a PastDue billable — drop the
+        // failure markers so the dashboard banner and overage retry job stop
+        // treating it as overdue. Mirrors ProrataChargeHandler's cleanup.
+        if ($wasPastDue) {
+            unset($meta['payment_failure'], $meta['past_due_since']);
+        }
+
         $updates = [
             'subscription_period_starts_at' => $periodStartsAt,
             'subscription_meta' => $meta,
         ];
 
-        if ($billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial) {
+        if ($wasTrial || $wasPastDue) {
             $updates['subscription_status'] = SubscriptionStatus::Active;
+        }
+        if ($wasTrial) {
             $updates['trial_ends_at'] = null;
             event(new TrialConverted($billable, $planCode));
         }
