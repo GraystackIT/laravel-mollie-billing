@@ -120,6 +120,12 @@ return [
         env('BILLING_PLAN_CHANGE_MODE', PlanChangeMode::UserChoice->value)
     ),
 
+    // Mollie API key. When set, propagates to `mollie.key` so the underlying
+    // `mollie/laravel-mollie` package picks it up. Leave empty to keep using
+    // `MOLLIE_KEY` from the `mollie/laravel-mollie` config — both work, this
+    // alias just keeps all package settings on the `BILLING_*` prefix.
+    'mollie_api_key' => env('BILLING_MOLLIE_KEY'),
+
     'mollie_locale' => env('BILLING_MOLLIE_LOCALE'),
 
     // Primary key type of the billable model — set before first migration run.

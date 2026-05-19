@@ -114,12 +114,16 @@ class Organization extends Model implements Billable
 Configure your environment:
 
 ```dotenv
-MOLLIE_KEY=test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+BILLING_MOLLIE_KEY=test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BILLING_BILLABLE_MODEL=App\Models\Organization
 BILLING_BILLABLE_KEY_TYPE=uuid
 BILLING_USER_KEY_TYPE=int
 BILLING_CURRENCY=EUR
 ```
+
+`BILLING_MOLLIE_KEY` is an alias for `MOLLIE_KEY` from `mollie/laravel-mollie` —
+either works. The package propagates `BILLING_MOLLIE_KEY` into `mollie.key` so
+your `.env` stays on the `BILLING_*` prefix.
 
 Mount the package routes in `routes/web.php`. The three route groups serve different scopes and need different middleware:
 

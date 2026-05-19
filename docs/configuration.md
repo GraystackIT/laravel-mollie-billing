@@ -55,6 +55,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Display symbol. Default: `€`. |
 | `allow_overage_default` | `BILLING_ALLOW_OVERAGE` | Default for `Billable::allowsBillingOverage()`. Overridable per billable. |
 | `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `Immediate` / `EndOfPeriod` / `UserChoice`. Controls when plan changes are applied. Default: `UserChoice`. |
+| `mollie_api_key` | `BILLING_MOLLIE_KEY` | Mollie API key. Alias for `MOLLIE_KEY` from `mollie/laravel-mollie` — when set, the package propagates it into `mollie.key` at boot so you can keep all settings on the `BILLING_*` prefix. Leave empty to keep using `MOLLIE_KEY` directly. |
 | `mollie_locale` | `BILLING_MOLLIE_LOCALE` | Locale for Mollie hosted pages. `null` lets Mollie auto-detect. |
 | `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Set before the first migration** — affects FK column shapes. Default: `uuid`. |
 | `user_key_type` | `BILLING_USER_KEY_TYPE` | `uuid` / `ulid` / `int`. Primary key type of your auth user model — used for columns like `billing_country_mismatches.resolved_by_user_id`. **Set before the first migration**. Default: `int`. |
