@@ -84,10 +84,13 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        $billable->refresh();
+
         if ($billable->hasAccessibleBillingSubscription()) {
             Log::warning('Mandate-only subscription activation skipped — billable already has an active subscription', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $payment->id ?? null,
+                'current_status' => $billable->getBillingSubscriptionStatus()->value,
             ]);
             DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? ''));
 
@@ -130,6 +133,16 @@ class MandateOnlyPaymentHandler
         string $couponCode,
     ): void {
         /** @var Model&Billable $billable */
+
+        if ($billable->getBillingSubscriptionStatus() !== SubscriptionStatus::New) {
+            Log::info('Mandate-only coupon activation skipped — billable already past initial state', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'current_status' => $billable->getBillingSubscriptionStatus()->value,
+            ]);
+
+            return;
+        }
 
         $pricedCoupon = $this->firstPaymentCouponPricing->price(
             $billable,
@@ -259,6 +272,16 @@ class MandateOnlyPaymentHandler
         int $trialDays,
     ): void {
         /** @var Model&Billable $billable */
+
+        if ($billable->getBillingSubscriptionStatus() !== SubscriptionStatus::New) {
+            Log::info('Mandate-only trial activation skipped — billable already past initial state', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'current_status' => $billable->getBillingSubscriptionStatus()->value,
+            ]);
+
+            return;
+        }
 
         $pricedCoupon = null;
         if ($couponCode !== '') {

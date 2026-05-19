@@ -158,6 +158,55 @@ it('hydrates the wallet aliquot to the trial length using ceil(included * trialD
     expect($smsWallet?->balanceInt ?? 0)->toBe(7);
 });
 
+it('is idempotent — a second mandate_only webhook does not reset an already-activated trial', function (): void {
+    $billable = trialWebhookBillable();
+
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 'sub_trial']);
+
+    $payload = [
+        'id' => 'tr_mandate_first',
+        'status' => 'paid',
+        'amount' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'metadata' => [
+            'type' => 'mandate_only',
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+            'pending_subscription_plan_code' => 'pro',
+            'pending_subscription_interval' => 'monthly',
+            'pending_subscription_trial_days' => 14,
+        ],
+        'subscriptionId' => null,
+        'customerId' => 'cst_test',
+        'mandateId' => 'mdt_test',
+    ];
+
+    TrialActivationFakeWebhookController::$nextPayment = (object) $payload;
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_first'])->assertStatus(200);
+
+    $billable->refresh();
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Trial);
+    $originalTrialEndsAt = $billable->trial_ends_at?->toIso8601String();
+
+    // Simulate a second mandate_only webhook arriving later (different payment_id,
+    // same billable, same metadata). Without the idempotency guard this would
+    // re-run the trial activation, forceFill the status back to Trial and
+    // re-set trial_ends_at, effectively extending the trial.
+    $secondPayload = $payload;
+    $secondPayload['id'] = 'tr_mandate_second';
+    TrialActivationFakeWebhookController::$nextPayment = (object) $secondPayload;
+
+    // Advance time so a re-set trial_ends_at would observably differ.
+    \Illuminate\Support\Carbon::setTestNow(BillingTime::nowUtc()->addMinutes(30));
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_second'])->assertStatus(200);
+
+    $billable->refresh();
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Trial);
+    expect($billable->trial_ends_at?->toIso8601String())->toBe($originalTrialEndsAt);
+
+    \Illuminate\Support\Carbon::setTestNow();
+});
+
 it('credits more than 1× quota when the trial exceeds one interval', function (): void {
     config()->set('mollie-billing-plans.plans.pro.intervals.monthly.trial_days', 60);
 
