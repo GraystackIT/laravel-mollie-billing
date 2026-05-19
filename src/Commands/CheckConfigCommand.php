@@ -129,6 +129,22 @@ class CheckConfigCommand extends Command
         $this->validateOverageJobTime($scope);
         $this->validateUsageThreshold($scope);
         $this->validateIpBlock($scope, $driver);
+        $this->validateLegacyRolloverKeys($scope);
+    }
+
+    private function validateLegacyRolloverKeys(string $scope): void
+    {
+        $migrationHint = 'Use `usage_rollover_fallback` (env: BILLING_USAGE_ROLLOVER_FALLBACK) and per-type overrides in `mollie-billing-plans.usage_types`.';
+
+        if (array_key_exists('usage_rollover', (array) config('mollie-billing'))) {
+            $this->addError($scope, "Legacy key `mollie-billing.usage_rollover` is set. {$migrationHint}");
+        }
+
+        if (getenv('BILLING_USAGE_ROLLOVER') !== false
+            || isset($_ENV['BILLING_USAGE_ROLLOVER'])
+            || isset($_SERVER['BILLING_USAGE_ROLLOVER'])) {
+            $this->addError($scope, "Legacy env var `BILLING_USAGE_ROLLOVER` is set. {$migrationHint}");
+        }
     }
 
     private function validateIpBlock(string $scope, string $geoDriver): void
@@ -286,8 +302,54 @@ class CheckConfigCommand extends Command
         $this->validatePlans($scope, $plans, $featureKeys, $addonKeys);
         $this->validateAddons($scope, $addons, $featureKeys);
         $this->validateProducts($scope, $products, $groupKeys, $plans);
+        $this->validateUsageTypes($scope, $plans);
 
         $this->checkUnusedFeatures($scope, $featureKeys, $plans, $addons);
+    }
+
+    /**
+     * @param  array<string, mixed>  $plans
+     */
+    private function validateUsageTypes(string $scope, array $plans): void
+    {
+        unset($plans);
+
+        $rawConfig = config('mollie-billing-plans');
+        $hasUsageTypes = is_array($rawConfig) && array_key_exists('usage_types', $rawConfig);
+
+        if (! $hasUsageTypes) {
+            return;
+        }
+
+        $usageTypes = $rawConfig['usage_types'];
+
+        if (! is_array($usageTypes)) {
+            $this->addError($scope, 'usage_types must be an array.');
+
+            return;
+        }
+
+        foreach ($usageTypes as $type => $config) {
+            $where = "usage_types.{$type}";
+
+            if (! is_string($type) || $type === '') {
+                $this->addError($scope, 'usage_types contains an invalid usage type key.');
+
+                continue;
+            }
+
+            if (! is_array($config)) {
+                $this->addError($scope, "{$where} must be an array (e.g. ['rollover' => true]).");
+
+                continue;
+            }
+
+            if (! array_key_exists('rollover', $config)) {
+                $this->addError($scope, "{$where}.rollover is required (true or false).");
+            } elseif (! is_bool($config['rollover'])) {
+                $this->addError($scope, "{$where}.rollover must be a boolean.");
+            }
+        }
     }
 
     /**
@@ -320,6 +382,10 @@ class CheckConfigCommand extends Command
 
             if (array_key_exists('trial_days', $plan)) {
                 $this->addError($scope, "{$where}.trial_days is no longer supported at plan level. Move the value into each interval (e.g. {$where}.intervals.monthly.trial_days).");
+            }
+
+            if (array_key_exists('usage_rollover', $plan)) {
+                $this->addError($scope, "{$where}.usage_rollover is no longer supported. Use `usage_rollover_fallback` (env: BILLING_USAGE_ROLLOVER_FALLBACK) and per-type overrides in `mollie-billing-plans.usage_types`.");
             }
 
             if (isset($plan['included_seats']) && (! is_int($plan['included_seats']) || $plan['included_seats'] < 1)) {

@@ -15,31 +15,26 @@ Each usage type is backed by a [bavix/laravel-wallet](https://github.com/bavix/l
 
 ## Configuration
 
-### `usage_rollover`
+### Rollover (per usage type)
 
-Controls whether unused credits carry over to the next billing period.
-
-```php
-// config/mollie-billing.php
-'usage_rollover' => env('BILLING_USAGE_ROLLOVER', false),
-```
-
-Can be overridden per plan:
+Controls whether unused credits carry over to the next billing period. Configured **per usage type**, not per plan:
 
 ```php
 // config/mollie-billing-plans.php
-'pro' => [
-    'usage_rollover' => true, // overrides global default
-    'intervals' => [
-        'monthly' => [
-            'included_usages' => ['Tokens' => 100, 'SMS' => 50],
-            'usage_overage_prices' => ['Tokens' => 10, 'SMS' => 15],
-        ],
-    ],
+'usage_types' => [
+    'Tokens' => ['rollover' => true],
+    'SMS'    => ['rollover' => false],
 ],
 ```
 
-Resolution order: plan-level `usage_rollover` > global config > default `false`.
+Usage types without an explicit entry fall back to the global default:
+
+```php
+// config/mollie-billing.php
+'usage_rollover_fallback' => env('BILLING_USAGE_ROLLOVER_FALLBACK', false),
+```
+
+Resolution order: `usage_types.<type>.rollover` (when boolean) > `usage_rollover_fallback` > `false`.
 
 ### Included usages & overage prices
 
@@ -118,7 +113,7 @@ In both cases, purchased credits that were not consumed survive the renewal.
 
 ### Examples
 
-**Without rollover, no purchased credits** (`usage_rollover = false`):
+**Without rollover, no purchased credits** (`usage_types.<type>.rollover = false`):
 
 | Period | Action | Balance |
 |--------|--------|---------|
@@ -139,7 +134,7 @@ In both cases, purchased credits that were not consumed survive the renewal.
 | Month 2 | Use 50 (plan only) | 450 | 400 |
 | Month 3 start | Reset + credit 100 + 400 purchased | 500 | 400 |
 
-**With rollover** (`usage_rollover = true`):
+**With rollover** (`usage_types.<type>.rollover = true`):
 
 | Period | Action | Balance |
 |--------|--------|---------|
@@ -195,7 +190,7 @@ If `targetBalance < 0`, the remainder is charged as overage via `ChargeUsageOver
 1. **Separate purchased credits** -- compute `purchasedRemaining` from wallet meta, derive `planOnlyBalance`
 2. **Compute prorated old quota** -- how many plan units the user was entitled to use up to now
 3. **Compute excess** -- if `planOnlyBalance` is below the prorated quota, the user consumed more plan credits than their fair share
-4. **Compute rollover credits** -- (only when `usage_rollover = true`) credits carried from previous periods (plan-only, not purchased)
+4. **Compute rollover credits** -- (only when rollover is enabled for the usage type) credits carried from previous periods (plan-only, not purchased)
 5. **Set wallet to new plan quota** -- the new plan starts fresh with its full `included_usages`
 6. **Add rollover credits** -- carried plan credits are preserved
 7. **Add purchased credits** -- purchased credits survive the plan change unchanged

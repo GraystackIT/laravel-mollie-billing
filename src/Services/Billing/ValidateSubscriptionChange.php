@@ -217,10 +217,10 @@ class ValidateSubscriptionChange
 
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
-        $rollover = $this->catalog->usageRollover($context->currentPlan);
 
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
+            $rollover = $this->catalog->usageRollover($slug);
             $oldIncluded = $this->catalog->includedUsage($context->currentPlan, $context->currentInterval, $slug);
             $newIncluded = $this->catalog->includedUsage($context->newPlan, $context->newInterval, $slug);
             $balance = (int) $wallet->balanceInt;

@@ -110,8 +110,8 @@ class WalletUsageService
 
     /**
      * Reset a wallet to zero then deposit the given quota. Used when
-     * usage_rollover is disabled — the wallet is brought to exactly
-     * the plan's included quota on each renewal.
+     * rollover for this usage type is disabled — the wallet is brought
+     * to exactly the plan's included quota on each renewal.
      *
      * Purchased credits (from one-time orders / coupons) survive the
      * reset: the remaining purchased balance is computed and added on

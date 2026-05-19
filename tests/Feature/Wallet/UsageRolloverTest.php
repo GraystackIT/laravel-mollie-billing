@@ -178,7 +178,7 @@ it('computes excess when usage burned far more than the early-period prorated en
 // ── remainingBillingQuota capping ───────────────────────────────────────────
 
 it('does not cap remainingBillingQuota for extra credits when rollover is disabled', function (): void {
-    config()->set('mollie-billing.usage_rollover', false);
+    config()->set('mollie-billing-plans.usage_types.Tokens.rollover', false);
 
     $billable = makeTestBillable();
     $service = app(WalletUsageService::class);
@@ -190,7 +190,7 @@ it('does not cap remainingBillingQuota for extra credits when rollover is disabl
 });
 
 it('does not cap remainingBillingQuota when rollover is enabled', function (): void {
-    config()->set('mollie-billing.usage_rollover', true);
+    config()->set('mollie-billing-plans.usage_types.Tokens.rollover', true);
 
     $billable = makeTestBillable();
     $service = app(WalletUsageService::class);
@@ -201,7 +201,7 @@ it('does not cap remainingBillingQuota when rollover is enabled', function (): v
 });
 
 it('usedBillingQuota stays consistent with remainingBillingQuota', function (): void {
-    config()->set('mollie-billing.usage_rollover', false);
+    config()->set('mollie-billing-plans.usage_types.Tokens.rollover', false);
 
     $billable = makeTestBillable();
     $service = app(WalletUsageService::class);
@@ -218,21 +218,25 @@ it('usedBillingQuota stays consistent with remainingBillingQuota', function (): 
 
 // ── usageRollover config ────────────────────────────────────────────────────
 
-it('reads rollover from global config', function (): void {
-    config()->set('mollie-billing.usage_rollover', true);
+it('reads rollover from fallback config', function (): void {
+    config()->set('mollie-billing-plans.usage_types', []);
+    config()->set('mollie-billing.usage_rollover_fallback', true);
     $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
 
-    expect($catalog->usageRollover('pro'))->toBeTrue();
+    expect($catalog->usageRollover('Tokens'))->toBeTrue();
 
-    config()->set('mollie-billing.usage_rollover', false);
-    expect($catalog->usageRollover('pro'))->toBeFalse();
+    config()->set('mollie-billing.usage_rollover_fallback', false);
+    expect($catalog->usageRollover('Tokens'))->toBeFalse();
 });
 
-it('reads rollover from plan-level config overriding global', function (): void {
-    config()->set('mollie-billing.usage_rollover', false);
-    config()->set('mollie-billing-plans.plans.pro.usage_rollover', true);
+it('usage-type config overrides fallback', function (): void {
+    config()->set('mollie-billing.usage_rollover_fallback', false);
+    config()->set('mollie-billing-plans.usage_types', [
+        'Tokens' => ['rollover' => true],
+    ]);
 
     $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
 
-    expect($catalog->usageRollover('pro'))->toBeTrue();
+    expect($catalog->usageRollover('Tokens'))->toBeTrue();
+    expect($catalog->usageRollover('SMS'))->toBeFalse();
 });

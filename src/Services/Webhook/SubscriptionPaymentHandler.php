@@ -181,11 +181,9 @@ class SubscriptionPaymentHandler
             }
         }
 
-        $rollover = $this->catalog->usageRollover($planCode);
-
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
             try {
-                if ($rollover) {
+                if ($this->catalog->usageRollover((string) $type)) {
                     $wallet = $billable->getWallet((string) $type);
                     if ($wallet !== null) {
                         $purchasedRemaining = WalletUsageService::computePurchasedRemaining(

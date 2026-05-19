@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: `SubscriptionCatalogInterface::usageRollover()` now takes a usage type instead of a plan code. Configure rollover per usage type via the new `usage_types.<type>.rollover` block in `config/mollie-billing-plans.php`.
+- **BREAKING**: Removed `BILLING_USAGE_ROLLOVER` / `config('mollie-billing.usage_rollover')` and the per-plan `plans.<code>.usage_rollover` override. Replaced by `BILLING_USAGE_ROLLOVER_FALLBACK` / `config('mollie-billing.usage_rollover_fallback')`. `php artisan billing:check-config` fails hard on the legacy keys with a migration hint.
+
 ### Fixed
 
 - `MandateOnlyPaymentHandler` is now idempotent against re-entry: a second `mandate_only` webhook for an already-activated billable no longer resets `subscription_status` to `Trial` or extends `trial_ends_at`. The dispatcher reloads the billable from the DB before the `hasAccessibleBillingSubscription()` guard, and both internal activation paths (`activateTrialSubscriptionAfterMandate`, `activateCouponSubscriptionAfterMandate`) bail out early when the status is no longer `New`.

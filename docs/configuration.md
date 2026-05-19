@@ -63,7 +63,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `trial_lifecycle_job_time` | `BILLING_TRIAL_LIFECYCLE_JOB_TIME` | Time of day (`HH:MM`) for `ProcessTrialLifecycleJob`. Sends trial-ending notifications and expires stale trials. Default: `02:05`. |
 | `trial_ending_soon_notice_days` | `BILLING_TRIAL_ENDING_SOON_NOTICE_DAYS` | Days before `trial_ends_at` at which `TrialEndingSoonNotification` / `TrialConvertedNotification` is dispatched. Missed windows are **not** backfilled when this value is increased. Default: `1`. |
 | `usage_threshold_percent` | `BILLING_USAGE_THRESHOLD` | Threshold for usage-warning events (in %). Default: `80`. |
-| `usage_rollover` | `BILLING_USAGE_ROLLOVER` | Global default: carry over unused wallet credits across period changes. Overridable per plan. Default: `false`. |
+| `usage_rollover_fallback` | `BILLING_USAGE_ROLLOVER_FALLBACK` | Fallback for usage types that have no explicit entry under `usage_types` in `mollie-billing-plans.php`. When `true`, unused credits of such types carry over to the next billing period; when `false`, the wallet is reset to the plan's included quota on each renewal. Default: `false`. |
 | `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL of the admin-panel KPI cache (seconds). Default: `300`. |
 | `show_yearly_savings` | `BILLING_SHOW_YEARLY_SAVINGS` | Shows the computed savings (yearly vs. monthly) in the plan selector. Default: `true`. |
 | `local_subscription.allow_one_time_orders` | `BILLING_LOCAL_ALLOW_ONE_TIME_ORDERS` | Whether free / Local subscribers may purchase one-time products. Default: `false` — purchase attempts throw `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons with an upgrade hint. Set `true` if your free plan is a default tier monetised through token packs etc. Paid add-ons and extra seats remain blocked on Local subs regardless of this flag (no mandate available). |
@@ -244,7 +244,6 @@ Each plan is keyed by its `planCode`.
     'included_seats' => 3,
     'feature_keys'   => ['dashboard', 'advanced-reports'],  // references into 'features'
     'allowed_addons' => ['softdrinks'],                     // references into 'addons'
-    // 'usage_rollover' => true,                            // optional, overrides the global default
     'intervals' => [
         'monthly' => [
             'base_price_net'        => 2900,                // cents — base plan price
@@ -271,7 +270,6 @@ Each plan is keyed by its `planCode`.
 | `included_seats` | Number of seats included in the base price. `SyncSeats` charges anything above this as additional seats. |
 | `feature_keys` | List of feature keys from the `features` block. Resolved together with addon features by `FeatureAccess`. |
 | `allowed_addons` | Whitelist of addons. Other addons cannot be enabled on this plan. |
-| `usage_rollover` *(optional)* | `true` / `false`. Overrides `mollie-billing.usage_rollover`. |
 | `intervals` | Required — one block per supported interval (`monthly`, `yearly`). |
 
 > **Breaking change**: Plan-level `trial_days` is no longer supported. Move the value into each interval that should offer a trial (`intervals.monthly.trial_days`, `intervals.yearly.trial_days`). `php artisan billing:check-config` will fail with a migration hint until the config is updated.
@@ -287,6 +285,27 @@ Each plan is keyed by its `planCode`.
 | `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. |
 
 > **Important:** `included_usages`, `usage_overage_prices`, and `trial_days` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
+
+### `usage_types`
+
+Per-usage-type configuration. Each usage type referenced in `plans.*.intervals.*.included_usages` or `usage_overage_prices` can opt in or out of rollover here. Types without an entry fall back to `mollie-billing.usage_rollover_fallback`.
+
+```php
+'usage_types' => [
+    'Tokens' => ['rollover' => true],
+    'SMS'    => ['rollover' => false],
+],
+```
+
+| Field | Description |
+|-------|-------------|
+| `rollover` | `true` → unused credits carry over to the next billing period. `false` → wallet is reset to the plan's included quota on each renewal. Purchased credits from one-time orders always survive both modes. |
+
+Resolution order for `SubscriptionCatalogInterface::usageRollover($type)`:
+
+1. `usage_types.<type>.rollover` (when boolean)
+2. `mollie-billing.usage_rollover_fallback`
+3. `false`
 
 ### `features`
 

@@ -221,10 +221,12 @@ return [
 
     'usage_threshold_percent' => env('BILLING_USAGE_THRESHOLD', 80),
 
-    // Whether unused usage credits carry over to the next billing period.
-    // When false, wallets are reset to the plan's included quota on each renewal.
-    // Can be overridden per plan in mollie-billing-plans.php.
-    'usage_rollover' => env('BILLING_USAGE_ROLLOVER', false),
+    // Fallback for usage types that have no explicit `rollover` entry
+    // under `usage_types` in mollie-billing-plans.php. When true, unused
+    // credits of that type carry over to the next billing period; when
+    // false, the wallet is reset to the plan's included quota on each
+    // renewal. Per-type overrides always win.
+    'usage_rollover_fallback' => env('BILLING_USAGE_ROLLOVER_FALLBACK', false),
 
     // Admin KPI cache TTL in seconds
     'admin_kpi_cache_ttl' => env('BILLING_ADMIN_KPI_TTL', 300),

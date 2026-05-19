@@ -204,15 +204,15 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return null;
     }
 
-    public function usageRollover(string $planCode): bool
+    public function usageRollover(string $usageType): bool
     {
-        $planValue = $this->plan($planCode)['usage_rollover'] ?? null;
+        $typeValue = config("{$this->configKey}.usage_types.{$usageType}.rollover");
 
-        if (is_bool($planValue)) {
-            return $planValue;
+        if (is_bool($typeValue)) {
+            return $typeValue;
         }
 
-        return (bool) config('mollie-billing.usage_rollover', false);
+        return (bool) config('mollie-billing.usage_rollover_fallback', false);
     }
 
     public function yearlySavingsPercent(string $planCode): float

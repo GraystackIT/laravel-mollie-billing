@@ -346,9 +346,9 @@ class PreviewService
         // Usage comparison with prorated excess calculation
         $usageChanges = [];
         $usageOverageChargeNet = 0;
-        $rollover = $currentPlan !== '' ? $this->catalog->usageRollover($currentPlan) : false;
 
         foreach ($this->catalog->allUsageTypes() as $usageType) {
+            $rollover = $this->catalog->usageRollover($usageType);
             $currentQuota = $this->catalog->includedUsage($currentPlan, $currentInterval, $usageType);
             $newQuota = $this->catalog->includedUsage($newPlan, $newInterval, $usageType);
             if ($currentQuota <= 0 && $newQuota <= 0) {

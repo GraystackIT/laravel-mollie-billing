@@ -55,6 +55,15 @@ return [
         ],
     ],
 
+    // Per-usage-type configuration. Each usage type referenced in
+    // `plans.*.intervals.*.included_usages` / `usage_overage_prices`
+    // can opt in or out of rollover here. Types not listed fall back
+    // to `mollie-billing.usage_rollover_fallback`.
+    'usage_types' => [
+        'Tokens' => ['rollover' => true],
+        'SMS' => ['rollover' => false],
+    ],
+
     'features' => [
         'dashboard' => [
             'name' => 'Dashboard',

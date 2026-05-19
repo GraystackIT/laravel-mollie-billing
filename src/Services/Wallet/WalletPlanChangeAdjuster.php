@@ -39,11 +39,11 @@ class WalletPlanChangeAdjuster
 
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
-        $rollover = $this->catalog->usageRollover($oldPlan);
         $overageLineItems = [];
 
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
+            $rollover = $this->catalog->usageRollover($slug);
             $oldIncluded = $this->catalog->includedUsage($oldPlan, $oldInterval, $slug);
             $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
             $balance = (int) $wallet->balanceInt;
