@@ -8,7 +8,9 @@ use GraystackIT\MollieBilling\Commands\CheckConfigCommand;
 use GraystackIT\MollieBilling\Commands\CleanupOrphanedBillablesCommand;
 use GraystackIT\MollieBilling\Commands\OssExportCommand;
 use GraystackIT\MollieBilling\Commands\PrepareOverageCommand;
+use GraystackIT\MollieBilling\Commands\SimulateCommand;
 use GraystackIT\MollieBilling\Commands\SyncPurchasedBalanceCommand;
+use GraystackIT\MollieBilling\Commands\WebhookReplayCommand;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Features\FeatureAccess;
@@ -207,6 +209,8 @@ class MollieBillingServiceProvider extends ServiceProvider
             SyncPurchasedBalanceCommand::class,
             CheckConfigCommand::class,
             CleanupOrphanedBillablesCommand::class,
+            SimulateCommand::class,
+            WebhookReplayCommand::class,
         ]);
     }
 

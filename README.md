@@ -772,7 +772,18 @@ php artisan billing:check-config
 # mandates). Runs every 15 minutes via the scheduler in normal operation; this
 # command is for manual / on-demand cleanup.
 php artisan billing:cleanup-orphans
+
+# Reproduce subscription-lifecycle transitions on a staging system. Interactive
+# walkthrough without arguments, single flow with one. Non-production only.
+php artisan billing:simulate
+php artisan billing:simulate trial-expired --billable=42
+
+# Replay a Mollie payment through the webhook handler. Non-production only.
+php artisan billing:webhook-replay tr_xxxxxxxxx
 ```
+
+See [docs/testing-flows.md](docs/testing-flows.md) for the full list of simulated flows,
+options, and what is/isn't covered.
 
 `billing:check-config` reports two classes of issues:
 
@@ -792,6 +803,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [VAT Handling](docs/vat-handling.md) — VAT calculation, VIES, OSS, country reconciliation, automatic resolution
 - [Notifications](docs/notifications.md) — recipient resolution, translation overrides, swapping notification classes with `useNotification()`
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
+- [Testing Lifecycle Flows](docs/testing-flows.md) — `billing:simulate` and `billing:webhook-replay` for reproducing every lifecycle transition on staging
 
 ## Architecture
 

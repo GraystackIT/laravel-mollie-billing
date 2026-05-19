@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- New `billing:simulate` and `billing:webhook-replay` Artisan commands plus `Testing\LifecycleSimulator` service for reproducing subscription-lifecycle transitions (trial end, renewal, scheduled change, overage charge, past-due auto-cancel, cancelled→expired) and replaying Mollie payments through the webhook handler on non-production systems. See [docs/testing-flows.md](docs/testing-flows.md).
+
 ### Fixed
 
 - Country mismatch detected during a `mandate_only` webhook no longer leaves the billable permanently un-activatable: the trial/coupon activation now runs before the country-match check, so `subscription_plan_code`/`interval`/`source` are persisted before the mismatch path triggers cancel-at-period-end. `ResubscribeSubscription` can recover the billable after the user resolves the mismatch in the portal. Same ordering fix applied to the first-payment and local→Mollie upgrade paths (`FirstPaymentArtifacts::persist()` no longer runs the country-match check internally; callers invoke it after the subscription is fully active).
