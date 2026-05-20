@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Mail notifications no longer render a duplicate closing line. The custom `signature_line` ("Thanks, the :app team.") was appended on top of Laravel's default `Regards, :app` salutation; the custom line has been removed from all notifications and the `billing::emails.signature_line` translation key dropped.
-- `TrialExtension` coupons now also patch the Mollie subscription's `startDate` to the new trial end. Previously only the local `trial_ends_at` was updated, so Mollie still charged at the originally scheduled date. New `MollieSubscriptionPatcher::setNextChargeDate()` applied from `CouponService` for Mollie-source subscriptions.
+- Trial extensions now always patch the Mollie subscription's `startDate` to the new trial end — both via `TrialExtension` coupon and via direct `Billable::extendBillingTrialUntil()` calls (e.g. from admin UIs). Previously only the local `trial_ends_at` was updated, so Mollie still charged at the originally scheduled date. The Mollie sync is centralized in `HasBilling::extendBillingTrialUntil()` and skipped when the effective end does not move (no redundant PATCH). New `MollieSubscriptionPatcher::setNextChargeDate()`.
 
 ### Documentation
 

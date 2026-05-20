@@ -22,6 +22,7 @@ use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\ChangePlan;
 use GraystackIT\MollieBilling\Services\Billing\DisableAddon;
 use GraystackIT\MollieBilling\Services\Billing\EnableAddon;
+use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Services\Billing\SyncSeats;
@@ -500,6 +501,14 @@ trait HasBilling
 
     // ── Trial management (admin actions) ──
 
+    /**
+     * Extend the trial to the given target (or further into the future if the
+     * current `trial_ends_at` already exceeds it). For Mollie-source subscriptions
+     * the Mollie `startDate` is patched to the new trial end as well — Mollie has
+     * no concept of a trial, our trial is just a Mollie subscription with a
+     * deferred startDate, so the schedule has to follow the trial end or Mollie
+     * would charge at the originally scheduled date.
+     */
     public function extendBillingTrialUntil(CarbonInterface $until): void
     {
         $previous = $this->trial_ends_at;
@@ -509,6 +518,12 @@ trait HasBilling
 
         if ($this->subscription_status !== SubscriptionStatus::Trial && $newEnd->isFuture()) {
             $this->forceFill(['subscription_status' => SubscriptionStatus::Trial])->save();
+        }
+
+        $changed = $previous === null || ! $previous->equalTo($newEnd);
+
+        if ($changed && $this->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
+            app(MollieSubscriptionPatcher::class)->setNextChargeDate($this, $newEnd);
         }
 
         event(new TrialExtended($this, $previous, $newEnd));
