@@ -42,8 +42,7 @@ class TrialConvertedNotification extends Notification
                 'plan' => $plan,
                 'amount' => $amount,
             ]))
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**

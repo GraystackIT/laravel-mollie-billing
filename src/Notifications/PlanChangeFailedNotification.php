@@ -45,8 +45,7 @@ class PlanChangeFailedNotification extends Notification implements ShouldQueue
             ->subject(__('billing::notifications.plan_change_failed.subject'))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
             ->line(__('billing::notifications.plan_change_failed.body', ['app' => $app]))
-            ->action(__('billing::emails.update_payment_method'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.update_payment_method'), $this->billable->billingPortalUrl());
     }
 
     /**

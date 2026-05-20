@@ -30,7 +30,6 @@ class AdminRefundFailedNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $app = config('mollie-billing.company_name', config('app.name'));
         $invoice = $this->billable->latestBillingInvoice();
         $invoiceId = $invoice?->id ?? '-';
         $reason = $this->exception->getMessage();
@@ -38,8 +37,7 @@ class AdminRefundFailedNotification extends Notification
         return (new MailMessage())
             ->subject(__('billing::notifications.admin_refund_failed.subject', ['invoice' => (string) $invoiceId]))
             ->line(__('billing::notifications.admin_refund_failed.body', ['reason' => $reason]))
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**

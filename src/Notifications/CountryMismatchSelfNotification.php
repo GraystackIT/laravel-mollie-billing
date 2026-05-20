@@ -30,8 +30,6 @@ class CountryMismatchSelfNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $app = config('mollie-billing.company_name', config('app.name'));
-
         return (new MailMessage())
             ->subject(__('billing::notifications.country_mismatch_self.subject'))
             ->line(__('billing::notifications.country_mismatch_self.body_intro'))
@@ -45,8 +43,7 @@ class CountryMismatchSelfNotification extends Notification
                 'country' => (string) ($this->mismatch->tax_country_ip ?? '-'),
             ]))
             ->line(__('billing::notifications.country_mismatch_self.body_consequence'))
-            ->action(__('billing::notifications.country_mismatch_self.cta'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::notifications.country_mismatch_self.cta'), $this->billable->billingPortalUrl());
     }
 
     /**

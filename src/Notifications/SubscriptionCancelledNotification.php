@@ -35,8 +35,7 @@ class SubscriptionCancelledNotification extends Notification
             ->subject(__('billing::notifications.subscription_cancelled.subject', ['app' => $app]))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
             ->line(__('billing::notifications.subscription_cancelled.body', ['date' => $date]))
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**

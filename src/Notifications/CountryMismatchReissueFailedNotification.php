@@ -31,8 +31,6 @@ class CountryMismatchReissueFailedNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $app = config('mollie-billing.company_name', config('app.name'));
-
         return (new MailMessage())
             ->subject(__('billing::notifications.country_mismatch_reissue_failed.subject', [
                 'mismatch' => (string) $this->mismatch->id,
@@ -41,8 +39,7 @@ class CountryMismatchReissueFailedNotification extends Notification
                 'customer' => $this->billable->getBillingName(),
                 'reason' => $this->reason,
             ]))
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**

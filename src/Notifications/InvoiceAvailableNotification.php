@@ -38,8 +38,7 @@ class InvoiceAvailableNotification extends Notification
                 'app' => $app,
                 'amount' => $amount.' '.$currency,
             ]))
-            ->action(__('billing::emails.view_invoice'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.view_invoice'), $this->billable->billingPortalUrl());
     }
 
     /**

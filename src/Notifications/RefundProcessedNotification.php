@@ -30,7 +30,6 @@ class RefundProcessedNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $app = config('mollie-billing.company_name', config('app.name'));
         $currency = ($this->creditNote->currency) ?: config('mollie-billing.currency', 'EUR');
         $amount = number_format(abs((int) $this->creditNote->amount_gross) / 100, 2, ',', '.').' '.$currency;
 
@@ -38,8 +37,7 @@ class RefundProcessedNotification extends Notification
             ->subject(__('billing::notifications.refund_processed.subject', ['amount' => $amount]))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
             ->line(__('billing::notifications.refund_processed.body', ['amount' => $amount]))
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**

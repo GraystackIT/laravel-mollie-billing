@@ -48,8 +48,7 @@ class TrialEndingSoonNotification extends Notification
             : __('billing::emails.update_payment_method');
 
         return $message
-            ->action($action, $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action($action, $this->billable->billingPortalUrl());
     }
 
     /**

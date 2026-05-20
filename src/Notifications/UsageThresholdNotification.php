@@ -30,7 +30,6 @@ class UsageThresholdNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $app = config('mollie-billing.company_name', config('app.name'));
         $hint = $this->billable->allowsBillingOverage()
             ? __('billing::notifications.usage_threshold.overage_allowed')
             : __('billing::notifications.usage_threshold.overage_blocked', ['type' => $this->usageType]);
@@ -46,8 +45,7 @@ class UsageThresholdNotification extends Notification
                 'percent' => $this->percent,
                 'overage_hint' => $hint,
             ]))
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**

@@ -46,8 +46,7 @@ class SubscriptionPaymentFailedNotification extends Notification
                 'date' => $date,
                 'app' => $app,
             ]))
-            ->action(__('billing::emails.update_payment_method'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.update_payment_method'), $this->billable->billingPortalUrl());
     }
 
     /**

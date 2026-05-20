@@ -30,7 +30,6 @@ class AdminOverageBillingFailedNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $app = config('mollie-billing.company_name', config('app.name'));
         $customer = $this->billable->getBillingName();
         $invoice = $this->billable->latestBillingInvoice();
         $currency = ($invoice?->currency) ?: config('mollie-billing.currency', 'EUR');
@@ -45,8 +44,7 @@ class AdminOverageBillingFailedNotification extends Notification
                 'amount' => $amount,
             ]))
             ->line('Exception: '.$this->exception->getMessage())
-            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl())
-            ->line(__('billing::emails.signature_line', ['app' => $app]));
+            ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
     /**
