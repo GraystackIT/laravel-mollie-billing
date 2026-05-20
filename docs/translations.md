@@ -25,7 +25,7 @@ The package ships with two locales out of the box:
 | `portal.php` | Billing portal UI: dashboard, plan change, invoices, usage history, addons, seats, products, payment method, return page, navigation, flash messages |
 | `checkout.php` | Checkout flow: steps, billing address, plan selection, addon/seat configuration, order confirmation, coupon handling, VAT display |
 | `notifications.php` | Email notification subjects and bodies: trial reminders, payment failures, invoice available, usage thresholds, overage billing, refunds, plan change failures |
-| `emails.php` | Shared email partials: greeting, signature, action buttons |
+| `emails.php` | Shared email partials: greeting, action buttons |
 | `errors.php` | User-facing error messages: country validation, coupons, usage limits, access grants, refunds |
 | `enums.php` | Human-readable labels for all enums: `SubscriptionStatus`, `InvoiceStatus`, `InvoiceKind`, `SubscriptionSource`, `SubscriptionInterval`, `CouponType`, `DiscountType`, `RefundReasonCode`, `CountryMismatchStatus`, `PlanChangeMode`, `MollieSubscriptionStatus` |
 | `countries.php` | EU-27 country names keyed by ISO 3166-1 alpha-2 code |
@@ -181,6 +181,12 @@ If your application only uses one language and you don't need translation files 
 ```
 
 The config values serve as the second-priority fallback and work without any translation files.
+
+## Notification language per recipient
+
+Mail notifications render in whatever locale is active when `Notification::send()` runs. For queued jobs and webhook handlers (no HTTP request → no auto-detected request locale), that falls back to `config('app.locale')`.
+
+To deliver each customer their preferred language, implement `Illuminate\Contracts\Translation\HasLocalePreference` on the notifiable returned by your `notifyBillingAdminsUsing()` / `notifyAdminUsing()` closures. Laravel switches the translator for the duration of the notification automatically. See [notifications.md](notifications.md#choosing-the-locale-per-recipient) for the full example.
 
 ## Placeholder reference
 

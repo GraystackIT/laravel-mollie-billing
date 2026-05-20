@@ -35,6 +35,38 @@ php artisan vendor:publish --tag=billing-lang
 
 Subjects, body lines, button labels and signatures live in `resources/lang/vendor/billing/{locale}/notifications.php`. Laravel resolves vendor translations first, so app overrides take precedence over package defaults. See [translations.md](translations.md) for the full file list and placeholder reference.
 
+### Choosing the locale per recipient
+
+The package does not introduce its own "notification language" setting. Notifications render in whatever locale is active when `Notification::send()` runs — which is usually `config('app.locale')` for queued jobs and webhook handlers (no HTTP request → no auto-detected request locale).
+
+To send each customer their preferred language, implement Laravel's `Illuminate\Contracts\Translation\HasLocalePreference` on the **notifiable** that `notifyBillingAdminsUsing()` / `notifyAdminUsing()` returns (typically your `User` model). Laravel calls `preferredLocale()` automatically before rendering the mail and switches the translator for the duration of that notification — no changes needed inside the package.
+
+```php
+use Illuminate\Contracts\Translation\HasLocalePreference;
+
+class User extends Authenticatable implements HasLocalePreference
+{
+    public function preferredLocale(): string
+    {
+        return $this->locale ?? config('app.locale');
+    }
+}
+```
+
+If you store the language on the billable (e.g. `Organization`) rather than on the user, resolve it inside the closure:
+
+```php
+MollieBilling::notifyBillingAdminsUsing(function ($billable) {
+    return $billable->billingAdmins->each(
+        fn ($user) => $user->setAttribute('locale', $billable->locale)
+    );
+});
+```
+
+Combined with `HasLocalePreference` on `User`, every recipient gets the tenant's language regardless of their personal setting.
+
+If you need a single hard-coded language for all billing mails (e.g. operator-only platform), the simplest route is to pin it in your queue worker / scheduler config (`APP_LOCALE=de`) — no package config required.
+
 ## 3. Swap a notification class entirely
 
 When wording changes are not enough — different channels (Slack, database, push), Markdown templates, MJML, extra CTAs, additional data — replace the notification class itself via `useNotification()`:
