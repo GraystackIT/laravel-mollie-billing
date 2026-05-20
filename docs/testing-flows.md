@@ -27,7 +27,8 @@ Three classes of transitions need to be testable:
 
 ```bash
 # Interactive walkthrough — searchable billable picker (arrow keys), then a
-# multi-select of flows (space to toggle, enter to confirm). Destructive
+# single-select flow menu. After each run the menu reopens so you can chain
+# simulations against the same billable. Pick "Exit" to leave. Destructive
 # transitions still require an explicit confirm.
 php artisan billing:simulate
 
@@ -37,6 +38,11 @@ php artisan billing:simulate trial-expired --billable=42
 # Skip all confirmations (still non-interactive on options):
 php artisan billing:simulate trial-expired --billable=42 --yes
 ```
+
+Each interactive run prints an **Expected:** block (target status, dispatched events, sent
+notifications) before executing the flow, and a **Result:** + **Verification:** block
+afterwards with ✓/✗ for every expectation. Events and notifications are captured by
+runtime spies, not faked — the simulated side-effects still happen.
 
 ### Available flows
 

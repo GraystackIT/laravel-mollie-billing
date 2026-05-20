@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Mail notifications no longer render a duplicate closing line. The custom `signature_line` ("Thanks, the :app team.") was appended on top of Laravel's default `Regards, :app` salutation; the custom line has been removed from all notifications and the `billing::emails.signature_line` translation key dropped.
 - Trial extensions now always patch the Mollie subscription's `startDate` to the new trial end — both via `TrialExtension` coupon and via direct `Billable::extendBillingTrialUntil()` calls (e.g. from admin UIs). Previously only the local `trial_ends_at` was updated, so Mollie still charged at the originally scheduled date. The Mollie sync is centralized in `HasBilling::extendBillingTrialUntil()` and skipped when the effective end does not move (no redundant PATCH). New `MollieSubscriptionPatcher::setNextChargeDate()`.
 
+### Changed
+
+- `billing:simulate` no longer asks for multiple flows at once. The interactive picker now offers a single flow at a time and loops back to the menu after each run, so multiple simulations can be chained without restarting the command. The dispatch step prints an "Expected:" block (status / events / notifications) before running and a "Result:" + "Verification:" block afterwards with ✓/✗ for each expectation — events and notifications are captured via runtime spies, not faked, so the simulated side-effects still happen.
+
 ### Documentation
 
 - New "Choosing the locale per recipient" section in [docs/notifications.md](docs/notifications.md) and a cross-reference in [docs/translations.md](docs/translations.md). Explains how to deliver per-customer email languages via Laravel's `HasLocalePreference` contract — no package config required.
