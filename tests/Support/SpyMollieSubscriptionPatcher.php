@@ -88,4 +88,19 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
             $billable->forceFill(['subscription_meta' => $meta])->save();
         }
     }
+
+    public function setNextChargeDate(Billable $billable, \Carbon\CarbonInterface $target): void
+    {
+        $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
+        $iso = $target->copy()->toIso8601String();
+        self::$calls[] = ['set_next_charge_date', $customerId, $subscriptionId, ['target' => $iso]];
+        SpyUpdateSubscription::$calls[] = ['set_next_charge_date', $customerId, $subscriptionId, ['target' => $iso]];
+
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta['next_charge_date_override'] = $iso;
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
+    }
 }

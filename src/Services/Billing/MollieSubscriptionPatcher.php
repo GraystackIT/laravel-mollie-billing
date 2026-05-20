@@ -269,6 +269,46 @@ class MollieSubscriptionPatcher
     }
 
     /**
+     * Sets the date of the next Mollie billing to an absolute target date.
+     * Used by the TrialExtension coupon type: the trial end is computed
+     * absolutely (`max(current_trial_end, now) + days`), so the Mollie
+     * startDate must follow that same absolute value rather than a relative
+     * shift — otherwise a coupon applied after the trial already expired
+     * would push the next charge too far into the future.
+     * After a successful PATCH an override is set in the subscription meta so
+     * that `nextBillingDate()` returns the new value.
+     */
+    public function setNextChargeDate(Billable $billable, \Carbon\CarbonInterface $target): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $customerId = $billable->getMollieCustomerId();
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+
+        if ($customerId === null || $subscriptionId === '') {
+            Log::warning('setNextChargeDate skipped — missing Mollie customer or subscription id', [
+                'billable' => $billable->getKey(),
+            ]);
+
+            return;
+        }
+
+        $newDate = $target->copy();
+
+        Mollie::send(new MollieUpdateSubscriptionRequest(
+            customerId: $customerId,
+            subscriptionId: $subscriptionId,
+            startDate: new Date($newDate),
+        ));
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['next_charge_date_override'] = $newDate->toIso8601String();
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
      * Cancels the Mollie subscription on a free downgrade. Tolerant of API failures.
      */
     public function cancelForFreeDowngrade(Billable $billable): void

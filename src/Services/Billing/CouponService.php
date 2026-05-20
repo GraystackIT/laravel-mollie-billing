@@ -537,6 +537,15 @@ class CouponService
                     $current = $billable->getBillingTrialEndsAt();
                     $newEnd = ($current && $current->isFuture() ? $current->copy() : BillingTime::nowUtc())->addDays($days);
                     $billable->extendBillingTrialUntil($newEnd);
+
+                    // Mollie has no concept of a trial — our trial is a Mollie
+                    // subscription with a deferred startDate (see CreateSubscription).
+                    // The startDate must follow the new trial end, else Mollie
+                    // would charge at the originally scheduled date.
+                    if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
+                        app(MollieSubscriptionPatcher::class)->setNextChargeDate($billable, $newEnd);
+                    }
+
                     $redemption->trial_days_added = $days;
                     break;
 
