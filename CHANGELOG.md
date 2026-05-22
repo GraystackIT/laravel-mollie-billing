@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- New `Billable::applyBillingScope(Builder $query)` hook, applied automatically as a global Eloquent scope by `HasBilling`. Apps whose billable model also stores non-billable rows (e.g. a `User` table that mixes staff with paying customers) can override this method to restrict the row set the package operates on — admin listings, KPIs and lifecycle jobs all see the filtered set. Default is a no-op, so existing implementations are unaffected. Bypass per-query with `->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)` where every row must remain reachable (webhook resolution, retry jobs, admin impersonation).
+
 ## [0.3.1] - 2026-05-22
 
 ### Changed

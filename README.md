@@ -556,6 +556,34 @@ class User extends Authenticatable implements Billable
 
 The `name` key passed to your `createBillableUsing` callback always carries the *company* name from the checkout form — your callback decides which attribute to persist it into.
 
+### Restricting which rows are treated as billable
+
+When the billable table also stores rows that are **not** customers — typically a single `users` table that mixes admins/staff with paying users — override `applyBillingScope()` on the model. The `HasBilling` trait registers `BillingScope` as a global scope and delegates to this method, so the same filter applies to admin listings, KPI queries, and every lifecycle job that iterates billables.
+
+```php
+use GraystackIT\MollieBilling\Concerns\HasBilling;
+use GraystackIT\MollieBilling\Contracts\Billable;
+use Illuminate\Database\Eloquent\Builder;
+
+class User extends Authenticatable implements Billable
+{
+    use HasBilling;
+
+    public function applyBillingScope(Builder $query): void
+    {
+        $query->where('is_customer', true);
+    }
+}
+```
+
+Bypass the scope on the rare lookups that must reach every row regardless of the app-defined restriction (Mollie webhook resolution, retry jobs, admin impersonation):
+
+```php
+User::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($id);
+```
+
+The default implementation is a no-op, so models where the table only contains billables need not override it.
+
 ## Coupon types
 
 | Type | Behavior | Quick example |

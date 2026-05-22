@@ -14,6 +14,7 @@ The goal of this page is to give integrators a precise picture of which states t
 | 4. Billable record deleted by the host app | – | Cascade delete of `wallets`, `billing_vat_validations`, `billing_country_mismatches`, `coupon_redemptions` (invoices are usually retained for legal reasons) |
 | 5. Stuck in `past_due` indefinitely | `PrepareUsageOverageJob` Pass 3a auto-cancels after `past_due_max_days` (default 30) | Adjust `BILLING_PAST_DUE_MAX_DAYS` to taste, or set `0` to keep the legacy behavior |
 | 6. Paid webhook for an unresolvable billable | Logs a warning + sends `AdminPaidWithoutBillableNotification` | Reconcile manually — the money cleared at Mollie but no local record was touched |
+| 7. Billable table mixes customers with non-customers (staff/admins) | `HasBilling` applies `BillingScope` globally and delegates to `applyBillingScope()` on the model | Override `applyBillingScope(Builder $query)` to filter out non-billable rows |
 
 ## 1. Checkout started, never completed
 
@@ -196,6 +197,36 @@ MollieBilling::notifyAdminUsing(fn () => [
     new AnonymousNotifiable(['mail' => 'finance@example.com']),
 ]);
 ```
+
+## 7. Excluding non-customer rows from billing queries
+
+When the configured billable model also stores rows that are not customers — typically a single `users` table containing both staff and paying users — every lifecycle job and admin query would otherwise sweep through them. Override `applyBillingScope()` on the billable model and return a filtered builder; `HasBilling` registers `BillingScope` as a global Eloquent scope and runs the override on every package-side query:
+
+```php
+use GraystackIT\MollieBilling\Concerns\HasBilling;
+use GraystackIT\MollieBilling\Contracts\Billable;
+use Illuminate\Database\Eloquent\Builder;
+
+class User extends Authenticatable implements Billable
+{
+    use HasBilling;
+
+    public function applyBillingScope(Builder $query): void
+    {
+        $query->where('is_customer', true);
+    }
+}
+```
+
+This is independent from `MollieBilling::cleanupOrphanedBillableUsing()` (which vetoes the cleanup *side-effects* on a per-row basis). The scope keeps the row out of the candidate set entirely, so admin listings, KPIs and lifecycle jobs never see it. Use the cleanup closure when the row *is* a billable but should not be touched right now; use the scope when the row is not a billable at all.
+
+`CleanupOrphanedBillablesJob`, `ProcessTrialLifecycleJob` and the admin billables index all honour the scope automatically. Lookups that must reach every row regardless — Mollie webhook resolution, retry jobs handling a payment for an old row, admin impersonation flows — bypass it explicitly:
+
+```php
+User::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($id);
+```
+
+The default `applyBillingScope()` is a no-op, so models where the table only holds billables (a dedicated `Organization` / `Tenant` model) require no override.
 
 ## Related
 
