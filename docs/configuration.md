@@ -80,7 +80,7 @@ Removes billables that were created during a checkout flow but never reached an 
 - When the billable has a `pending_first_payment_id` in `subscription_meta` the job polls Mollie and only cleans up when the payment is in a terminal failure state (`failed`/`canceled`/`expired`).
 - Otherwise the billable is cleaned purely based on age plus the absence of any accessible subscription (`subscription_source` is `none`/`null` and `subscription_status` is `new`/`null`).
 
-Cascading cleanup (e.g. removing tenants and orphaned users) is delegated to the closure registered via `MollieBilling::cleanupOrphanedBillableUsing(...)`. When no closure is registered the package falls back to `$billable->delete()`. A captured Mollie mandate is revoked best-effort before the billable is removed so we don't leave permission-to-charge floating in Mollie. The job dispatches a `CheckoutAbandoned` event before running the closure so apps can hook into the cleanup for additional side-effects (logging, notifications).
+Cascading cleanup (e.g. removing tenants and orphaned users) is delegated to the closure registered via `MollieBilling::cleanupOrphanedBillableUsing(...)`. When no closure is registered the package falls back to `$billable->delete()`. The closure may return `false` to veto cleanup for billables that legitimately exist without a subscription (admins, employees, internal accounts); in that case the job emits no `CheckoutAbandoned` event, no mandate revocation, and no log entry. Returning `true` or `void` keeps the legacy behaviour. A captured Mollie mandate is revoked best-effort after a successful cleanup so we don't leave permission-to-charge floating in Mollie.
 
 ### Invoices (`invoices`)
 

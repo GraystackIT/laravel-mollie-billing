@@ -6,9 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- `MollieBilling::cleanupOrphanedBillableUsing()` closures may now return `false` to veto cleanup for billables that legitimately exist without a subscription (admins, employees, internal accounts). The job then skips the `CheckoutAbandoned` event, mandate revocation and log entry. Returning `true` or `void` keeps the legacy behaviour. The cleanup closure is also now invoked **before** the side-effects (event/mandate revoke), so a vetoing app no longer triggers ghost notifications for every matching admin row. Mollie customer/mandate IDs are snapshotted before the closure runs so revocation still works after the row is deleted.
+
 ### Fixed
 
 - `ProcessTrialLifecycleJob` no longer fires the `TrialConverted` event or sends `TrialConvertedNotification` when a mandate is present and the trial ends tomorrow — both spoke in past tense ("trial was converted", "invoice was issued") but at that point no charge had happened and no invoice existed. The job now always sends `TrialEndingSoonNotification`, which already branches on `hasMollieMandate()` for the right wording. The actual conversion event + notification are dispatched only by `SubscriptionPaymentHandler::paid()` when Mollie's first recurring charge lands.
+- `CleanupOrphanedBillablesJob` now sets `$timeout = 60` so a hung Mollie HTTP call (the SDK uses a very generous default) can't outlast the queue's visibility window. Without it, a stuck `GetPaymentRequest` could keep the job running past `retry_after`, the queue would re-deliver it, and the second pickup would fail immediately with `MaxAttemptsExceededException` because `attempts() >= tries`.
+- `CleanupOrphanedBillablesJob` now handles `ModelNotFoundException` from `$billable->refresh()` — when an earlier billable in the same chunk cascade-deletes a later one via the app's cleanup closure, the job skips the disappeared row instead of bubbling the exception into the outer try/catch (which would have logged a misleading warning).
 
 ## [0.3.0] - 2026-05-20
 

@@ -242,7 +242,17 @@ MollieBilling::afterCheckoutUsing(function (Billable $billable, bool $success): 
 // receives the billable and is responsible for cascading cleanup (e.g.
 // deleting tenants, users with no other organizations, etc.). Without a
 // closure the package falls back to `$billable->delete()`.
-MollieBilling::cleanupOrphanedBillableUsing(function (Billable $billable): void {
+//
+// The closure may return `false` to veto cleanup for billables that
+// legitimately exist without a subscription (admins, employees, internal
+// accounts). The job then suppresses ALL side-effects — no CheckoutAbandoned
+// event, no mandate revocation, no log entry. Returning `true` or `void`
+// behaves like before.
+MollieBilling::cleanupOrphanedBillableUsing(function (Billable $billable): bool {
+    if ($billable instanceof User && ($billable->isAdmin() || $billable->isEmployee())) {
+        return false;
+    }
+
     DB::transaction(function () use ($billable): void {
         foreach ($billable->users()->get() as $user) {
             if ($user->organizations()->where('id', '!=', $billable->id)->doesntExist()) {
@@ -251,6 +261,8 @@ MollieBilling::cleanupOrphanedBillableUsing(function (Billable $billable): void 
         }
         $billable->forceDelete();
     });
+
+    return true;
 });
 ```
 

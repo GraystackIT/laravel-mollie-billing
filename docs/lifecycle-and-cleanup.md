@@ -26,11 +26,25 @@ Detection is hybrid:
 - **If** the billable has a `pending_first_payment_id` in `subscription_meta`, Mollie is polled. The record is cleaned **only** when the payment is in a terminal failure state (`failed`, `canceled`, `expired`).
 - **Otherwise**, the billable is cleaned purely on age — older than `mollie-billing.cleanup.threshold_minutes` (default 60).
 
-The job dispatches `RevokeMollieMandateJob` first to release the mandate on Mollie's side (relevant when the user captured a mandate but never paid the first invoice), then calls `MollieBilling::runCleanupOrphanedBillable()`. If you have not registered `MollieBilling::cleanupOrphanedBillableUsing()`, the fallback is `$billable->delete()` — fine for soft-deleting models, **not** sufficient if the billable represents a tenant whose user records, auth tokens, or other tables need to go too.
+The job calls `MollieBilling::runCleanupOrphanedBillable()` first, then dispatches `RevokeMollieMandateJob` to release the mandate on Mollie's side (relevant when the user captured a mandate but never paid the first invoice). The mandate-revoke call uses a snapshot of the customer/mandate IDs taken before the cleanup closure runs, so it still works after the closure has deleted the underlying row. If you have not registered `MollieBilling::cleanupOrphanedBillableUsing()`, the fallback is `$billable->delete()` — fine for soft-deleting models, **not** sufficient if the billable represents a tenant whose user records, auth tokens, or other tables need to go too.
 
 The Mollie Customer object itself is **not** deleted from Mollie. Mollie allows orphaned customers; this is a deliberate non-decision rather than a bug.
 
 A `CheckoutAbandoned` event fires for every cleaned billable so apps can hook into the deletion (analytics, audit trail).
+
+**Vetoing cleanup from the closure.** The query is intentionally permissive — any row with `subscription_source ∈ {null, None}` and `subscription_status ∈ {null, New}` older than the threshold matches, including users that legitimately exist without a subscription (admins, employees, internal accounts). The cleanup closure may return `false` to declare such a row "not actually orphan"; the job then suppresses **all** side-effects: no `CheckoutAbandoned` event, no mandate revocation, no log entry. Returning `true` or `void` keeps the legacy behaviour.
+
+```php
+MollieBilling::cleanupOrphanedBillableUsing(function ($billable): bool {
+    if ($billable instanceof User && ($billable->isAdmin() || $billable->isEmployee())) {
+        return false; // veto — leave the row untouched
+    }
+
+    $billable->delete();
+
+    return true;
+});
+```
 
 **Configuration**
 
@@ -46,6 +60,12 @@ A `CheckoutAbandoned` event fires for every cleaned billable so apps can hook in
 ```php
 // AppServiceProvider::boot()
 MollieBilling::cleanupOrphanedBillableUsing(function ($billable) {
+    // Return false to veto: an admin / employee / internal user that matches
+    // the cleanup query but should never be deleted.
+    if ($billable instanceof User && ($billable->isAdmin() || $billable->isEmployee())) {
+        return false;
+    }
+
     DB::transaction(function () use ($billable) {
         $billable->users()->delete();
         $billable->personal_access_tokens()->delete();

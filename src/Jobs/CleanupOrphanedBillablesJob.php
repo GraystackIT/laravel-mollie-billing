@@ -37,11 +37,13 @@ use Mollie\Laravel\Facades\Mollie;
  * The actual deletion is delegated to MollieBilling::cleanupOrphanedBillableUsing()
  * — apps typically use that closure to also remove tenants/users/etc. that
  * have no other relations. When no closure is registered we fall back to
- * `$billable->delete()`.
+ * `$billable->delete()`. The closure may also return `false` to veto cleanup
+ * for billables that legitimately exist without a subscription (e.g. admins);
+ * in that case no event, mandate revocation, or log entry is produced.
  *
- * Captured-but-orphaned Mollie mandates are revoked best-effort before the
- * billable goes away so we don't leave permission-to-charge floating in
- * Mollie for a customer record that is about to be detached.
+ * Captured-but-orphaned Mollie mandates are revoked best-effort after the
+ * cleanup closure runs (using a pre-snapshotted ID pair, since the closure
+ * may have already deleted the billable row).
  */
 class CleanupOrphanedBillablesJob implements ShouldQueue
 {
@@ -52,6 +54,15 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
     use UsesBillingQueue;
 
     public int $tries = 1;
+
+    /**
+     * Cap the job at 60s so a hung Mollie HTTP call (the SDK has a very generous
+     * default timeout) can't outlast the queue's visibility window. Without this,
+     * a single stuck `GetPaymentRequest` could keep the job running past
+     * `retry_after`, the queue would re-deliver it, and the second pickup would
+     * fail immediately with `MaxAttemptsExceededException` because `attempts() >= tries`.
+     */
+    public int $timeout = 60;
 
     public function __construct()
     {
@@ -108,8 +119,15 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
         }
 
         // Defense in depth — refresh and re-check, the row may have flipped
-        // mid-run (paid webhook arrived between query and processing).
-        $billable->refresh();
+        // mid-run (paid webhook arrived between query and processing). It may
+        // also have disappeared if an earlier billable in the same chunk
+        // cascade-deleted this one through the app's cleanup closure — in that
+        // case nothing left to do.
+        try {
+            $billable->refresh();
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return;
+        }
 
         if ($billable->hasAccessibleBillingSubscription()) {
             return;
@@ -128,14 +146,29 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             }
         }
 
-        $this->revokeMandateIfPresent($billable);
+        // Snapshot the Mollie identifiers before running the cleanup closure —
+        // the closure may delete the billable, which detaches the model from
+        // the DB row and makes attribute access unreliable.
+        $customerId = (string) ($billable->mollie_customer_id ?? '');
+        $mandateId = (string) ($billable->mollie_mandate_id ?? '');
+        $billableKey = $billable->getKey();
+
+        // App-level veto: the consuming app may decide that a billable matching
+        // the query (e.g. an admin / employee user without a subscription) is
+        // not actually orphan. In that case we suppress all side-effects —
+        // event, mandate revocation, log — so the row is left fully untouched.
+        $cleaned = MollieBilling::runCleanupOrphanedBillable($billable);
+
+        if (! $cleaned) {
+            return;
+        }
+
+        $this->revokeMandate($customerId, $mandateId);
 
         event(new CheckoutAbandoned($billable, (string) ($pendingPaymentId ?? '')));
 
-        MollieBilling::runCleanupOrphanedBillable($billable);
-
         Log::info('CleanupOrphanedBillablesJob: orphaned billable cleaned up', [
-            'billable_id' => $billable->getKey(),
+            'billable_id' => $billableKey,
             'payment_id' => $pendingPaymentId,
         ]);
     }
@@ -158,11 +191,8 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
         return in_array($status, ['failed', 'canceled', 'expired'], true);
     }
 
-    private function revokeMandateIfPresent(Billable $billable): void
+    private function revokeMandate(string $customerId, string $mandateId): void
     {
-        $customerId = (string) ($billable->mollie_customer_id ?? '');
-        $mandateId = (string) ($billable->mollie_mandate_id ?? '');
-
         if ($customerId === '' || $mandateId === '') {
             return;
         }

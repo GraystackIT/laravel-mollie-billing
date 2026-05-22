@@ -49,7 +49,7 @@ class MollieBilling
     /** @var Closure(?Billable): array<string, mixed>|null */
     protected static ?Closure $urlParametersCallback = null;
 
-    /** @var Closure(Billable): void|null */
+    /** @var Closure(Billable): (void|bool)|null */
     protected static ?Closure $cleanupOrphanedBillableCallback = null;
 
     /** @var array<class-string, class-string> */
@@ -247,23 +247,40 @@ class MollieBilling
      * The closure receives the Billable and is responsible for cascading
      * cleanup (e.g. removing related users, tenants, organizations). When no
      * closure is registered the package falls back to `$billable->delete()`.
+     *
+     * The closure MAY return a bool: `false` signals that the billable is not
+     * actually orphan (e.g. an admin/employee user that legitimately exists
+     * without a subscription) and should be left untouched. In that case the
+     * job ALSO suppresses the surrounding side-effects — no CheckoutAbandoned
+     * event, no mandate revocation, no log entry. Returning `true` or `void`
+     * keeps the legacy behaviour: the closure is treated as having performed
+     * the cleanup.
      */
     public static function cleanupOrphanedBillableUsing(Closure $callback): void
     {
         self::$cleanupOrphanedBillableCallback = $callback;
     }
 
-    public static function runCleanupOrphanedBillable(Billable $billable): void
+    /**
+     * Invoke the registered cleanup closure (or fall back to a direct delete).
+     *
+     * Returns `false` only when the registered closure explicitly returns
+     * `false` — see `cleanupOrphanedBillableUsing()` for the contract. Callers
+     * use this to short-circuit the surrounding orphan-cleanup side-effects.
+     */
+    public static function runCleanupOrphanedBillable(Billable $billable): bool
     {
         if (self::$cleanupOrphanedBillableCallback !== null) {
-            (self::$cleanupOrphanedBillableCallback)($billable);
+            $result = (self::$cleanupOrphanedBillableCallback)($billable);
 
-            return;
+            return $result !== false;
         }
 
         if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
             $billable->delete();
         }
+
+        return true;
     }
 
     /**

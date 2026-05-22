@@ -183,6 +183,52 @@ it('revokes the Mollie mandate when one was captured before abandonment', functi
     Bus::assertDispatched(RevokeMollieMandateJob::class, fn ($job) => $job->mollieCustomerId === 'cst_xyz' && $job->mandateId === 'mdt_xyz');
 });
 
+it('skips event, mandate revocation and delete when the cleanup closure returns false', function (): void {
+    Event::fake([CheckoutAbandoned::class]);
+    Bus::fake([RevokeMollieMandateJob::class]);
+
+    MollieBilling::cleanupOrphanedBillableUsing(fn ($billable): bool => false);
+
+    $protected = TestBillable::create([
+        'name' => 'Protected Co',
+        'email' => 'protected@example.test',
+        'mollie_customer_id' => 'cst_protected',
+        'mollie_mandate_id' => 'mdt_protected',
+    ]);
+    $protected->forceFill([
+        'created_at' => now()->subHours(2),
+        'updated_at' => now()->subHours(2),
+    ])->save();
+
+    CleanupOrphanedBillablesJob::dispatchSync();
+
+    expect(TestBillable::find($protected->getKey()))->not->toBeNull();
+    Event::assertNotDispatched(CheckoutAbandoned::class);
+    Bus::assertNotDispatched(RevokeMollieMandateJob::class);
+});
+
+it('treats a void-returning cleanup closure as a successful cleanup', function (): void {
+    Event::fake([CheckoutAbandoned::class]);
+
+    MollieBilling::cleanupOrphanedBillableUsing(function ($billable): void {
+        $billable->delete();
+    });
+
+    $orphan = TestBillable::create([
+        'name' => 'Void Co',
+        'email' => 'void@example.test',
+    ]);
+    $orphan->forceFill([
+        'created_at' => now()->subHours(2),
+        'updated_at' => now()->subHours(2),
+    ])->save();
+
+    CleanupOrphanedBillablesJob::dispatchSync();
+
+    expect(TestBillable::find($orphan->getKey()))->toBeNull();
+    Event::assertDispatched(CheckoutAbandoned::class);
+});
+
 it('respects the threshold_minutes config', function (): void {
     config(['mollie-billing.cleanup.threshold_minutes' => 240]);
 
