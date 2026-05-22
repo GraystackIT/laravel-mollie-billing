@@ -5,11 +5,9 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
-use GraystackIT\MollieBilling\Events\TrialConverted;
 use GraystackIT\MollieBilling\Events\TrialExpired;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
-use GraystackIT\MollieBilling\Notifications\TrialConvertedNotification;
 use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Notifications\TrialExpiredNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -31,8 +29,12 @@ use Throwable;
  * Two passes:
  *   A. Notify billables whose trial ends in exactly N days, where N is
  *      `mollie-billing.trial_ending_soon_notice_days` (default 1, i.e. tomorrow).
- *      - With a Mollie mandate captured: send TrialConvertedNotification, dispatch TrialConverted.
- *      - Without mandate: send TrialEndingSoonNotification (call-to-action to add a payment method).
+ *      Sends TrialEndingSoonNotification in both cases; the notification itself
+ *      branches on hasMollieMandate() to pick the right wording. The actual
+ *      conversion (TrialConverted event + TrialConvertedNotification) is fired
+ *      later by SubscriptionPaymentHandler::paid() when Mollie's first recurring
+ *      charge succeeds — not here, because at this point no charge has happened
+ *      yet and no invoice exists.
  *   B. Expire billables whose trial_ends_at lies in the past while status is still Trial.
  *      Their first paid charge never landed (no mandate, or Mollie's first charge failed),
  *      so flip them to PastDue and notify. RequireActiveSubscription routes them to checkout.
@@ -89,12 +91,7 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
             ->chunk(200, function ($billables): void {
                 foreach ($billables as $billable) {
                     try {
-                        if ($billable->hasMollieMandate()) {
-                            $this->notify($billable, MollieBilling::resolveNotification(TrialConvertedNotification::class, $billable));
-                            event(new TrialConverted($billable, $billable->getBillingSubscriptionPlanCode() ?? ''));
-                        } else {
-                            $this->notify($billable, MollieBilling::resolveNotification(TrialEndingSoonNotification::class, $billable));
-                        }
+                        $this->notify($billable, MollieBilling::resolveNotification(TrialEndingSoonNotification::class, $billable));
                     } catch (Throwable $e) {
                         Log::error('ProcessTrialLifecycleJob: trial-ending notify failed', [
                             'billable_id' => $billable->getKey(),

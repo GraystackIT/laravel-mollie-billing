@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `ProcessTrialLifecycleJob` no longer fires the `TrialConverted` event or sends `TrialConvertedNotification` when a mandate is present and the trial ends tomorrow — both spoke in past tense ("trial was converted", "invoice was issued") but at that point no charge had happened and no invoice existed. The job now always sends `TrialEndingSoonNotification`, which already branches on `hasMollieMandate()` for the right wording. The actual conversion event + notification are dispatched only by `SubscriptionPaymentHandler::paid()` when Mollie's first recurring charge lands.
+
 ## [0.3.0] - 2026-05-20
 
 ### Fixed

@@ -93,8 +93,8 @@ From that point on, every `Notification::send(..., new TrialEndingSoonNotificati
 
 | Class | Trigger | Constructor signature |
 |-------|---------|----------------------|
-| `TrialEndingSoonNotification` | Trial ends in `trial_ending_soon_notice_days` days, no mandate captured yet. CTA: add payment method. | `(Billable $billable)` |
-| `TrialConvertedNotification` | Trial ends soon and a Mollie mandate is on file. Informational: first charge will happen on `trial_ends_at`. | `(Billable $billable)` |
+| `TrialEndingSoonNotification` | Trial ends in `trial_ending_soon_notice_days` days. Wording branches on `hasMollieMandate()`: with mandate → heads-up that the first charge will be made automatically; without mandate → CTA to add a payment method. | `(Billable $billable)` |
+| `TrialConvertedNotification` | Mollie's first recurring charge has actually landed (fired from `SubscriptionPaymentHandler::paid()`, not from the lifecycle job). The first invoice is already attached when this is sent. | `(Billable $billable)` |
 | `TrialExpiredNotification` | Trial passed without a successful first charge — billable was flipped to `PastDue`. | `(Billable $billable)` |
 | `InvoiceAvailableNotification` | A new invoice (subscription renewal, one-time order, plan-change proration) has been generated. | `(Billable $billable, BillingInvoice $invoice)` |
 | `SubscriptionCancelledNotification` | Subscription cancelled (immediate or end-of-period). | `(Billable $billable)` |

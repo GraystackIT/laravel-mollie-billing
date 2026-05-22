@@ -8,7 +8,6 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\TrialConverted;
 use GraystackIT\MollieBilling\Events\TrialExpired;
 use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
-use GraystackIT\MollieBilling\Notifications\TrialConvertedNotification;
 use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Notifications\TrialExpiredNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -47,7 +46,12 @@ function makeTrialingBillable(array $overrides = []): TestBillable
     return $b->refresh();
 }
 
-it('sends TrialConvertedNotification + TrialConverted event for billable with mandate whose trial ends tomorrow', function (): void {
+it('sends TrialEndingSoonNotification (mandate variant) and does NOT fire TrialConverted for billable with mandate whose trial ends tomorrow', function (): void {
+    // The actual conversion (TrialConverted event + TrialConvertedNotification)
+    // must wait until SubscriptionPaymentHandler::paid() — i.e. when Mollie's
+    // first recurring charge actually lands. The lifecycle job only sends an
+    // ending-soon heads-up; the notification itself picks the with-mandate
+    // wording because hasMollieMandate() is true.
     $billable = makeTrialingBillable([
         'mollie_customer_id' => 'cst_t',
         'mollie_mandate_id' => 'mdt_t',
@@ -63,9 +67,12 @@ it('sends TrialConvertedNotification + TrialConverted event for billable with ma
 
     (new ProcessTrialLifecycleJob)->handle();
 
-    Notification::assertSentTo($billable, TrialConvertedNotification::class);
-    Notification::assertSentTimes(TrialEndingSoonNotification::class, 0);
-    Event::assertDispatched(TrialConverted::class);
+    Notification::assertSentTo($billable, TrialEndingSoonNotification::class, function (TrialEndingSoonNotification $n) use ($billable): bool {
+        $payload = $n->toArray($billable);
+
+        return ($payload['has_mandate'] ?? null) === true;
+    });
+    Event::assertNotDispatched(TrialConverted::class);
 
     expect($billable->fresh()->subscription_status)->toBe(SubscriptionStatus::Trial);
 });
