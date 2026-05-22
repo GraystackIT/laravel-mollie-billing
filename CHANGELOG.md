@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-22
+
 ### Changed
 
 - `MollieBilling::cleanupOrphanedBillableUsing()` closures may now return `false` to veto cleanup for billables that legitimately exist without a subscription (admins, employees, internal accounts). The job then skips the `CheckoutAbandoned` event, mandate revocation and log entry. Returning `true` or `void` keeps the legacy behaviour. The cleanup closure is also now invoked **before** the side-effects (event/mandate revoke), so a vetoing app no longer triggers ghost notifications for every matching admin row. Mollie customer/mandate IDs are snapshotted before the closure runs so revocation still works after the row is deleted.
