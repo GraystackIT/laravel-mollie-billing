@@ -61,7 +61,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $billable = $this->billableClass::find($this->billableId);
+        $billable = $this->billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($this->billableId);
 
         if ($billable === null) {
             return;

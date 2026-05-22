@@ -375,7 +375,10 @@ class MollieWebhookController extends Controller
             return null;
         }
 
-        return $type::find($id);
+        // Bypass the app-defined billing scope so a webhook for a billable
+        // that no longer matches the scope (e.g. a tenant flag flipped) still
+        // resolves — losing a payment webhook is worse than enforcing the filter.
+        return $type::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($id);
     }
 
     /**

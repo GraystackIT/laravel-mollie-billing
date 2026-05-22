@@ -69,7 +69,7 @@ class RetryRefundLineJob implements ShouldQueue
         }
 
         /** @var \GraystackIT\MollieBilling\Contracts\Billable|null $billable */
-        $billable = $this->billableClass::find($this->billableId);
+        $billable = $this->billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($this->billableId);
         if ($billable === null) {
             return;
         }
@@ -91,7 +91,7 @@ class RetryRefundLineJob implements ShouldQueue
             return;
         }
         /** @var \GraystackIT\MollieBilling\Contracts\Billable|null $billable */
-        $billable = $this->billableClass::find($this->billableId);
+        $billable = $this->billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($this->billableId);
         if ($billable === null) {
             return;
         }

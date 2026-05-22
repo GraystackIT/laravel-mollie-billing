@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Contracts;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 interface Billable
@@ -109,6 +110,13 @@ interface Billable
 
     /** @return array<int, string> */
     public function availableBillingProducts(): array;
+
+    // Eloquent scope hook. Applied as a global scope by HasBilling so every
+    // package-side query that walks the billable model (admin listings, KPIs,
+    // lifecycle jobs) sees the same filtered set. Default is a no-op — apps
+    // override on multi-purpose user models to exclude rows that share the
+    // table but are not actually billables (e.g. staff users under a tenant).
+    public function applyBillingScope(Builder $query): void;
 
     // Subscription management (actions)
     public function cancelBillingSubscription(bool $immediately = false): void;

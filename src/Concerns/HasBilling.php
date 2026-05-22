@@ -27,6 +27,7 @@ use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Services\Billing\SyncSeats;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 /**
@@ -255,6 +256,27 @@ trait HasBilling
     public function getBillingSubscriptionStatus(): SubscriptionStatus
     {
         return $this->subscription_status;
+    }
+
+    /**
+     * Registers a global scope that delegates to applyBillingScope() on the model.
+     * Apps override applyBillingScope() to filter out rows that share the table
+     * with billables but are not themselves billable (e.g. staff under a tenant).
+     * The scope is bypassable per-query via
+     * ->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class).
+     */
+    protected static function bootHasBilling(): void
+    {
+        static::addGlobalScope(new \GraystackIT\MollieBilling\Scopes\BillingScope);
+    }
+
+    /**
+     * Default: no-op. Override on the billable model to restrict the set of
+     * rows the billing package operates on.
+     */
+    public function applyBillingScope(Builder $query): void
+    {
+        // No-op by default.
     }
 
     public function initializeHasBilling(): void
