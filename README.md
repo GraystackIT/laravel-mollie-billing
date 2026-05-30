@@ -515,6 +515,11 @@ class Organization extends Model implements Billable
 
 The seat count is used during plan-change previews to calculate whether extra seats need to be purchased on the new plan.
 
+Building on `getUsedBillingSeats()`, the trait derives seat availability for you:
+
+- `getAvailableBillingSeats(): int` — configured seat count minus seats in use (never negative).
+- `isBillingSeatAvailable(int $count = 1): bool` — whether `$count` more seats can be assigned without exceeding the seat count. A non-positive `$count` is treated as a request for one seat.
+
 `HasBilling` provides among others:
 
 - `recordBillingUsage($type, $quantity)` and `creditBillingUsage(...)`

@@ -499,6 +499,23 @@ trait HasBilling
     // getUsedBillingSeats() is intentionally NOT provided by this trait.
     // Each app MUST implement it on the billable model (e.g. return $this->users()->count()).
 
+    /**
+     * Seats still free to assign: the configured seat count minus the seats already in use.
+     * Never negative.
+     */
+    public function getAvailableBillingSeats(): int
+    {
+        return max(0, $this->getBillingSeatCount() - $this->getUsedBillingSeats());
+    }
+
+    /**
+     * Whether at least $count more seats can be assigned without exceeding the seat count.
+     */
+    public function isBillingSeatAvailable(int $count = 1): bool
+    {
+        return $this->getAvailableBillingSeats() >= max(1, $count);
+    }
+
     // ── Addons ──
 
     /**
