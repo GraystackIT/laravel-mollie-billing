@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-05-30
+
 ### Added
 
 - `HasBilling::getAvailableBillingSeats()` and `isBillingSeatAvailable(int $count = 1)` — derive free seat capacity from the configured seat count minus `getUsedBillingSeats()`. Both are part of the `Billable` contract.
