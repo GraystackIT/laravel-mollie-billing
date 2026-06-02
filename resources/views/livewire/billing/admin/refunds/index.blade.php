@@ -48,12 +48,12 @@ new class extends Component {
 
         if ($this->search !== '') {
             $term = '%'.$this->search.'%';
-            $q->where(function ($w) use ($term) {
+            $search = $this->search;
+            $q->where(function ($w) use ($term, $search) {
                 $w->where('billable_id', 'like', $term)
                     ->orWhere('serial_number', 'like', $term)
-                    ->orWhereHasMorph('billable', '*', function ($mq) use ($term) {
-                        $mq->where('name', 'like', $term)
-                           ->orWhere('email', 'like', $term);
+                    ->orWhereHasMorph('billable', '*', function ($mq) use ($search) {
+                        $mq->billableSearch($search);
                     });
             });
         }
@@ -117,7 +117,8 @@ new class extends Component {
                     @foreach ($notes as $n)
                         @php
                             $billable = $n->billable;
-                            $billableLabel = $billable?->name ?? $billable?->email ?? null;
+                            $billableEmail = $billable?->getBillingEmail();
+                            $billableLabel = $billable ? ($billable->getBillingName() ?: $billableEmail ?: null) : null;
                         @endphp
                         <flux:table.row :key="$n->id">
                             <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($n->created_at)->format('Y-m-d H:i') }}</flux:table.cell>
@@ -133,7 +134,7 @@ new class extends Component {
                                     @endif
                                     <x-mollie-billing::admin.billable-address
                                         :billable="$billable"
-                                        :fallback="$billable?->email && $billable->email !== $billableLabel ? $billable->email : null"
+                                        :fallback="$billableEmail && $billableEmail !== $billableLabel ? $billableEmail : null"
                                         class="block text-xs font-normal text-zinc-500 dark:text-zinc-400"
                                     />
                                 @else
@@ -162,6 +163,8 @@ new class extends Component {
     @if ($detail)
             @php
                 $detailBillable = $detail->billable;
+                $detailBillableEmail = $detailBillable?->getBillingEmail();
+                $detailBillableLabel = $detailBillable ? ($detailBillable->getBillingName() ?: $detailBillableEmail) : '';
                 $grossAbs = abs((int) $detail->amount_gross);
                 $netAbs = abs((int) $detail->amount_net);
                 $vatAbs = abs((int) $detail->amount_vat);
@@ -176,7 +179,7 @@ new class extends Component {
 
                 $billableInitials = '';
                 if ($detailBillable) {
-                    $name = $detailBillable->name ?? $detailBillable->email ?? '';
+                    $name = $detailBillableLabel ?: '';
                     $parts = preg_split('/\s+/', trim($name));
                     foreach (array_slice($parts, 0, 2) as $p) {
                         $billableInitials .= mb_strtoupper(mb_substr($p, 0, 1));
@@ -201,11 +204,11 @@ new class extends Component {
                         </div>
                         <div class="min-w-0 flex-1">
                             <div class="truncate font-medium text-zinc-900 dark:text-white">
-                                {{ $detailBillable?->name ?? $detailBillable?->email ?? class_basename($detail->billable_type).'#'.$detail->billable_id }}
+                                {{ $detailBillableLabel ?: class_basename($detail->billable_type).'#'.$detail->billable_id }}
                             </div>
                             <x-mollie-billing::admin.billable-address
                                 :billable="$detailBillable"
-                                :fallback="$detailBillable?->email"
+                                :fallback="$detailBillableEmail"
                                 class="mt-0.5 block truncate text-xs text-zinc-500 dark:text-zinc-400"
                             />
                         </div>

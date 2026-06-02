@@ -54,7 +54,7 @@ new class extends Component {
         </flux:card>
     @else
         @php
-            $initials = collect(explode(' ', trim((string) $billable->name)))
+            $initials = collect(explode(' ', trim($billable->getBillingName())))
                 ->filter()
                 ->take(2)
                 ->map(fn ($part) => mb_strtoupper(mb_substr($part, 0, 1)))
@@ -71,10 +71,10 @@ new class extends Component {
                     </div>
                     <div class="min-w-0 space-y-1">
                         <div class="flex flex-wrap items-center gap-3">
-                            <flux:heading size="xl" class="truncate">{{ $billable->name }}</flux:heading>
+                            <flux:heading size="xl" class="truncate">{{ $billable->getBillingName() }}</flux:heading>
                             <x-mollie-billing::admin.enum-badge :value="$billable->subscription_status" />
                         </div>
-                        <flux:text class="text-zinc-600 dark:text-zinc-400">{{ $billable->email }}</flux:text>
+                        <flux:text class="text-zinc-600 dark:text-zinc-400">{{ $billable->getBillingEmail() }}</flux:text>
                     </div>
                 </div>
 

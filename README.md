@@ -561,6 +561,45 @@ class User extends Authenticatable implements Billable
 
 The `name` key passed to your `createBillableUsing` callback always carries the *company* name from the checkout form — your callback decides which attribute to persist it into.
 
+The admin panel never reads the `name` / `email` columns directly — every billable label is rendered through `getBillingName()` / `getBillingEmail()`, so overriding the accessors above is enough to make the admin listings, the billable detail header, scheduled-changes, past-due, refunds and grant views all show the right value.
+
+### Admin search & sort on custom columns
+
+Display goes through `getBillingName()` / `getBillingEmail()`, but the admin listings also *search* and *sort* by name and email — and a query can't call a PHP accessor. When your display name or contact email lives on a different column (or behind a relation), point the three search/sort scopes at the right place. They default to the `name` and `email` columns, so a User-as-billable setup needs no override:
+
+```php
+use GraystackIT\MollieBilling\Concerns\HasBilling;
+use GraystackIT\MollieBilling\Contracts\Billable;
+use Illuminate\Database\Eloquent\Builder;
+
+class Practice extends Model implements Billable
+{
+    use HasBilling;
+
+    public function scopeBillableSearch(Builder $query, string $term): Builder
+    {
+        return $query->where(function ($q) use ($term) {
+            $q->where('practice_name', 'like', '%'.$term.'%')
+              ->orWhereHas('owner', fn ($o) => $o->where('email', 'like', '%'.$term.'%'));
+        });
+    }
+
+    public function scopeBillableOrderByName(Builder $query, string $direction): Builder
+    {
+        return $query->orderBy('practice_name', $direction);
+    }
+
+    public function scopeBillableOrderByEmail(Builder $query, string $direction): Builder
+    {
+        return $query->leftJoin('users', 'users.id', '=', 'practices.owner_id')
+                     ->orderBy('users.email', $direction)
+                     ->select('practices.*');
+    }
+}
+```
+
+All three are part of the `Billable` contract, so your IDE/static analysis will flag them if you implement the interface manually instead of using the `HasBilling` trait.
+
 ### Restricting which rows are treated as billable
 
 When the billable table also stores rows that are **not** customers — typically a single `users` table that mixes admins/staff with paying users — override `applyBillingScope()` on the model. The `HasBilling` trait registers `BillingScope` as a global scope and delegates to this method, so the same filter applies to admin listings, KPI queries, and every lifecycle job that iterates billables.

@@ -120,8 +120,11 @@ it('rejects period_extension when next charge is within 24 hours', function (): 
         'subscription_status' => SubscriptionStatus::Active,
         'subscription_plan_code' => 'pro',
         'subscription_interval' => SubscriptionInterval::Monthly,
-        // period started ~30 days ago for monthly interval → next charge is in just hours.
-        'subscription_period_starts_at' => BillingTime::nowUtc()->subDays(30)->addHours(2),
+        // nextBillingDate() = period_starts_at + 1 month, so place the period exactly
+        // one month back (minus a couple of hours) → next charge lands ~2h from now,
+        // well inside the 24h window. Computing it inversely to addMonth() keeps the
+        // assertion calendar-independent (a flat subDays(30) drifts past 24h in 31-day months).
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subMonthNoOverflow()->addHours(2),
         'subscription_meta' => ['mollie_subscription_id' => 'sub_test'],
         'mollie_customer_id' => 'cust_test',
     ])->save();

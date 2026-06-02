@@ -49,7 +49,7 @@ new class extends Component {
                 ? $service->accessGrantCoupon($code, $this->planCode, $this->interval, $this->addonCodes, $this->durationDays)
                 : $service->addonGrantCoupon($code, $this->addonCodes);
             $service->redeem($coupon, $b, []);
-            session()->flash('status', "Grant {$code} issued and redeemed for {$b->name}.");
+            session()->flash('status', "Grant {$code} issued and redeemed for {$b->getBillingName()}.");
             return $this->redirectRoute(BillingRoute::admin('billables.show'), ['billable' => $b], navigate: true);
         } catch (\Throwable $e) {
             report($e);
@@ -63,9 +63,9 @@ new class extends Component {
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
         title="Issue access grant"
-        :subtitle="$billable ? 'For '.$billable->name.' ('.$billable->email.')' : 'Grants plan and/or addon access without charge.'"
+        :subtitle="$billable ? 'For '.$billable->getBillingName().' ('.$billable->getBillingEmail().')' : 'Grants plan and/or addon access without charge.'"
         :back="$billable ? route(BillingRoute::admin('billables.show'), $billable) : route(BillingRoute::admin('billables.index'))"
-        :backLabel="$billable ? $billable->name : 'Billables'"
+        :backLabel="$billable ? $billable->getBillingName() : 'Billables'"
     />
 
     <x-mollie-billing::admin.flash :error="$error" />

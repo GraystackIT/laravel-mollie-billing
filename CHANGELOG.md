@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `Billable::scopeBillableSearch()`, `scopeBillableOrderByName()` and `scopeBillableOrderByEmail()` — query scopes that drive admin-panel search and sorting. `HasBilling` ships defaults targeting the `name` / `email` columns (User-as-billable shape); apps whose display name or contact email lives elsewhere (or behind a relation) override them. See README "Admin search & sort on custom columns".
+
+### Changed
+
+- The admin panel no longer reads `name` / `email` columns directly. Billable labels in the billables list & detail, scheduled-changes, past-due, refunds and grant views now render through `getBillingName()` / `getBillingEmail()`, and search/sort route through the new scopes — so a billable whose name/email lives on non-standard columns no longer yields empty lists or query errors.
+
+### Breaking
+
+- The three new scope methods are part of the `Billable` contract. Apps that implement `Billable` **without** the `HasBilling` trait must add them (next tag should be **0.4.0**). Implementations using `HasBilling` inherit working defaults and need no change.
+
 ## [0.3.3] - 2026-05-30
 
 ### Added

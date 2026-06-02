@@ -38,10 +38,7 @@ new class extends Component {
         $query = $class ? $class::query() : null;
 
         if ($query && $this->search !== '') {
-            $query->where(function ($q): void {
-                $q->where('email', 'like', '%'.$this->search.'%')
-                  ->orWhere('name', 'like', '%'.$this->search.'%');
-            });
+            $query->billableSearch($this->search);
         }
 
         if ($query && $this->statusFilter !== '') {
@@ -50,7 +47,11 @@ new class extends Component {
 
         if ($query) {
             $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
-            $query->orderBy($sortBy, $this->sortDirection);
+            match ($sortBy) {
+                'name' => $query->billableOrderByName($this->sortDirection),
+                'email' => $query->billableOrderByEmail($this->sortDirection),
+                default => $query->orderBy($sortBy, $this->sortDirection),
+            };
         }
 
         return [
@@ -113,8 +114,8 @@ new class extends Component {
                     <flux:table.rows>
                         @foreach ($billables as $b)
                             <flux:table.row :key="$b->getKey()">
-                                <flux:table.cell variant="strong">{{ $b->name }}</flux:table.cell>
-                                <flux:table.cell>{{ $b->email }}</flux:table.cell>
+                                <flux:table.cell variant="strong">{{ $b->getBillingName() }}</flux:table.cell>
+                                <flux:table.cell>{{ $b->getBillingEmail() }}</flux:table.cell>
                                 <flux:table.cell class="font-mono text-sm">{{ $b->subscription_plan_code ?? '—' }}</flux:table.cell>
                                 <flux:table.cell>
                                     <x-mollie-billing::admin.enum-badge :value="$b->subscription_status" />

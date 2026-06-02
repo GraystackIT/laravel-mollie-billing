@@ -120,6 +120,38 @@ interface Billable
     // table but are not actually billables (e.g. staff users under a tenant).
     public function applyBillingScope(Builder $query): void;
 
+    // Admin listing search & sort. The package never reads `name`/`email`
+    // columns directly in the admin views — it routes filtering and ordering
+    // through these scopes so apps whose billable model keeps its display name
+    // or contact email elsewhere (or behind a relation) can override them.
+    //
+    // Default implementations in HasBilling target the `name` and `email`
+    // columns, matching a User-as-billable setup. Override on the consuming
+    // model when the schema differs:
+    //
+    //     public function scopeBillableSearch(Builder $query, string $term): Builder
+    //     {
+    //         return $query->where(function ($q) use ($term) {
+    //             $q->where('practice_name', 'like', '%'.$term.'%')
+    //               ->orWhereHas('owner', fn ($o) => $o->where('email', 'like', '%'.$term.'%'));
+    //         });
+    //     }
+    //
+    //     public function scopeBillableOrderByName(Builder $query, string $direction): Builder
+    //     {
+    //         return $query->orderBy('practice_name', $direction);
+    //     }
+    //
+    //     public function scopeBillableOrderByEmail(Builder $query, string $direction): Builder
+    //     {
+    //         return $query->leftJoin('users', 'users.id', '=', 'practices.owner_id')
+    //                      ->orderBy('users.email', $direction)
+    //                      ->select('practices.*');
+    //     }
+    public function scopeBillableSearch(Builder $query, string $term): Builder;
+    public function scopeBillableOrderByName(Builder $query, string $direction): Builder;
+    public function scopeBillableOrderByEmail(Builder $query, string $direction): Builder;
+
     // Subscription management (actions)
     public function cancelBillingSubscription(bool $immediately = false): void;
     public function changeBillingPlan(string $planCode, string $interval): void;

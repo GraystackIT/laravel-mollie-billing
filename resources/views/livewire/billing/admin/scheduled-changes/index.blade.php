@@ -59,15 +59,16 @@ new class extends Component {
         $query = $class ? $class::query()->whereNotNull('scheduled_change_at') : null;
 
         if ($query && $this->search !== '') {
-            $query->where(function ($w): void {
-                $w->where('name', 'like', '%'.$this->search.'%')
-                  ->orWhere('email', 'like', '%'.$this->search.'%');
-            });
+            $query->billableSearch($this->search);
         }
 
         if ($query) {
             $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'scheduled_change_at';
-            $query->orderBy($sortBy, $this->sortDirection);
+            match ($sortBy) {
+                'name' => $query->billableOrderByName($this->sortDirection),
+                'email' => $query->billableOrderByEmail($this->sortDirection),
+                default => $query->orderBy($sortBy, $this->sortDirection),
+            };
         }
 
         return ['billables' => $query ? $query->paginate(20) : null];
@@ -141,8 +142,8 @@ new class extends Component {
                             @endphp
                             <flux:table.row :key="$b->getKey()">
                                 <flux:table.cell variant="strong">
-                                    <a href="{{ route(BillingRoute::admin('billables.show'), $b) }}" class="hover:underline">{{ $b->name }}</a>
-                                    <flux:text size="xs" class="text-zinc-500">{{ $b->email }}</flux:text>
+                                    <a href="{{ route(BillingRoute::admin('billables.show'), $b) }}" class="hover:underline">{{ $b->getBillingName() }}</a>
+                                    <flux:text size="xs" class="text-zinc-500">{{ $b->getBillingEmail() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">
                                     {{ BillingTime::displayUtc($b->scheduled_change_at)?->format('Y-m-d H:i') }} UTC

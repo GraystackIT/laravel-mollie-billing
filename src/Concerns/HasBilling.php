@@ -126,6 +126,45 @@ trait HasBilling
         $this->{$this->billingNameAttribute()} = $name;
     }
 
+    /**
+     * Filters the admin billable listing by a free-text search term. Default
+     * matches the `name` and `email` columns (User-as-billable shape). Override
+     * when the display name / contact email live elsewhere or behind a relation:
+     *
+     *     public function scopeBillableSearch(Builder $query, string $term): Builder
+     *     {
+     *         return $query->where(function ($q) use ($term) {
+     *             $q->where('practice_name', 'like', '%'.$term.'%')
+     *               ->orWhereHas('owner', fn ($o) => $o->where('email', 'like', '%'.$term.'%'));
+     *         });
+     *     }
+     */
+    public function scopeBillableSearch(Builder $query, string $term): Builder
+    {
+        return $query->where(function (Builder $q) use ($term): void {
+            $q->where('name', 'like', '%'.$term.'%')
+              ->orWhere('email', 'like', '%'.$term.'%');
+        });
+    }
+
+    /**
+     * Orders the admin billable listing by display name. Override to point at a
+     * different column or a joined relation — see scopeBillableSearch().
+     */
+    public function scopeBillableOrderByName(Builder $query, string $direction): Builder
+    {
+        return $query->orderBy('name', $direction);
+    }
+
+    /**
+     * Orders the admin billable listing by contact email. Override to point at a
+     * different column or a joined relation — see scopeBillableSearch().
+     */
+    public function scopeBillableOrderByEmail(Builder $query, string $direction): Builder
+    {
+        return $query->orderBy('email', $direction);
+    }
+
     public function getBillingStreet(): ?string
     {
         return $this->billing_street;
