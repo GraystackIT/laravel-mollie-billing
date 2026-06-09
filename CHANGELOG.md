@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-09
+
 ### Fixed
 
 - Plan changes are now blocked for billables that never completed checkout (`subscription_source = none`): after an abandoned/cancelled first payment the portal could silently rewrite the plan code with no payment. `ValidateSubscriptionChange` now throws `InvalidSubscriptionStateException`, and `BillingPortalController::plan()` redirects such billables to checkout.
