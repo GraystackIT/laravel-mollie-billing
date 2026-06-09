@@ -52,11 +52,43 @@ class ValidateSubscriptionChange
      */
     public function validate(Billable $billable, SubscriptionChangeContext $context): void
     {
+        $this->validateSubscriptionEstablished($billable);
         $this->validateSeats($billable, $context);
         $this->validateAddons($billable, $context);
         $this->validateLocalSubscriptionExtras($billable, $context);
         $this->validateWalletUsage($billable, $context);
         $this->validateMollieReadiness($billable, $context);
+    }
+
+    /**
+     * Ensure the billable has an established subscription to change at all.
+     *
+     * A plan change presupposes an existing subscription. A billable with
+     * `subscription_source = None` never completed checkout — e.g. its first
+     * payment was cancelled or abandoned, leaving it at status `New` with no
+     * Mollie mandate. Such a billable has no plan to "change" and no payment
+     * instrument to bill: without this guard, the portal's plan-change screen
+     * would silently rewrite `subscription_plan_code` with no money flow,
+     * neither validateLocalSubscriptionExtras (only fires for Local) nor
+     * validateMollieReadiness (only fires for Mollie + prorata) catching it.
+     *
+     * The correct path for these billables is the checkout flow, which obtains
+     * a mandate and creates the subscription. Local and Mollie subscriptions
+     * (both established) are unaffected.
+     *
+     * @throws InvalidSubscriptionStateException When no subscription has been established
+     */
+    protected function validateSubscriptionEstablished(Billable $billable): void
+    {
+        // null (never persisted) and None (DB default) both mean "no subscription
+        // established yet" — only Local and Mollie are real sources to change.
+        $source = $billable->getBillingSubscriptionSource();
+
+        if ($source === null || $source === SubscriptionSource::None->value) {
+            throw new InvalidSubscriptionStateException(
+                'Cannot change plan — no active subscription. Complete checkout first.'
+            );
+        }
     }
 
     /**

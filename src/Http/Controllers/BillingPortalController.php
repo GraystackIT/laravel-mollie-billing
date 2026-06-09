@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
+use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -45,8 +46,22 @@ class BillingPortalController extends Controller
         return $this->render('dashboard');
     }
 
-    public function plan(Request $request): View
+    public function plan(Request $request): View|RedirectResponse
     {
+        $billable = MollieBilling::resolveBillable($request);
+
+        // A plan change requires an established subscription. A billable that
+        // never completed checkout (source None — e.g. an abandoned first
+        // payment) has no plan to change; send it to checkout instead of
+        // letting it pick a plan that ValidateSubscriptionChange would reject.
+        $source = $billable?->getBillingSubscriptionSource();
+        if ($billable === null || $source === null || $source === SubscriptionSource::None->value) {
+            return redirect()->route(
+                BillingRoute::checkout(),
+                $billable !== null ? MollieBilling::resolveUrlParameters($billable) : [],
+            );
+        }
+
         return $this->render('plan-change');
     }
 

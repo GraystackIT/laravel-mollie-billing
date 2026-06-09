@@ -136,6 +136,29 @@ it('blocks switching a Local subscription directly to a paid plan', function ():
     ]))->toThrow(\GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException::class);
 });
 
+it('blocks a plan change for a billable that never completed checkout (source None)', function (): void {
+    // Reproduces the abandoned-checkout bug: a fresh billable defaults to
+    // source None / status New with no Mollie mandate. The plan-change portal
+    // must not silently rewrite the plan code without any payment.
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Acme', 'email' => 'acme@example.test']);
+    // Reload so the DB default (source None / status New) is materialized,
+    // mirroring a billable loaded from storage after an abandoned checkout.
+    $billable->refresh();
+
+    expect($billable->subscription_source)->toBe(SubscriptionSource::None);
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::New);
+
+    expect(fn () => app(UpdateSubscription::class)->update($billable, [
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+    ]))->toThrow(\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException::class);
+
+    $billable->refresh();
+    expect($billable->subscription_plan_code)->toBeNull();
+    expect($billable->subscription_source)->toBe(SubscriptionSource::None);
+});
+
 it('disables an addon on a Mollie subscription and records it in diff.addonsRemoved', function (): void {
     Event::fake([AddonDisabled::class, SubscriptionUpdated::class]);
 

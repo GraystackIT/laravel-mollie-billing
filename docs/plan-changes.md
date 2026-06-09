@@ -60,6 +60,10 @@ Phase 2b — Webhook: payment failed
 
 All validation is centralized in `ValidateSubscriptionChange`. It runs in both Phase 1 (pre-flight) and Phase 2 (before applying). Apps can override it via `app->bind`.
 
+### Established Subscription
+
+- A plan change requires an existing subscription. If `subscription_source` is `none` (or unset) — i.e. checkout was never completed, e.g. an abandoned/cancelled first payment — `InvalidSubscriptionStateException` is thrown. Such billables must go through the checkout flow, which obtains a mandate and creates the subscription. The portal's plan screen (`BillingPortalController::plan()`) redirects these billables to checkout for the same reason.
+
 ### Seats
 
 - If `usedSeats > newIncludedSeats` and the new plan supports extra seats (`seat_price_net !== null`): seats are automatically increased to `max(usedSeats, newIncludedSeats)`.
