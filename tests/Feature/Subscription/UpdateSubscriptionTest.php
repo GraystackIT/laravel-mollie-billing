@@ -118,6 +118,36 @@ it('decreases seats on a Mollie subscription and fires SeatsChanged', function (
     });
 });
 
+it('blocks a user-initiated seat change when the billing period has already lapsed', function (): void {
+    // Period started 40 days ago on a monthly plan → ended ~10 days ago and was
+    // never renewed. The prorata factor would collapse to 0, so without this
+    // guard a seat increase would be applied for free.
+    $billable = makeMollieProBillable(5);
+    $billable->forceFill([
+        'subscription_period_starts_at' => now()->subDays(40),
+    ])->save();
+    $billable->refresh();
+
+    expect(fn () => app(UpdateSubscription::class)->update($billable, ['seats' => 10]))
+        ->toThrow(\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException::class);
+
+    $billable->refresh();
+    expect($billable->subscription_meta['seat_count'] ?? null)->toBe(5);
+});
+
+it('still allows seat changes while the billing period is current', function (): void {
+    Event::fake([SeatsChanged::class, SubscriptionUpdated::class]);
+
+    // Period started 5 days ago → ~25 days remaining → prorata applies normally.
+    $billable = makeMollieProBillable(5);
+
+    $result = app(UpdateSubscription::class)->update($billable, ['seats' => 7]);
+
+    $billable->refresh();
+    expect($billable->subscription_meta['seat_count'] ?? null)->toBe(7);
+    expect($result['seatsChanged'])->toBeTrue();
+});
+
 it('blocks switching a Local subscription directly to a paid plan', function (): void {
     /** @var TestBillable $billable */
     $billable = TestBillable::create(['name' => 'Acme', 'email' => 'acme@example.test']);

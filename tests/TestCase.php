@@ -21,6 +21,7 @@ abstract class TestCase extends Orchestra
     protected function getPackageProviders($app): array
     {
         return [
+            \Livewire\LivewireServiceProvider::class,
             VatCalculatorServiceProvider::class,
             WalletServiceProvider::class,
             \Elegantly\Invoices\InvoiceServiceProvider::class,
@@ -30,6 +31,7 @@ abstract class TestCase extends Orchestra
 
     protected function defineEnvironment($app): void
     {
+        $app['config']->set('app.key', 'base64:'.base64_encode(str_repeat('a', 32)));
         $app['config']->set('mollie-billing.billable_model', TestBillable::class);
         $app['config']->set('mollie-billing.billable_key_type', 'int');
         $app['config']->set('database.default', 'testing');

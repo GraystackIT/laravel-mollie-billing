@@ -243,6 +243,10 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        // Livewire actions bypass the portal route middleware, so authorize here:
+        // only users the host app permits may change seats (and trigger the charge).
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
         $this->ensureMinSeats();
 
         try {
