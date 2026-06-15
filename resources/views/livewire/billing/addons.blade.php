@@ -201,6 +201,8 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
         $codes = $this->appliedCouponCodes[$addonCode] ?? [];
 
         try {
@@ -229,6 +231,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
         try {
             $billable->disableBillingAddon($addonCode);

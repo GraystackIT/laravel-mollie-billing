@@ -238,6 +238,8 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
         try {
             $service->cancelScheduledChange($billable);
             \Flux::toast(__('billing::portal.flash.scheduled_cancelled'), variant: 'success');
@@ -252,6 +254,8 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
         try {
             $service->cancelPendingPlanChange($billable);
             \Flux::toast(__('billing::portal.flash.pending_change_cancelled'), variant: 'success');
@@ -265,6 +269,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
         $meta = $billable->getBillingSubscriptionMeta();
         $sc = $meta['scheduled_change'] ?? null;
@@ -309,6 +315,8 @@ new class extends Component {
             \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
             return;
         }
+
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
         // Local → paid: divert to the dedicated UpgradeLocalToMollie path.
         // The regular UpdateSubscription would (correctly) refuse this transition
@@ -395,6 +403,8 @@ new class extends Component {
             return null;
         }
 
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
         $grossAmount = (int) ($this->preview['grossTotal'] ?? 0);
         if ($grossAmount <= 0) {
             \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
@@ -465,6 +475,8 @@ new class extends Component {
         if (! $billable || ! ($billable instanceof \Illuminate\Database\Eloquent\Model)) {
             return;
         }
+
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
         $validCountries = array_keys(CountryResolver::resolve());
 

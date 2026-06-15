@@ -205,6 +205,8 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
         $this->processing = true;
 
         try {
