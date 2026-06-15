@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `UpdateSubscription` now guards against user-initiated changes while the current billing period has lapsed without renewing. When `nextBillingDate()` lies in the past the subscription is stuck between periods and the prorata factor collapses to 0, so a seat/addon upgrade would prorate to a free change; `guardPeriodNotLapsed()` throws `InvalidSubscriptionStateException` until the renewal (or past-due flow) catches up. Internal end-of-period re-entries (`internal=true`) and past-due subscriptions are exempt.
+
+### Security
+
+- Portal mutation actions now authorize at the service level via `abort_unless(MollieBilling::authorizes(request(), $billable), 403)`. Livewire component actions bypass the portal route middleware, so plan changes, scheduled/pending-change cancellation, addon enable/disable, seat changes and one-time product payments each re-check authorization before mutating state or triggering a charge.
+
 ## [0.3.5] - 2026-06-09
 
 ### Fixed
