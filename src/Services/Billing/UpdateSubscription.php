@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Events\AddonEnabled;
 use GraystackIT\MollieBilling\Events\PlanChanged;
 use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
+use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -39,6 +40,7 @@ class UpdateSubscription
         $dto = SubscriptionUpdateRequest::from($request);
 
         $this->validateApplyAt($dto);
+        $this->guardPeriodNotLapsed($billable, $dto);
 
         if ($dto->applyAt === 'end_of_period') {
             $this->scheduleService->schedule($billable, $dto);
@@ -932,6 +934,48 @@ class UpdateSubscription
 
         if ($dto->applyAt !== 'end_of_period' && $mode === PlanChangeMode::EndOfPeriod) {
             throw new \RuntimeException('Immediate plan changes are not allowed.');
+        }
+    }
+
+    /**
+     * Reject user-initiated changes when the current billing period has already
+     * lapsed without renewing.
+     *
+     * For a healthy subscription Mollie charges at period end and a webhook
+     * advances `subscription_period_starts_at`, so `nextBillingDate()` always
+     * stays in the future. When it lies in the past the subscription is stuck
+     * between periods: the prorata factor collapses to 0
+     * (`BillingPolicy::prorataFactor()` clamps negative remaining days), so a
+     * seat/addon upgrade would prorate to a 0 charge and be applied for free.
+     * We block the change until the renewal (or the past-due flow) catches up.
+     *
+     * Internal re-entries (scheduled apply at period end) carry `internal=true`
+     * and are exempt — they intentionally run exactly when the period rolls over.
+     * Past-due subscriptions are also exempt: plan/interval changes there are
+     * handled by the dedicated past-due reset path (full first-period charge).
+     *
+     * @throws InvalidSubscriptionStateException When the period has lapsed and no renewal has occurred
+     */
+    private function guardPeriodNotLapsed(Billable $billable, SubscriptionUpdateRequest $dto): void
+    {
+        if ($dto->internal || $billable->isBillingPastDue()) {
+            return;
+        }
+
+        $periodEnd = $billable->nextBillingDate();
+        if ($periodEnd === null) {
+            return;
+        }
+
+        // Day-granular UTC comparison mirrors BillingPolicy::prorataPeriodDays():
+        // a change on the period-end day itself still has 0 remaining days and
+        // prorates to ~0 legitimately — only a strictly past end date is stuck.
+        if (BillingTime::nowUtc()->startOfDay()->greaterThan($periodEnd->copy()->utc()->startOfDay())) {
+            throw new InvalidSubscriptionStateException(
+                'Cannot modify the subscription — the current billing period ended on '
+                .$periodEnd->copy()->utc()->toDateString()
+                .' and has not renewed yet. Wait for the renewal to complete before changing the subscription.'
+            );
         }
     }
 
