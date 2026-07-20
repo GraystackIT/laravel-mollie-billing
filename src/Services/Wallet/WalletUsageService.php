@@ -149,6 +149,84 @@ class WalletUsageService
         event(new WalletReset($billable, $type, $previousBalance, $quota, $reason));
     }
 
+    // ── Usage vs. bookkeeping transactions ────────────────────────────────────
+    //
+    // Wallet transactions cover two very different things: real consumption
+    // (recordBillingUsage) and bookkeeping — plan quota top-ups, period resets,
+    // plan-change adjustments and purchased credits. Usage statistics must only
+    // ever count the former, otherwise a renewal reset or a credit purchase
+    // shows up as "consumption".
+
+    /**
+     * Transaction reasons that represent bookkeeping, not real consumption.
+     */
+    public const NON_USAGE_REASONS = [
+        'credit',
+        'period_reset',
+        'plan_change',
+        'plan_change_reset',
+        'plan_change_credit',
+        'plan_change_upgrade',
+        'plan_change_downgrade',
+        'subscription_activation',
+        'subscription_renewal',
+        'subscription_renewal_rollover',
+        'subscription_trial_start',
+        'coupon_credit',
+    ];
+
+    /**
+     * Prefixes of dynamic bookkeeping reasons (e.g. `one_time_order:starter-pack`).
+     */
+    public const NON_USAGE_REASON_PREFIXES = [
+        'one_time_order:',
+    ];
+
+    /**
+     * Whether a transaction reason represents real consumption.
+     */
+    public static function isUsageReason(?string $reason): bool
+    {
+        if ($reason === null || $reason === '') {
+            return true;
+        }
+
+        if (in_array($reason, self::NON_USAGE_REASONS, true)) {
+            return false;
+        }
+
+        foreach (self::NON_USAGE_REASON_PREFIXES as $prefix) {
+            if (str_starts_with($reason, $prefix)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Constrain a wallet-transaction query to real consumption, excluding
+     * purchases, plan quota credits and period/plan-change resets.
+     *
+     * @template TQuery of \Illuminate\Database\Eloquent\Builder|\Illuminate\Database\Query\Builder
+     *
+     * @param  TQuery  $query
+     * @return TQuery
+     */
+    public static function scopeRealUsage($query)
+    {
+        return $query->where(function ($q): void {
+            $q->whereNull('meta->reason')
+                ->orWhere(function ($inner): void {
+                    $inner->whereNotIn('meta->reason', self::NON_USAGE_REASONS);
+
+                    foreach (self::NON_USAGE_REASON_PREFIXES as $prefix) {
+                        $inner->where('meta->reason', 'not like', $prefix.'%');
+                    }
+                });
+        });
+    }
+
     // ── Purchased balance tracking ────────────────────────────────────────────
     //
     // One-time order and coupon credits are tracked separately from plan quotas

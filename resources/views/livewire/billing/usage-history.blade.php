@@ -119,14 +119,14 @@ new class extends Component {
 
         // Stats for the filtered result set — use the unordered base query so
         // grouped aggregations work on Postgres (no leftover ORDER BY columns).
-        $statsQuery = $baseQuery;
+        // Only real consumption counts: purchases, plan quota credits and
+        // period/plan-change resets are bookkeeping and must not be included.
+        $statsQuery = WalletUsageService::scopeRealUsage($baseQuery);
         $totalDebits = (clone $statsQuery)->where('type', 'withdraw')->sum('amount');
-        $totalCredits = (clone $statsQuery)->where('type', 'deposit')->sum('amount');
-        $totalTransactions = (clone $statsQuery)->count();
+        $totalTransactions = (clone $statsQuery)->where('type', 'withdraw')->count();
 
         $debitsAbs = abs((int) $totalDebits);
-        $creditsInt = (int) $totalCredits;
-        $netUsage = max(0, $debitsAbs - $creditsInt);
+        $netUsage = $debitsAbs;
 
         // Daily debit series for sparkline + peak/avg.
         // reorder() clears any inherited ORDER BY so Postgres' GROUP BY check passes.
@@ -197,7 +197,6 @@ new class extends Component {
         $stats = [
             'total' => $totalTransactions,
             'debits' => $debitsAbs,
-            'credits' => $creditsInt,
             'net' => $netUsage,
             'dailyAvg' => $dailyAvg,
             'peakDay' => $peakDay,
@@ -314,13 +313,9 @@ new class extends Component {
                     {{ __('billing::portal.usage_history_net_hint') }}
                 </flux:text>
                 <div class="mt-3 flex items-center gap-3 text-xs tabular-nums">
-                    <span class="inline-flex items-center gap-1 text-red-600/80 dark:text-red-400/80">
+                    <span class="inline-flex items-center gap-1 text-zinc-500 dark:text-zinc-400">
                         <span class="size-1.5 rounded-full bg-red-500"></span>
-                        −{{ number_format($stats['debits']) }}
-                    </span>
-                    <span class="inline-flex items-center gap-1 text-emerald-600/80 dark:text-emerald-400/80">
-                        <span class="size-1.5 rounded-full bg-emerald-500"></span>
-                        +{{ number_format($stats['credits']) }}
+                        {{ trans_choice('billing::portal.usage_history_events', $stats['total'], ['count' => number_format($stats['total'])]) }}
                     </span>
                 </div>
             </flux:card>

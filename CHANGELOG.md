@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Portal usage statistics now count real consumption only. Bookkeeping transactions (credit purchases, plan quota top-ups, period and plan-change resets) no longer inflate the usage total, daily average, peak day, trend and top usage type. New `WalletUsageService::isUsageReason()` / `scopeRealUsage()` expose the classification; the transaction table still lists the full wallet ledger.
+
 ## [0.3.6] - 2026-06-15
 
 ### Added

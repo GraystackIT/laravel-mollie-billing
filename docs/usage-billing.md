@@ -292,6 +292,28 @@ Standalone (resolves billable automatically):
 <livewire:mollie-billing::components.usage-meter type="Tokens" />
 ```
 
+### Usage History Statistics
+
+The portal's usage history page (`livewire/billing/usage-history`) reports **real consumption only**. Every wallet transaction carries a `reason` in its meta, and bookkeeping reasons — plan quota top-ups, period resets, plan-change adjustments and purchased credits — are excluded from the total usage, daily average, peak day, trend sparkline and top usage type. The transaction table below the statistics still lists the full wallet ledger, including bookkeeping rows.
+
+The classification lives on `WalletUsageService`:
+
+```php
+WalletUsageService::isUsageReason('usage');                     // true
+WalletUsageService::isUsageReason('api_call');                  // true (custom reasons count as usage)
+WalletUsageService::isUsageReason(null);                        // true
+WalletUsageService::isUsageReason('period_reset');              // false
+WalletUsageService::isUsageReason('subscription_renewal');      // false
+WalletUsageService::isUsageReason('one_time_order:pack-500');   // false
+
+// Constrain a transaction query to real consumption:
+WalletUsageService::scopeRealUsage(
+    Transaction::query()->whereIn('wallet_id', $walletIds)
+)->where('type', 'withdraw');
+```
+
+Non-usage reasons are listed in `WalletUsageService::NON_USAGE_REASONS`; dynamic ones are matched by prefix via `NON_USAGE_REASON_PREFIXES` (e.g. `one_time_order:`). Any reason not on those lists — including custom reasons passed to `recordBillingUsage($type, $qty, $reason)` — counts as consumption.
+
 ## Events
 
 | Event | When |
