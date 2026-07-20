@@ -106,6 +106,12 @@ drop-and-recreate, so existing rows survive), and only when they are actually st
 back is equally safe: `down()` only drops the table when our own migration created it, detected via a
 marker index.
 
+A third migration adds the `attribute_changes` column that spatie/laravel-activitylog **v5** requires
+(v4 keeps model diffs inside `properties` and never writes it). It runs against any `activity_log`
+table — ours, the app's, or one created by spatie's published migration — because without the column
+every insert fails, and `RecordBillingAudit` deliberately swallows write errors, so the trail would
+silently stay empty. The package supports `^4.12|^5.0`.
+
 `php artisan billing:check-config` verifies all of this: table present, morph columns compatible
 with your key types, and every audit translation key resolvable in the current locale.
 
