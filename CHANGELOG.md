@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-07-20
+
 ### Added
 
 - `spatie/laravel-activitylog` v5 support (`^4.12|^5.0`). v5 stores model attribute diffs in a dedicated `attribute_changes` column instead of nesting them in `properties`; the create migration now ships that column and a new `add_attribute_changes_to_activity_log_table` migration adds it to tables created earlier, owned by the app, or created by spatie's own published migration. Without it every audit insert fails — and since `RecordBillingAudit` swallows write errors to keep billing flows alive, the trail would silently stay empty. Both majors work against the same table (the column is nullable and v4 never writes it).
