@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-07-20
+
 ### Added
 
 - Audit trail: every billing event is recorded against the billable via `spatie/laravel-activitylog` (new hard dependency) and shown as a timeline in a new "Audit" tab on the admin billable page. Rows store a translation key plus raw placeholder values instead of rendered text, so the history renders in any locale and resolves plan codes to current catalog names. New `BillingAuditMap` (single source of truth for what is audited), `BillingAuditEntry` (rendering), `RecordBillingAudit` listener, `AuditCategory` enum, `HasBilling::billingAuditTrail()`, `PruneBillingAuditJob`, `audit` config block and `resources/lang/{en,de}/audit.php`. The package ships its own `activity_log` migration with string morph ids — spatie's `nullableMorphs` stub cannot hold the default uuid keys; do not publish spatie's migrations alongside it.
