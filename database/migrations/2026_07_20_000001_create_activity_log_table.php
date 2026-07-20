@@ -51,6 +51,12 @@ return new class extends Migration
             $blueprint->string('causer_id')->nullable();
 
             $blueprint->json('properties')->nullable();
+
+            // activitylog v5 moved model attribute diffs out of `properties`
+            // into their own column. v4 never writes it; the column is nullable
+            // so both majors work against this table.
+            $blueprint->json('attribute_changes')->nullable();
+
             $blueprint->uuid('batch_uuid')->nullable();
             $blueprint->timestamps();
 

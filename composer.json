@@ -39,7 +39,7 @@
         "livewire/livewire": "^4.0",
         "mollie/laravel-mollie": "^4.1",
         "mpociot/vat-calculator": "^3.26",
-        "spatie/laravel-activitylog": "^4.10"
+        "spatie/laravel-activitylog": "^4.12|^5.0"
     },
     "suggest": {
         "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license."
