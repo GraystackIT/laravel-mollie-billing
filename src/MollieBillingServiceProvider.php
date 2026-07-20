@@ -24,12 +24,15 @@ use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\CleanupOrphanedBillablesJob;
 use GraystackIT\MollieBilling\Jobs\CleanupStalePendingCountryCorrectionJob;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
+use GraystackIT\MollieBilling\Jobs\PruneBillingAuditJob;
 use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
+use GraystackIT\MollieBilling\Listeners\RecordBillingAudit;
 use GraystackIT\MollieBilling\Listeners\RevokePreviousMandate;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\MollieSalesInvoiceService;
+use GraystackIT\MollieBilling\Support\BillingAuditMap;
 use GraystackIT\MollieBilling\Support\ConfigSubscriptionCatalog;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Blade;
@@ -77,6 +80,10 @@ class MollieBillingServiceProvider extends ServiceProvider
     private function registerEventListeners(): void
     {
         Event::listen(MandateUpdated::class, RevokePreviousMandate::class);
+
+        // Audit trail. Listed explicitly from BillingAuditMap rather than via a
+        // wildcard so the map stays the single source of truth for what is audited.
+        Event::listen(array_keys(BillingAuditMap::all()), RecordBillingAudit::class);
     }
 
     private function propagateMollieApiKey(): void
@@ -228,6 +235,12 @@ class MollieBillingServiceProvider extends ServiceProvider
             $schedule->job(PruneProcessedWebhooksJob::class)
                 ->monthlyOn(1, '03:00')
                 ->timezone('UTC');
+
+            if (config('mollie-billing.audit.retention_days') !== null) {
+                $schedule->job(PruneBillingAuditJob::class)
+                    ->monthlyOn(1, '03:30')
+                    ->timezone('UTC');
+            }
 
             $schedule->job(CleanupStalePendingCountryCorrectionJob::class)
                 ->hourly()

@@ -135,6 +135,41 @@ return [
     // on country mismatches). Set before first migration run.
     'user_key_type' => env('BILLING_USER_KEY_TYPE', 'int'), // uuid|ulid|int
 
+    // Audit trail — every billing event is recorded against the billable via
+    // spatie/laravel-activitylog and shown as a timeline in the admin panel.
+    // Rows store a translation key plus raw values, never a rendered sentence,
+    // so the history reads correctly in any locale. See docs/audit.md.
+    'audit' => [
+        'enabled' => env('BILLING_AUDIT_ENABLED', true),
+
+        // Separates our rows from the app's own activitylog usage. Every query
+        // the package makes filters on this.
+        'log_name' => env('BILLING_AUDIT_LOG_NAME', 'billing'),
+
+        // Categories to record. Drop 'usage' on high-volume metered setups:
+        // UsageLimitReached / WalletCredited can fire on every request, and each
+        // one costs a synchronous insert.
+        'categories' => [
+            'subscription',
+            'payment',
+            'invoice',
+            'payment_method',
+            'coupon',
+            'trial',
+            'usage',
+            'compliance',
+        ],
+
+        // How long audit rows are kept. PruneBillingAuditJob runs monthly and
+        // deletes older rows — scoped to `log_name` above, so the app's own
+        // activitylog entries are never touched. Set to null to keep forever.
+        //
+        // Defaults to 10 years: the volume is low (a handful of rows per billable
+        // per year) and it comfortably covers the statutory retention periods for
+        // billing records in AT/DE (7 years) and most other EU jurisdictions.
+        'retention_days' => env('BILLING_AUDIT_RETENTION_DAYS', 3650),
+    ],
+
     'ip_geolocation' => [
         'driver' => env('BILLING_IP_DRIVER', 'ipinfo_lite'),
         'drivers' => [

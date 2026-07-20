@@ -29,6 +29,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - Livewire 4 SFC customer portal and admin panel, both built on Flux Pro
 - Promotion links via signed `/promotion/{token}` URLs
 - Localized notifications (English and German out of the box)
+- Audit trail over every billing event, shown as a timeline per billable in the admin panel. Rows store a translation key plus raw values rather than rendered text, so the history reads correctly in any locale — see [docs/audit.md](docs/audit.md).
 - All Livewire SFC views publishable and overridable
 
 ## Requirements
@@ -818,6 +819,8 @@ Every state change dispatches a Laravel event so apps can react via listeners. N
 
 Subscribe in your `EventServiceProvider` exactly like any other Laravel event.
 
+Every event in this list is also recorded to the per-billable audit trail — see [docs/audit.md](docs/audit.md).
+
 ## Testing
 
 The package ships with helpers for both unit and feature tests:
@@ -887,6 +890,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [VAT Handling](docs/vat-handling.md) — VAT calculation, VIES, OSS, country reconciliation, automatic resolution
 - [Notifications](docs/notifications.md) — recipient resolution, translation overrides, swapping notification classes with `useNotification()`
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
+- [Audit Trail](docs/audit.md) — per-billable timeline, localizable storage format, categories, retention, adding new events
 - [Testing Lifecycle Flows](docs/testing-flows.md) — `billing:simulate` and `billing:webhook-replay` for reproducing every lifecycle transition on staging
 
 ## Architecture

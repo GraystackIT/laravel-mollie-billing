@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -50,8 +51,20 @@ class InvoiceDownloadController extends Controller
         // this check an S3 disk would redirect the user straight into a raw
         // NoSuchKey XML error page — regenerate the PDF instead.
         if (! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
+            // Serialised per invoice: a double-click (or several tabs) would
+            // otherwise regenerate the same PDF concurrently, and each run deletes
+            // the file the other just wrote.
+            $lock = Cache::lock('billing:invoice-pdf-regenerate:'.$invoice->id, 30);
+
             try {
-                app(InvoiceService::class)->regeneratePdf($invoice);
+                $lock->block(15);
+
+                // The winner may already have rebuilt it while we waited.
+                $invoice = $invoice->fresh() ?? $invoice;
+
+                if (! $invoice->hasPdf() || ! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
+                    app(InvoiceService::class)->regeneratePdf($invoice);
+                }
             } catch (\Throwable $e) {
                 Log::warning('Invoice PDF missing on disk and could not be regenerated', [
                     'invoice_id' => $invoice->id,
@@ -59,6 +72,8 @@ class InvoiceDownloadController extends Controller
                     'path' => $invoice->pdf_path,
                     'error' => $e->getMessage(),
                 ]);
+            } finally {
+                $lock->release();
             }
 
             $invoice = $invoice->fresh();

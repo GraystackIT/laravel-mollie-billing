@@ -6,9 +6,12 @@ namespace GraystackIT\MollieBilling\Commands;
 
 use GraystackIT\MollieBilling\Concerns\HasBilling;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\AuditCategory;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
+use GraystackIT\MollieBilling\Support\BillingAuditMap;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 
 class CheckConfigCommand extends Command
@@ -130,6 +133,106 @@ class CheckConfigCommand extends Command
         $this->validateUsageThreshold($scope);
         $this->validateIpBlock($scope, $driver);
         $this->validateLegacyRolloverKeys($scope);
+        $this->validateAudit($scope);
+    }
+
+    private function validateAudit(string $scope): void
+    {
+        if (! config('mollie-billing.audit.enabled', true)) {
+            return;
+        }
+
+        $categories = config('mollie-billing.audit.categories');
+        $known = array_map(fn (AuditCategory $c): string => $c->value, AuditCategory::cases());
+
+        if ($categories !== null && ! is_array($categories)) {
+            $this->addError($scope, 'audit.categories must be an array of category values (or null to record every category); got ['.var_export($categories, true).'].');
+        } elseif (is_array($categories)) {
+            foreach ($categories as $category) {
+                if (! is_string($category) || ! in_array($category, $known, true)) {
+                    $this->addError($scope, 'audit.categories contains an unknown category ['.var_export($category, true).']; valid: '.implode(', ', $known).'.');
+                }
+            }
+        }
+
+        $retention = config('mollie-billing.audit.retention_days');
+        // Values coming straight from .env arrive as numeric strings, which
+        // PruneBillingAuditJob accepts — so accept them here too.
+        if ($retention !== null && (! is_numeric($retention) || (int) $retention != $retention || (int) $retention < 1)) {
+            $this->addError($scope, 'audit.retention_days must be null (keep forever) or a positive integer; got ['.var_export($retention, true).'].');
+        }
+
+        $table = (string) config('activitylog.table_name', 'activity_log');
+
+        try {
+            $connection = Schema::connection(config('activitylog.database_connection'));
+
+            if (! $connection->hasTable($table)) {
+                $this->addError($scope, "audit is enabled but the [{$table}] table does not exist — run `php artisan migrate`. Do not publish spatie's own activitylog migrations; this package ships one sized for your billable_key_type.");
+
+                return;
+            }
+
+            // The reason we ship our own migration: spatie's stub uses
+            // unsignedBigInteger morphs, which cannot hold uuid/ulid keys.
+            $this->validateAuditMorphColumn(
+                $scope,
+                $connection,
+                $table,
+                'subject_id',
+                'billable_key_type',
+                (string) config('mollie-billing.billable_key_type', 'uuid'),
+            );
+
+            $this->validateAuditMorphColumn(
+                $scope,
+                $connection,
+                $table,
+                'causer_id',
+                'user_key_type',
+                (string) config('mollie-billing.user_key_type', 'int'),
+            );
+        } catch (\Throwable $e) {
+            $this->addWarning($scope, 'Could not inspect the audit table: '.$e->getMessage());
+        }
+
+        // A missing translation renders as "Unrecognised billing event" in the
+        // timeline rather than failing loudly, so surface it here instead.
+        $missing = [];
+        foreach (BillingAuditMap::all() as $descriptor) {
+            $key = 'billing::'.$descriptor->descriptionKey();
+            if (trans($key) === $key) {
+                $missing[] = $descriptor->key;
+            }
+        }
+
+        if ($missing !== []) {
+            $this->addWarning($scope, 'Missing audit translations for the current locale ['.app()->getLocale().']: '.implode(', ', $missing).'. Re-publish with `php artisan vendor:publish --tag=billing-lang`.');
+        }
+    }
+
+    /**
+     * A numeric morph id cannot hold a uuid/ulid key. The reverse is harmless —
+     * our own create migration ships string morphs, which store integer keys
+     * fine — so only the numeric-column-with-textual-key direction is an error.
+     */
+    private function validateAuditMorphColumn(
+        string $scope,
+        \Illuminate\Database\Schema\Builder $connection,
+        string $table,
+        string $column,
+        string $configKey,
+        string $keyType,
+    ): void {
+        if ($keyType === 'int') {
+            return;
+        }
+
+        $type = $connection->getColumnType($table, $column);
+
+        if (in_array(strtolower($type), ['integer', 'bigint', 'int', 'int8'], true)) {
+            $this->addError($scope, "[{$table}].{$column} is [{$type}] but {$configKey} is [{$keyType}] — audit writes will fail. This happens when spatie's own migration created the table; run `php artisan migrate` so the package's alter migration widens it.");
+        }
     }
 
     private function validateLegacyRolloverKeys(string $scope): void

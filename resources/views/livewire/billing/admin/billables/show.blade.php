@@ -276,6 +276,7 @@ new class extends Component {
                 <flux:tab name="subscription" icon="arrow-path">Subscription</flux:tab>
                 <flux:tab name="invoices" icon="document-text">Invoices</flux:tab>
                 <flux:tab name="wallet" icon="wallet">Wallet</flux:tab>
+                <flux:tab name="audit" icon="clock">{{ __('billing::audit.tab_label') }}</flux:tab>
             </flux:tabs>
 
             <flux:tab.panel name="subscription" class="pt-4">
@@ -288,6 +289,10 @@ new class extends Component {
 
             <flux:tab.panel name="wallet" class="pt-4">
                 <livewire:mollie-billing::admin.billables.wallet-tab :billable-id="$billable->getKey()" :key="'wal-'.$billable->getKey()" />
+            </flux:tab.panel>
+
+            <flux:tab.panel name="audit" class="pt-4">
+                <livewire:mollie-billing::admin.billables.audit-tab :billable-id="$billable->getKey()" :key="'aud-'.$billable->getKey()" />
             </flux:tab.panel>
         </flux:tab.group>
     @endif

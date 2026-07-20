@@ -6,8 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Audit trail: every billing event is recorded against the billable via `spatie/laravel-activitylog` (new hard dependency) and shown as a timeline in a new "Audit" tab on the admin billable page. Rows store a translation key plus raw placeholder values instead of rendered text, so the history renders in any locale and resolves plan codes to current catalog names. New `BillingAuditMap` (single source of truth for what is audited), `BillingAuditEntry` (rendering), `RecordBillingAudit` listener, `AuditCategory` enum, `HasBilling::billingAuditTrail()`, `PruneBillingAuditJob`, `audit` config block and `resources/lang/{en,de}/audit.php`. The package ships its own `activity_log` migration with string morph ids — spatie's `nullableMorphs` stub cannot hold the default uuid keys; do not publish spatie's migrations alongside it.
+
 ### Fixed
 
+- Audit hardening: the `activity_log` migration now uses string morph ids (integer- and uuid/ulid-keyed subjects can coexist) and only drops the table on rollback when it created it; `check-config` validates `causer_id` as well as `audit.categories` / `audit.retention_days`; `RecordBillingAudit` requires a `Billable` model; `BillingAuditEntry::occurredAt()` accepts immutable dates; `billingAuditTrail()` sorts by id as tie-breaker.
+- Invoice download: missing-PDF regeneration is serialised per invoice via a cache lock, so concurrent downloads no longer delete each other's freshly written file.
 - Portal usage statistics now count real consumption only. Bookkeeping transactions (credit purchases, plan quota top-ups, period and plan-change resets) no longer inflate the usage total, daily average, peak day, trend and top usage type. New `WalletUsageService::isUsageReason()` / `scopeRealUsage()` expose the classification; the transaction table still lists the full wallet ledger.
 
 ## [0.3.6] - 2026-06-15

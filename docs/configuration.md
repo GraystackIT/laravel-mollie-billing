@@ -73,6 +73,19 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `cleanup.cron_expression` | `BILLING_CLEANUP_ORPHANED_CRON` | Cron expression for the cleanup schedule. Default: `*/15 * * * *` (every 15 minutes). |
 | `past_due_max_days` | `BILLING_PAST_DUE_MAX_DAYS` | Days a billable may sit in `past_due` before `PrepareUsageOverageJob` Pass 3a auto-cancels the subscription (`past_due → cancelled` with `subscription_ends_at = now`, then Pass 3b finalises to `expired` on the next run). Recovery (Mollie retries succeeding, manual portal payment) still works up to the cutoff. Set to `0` to disable and keep the legacy behavior (PastDue lives forever until manual action). Default: `30`. See [docs/lifecycle-and-cleanup.md](lifecycle-and-cleanup.md). |
 
+### Audit trail (`audit`)
+
+Records every billing event against the billable and renders it as a timeline in the admin panel. Full reference: [docs/audit.md](audit.md).
+
+| Key | ENV | Meaning |
+| --- | --- | --- |
+| `audit.enabled` | `BILLING_AUDIT_ENABLED` | Master switch. Default: `true`. |
+| `audit.log_name` | `BILLING_AUDIT_LOG_NAME` | `log_name` written to `activity_log`, and the filter every package query applies — keeps our rows separate from an app's own activitylog usage. Default: `billing`. |
+| `audit.categories` | — | Which categories to record: `subscription`, `payment`, `invoice`, `payment_method`, `coupon`, `trial`, `usage`, `compliance`. Drop `usage` on high-volume metered setups: `UsageLimitReached` / `WalletCredited` can fire on every request, each costing a synchronous insert. Default: all. |
+| `audit.retention_days` | `BILLING_AUDIT_RETENTION_DAYS` | Age at which `PruneBillingAuditJob` (monthly) deletes rows, scoped to `log_name`. Default: `3650` (10 years) — covers the statutory retention periods for billing records in AT/DE and most EU jurisdictions at negligible storage cost. `null` keeps everything. |
+
+The package ships its own `activity_log` migration with string morph ids, so integer-, uuid- and ulid-keyed subjects and causers can coexist. **Do not additionally publish spatie's migrations** (`vendor:publish --tag=activitylog-migrations`) — spatie's stub uses `nullableMorphs()` (bigint), which cannot hold the default `uuid` billable keys, and you would get two migrations creating the same table. `billing:check-config` verifies the table exists, that neither `subject_id` nor `causer_id` is still numeric when the matching key type is `uuid`/`ulid`, that `audit.categories` and `audit.retention_days` are well-formed, and that every audit translation key resolves.
+
 #### Orphaned-billable cleanup (`cleanup`)
 
 Removes billables that were created during a checkout flow but never reached an active subscription — abandoned tabs, expired Mollie sessions, captured-but-unused mandates. Detection is hybrid:

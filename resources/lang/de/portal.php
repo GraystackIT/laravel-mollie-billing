@@ -272,7 +272,7 @@ return [
         'country_dirty_inline' => 'Land geändert — beim Speichern wird der USt-Satz neu bestimmt.',
         'payment_country_mismatch_inline' => 'Hinweis: Deine Zahlungsmethode stammt aus :payment, du wählst aber :declared. Das wird bei der nächsten Verlängerung in unserem Prüfprotokoll vermerkt.',
         'badge_reverse_charge' => 'Reverse-Charge',
-        'badge_vat_pending' => 'UID prüfung offen',
+        'badge_vat_pending' => 'UID Prüfung offen',
         'badge_vat_standard' => 'USt regulär',
         'street' => 'Straße und Hausnummer',
         'postal_code' => 'PLZ',

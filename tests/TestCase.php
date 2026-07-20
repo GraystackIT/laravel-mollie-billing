@@ -25,6 +25,7 @@ abstract class TestCase extends Orchestra
             VatCalculatorServiceProvider::class,
             WalletServiceProvider::class,
             \Elegantly\Invoices\InvoiceServiceProvider::class,
+            \Spatie\Activitylog\ActivitylogServiceProvider::class,
             MollieBillingServiceProvider::class,
         ];
     }

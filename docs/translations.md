@@ -27,7 +27,8 @@ The package ships with two locales out of the box:
 | `notifications.php` | Email notification subjects and bodies: trial reminders, payment failures, invoice available, usage thresholds, overage billing, refunds, plan change failures |
 | `emails.php` | Shared email partials: greeting, action buttons |
 | `errors.php` | User-facing error messages: country validation, coupons, usage limits, access grants, refunds |
-| `enums.php` | Human-readable labels for all enums: `SubscriptionStatus`, `InvoiceStatus`, `InvoiceKind`, `SubscriptionSource`, `SubscriptionInterval`, `CouponType`, `DiscountType`, `RefundReasonCode`, `CountryMismatchStatus`, `PlanChangeMode`, `MollieSubscriptionStatus` |
+| `enums.php` | Human-readable labels for all enums: `SubscriptionStatus`, `InvoiceStatus`, `InvoiceKind`, `SubscriptionSource`, `SubscriptionInterval`, `CouponType`, `DiscountType`, `RefundReasonCode`, `CountryMismatchStatus`, `PlanChangeMode`, `MollieSubscriptionStatus`, `AuditCategory` |
+| `audit.php` | Audit-trail event sentences, category and actor labels, admin timeline UI. Unlike every other file here, these strings are resolved from a **key stored in the database** rather than at the call site — a missing key degrades to "Unrecognised billing event" instead of failing. Keep it in sync with `BillingAuditMap`; see [audit.md](audit.md). |
 | `countries.php` | EU-27 country names keyed by ISO 3166-1 alpha-2 code |
 | `features.php` | Feature names and descriptions (keyed by feature key) |
 | `plans.php` | Plan name and description overrides (keyed by plan code) |

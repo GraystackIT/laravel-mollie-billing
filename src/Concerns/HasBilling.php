@@ -9,6 +9,7 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingAuditEntry;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -617,6 +618,23 @@ trait HasBilling
     public function latestBillingInvoice(): ?BillingInvoice
     {
         return $this->billingInvoices()->first();
+    }
+
+    /**
+     * The audit trail for this billable, newest first.
+     *
+     * Scoped to our own `log_name` so an app that uses spatie/laravel-activitylog
+     * for its own purposes does not bleed into the billing timeline. Rows carry a
+     * translation key, not a sentence — wrap them in BillingAuditEntry to render.
+     */
+    public function billingAuditTrail(): MorphMany
+    {
+        return $this->morphMany(BillingAuditEntry::model(), 'subject')
+            ->where('log_name', config('mollie-billing.audit.log_name', 'billing'))
+            ->orderByDesc('created_at')
+            // Several events can land in the same second; the auto-increment id
+            // keeps "newest first" deterministic in that case.
+            ->orderByDesc('id');
     }
 
     public function nextBillingDate(): ?CarbonInterface
