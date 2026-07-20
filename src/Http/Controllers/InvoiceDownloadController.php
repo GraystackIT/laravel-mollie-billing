@@ -7,8 +7,10 @@ namespace GraystackIT\MollieBilling\Http\Controllers;
 use GraystackIT\MollieBilling\Contracts\AuthorizesBillingAdmin;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
@@ -43,6 +45,29 @@ class InvoiceDownloadController extends Controller
         abort_unless($isAdmin || $isAuthorizedTenant, 403);
         abort_unless($invoice->hasPdf(), 404);
 
+        // The DB may reference a PDF that no longer exists on the disk (bucket
+        // switched, database copied between environments, blob deleted). Without
+        // this check an S3 disk would redirect the user straight into a raw
+        // NoSuchKey XML error page — regenerate the PDF instead.
+        if (! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
+            try {
+                app(InvoiceService::class)->regeneratePdf($invoice);
+            } catch (\Throwable $e) {
+                Log::warning('Invoice PDF missing on disk and could not be regenerated', [
+                    'invoice_id' => $invoice->id,
+                    'disk' => $invoice->pdf_disk,
+                    'path' => $invoice->pdf_path,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
+            $invoice = $invoice->fresh();
+
+            abort_unless($invoice instanceof BillingInvoice && $invoice->hasPdf(), 404);
+            abort_unless(Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path), 404);
+        }
+
+        /** @var \Illuminate\Filesystem\FilesystemAdapter $disk */
         $disk = Storage::disk($invoice->pdf_disk);
         $filename = Str::slug($invoice->serial_number ?? 'invoice-'.$invoice->id).'.pdf';
 
