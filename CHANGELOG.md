@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-08-04
+
 ### Added
 
 - Hidden plans: `hidden => true` per plan keeps it out of the checkout plan step and the portal's plan-change screen while every by-code lookup keeps resolving, so a subscriber on one still sees their plan. Enforced server-side via `HiddenPlanNotSelectableException` (plan change, scheduled change, checkout, Local→Mollie upgrade); staying on a hidden plan and changing interval within it stay allowed, and `ActivateLocalSubscription` still assigns them programmatically. New `SubscriptionCatalogInterface::visiblePlans()` / `planIsHidden()` — **breaking for apps that implement the interface themselves** rather than extending `ConfigSubscriptionCatalog`. Opt out per call through the typed request only: `new SubscriptionUpdateRequest(planCode: 'supplier', allowHiddenPlan: true)` or `$request->withAllowHiddenPlan()`.
