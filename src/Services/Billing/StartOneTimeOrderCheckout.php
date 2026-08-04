@@ -18,12 +18,70 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Str;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 class StartOneTimeOrderCheckout
 {
+    /**
+     * Session key holding the pending one-time-order payments as a
+     * `token => mollie_payment_id` map. Mollie echoes nothing back on the
+     * redirect, so the token we put into `redirectUrl` is the return page's only
+     * handle on "which payment do I report on" — without it the page cannot tell
+     * a completed order from a cancelled one.
+     *
+     * A map rather than a single id: two checkouts started in parallel (two tabs,
+     * a double-click that opened two Mollie windows) would otherwise overwrite
+     * each other and both return pages would judge the *last* payment — one of
+     * them reporting a cancellation the customer never made, or a success they
+     * never paid for.
+     */
+    public const PENDING_ORDER_SESSION_KEY = 'mollie-billing.pending_order_payments';
+
+    /** Query parameter carrying the per-checkout token back from Mollie. */
+    public const ORDER_TOKEN_PARAM = 'order_token';
+
+    /**
+     * Upper bound on the map. An abandoned checkout never reaches the return page,
+     * so nothing would ever evict its entry; the oldest ones drop out instead of
+     * growing the session cookie without limit.
+     */
+    private const MAX_PENDING_ORDERS = 10;
+
+    /**
+     * Look up the payment a return-page token refers to. Returns null for an
+     * unknown/expired token — the caller must then report "unresolved" rather
+     * than assume success.
+     */
+    public static function pendingOrderPaymentId(?string $token): ?string
+    {
+        if ($token === null || $token === '') {
+            return null;
+        }
+
+        $paymentId = ((array) session(self::PENDING_ORDER_SESSION_KEY, []))[$token] ?? null;
+
+        return is_string($paymentId) && $paymentId !== '' ? $paymentId : null;
+    }
+
+    /**
+     * Drop a token once its payment reached a terminal state. Keeps the map from
+     * accumulating settled orders across a long session.
+     */
+    public static function forgetPendingOrder(?string $token): void
+    {
+        if ($token === null || $token === '' || ! app()->bound('session.store')) {
+            return;
+        }
+
+        $pending = (array) session(self::PENDING_ORDER_SESSION_KEY, []);
+        unset($pending[$token]);
+
+        session([self::PENDING_ORDER_SESSION_KEY => $pending]);
+    }
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -35,7 +93,7 @@ class StartOneTimeOrderCheckout
 
     /**
      * @param  array{product_code:string,coupon_code?:?string,coupon_codes?:array<int,string>,metadata?:array}  $request
-     * @return array{checkout_url:?string,payment_id:string,completed?:bool}
+     * @return array{checkout_url:?string,payment_id:string,completed?:bool,order_token?:string}
      *
      * @throws \InvalidArgumentException if the product code does not exist in the catalog
      * @throws \RuntimeException if the product has a zero price
@@ -115,10 +173,19 @@ class StartOneTimeOrderCheckout
         $urlParams = MollieBilling::resolveUrlParameters($billable);
         $customMetadata = $request['metadata'] ?? [];
 
+        // Unguessable per-checkout handle. It only ever indexes the customer's own
+        // session map, so it grants nothing on its own — but it must not be
+        // enumerable, otherwise a crafted return URL could surface another
+        // checkout's outcome to whoever shares the session.
+        $orderToken = Str::random(32);
+
         $payment = Mollie::send(new CreatePaymentRequest(
             description: $this->catalog->productName($productCode) ?? $productCode,
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
-            redirectUrl: route(BillingRoute::name('return'), array_merge($urlParams, ['origin' => 'products'])),
+            redirectUrl: route(BillingRoute::name('return'), array_merge($urlParams, [
+                'origin' => 'products',
+                self::ORDER_TOKEN_PARAM => $orderToken,
+            ])),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: array_merge($customMetadata, [
                 'billable_type' => $billable->getMorphClass(),
@@ -129,9 +196,23 @@ class StartOneTimeOrderCheckout
             ]),
         ));
 
+        // Correlate the Mollie roundtrip with the return page. Guarded because the
+        // flow is also reachable from queued/CLI callers, which have no session.
+        if (request()->hasSession()) {
+            $pending = (array) session(self::PENDING_ORDER_SESSION_KEY, []);
+            $pending[$orderToken] = (string) $payment->id;
+
+            if (count($pending) > self::MAX_PENDING_ORDERS) {
+                $pending = array_slice($pending, -self::MAX_PENDING_ORDERS, preserve_keys: true);
+            }
+
+            request()->session()->put(self::PENDING_ORDER_SESSION_KEY, $pending);
+        }
+
         return [
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
             'payment_id' => $payment->id,
+            'order_token' => $orderToken,
         ];
     }
 

@@ -53,6 +53,10 @@ it('creates a one-time payment via Mollie', function (): void {
         'billing_country' => 'DE',
     ]);
 
+    // The service only stashes the payment when the request carries a session,
+    // which a plain service-level test does not set up on its own.
+    request()->setLaravelSession(app('session.store'));
+
     $capturedRequest = null;
 
     Mollie::shouldReceive('send')
@@ -72,6 +76,41 @@ it('creates a one-time payment via Mollie', function (): void {
 
     // Verify it was a CreatePaymentRequest with correct structure
     expect($capturedRequest)->toBeInstanceOf(CreatePaymentRequest::class);
+
+    // The return page has no other handle on the payment — Mollie's redirect
+    // carries no id — so the session stash is what lets it report the real status.
+    expect($result['order_token'])->toBeString()->not->toBeEmpty();
+    expect(session(StartOneTimeOrderCheckout::PENDING_ORDER_SESSION_KEY))
+        ->toBe([$result['order_token'] => 'tr_test_123']);
+});
+
+it('keeps parallel checkouts apart with one session entry per token', function (): void {
+    $billable = TestBillable::create([
+        'name' => 'Test',
+        'email' => 'test@example.test',
+        'billing_country' => 'DE',
+    ]);
+
+    request()->setLaravelSession(app('session.store'));
+
+    Mollie::shouldReceive('send')
+        ->twice()
+        ->andReturn(
+            fakePaymentResponse('tr_first', 'https://checkout.mollie.com/first'),
+            fakePaymentResponse('tr_second', 'https://checkout.mollie.com/second'),
+        );
+
+    $service = app(StartOneTimeOrderCheckout::class);
+    $first = $service->handle($billable, ['product_code' => 'token-pack']);
+    $second = $service->handle($billable, ['product_code' => 'token-pack']);
+
+    // A single session-wide id would have let the second checkout overwrite the
+    // first, and both return pages would then judge `tr_second`.
+    expect($first['order_token'])->not->toBe($second['order_token']);
+    expect(session(StartOneTimeOrderCheckout::PENDING_ORDER_SESSION_KEY))->toBe([
+        $first['order_token'] => 'tr_first',
+        $second['order_token'] => 'tr_second',
+    ]);
 });
 
 it('throws for unknown product code', function (): void {

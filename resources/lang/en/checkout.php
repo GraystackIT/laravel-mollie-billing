@@ -36,10 +36,11 @@ return [
     'vat_number' => 'VAT number (optional)',
 
     // VAT validation
+    'vat_checking' => 'Checking VAT number…',
     'vat_invalid_format' => 'Invalid VAT number format.',
-    'vat_country_mismatch' => 'VAT number prefix must match the selected country.',
+    'vat_country_mismatch' => 'VAT prefix must match the selected country.',
     'vies_unavailable' => 'VIES is currently unreachable. Please try again in a few minutes.',
-    'vies_validation_failed' => 'The VAT number could not be verified by VIES.',
+    'vies_validation_failed' => 'The VAT number is not registered as valid in VIES. Please check your input and try again.',
     'vat_verified' => 'VAT number verified — reverse-charge applies.',
     'vat_correct_or_clear' => 'Please correct the VAT number or leave it blank.',
 
@@ -52,11 +53,13 @@ return [
     'trial_days' => ':days-day trial',
     'per_month' => 'mo',
     'per_year' => 'yr',
-    'seats_included' => ':count seats incl.',
+    'seats_included' => ':count seat incl.|:count seats incl.',
     'extra_seat_cost' => ':currency:price per extra seat',
     'usage_included' => ':count :type incl.',
     'usage_overage' => ':currency:price per extra :type',
     'usage_unlimited' => 'Unlimited :type',
+    'quota_extra_price' => '+:currency:price/:unit',
+    'seat_unit' => 'seat',
     'available_addons' => 'Add-ons',
     'addon_price' => '+:currency:price/:interval',
 

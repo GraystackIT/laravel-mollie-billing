@@ -16,6 +16,15 @@
     $plans          = $this->plans();
     $planCount      = count($plans);
     $currencySymbol = config('mollie-billing.currency_symbol', '€');
+
+    // One line per entitlement: the included amount stays in prose on the left,
+    // the per-extra-unit price is right-aligned on the SAME line (it used to sit
+    // on a second, indented line and doubled the height of every card).
+    // Deliberately plain flex utilities — an arbitrary `grid-cols-[…]` template
+    // silently degrades to a single column when the app's CSS build has not
+    // generated it, which turns the rows into three stacked lines.
+    $quotaRowClass  = 'flex items-baseline justify-between gap-3 text-zinc-600 dark:text-zinc-300';
+    $quotaPriceClass = 'shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400';
 @endphp
 
 @if ($planCount === 1)
@@ -56,26 +65,20 @@
 
             {{-- Right: quotas + features + addons --}}
             <div class="space-y-5">
-                {{-- Quotas --}}
-                <div class="grid gap-2 text-sm sm:grid-cols-2">
-                    <div class="text-zinc-600 dark:text-zinc-300">
-                        <div class="flex items-center gap-2">
-                            <flux:icon.users class="size-4 shrink-0 text-zinc-400" />
-                            <span>{{ __('billing::checkout.seats_included', ['count' => $plan['included_seats'] ?? 0]) }}</span>
-                        </div>
-                        @if ($seatPriceNet !== null)
-                            <div class="ml-6 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($seatPriceNet) / 100, 2)]) }}</div>
+                {{-- Included quotas: one line each, extra-unit price right-aligned --}}
+                <div class="max-w-md space-y-1.5 text-sm">
+                    <div class="{{ $quotaRowClass }}">
+                        <span>{{ trans_choice('billing::checkout.seats_included', $plan['included_seats'] ?? 0, ['count' => $plan['included_seats'] ?? 0]) }}</span>
+                        @if ($seatPriceNet !== null && $seatPriceNet > 0)
+                            <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($seatPriceNet) / 100, 2)]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($seatPriceNet) / 100, 2), 'unit' => __('billing::checkout.seat_unit')]) }}</span>
                         @endif
                     </div>
 
-                    @foreach ($planUsages as $usageType => $usage)
-                        <div class="text-zinc-600 dark:text-zinc-300">
-                            <div class="flex items-center gap-2">
-                                <flux:icon.chart-bar class="size-4 shrink-0 text-zinc-400" />
-                                <span>{{ __('billing::checkout.usage_included', ['count' => number_format($usage['included']), 'type' => $usageType]) }}</span>
-                            </div>
-                            @if ($usage['overage_price'] !== null && $usage['overage_price'] > 0)
-                                <div class="ml-6 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($usage['overage_price']) / 100, 2), 'type' => $usageType]) }}</div>
+                    @foreach ($planUsages as $usage)
+                        <div class="{{ $quotaRowClass }}">
+                            <span>{{ __('billing::checkout.usage_included', ['count' => number_format($usage['included']), 'type' => $usage['label']]) }}</span>
+                            @if (($usage['overage_price'] ?? 0) > 0)
+                                <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($usage['overage_price']) / 100, 2), 'type' => $usage['label']]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($usage['overage_price']) / 100, 2), 'unit' => $usage['label']]) }}</span>
                             @endif
                         </div>
                     @endforeach
@@ -106,12 +109,14 @@
 
                     <div class="space-y-1.5">
                         <div class="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.available_addons') }}</div>
-                        @foreach ($planAddons as $addonCode => $addon)
-                            <div class="flex items-baseline justify-between text-sm">
-                                <span class="text-zinc-600 dark:text-zinc-300">{{ $addon['name'] }}</span>
-                                <span class="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($addon['price_net']) / 100, 2), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</span>
-                            </div>
-                        @endforeach
+                        <div class="grid gap-x-6 gap-y-1 sm:grid-cols-2">
+                            @foreach ($planAddons as $addon)
+                                <div class="flex items-baseline justify-between gap-3 text-sm">
+                                    <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($addon['description'])) title="{{ $addon['description'] }}" @endif>{{ $addon['name'] }}</span>
+                                    <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($addon['price_net']) / 100, 2), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</span>
+                                </div>
+                            @endforeach
+                        </div>
                     </div>
                 @endif
             </div>
@@ -179,61 +184,51 @@
 
                     <flux:separator />
 
-                    {{-- Quotas: seats + usages --}}
-                    <div class="space-y-2 text-sm">
-                        {{-- Seats --}}
-                        <div class="text-zinc-600 dark:text-zinc-300">
-                            <div class="flex items-center gap-2">
-                                <flux:icon.users class="size-4 shrink-0 text-zinc-400" />
-                                <span>{{ __('billing::checkout.seats_included', ['count' => $plan['included_seats'] ?? 0]) }}</span>
-                            </div>
-                            @if ($seatPriceNet !== null)
-                                <div class="ml-6 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($seatPriceNet) / 100, 2)]) }}</div>
+                    {{-- Included quotas: one line each, extra-unit price right-aligned --}}
+                    <div class="space-y-1.5 text-sm">
+                        <div class="{{ $quotaRowClass }}">
+                            <span>{{ trans_choice('billing::checkout.seats_included', $plan['included_seats'] ?? 0, ['count' => $plan['included_seats'] ?? 0]) }}</span>
+                            @if ($seatPriceNet !== null && $seatPriceNet > 0)
+                                <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($seatPriceNet) / 100, 2)]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($seatPriceNet) / 100, 2), 'unit' => __('billing::checkout.seat_unit')]) }}</span>
                             @endif
                         </div>
 
-                        {{-- Usages --}}
-                        @foreach ($planUsages as $usageType => $usage)
-                            <div class="text-zinc-600 dark:text-zinc-300">
-                                <div class="flex items-center gap-2">
-                                    <flux:icon.chart-bar class="size-4 shrink-0 text-zinc-400" />
-                                    <span>{{ __('billing::checkout.usage_included', ['count' => number_format($usage['included']), 'type' => $usageType]) }}</span>
-                                </div>
-                                @if ($usage['overage_price'] !== null && $usage['overage_price'] > 0)
-                                    <div class="ml-6 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($usage['overage_price']) / 100, 2), 'type' => $usageType]) }}</div>
+                        @foreach ($planUsages as $usage)
+                            <div class="{{ $quotaRowClass }}">
+                                <span>{{ __('billing::checkout.usage_included', ['count' => number_format($usage['included']), 'type' => $usage['label']]) }}</span>
+                                @if (($usage['overage_price'] ?? 0) > 0)
+                                    <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($usage['overage_price']) / 100, 2), 'type' => $usage['label']]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($usage['overage_price']) / 100, 2), 'unit' => $usage['label']]) }}</span>
                                 @endif
                             </div>
                         @endforeach
                     </div>
 
-                    {{-- Features --}}
+                    {{-- Features: names only. Descriptions would stack several
+                         lines per row and make the cards impossible to compare —
+                         they stay available on hover and on the confirm step. --}}
                     @if (! empty($planFeatures))
                         <flux:separator />
 
-                        <ul class="space-y-2 text-sm">
+                        <ul class="space-y-1.5 text-sm">
                             @foreach ($planFeatures as $feature)
                                 <li class="flex items-start gap-2">
                                     <flux:icon.check class="mt-0.5 size-4 shrink-0 text-emerald-500" />
-                                    <div>
-                                        <span class="text-zinc-700 dark:text-zinc-200">{{ $feature['name'] }}</span>
-                                        @if (! empty($feature['description']))
-                                            <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">{{ $feature['description'] }}</p>
-                                        @endif
-                                    </div>
+                                    <span class="text-zinc-700 dark:text-zinc-200" @if (! empty($feature['description'])) title="{{ $feature['description'] }}" @endif>{{ $feature['name'] }}</span>
                                 </li>
                             @endforeach
                         </ul>
                     @endif
                 </div>
 
-                {{-- Add-ons — pushed to bottom --}}
+                {{-- Add-ons — pushed to bottom. Always the complete list: an app
+                     may not hide sellable options behind a "+N more" counter. --}}
                 @if (! empty($planAddons))
                     <div class="mt-6 space-y-1.5 border-t border-zinc-200 pt-4 dark:border-white/10">
                         <div class="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.available_addons') }}</div>
-                        @foreach ($planAddons as $addonCode => $addon)
-                            <div class="flex items-baseline justify-between text-sm">
-                                <span class="text-zinc-600 dark:text-zinc-300">{{ $addon['name'] }}</span>
-                                <span class="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($addon['price_net']) / 100, 2), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</span>
+                        @foreach ($planAddons as $addon)
+                            <div class="flex items-baseline justify-between gap-3 text-sm">
+                                <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($addon['description'])) title="{{ $addon['description'] }}" @endif>{{ $addon['name'] }}</span>
+                                <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => number_format($priceFormatter($addon['price_net']) / 100, 2), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</span>
                             </div>
                         @endforeach
                     </div>

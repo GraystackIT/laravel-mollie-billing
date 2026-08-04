@@ -394,6 +394,16 @@ php artisan vendor:publish --tag=mollie-billing-views
 
 Views are published to `resources/views/vendor/mollie-billing/`. SFC files use the ⚡ prefix convention (e.g. `⚡checkout.blade.php`).
 
+To add your own Livewire component (e.g. a language switcher) to the portal and checkout
+headers, use `mollie-billing.header_components` instead of publishing the layouts:
+
+```php
+// config/mollie-billing.php
+'header_components' => ['pages::components.language-switcher'],
+```
+
+See [docs/configuration.md](docs/configuration.md#app-components-in-the-portalcheckout-header).
+
 ### Tailwind CSS content source
 
 The package's Blade views use Tailwind utility classes (including responsive breakpoints like `sm:`, `lg:`). Your host app's Tailwind build must scan the package views, otherwise these classes will be purged.

@@ -888,6 +888,13 @@ new class extends Component {
                 $price = $toDisplayCents($netPrice);
 
                 $includedUsages = $catalog->includedUsages($code, $selectedInterval);
+
+                // Resolved up-front: `@php(...)` does not compile reliably inside
+                // a Blade component slot, which is where the card body lives.
+                $featureRows = array_map(fn (string $key): array => [
+                    'name' => $catalog->featureName($key) ?? $key,
+                    'description' => $catalog->featureDescription($key),
+                ], $features);
             @endphp
 
             <flux:card
@@ -933,41 +940,64 @@ new class extends Component {
 
                     <flux:separator />
 
-                    {{-- Included info --}}
-                    <div class="space-y-2.5 text-sm">
-                        @if ($seats > 0)
-                            <div class="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
-                                <flux:icon.users class="size-4 shrink-0 text-zinc-400" />
-                                <span>{{ trans_choice('billing::portal.seats_included_count', $seats, ['count' => $seats]) }}</span>
+                    {{-- Included info: one line per entitlement, the per-extra-unit
+                         price right-aligned on the same line. Mirrors the checkout
+                         plan step; plain flex utilities on purpose (an arbitrary
+                         grid template silently collapses to one column when the
+                         app's CSS build has not generated it). --}}
+                    @php
+                        $quotaRows = [];
+
+                        if ($seats > 0) {
+                            $seatPriceNet = $catalog->seatPriceNet($code, $selectedInterval);
+                            $seatPrice = $seatPriceNet !== null ? $toDisplayCents($seatPriceNet) : null;
+                            $quotaRows[] = [
+                                'label' => trans_choice('billing::portal.seats_included_count', $seats, ['count' => number_format($seats)]),
+                                'unit' => __('billing::portal.seat_unit'),
+                                'extra' => $seatPrice !== null && $seatPrice > 0 ? $seatPrice : null,
+                                'extra_title' => $seatPrice !== null && $seatPrice > 0
+                                    ? __('billing::portal.seat_overage_price', ['currency' => $currencySymbol, 'price' => number_format($seatPrice / 100, 2)])
+                                    : null,
+                            ];
+                        }
+
+                        foreach ($includedUsages as $usageType => $included) {
+                            $overageNet = $catalog->usageOveragePrice($code, $selectedInterval, $usageType);
+                            $overageDisplay = $overageNet !== null ? $toDisplayCents($overageNet) : null;
+                            $usageLabel = $catalog->usageTypeName($usageType);
+                            $quotaRows[] = [
+                                'label' => __('billing::portal.usage_included_count', ['count' => number_format($included), 'type' => $usageLabel]),
+                                'unit' => $usageLabel,
+                                'extra' => $overageDisplay !== null && $overageDisplay > 0 ? $overageDisplay : null,
+                                'extra_title' => $overageDisplay !== null && $overageDisplay > 0
+                                    ? __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => number_format($overageDisplay / 100, 2), 'type' => $usageLabel])
+                                    : null,
+                            ];
+                        }
+
+                    @endphp
+
+                    <div class="text-sm">
+                        @if (count($quotaRows) > 0)
+                            <div class="space-y-1.5">
+                                @foreach ($quotaRows as $row)
+                                    <div class="flex items-baseline justify-between gap-3 text-zinc-600 dark:text-zinc-300">
+                                        <span>{{ $row['label'] }}</span>
+                                        @if ($row['extra'] !== null)
+                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => number_format($row['extra'] / 100, 2), 'unit' => $row['unit']]) }}</span>
+                                        @endif
+                                    </div>
+                                @endforeach
                             </div>
                         @endif
 
-                        @foreach ($includedUsages as $usageType => $included)
-                            @php
-                                $overageNet = $catalog->usageOveragePrice($code, $selectedInterval, $usageType);
-                                $overageDisplay = $overageNet !== null ? $toDisplayCents($overageNet) : null;
-                                $usageLabel = $catalog->usageTypeName($usageType);
-                            @endphp
-                            <div class="text-zinc-600 dark:text-zinc-300">
-                                <div class="flex items-center gap-2">
-                                    <flux:icon.chart-bar class="size-4 shrink-0 text-zinc-400" />
-                                    <span>{{ __('billing::portal.usage_included_count', ['count' => number_format($included), 'type' => $usageLabel]) }}</span>
-                                </div>
-                                @if ($overageDisplay !== null && $overageDisplay > 0)
-                                    <div class="ml-6 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">
-                                        {{ __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => number_format($overageDisplay / 100, 2), 'type' => $usageLabel]) }}
-                                    </div>
-                                @endif
-                            </div>
-                        @endforeach
-
                         @if (count($features) > 0)
-                        <flux:separator class="mt-4"/>
+                            <flux:separator class="mt-4"/>
                             <ul class="space-y-1.5 mt-4">
-                                @foreach ($features as $feature)
+                                @foreach ($featureRows as $feature)
                                     <li class="flex items-start gap-2">
                                         <flux:icon.check class="mt-0.5 size-4 shrink-0 text-emerald-500" />
-                                        <span class="text-zinc-600 dark:text-zinc-300">{{ $catalog->featureName($feature) }}</span>
+                                        <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($feature['description'])) title="{{ $feature['description'] }}" @endif>{{ $feature['name'] }}</span>
                                     </li>
                                 @endforeach
                             </ul>
@@ -1829,6 +1859,16 @@ new class extends Component {
     @endif
 
     {{-- Edit billing details modal --}}
+    @php
+        // Resolved outside the modal: `@php(...)` does not compile reliably inside
+        // a Blade component slot. Error wins over the non-error VIES verdict.
+        $vatMessage = $errors->first('vat_number') ?: $vatStatusMessage;
+
+        // A blocking error can exist while `$vatNumberValid` is still null (VIES
+        // unreachable, "correct or clear the number"). Those must read as errors,
+        // not as the amber pending state.
+        $vatHasError = $vatNumberValid === false || $errors->has('vat_number');
+    @endphp
     <flux:modal name="edit-billing-modal" wire:model.self="showEditBillingModal" class="md:w-[36rem]">
         <div class="space-y-5">
             <div>
@@ -1840,12 +1880,14 @@ new class extends Component {
                 <flux:input wire:model.live.debounce.500ms="company_name" :label="__('billing::checkout.company_name')" type="text" required autofocus />
                 <flux:input wire:model.live.debounce.500ms="billing_street" :label="__('billing::checkout.street')" type="text" required />
 
-                <div class="error-reserve grid gap-4 sm:grid-cols-[1fr_2fr]">
+                <div class="grid items-start gap-4 sm:grid-cols-[1fr_2fr]">
                     <flux:input wire:model.live.debounce.500ms="billing_postal_code" :label="__('billing::checkout.postal_code')" type="text" required />
                     <flux:input wire:model.live.debounce.500ms="billing_city" :label="__('billing::checkout.city')" type="text" required />
                 </div>
 
-                <div class="error-reserve grid gap-4 sm:grid-cols-2">
+                {{-- items-start: a validation message under the VAT field must not
+                     stretch or re-center the country select next to it. --}}
+                <div class="grid items-start gap-4 sm:grid-cols-2">
                     <flux:select wire:model.live="billing_country" :label="__('billing::checkout.country')" required>
                         @foreach (\GraystackIT\MollieBilling\Support\CountryResolver::resolve() as $iso => $name)
                             <flux:select.option value="{{ $iso }}">{{ $name }}</flux:select.option>
@@ -1867,10 +1909,26 @@ new class extends Component {
                                 @endif
                             </flux:input.group.suffix>
                         </flux:input.group>
-                        <flux:error name="vat_number" />
-                        @if ($vatStatusMessage)
-                            <flux:description>{{ $vatStatusMessage }}</flux:description>
-                        @endif
+
+                        {{-- The wrapper itself reserves one line of feedback space,
+                             so errors and the VIES verdict swap in place instead of
+                             pushing the modal around on every keystroke — including
+                             while a check is still in flight. --}}
+                        <div class="mt-2 min-h-4 text-xs">
+                            @if ($vatMessage)
+                                <span
+                                    role="status"
+                                    class="flex items-start gap-1.5 {{ $vatHasError ? 'text-red-600 dark:text-red-400' : ($vatNumberValid === true ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400') }}"
+                                >
+                                    @if ($vatHasError)
+                                        <flux:icon.exclamation-triangle class="mt-px size-3.5 shrink-0" />
+                                    @elseif ($vatNumberValid === true)
+                                        <flux:icon.check class="mt-px size-3.5 shrink-0" />
+                                    @endif
+                                    <span>{{ $vatMessage }}</span>
+                                </span>
+                            @endif
+                        </div>
                     </flux:field>
                 </div>
             </div>

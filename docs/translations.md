@@ -104,6 +104,8 @@ billing::features.{key}.name        →  config name  →  null
 billing::features.{key}.description →  config description  →  null
 ```
 
+Where the description surfaces: the single-plan checkout layout prints it under the feature name. The three-up plan cards (checkout comparison grid and the portal plan-change view) show the name only and keep the description as the row's hover title — stacked multi-line descriptions made the cards impossible to compare side by side.
+
 ### Product groups
 
 ```

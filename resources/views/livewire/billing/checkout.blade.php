@@ -144,28 +144,84 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     /**
      * Plans offered in the checkout plan step.
      *
-     * Hidden plans (internal / supplier / grandfathered) are filtered out, which
-     * also makes every downstream check inherit the rule for free: the `?plan=`
-     * pre-selection in mount(), the `in:` rule in validateStep2() and the
-     * re-validation in submit() all read this list.
+     * Built from the active `SubscriptionCatalogInterface` — never from
+     * `config('mollie-billing-plans.plans')` — so an app with a database-backed
+     * catalog offers the plan codes it actually sells instead of whatever the
+     * config file happens to still contain. `visiblePlans()` is the
+     * customer-listing contract, so hidden plans (internal / supplier /
+     * grandfathered) are excluded and every downstream check inherits the rule
+     * for free: the `?plan=` pre-selection in mount(), the `in:` rule in
+     * validateStep2() and the re-validation in submit() all read this list.
+     *
+     * The array shape mirrors the config layout the step views consume
+     * (`name`, `included_seats`, `allowed_addons`, `intervals.*`), so the cards
+     * stay unchanged while the data source moves behind the catalog.
      *
      * @return array<string, array<string, mixed>>
      */
     public function plans(): array
     {
         $catalog = app(SubscriptionCatalogInterface::class);
+        $allAddons = $catalog->allAddons();
+        $plans = [];
 
-        return array_filter(
-            config('mollie-billing-plans.plans', []),
-            fn ($plan, $code) => ! $catalog->planIsHidden((string) $code),
-            ARRAY_FILTER_USE_BOTH,
-        );
+        foreach ($catalog->visiblePlans() as $code) {
+            $code = (string) $code;
+
+            $plans[$code] = [
+                'name' => $catalog->planName($code) ?? $code,
+                'description' => $catalog->planDescription($code),
+                'included_seats' => $catalog->includedSeats($code),
+                'allowed_addons' => array_values(array_filter(
+                    $allAddons,
+                    fn (string $addonCode): bool => $catalog->planAllowsAddon($code, $addonCode),
+                )),
+                'intervals' => [
+                    'monthly' => [
+                        'base_price_net' => $catalog->basePriceNet($code, 'monthly'),
+                        'seat_price_net' => $catalog->seatPriceNet($code, 'monthly'),
+                    ],
+                    'yearly' => [
+                        'base_price_net' => $catalog->basePriceNet($code, 'yearly'),
+                        'seat_price_net' => $catalog->seatPriceNet($code, 'yearly'),
+                    ],
+                ],
+            ];
+        }
+
+        return $plans;
     }
 
-    /** @return array<string, array<string, mixed>> */
+    /**
+     * Addons available in the checkout, keyed by code.
+     *
+     * Catalog-driven for the same reason as plans(): `plans()` derives
+     * `allowed_addons` from `$catalog->allAddons()`, so the price lookups in
+     * subtotalNet() and the addon step must resolve through the catalog too —
+     * otherwise a catalog addon missing from the config file would be offered
+     * without a price and undercharge the displayed total.
+     *
+     * @return array<string, array<string, mixed>>
+     */
     public function addons(): array
     {
-        return config('mollie-billing-plans.addons', []);
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $addons = [];
+
+        foreach ($catalog->allAddons() as $code) {
+            $code = (string) $code;
+
+            $addons[$code] = [
+                'name' => $catalog->addonName($code) ?? $code,
+                'description' => $catalog->addonDescription($code),
+                'intervals' => [
+                    'monthly' => ['price_net' => $catalog->addonPriceNet($code, 'monthly')],
+                    'yearly' => ['price_net' => $catalog->addonPriceNet($code, 'yearly')],
+                ],
+            ];
+        }
+
+        return $addons;
     }
 
     /** @return array<int, array{key: string, name: string, description: ?string}> */
@@ -211,7 +267,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return $billable === null || ! $billable->hasMollieMandate();
     }
 
-    /** @return array<string, array{included: int, overage_price: int|null}> */
+    /** @return array<string, array{label: string, included: int, overage_price: int|null}> */
     public function planUsages(string $planCode, string $interval): array
     {
         $catalog = app(SubscriptionCatalogInterface::class);
@@ -220,6 +276,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
         foreach ($usages as $type => $included) {
             $result[$type] = [
+                'label' => $catalog->usageTypeName($type),
                 'included' => $included,
                 'overage_price' => $catalog->usageOveragePrice($planCode, $interval, $type),
             ];
@@ -228,7 +285,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return $result;
     }
 
-    /** @return array<string, array{name: string, price_net: int}> */
+    /** @return array<string, array{name: string, description: string|null, price_net: int}> */
     public function planAddons(string $planCode, string $interval): array
     {
         $plan = $this->plans()[$planCode] ?? [];
@@ -244,6 +301,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             }
             $result[$addonCode] = [
                 'name' => $catalog->addonName($addonCode) ?? $addonCode,
+                'description' => $addon['description'] ?? null,
                 'price_net' => $catalog->addonPriceNet($addonCode, $interval),
             ];
         }
@@ -1048,7 +1106,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     }
 }; ?>
 
-<div class="flex flex-col gap-10">
+@php
+    // The plan step needs the full shell width for the side-by-side cards; the
+    // form-shaped steps stay narrow so inputs don't stretch across the viewport.
+    $wideStep = $step === $customStepCount + 2;
+@endphp
+
+<div class="mx-auto flex w-full flex-col gap-10 {{ $wideStep ? 'max-w-5xl' : 'max-w-3xl' }}">
     {{-- Eyebrow + headline --}}
     <div class="flex flex-col gap-3">
         <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">

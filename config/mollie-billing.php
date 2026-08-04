@@ -18,6 +18,12 @@ return [
     // route via the 'route:' prefix, e.g. 'route:dashboard'.
     'dashboard_url' => env('BILLING_DASHBOARD_URL'),
 
+    // Livewire components rendered in the portal header (left of the theme
+    // switcher) and in the checkout header (left of the "Back" link) — e.g. a
+    // language switcher. Resolved by the consuming app, so any alias renderable
+    // via @livewire() works. The admin layout is intentionally excluded.
+    'header_components' => [],
+
     // Where the checkout "Back" link leads when no explicit $backUrl is passed.
     'checkout_back_url' => env('BILLING_CHECKOUT_BACK_URL', '/'),
 

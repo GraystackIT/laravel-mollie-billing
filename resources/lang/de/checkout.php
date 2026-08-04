@@ -36,10 +36,11 @@ return [
     'vat_number' => 'USt-IdNr. (optional)',
 
     // VAT validation
+    'vat_checking' => 'USt-IdNr. wird geprüft…',
     'vat_invalid_format' => 'Ungültiges Format der USt-IdNr.',
-    'vat_country_mismatch' => 'Das Länderkürzel der USt-IdNr. muss zum gewählten Land passen.',
+    'vat_country_mismatch' => 'Das Länderkürzel muss zum gewählten Land passen.',
     'vies_unavailable' => 'VIES ist gerade nicht erreichbar. Bitte versuchen Sie es in ein paar Minuten erneut.',
-    'vies_validation_failed' => 'Die USt-IdNr. konnte nicht über VIES verifiziert werden.',
+    'vies_validation_failed' => 'Die USt-IdNr. ist in VIES nicht als gültig registriert. Bitte prüfen Sie die Eingabe und versuchen Sie es erneut.',
     'vat_verified' => 'USt-IdNr. verifiziert — Reverse-Charge wird angewendet.',
     'vat_correct_or_clear' => 'Bitte korrigieren Sie die USt-IdNr. oder lassen Sie das Feld leer.',
 
@@ -52,11 +53,13 @@ return [
     'trial_days' => ':days Tage Testphase',
     'per_month' => 'Mo.',
     'per_year' => 'Jahr',
-    'seats_included' => ':count Plätze inkl.',
-    'extra_seat_cost' => ':currency:price per extra Platz',
+    'seats_included' => ':count Platz inkl.|:count Plätze inkl.',
+    'extra_seat_cost' => ':currency:price je weiteren Platz',
     'usage_included' => ':count :type inkl.',
-    'usage_overage' => ':currency:price per extra :type',
+    'usage_overage' => ':currency:price je weitere Einheit (:type)',
     'usage_unlimited' => 'Unbegrenzte :type',
+    'quota_extra_price' => '+:currency:price/:unit',
+    'seat_unit' => 'Platz',
     'available_addons' => 'Add-ons',
     'addon_price' => '+:currency:price/:interval',
 

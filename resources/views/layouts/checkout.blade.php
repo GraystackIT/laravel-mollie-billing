@@ -52,13 +52,22 @@
                         </span>
                     @endif
                 </span>
-                <flux:link :href="$resolvedBackUrl" class="text-sm" icon="arrow-left">
-                    {{ __('billing::checkout.back') }}
-                </flux:link>
+                {{-- App-provided header components (e.g. a language switcher) sit
+                     left of the back link — the checkout is the public-facing flow,
+                     so a locale switch has to be reachable before signup. --}}
+                <div class="flex items-center gap-4">
+                    @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
+                        @livewire($headerComponent, [], 'billing-header-'.$i)
+                    @endforeach
+
+                    <flux:link :href="$resolvedBackUrl" class="text-sm" icon="arrow-left">
+                        {{ __('billing::checkout.back') }}
+                    </flux:link>
+                </div>
             </header>
 
             {{-- Content --}}
-            <main class="relative z-10 mx-auto flex w-full max-w-3xl flex-col px-6 pb-16 pt-4 lg:px-0 lg:pt-8">
+            <main class="relative z-10 mx-auto flex w-full max-w-5xl flex-col px-6 pb-16 pt-4 lg:px-0 lg:pt-8">
                 @livewire($livewireComponent)
             </main>            
         </div>

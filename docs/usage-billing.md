@@ -63,6 +63,8 @@ return [
 
 Resolved by `SubscriptionCatalogInterface::usageTypeName()` with `ucfirst($type)` as fallback.
 
+These names are what the plan cards show — both in the checkout plan step and in the portal plan-change view. Each entitlement is one line there (`3 seats incl.`, `100 Tokens incl.`, …) with the per-extra-unit price right-aligned on the same line (`+€0.14/Tokens`); the full wording (`€0.14 per extra Tokens`) is kept as its hover title. The name doubles as the billed unit behind the slash, so prefer a short, singular-reading label (`AI-Token` over `AI-Tokens consumed`).
+
 ### Casing of usage-type identifiers
 
 Usage-type strings (`tokens`, `Tokens`, `TOKENS`, `sms`, `SMS`, …) are resolved **case-insensitively** throughout the package. You can pick whatever casing reads best in your config and stay consistent on the call site -- the package will not create duplicate wallets or miss quota lookups when callers use a different casing.

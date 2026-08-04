@@ -59,6 +59,12 @@
 
         <flux:spacer />
 
+        {{-- App-provided header components (e.g. a language switcher). Keyed by
+             index so Livewire keeps them apart across re-renders. --}}
+        @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
+            @livewire($headerComponent, [], 'billing-header-'.$i)
+        @endforeach
+
         <flux:dropdown position="bottom" align="end">
             <flux:button variant="ghost" size="sm" icon="sun" icon:variant="mini" x-bind:icon="$flux.appearance === 'dark' ? 'moon' : ($flux.appearance === 'light' ? 'sun' : 'computer-desktop')" aria-label="Toggle theme" />
             <flux:menu>

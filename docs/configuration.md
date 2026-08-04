@@ -26,6 +26,32 @@ Global settings. Most values can be overridden via ENV variables — the default
 | `company_name` | — | Default: `APP_NAME`. Used in mails and views. |
 | `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard. |
 | `checkout_back_url` | `BILLING_CHECKOUT_BACK_URL` | Default target of the "Back" link in the checkout when no explicit `$backUrl` is set. |
+| `header_components` | — | Array of Livewire component aliases rendered in the portal and checkout headers (e.g. a language switcher). Default: `[]`. See below. |
+
+#### App components in the portal/checkout header
+
+`header_components` is the supported way to put your own Livewire component into the
+bundled headers — publishing `layouts/portal.blade.php` just to add one is not needed
+and leaves you maintaining a copy of the layout.
+
+```php
+// config/mollie-billing.php
+'header_components' => [
+    'pages::components.language-switcher',
+],
+```
+
+Any alias that `@livewire()` can render works, including namespaced aliases from your
+own Livewire component namespaces. Each entry is mounted with a stable key
+(`billing-header-<index>`), so ordering is preserved across re-renders.
+
+Where they render:
+
+- **Portal** (`layouts/portal.blade.php`): in the sticky header, left of the theme switcher.
+- **Checkout** (`layouts/checkout.blade.php`): top right, left of the "Back" link — the
+  checkout is the public-facing flow, so a locale switch has to be reachable before signup.
+- **Admin** (`layouts/admin.blade.php`): intentionally **not** supported. The admin panel
+  stays English.
 
 ### Checkout country selection
 

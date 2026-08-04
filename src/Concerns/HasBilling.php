@@ -782,7 +782,7 @@ trait HasBilling
 
     /**
      * @param  array<int, string>|null  $couponCodes  Multiple stackable coupon codes; takes precedence over $couponCode.
-     * @return array{checkout_url:?string, payment_id:string}
+     * @return array{checkout_url:?string, payment_id:string, completed?:bool, order_token?:string}
      */
     public function purchaseOneTimeOrder(string $productCode, array $metadata = [], ?string $couponCode = null, ?array $couponCodes = null): array
     {
