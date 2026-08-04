@@ -24,11 +24,15 @@ beforeEach(function (): void {
                 'base_price_net' => 1000,
                 'seat_price_net' => null,
                 'included_usages' => ['emails' => 100],
+                // A quota needs an overage price for a Mollie billable to be
+                // allowed past it — see OverageGateTest.
+                'usage_overage_prices' => ['emails' => 5],
             ],
             'yearly' => [
                 'base_price_net' => 10000,
                 'seat_price_net' => null,
                 'included_usages' => ['emails' => 1200],
+                'usage_overage_prices' => ['emails' => 5],
             ],
         ],
     ]);

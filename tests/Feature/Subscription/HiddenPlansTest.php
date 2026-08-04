@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Services\Billing\ActivateLocalSubscription;
 use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
+use GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
 use GraystackIT\MollieBilling\Testing\TestBillable;
@@ -161,12 +162,12 @@ it('rejects a hidden plan target on a scheduled change before anything is stored
 it('carries allow_hidden_plan into the scheduled change so it survives to period end', function (): void {
     $billable = makeHiddenPlanMollieBillable();
 
-    app(UpdateSubscription::class)->update($billable, [
-        'plan_code' => 'supplier',
-        'interval' => 'monthly',
-        'apply_at' => 'end_of_period',
-        'allow_hidden_plan' => true,
-    ]);
+    app(UpdateSubscription::class)->update($billable, (new SubscriptionUpdateRequest(
+        planCode: 'supplier',
+        interval: 'monthly',
+        applyAt: 'end_of_period',
+        allowHiddenPlan: true,
+    )));
 
     $billable->refresh();
     $scheduled = $billable->subscription_meta['scheduled_change'] ?? null;
@@ -291,12 +292,98 @@ it('allows a programmatic move onto a hidden plan with allow_hidden_plan', funct
     $billable->refresh();
     expect($billable->subscription_plan_code)->toBe('free');
 
+    app(UpdateSubscription::class)->update($billable, (new SubscriptionUpdateRequest(
+        planCode: 'supplier',
+        interval: 'monthly',
+        allowHiddenPlan: true,
+    )));
+
+    $billable->refresh();
+    expect($billable->subscription_plan_code)->toBe('supplier');
+});
+
+// ── The override is not reachable from array payloads ──
+
+it('ignores allow_hidden_plan in an array payload, whatever the value looks like', function (): void {
+    // An app forwarding request data into update() must not be able to hand the
+    // caller a hidden plan. Note `(bool) 'false' === true` in PHP — the old array
+    // parsing would have enabled the override for the string "false" too.
+    foreach ([true, 'true', 'false', '1', 1] as $value) {
+        $billable = makeHiddenPlanMollieBillable();
+
+        expect(fn () => app(UpdateSubscription::class)->update($billable, [
+            'plan_code' => 'supplier',
+            'interval' => 'monthly',
+            'allow_hidden_plan' => $value,
+            'allowHiddenPlan' => $value,
+        ]))->toThrow(HiddenPlanNotSelectableException::class);
+
+        expect($billable->refresh()->subscription_plan_code)->toBe('pro');
+    }
+});
+
+it('ignores allow_hidden_plan in an array payload on the scheduling path', function (): void {
+    $billable = makeHiddenPlanMollieBillable();
+
+    expect(fn () => app(UpdateSubscription::class)->update($billable, [
+        'plan_code' => 'supplier',
+        'interval' => 'monthly',
+        'apply_at' => 'end_of_period',
+        'allow_hidden_plan' => true,
+    ]))->toThrow(HiddenPlanNotSelectableException::class);
+
+    $billable->refresh();
+    expect($billable->subscription_meta['scheduled_change'] ?? null)->toBeNull();
+});
+
+it('re-checks the hidden-plan rule on the locked row when the caller model is stale', function (): void {
+    // The pre-check in UpdateSubscription::update() runs on the caller's model.
+    // Here that model still sits on the hidden `supplier` plan, so "keep your own
+    // plan, switch interval" looks legitimate — while the persisted row has since
+    // been moved to `pro`. Only ScheduleSubscriptionChange::schedule() sees the
+    // refreshed row, where the request becomes a move *onto* a hidden plan.
+    $stale = makeSupplierBillable('monthly');
+
+    TestBillable::query()
+        ->whereKey($stale->getKey())
+        ->update(['subscription_plan_code' => 'pro']);
+
+    expect(fn () => app(UpdateSubscription::class)->update($stale, [
+        'plan_code' => 'supplier',
+        'interval' => 'yearly',
+        'apply_at' => 'end_of_period',
+    ]))->toThrow(HiddenPlanNotSelectableException::class);
+
+    $fresh = TestBillable::query()->whereKey($stale->getKey())->first();
+
+    expect($fresh->subscription_plan_code)->toBe('pro')
+        ->and($fresh->subscription_meta['scheduled_change'] ?? null)->toBeNull()
+        ->and($fresh->scheduled_change_at)->toBeNull();
+});
+
+it('still schedules an interval change within a hidden plan the billable is really on', function (): void {
+    $billable = makeSupplierBillable('monthly');
+
     app(UpdateSubscription::class)->update($billable, [
+        'plan_code' => 'supplier',
+        'interval' => 'yearly',
+        'apply_at' => 'end_of_period',
+    ]);
+
+    $billable->refresh();
+
+    expect($billable->subscription_meta['scheduled_change']['plan_code'] ?? null)->toBe('supplier')
+        ->and($billable->subscription_meta['scheduled_change']['interval'] ?? null)->toBe('yearly');
+});
+
+it('keeps the override when it is set through the typed request', function (): void {
+    $request = SubscriptionUpdateRequest::from([
         'plan_code' => 'supplier',
         'interval' => 'monthly',
         'allow_hidden_plan' => true,
     ]);
 
-    $billable->refresh();
-    expect($billable->subscription_plan_code)->toBe('supplier');
+    expect($request->allowHiddenPlan)->toBeFalse()
+        ->and($request->withAllowHiddenPlan()->allowHiddenPlan)->toBeTrue()
+        ->and($request->withAllowHiddenPlan()->planCode)->toBe('supplier');
 });

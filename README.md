@@ -511,7 +511,7 @@ A plan can be marked `hidden => true` to keep it out of the checkout plan select
 ],
 ```
 
-Hidden means **unlisted, not unresolvable**: lookups by code keep working, so a subscriber on a hidden plan still sees its name, features, seats and quota in the portal and can switch interval within it. `ActivateLocalSubscription` assigns hidden plans programmatically, while moving *onto* one from checkout or a plan change is refused server-side with `HiddenPlanNotSelectableException`. See [Hidden plans](docs/configuration.md#hidden-plans) for the full behaviour table and the `allow_hidden_plan` opt-in.
+Hidden means **unlisted, not unresolvable**: lookups by code keep working, so a subscriber on a hidden plan still sees its name, features, seats and quota in the portal and can switch interval within it. `ActivateLocalSubscription` assigns hidden plans programmatically, while moving *onto* one from checkout or a plan change is refused server-side with `HiddenPlanNotSelectableException`. See [Hidden plans](docs/configuration.md#hidden-plans) for the full behaviour table and the typed `allowHiddenPlan` opt-in.
 
 ## The Billable contract
 
@@ -719,7 +719,7 @@ A Local subscription has no Mollie mandate, so **no money can flow from the cust
 | Extra seats on a plan with `seat_price_net > 0` | **no** — same exception |
 | Switch to another free plan | yes |
 | Switch directly to a paid plan via `UpdateSubscription` | **no** — `LocalSubscriptionUpgradeRequiresMolliePathException`. Use `UpgradeLocalToMollie` instead (the bundled plan-change UI does this automatically). |
-| Track metered usage (`recordBillingUsage`) | yes — included quota is credited and reset at period boundaries |
+| Track metered usage (`recordBillingUsage`) | yes, up to the included quota — it is credited and reset at period boundaries. Bookings beyond the remaining balance are hard-capped with `UsageLimitExceededException`, since no overage could ever be collected without a mandate. Check `hasBillingQuotaLeft($type)` first. |
 | Charge the customer for usage overages | **no** — `PrepareUsageOverageJob` only charges `Mollie + mandate` billables. Negative balances on Local subs are silently reset at the next period. See [docs/usage-billing.md](docs/usage-billing.md#local-subscriptions-free-plans-access-grants). |
 | Purchase one-time products | **opt-in** via `config('mollie-billing.local_subscription.allow_one_time_orders')`. Default is `false` — purchase attempts throw `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons. Set to `true` if your business model treats the free plan as a default tier monetised through token packs etc. |
 | Cancel | yes — status switches to `cancelled`, wallets are kept until `subscription_ends_at`. |

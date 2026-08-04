@@ -503,9 +503,38 @@ trait HasBilling
         return $balance < 0 ? abs($balance) : 0;
     }
 
+    /**
+     * Whether an overage on this usage type could actually be billed.
+     *
+     * Single source of truth for "may this billable go past its quota": read by
+     * `hasBillingQuotaLeft()` (the gate apps ask before doing work) and by
+     * `WalletUsageService::debit()` (the hard cap that enforces it). Keeping both
+     * on one rule is the point — a gate that says yes where the debit throws is
+     * worse than either answer on its own.
+     *
+     * All four conditions have to hold:
+     *
+     * - Not a Local subscription — no Mollie subscription to attach a charge to.
+     * - A Mollie mandate exists — without it no recurring payment can be created.
+     * - `allowsBillingOverage()` — the per-billable (or config default) opt-out.
+     * - A configured overage price > 0 for this (plan, interval, type). Without
+     *   one `ChargeUsageOverageDirectly` skips the wallet entirely, so the
+     *   negative balance would never be collectable.
+     */
+    public function canChargeBillingOverage(string $type): bool
+    {
+        return ! $this->isLocalBillingSubscription()
+            && $this->hasMollieMandate()
+            && $this->allowsBillingOverage()
+            && ($this->billingOveragePrice($type) ?? 0) > 0;
+    }
+
     public function hasBillingQuotaLeft(string $type): bool
     {
-        return $this->hasMollieMandate() || $this->remainingBillingQuota($type) > 0;
+        // Positive balance covers plan quota *and* purchased credits, so a
+        // billable with credits passes regardless of its overage situation.
+        return $this->remainingBillingQuota($type) > 0
+            || $this->canChargeBillingOverage($type);
     }
 
     public function billingOveragePrice(string $type): ?int

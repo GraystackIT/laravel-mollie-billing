@@ -12,9 +12,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `usage_overage_prices` accepts `false` per usage type to declare a quota that deliberately has no overage; `billing:check-config` no longer warns about it, and `usageOveragePrice()` returns `null` (not `0`) so the UI does not render a "€0.00 per unit" price.
 - `billing:check-config` errors when every plan is hidden, validates that `hidden` is a boolean, and no longer reports an ambiguous `tier` when the collision only involves a hidden plan.
 
+### Changed
+
+- The hidden-plan override is typed-only: `SubscriptionUpdateRequest::from()` no longer reads `allow_hidden_plan` from array payloads. Use the constructor argument (`new SubscriptionUpdateRequest(planCode: 'supplier', allowHiddenPlan: true)`) or the new `withAllowHiddenPlan()`. It overrides an authorization check, so an app forwarding `request()->all()` into `update()` must not be able to enable it; scheduled changes replay it through the typed API.
+- The checkout plan step and its addon prices are resolved through `SubscriptionCatalogInterface` (`visiblePlans()`, `basePriceNet()`, `addonPriceNet()`, …) instead of reading `mollie-billing-plans.plans` / `.addons` directly, so a database-backed catalog offers the codes it actually sells and stale config entries can no longer surface in checkout.
+- `WalletUsageService::debit()` locks and refreshes the billable row before evaluating `canChargeBillingOverage()` and before locking the wallet — same acquisition order as the subscription-change path — so a debit can no longer decide the overage policy from a caller model that predates a plan change.
+- The usage-quota gate and the usage-quota enforcement now resolve through one rule, `Billable::canChargeBillingOverage($type)`: non-Local subscription, Mollie mandate present, `allowsBillingOverage()`, and an overage price > 0 for the current (plan, interval, usage type). `hasBillingQuotaLeft()` and the hard cap in `WalletUsageService::debit()` both read it, so the gate can no longer report quota left where the debit throws. `UsageThresholdNotification` uses it too and stops promising a charge that would not happen.
+  - **Behaviour change:** a quota whose overage price is missing (or `false`) is now hard-capped instead of running the wallet negative — `recordBillingUsage()` throws `UsageLimitExceededException` and fires `UsageLimitReached` once the balance is exhausted. Previously such usage was accepted and the negative balance was never collectable, because `ChargeUsageOverageDirectly` skips wallets without a price. Configure an overage price for every quota you want to be exceedable.
+  - **Breaking for apps implementing `Billable` without `HasBilling`**: the new `canChargeBillingOverage(string $type): bool` is part of the contract. Implementations using the trait inherit it.
+
 ### Fixed
 
+- `hasBillingQuotaLeft()` consulted the existence of a Mollie mandate alone, so it reported quota left where `WalletUsageService::debit()` would in fact refuse the booking. Most visible after a downgrade to a free plan or a cancellation: `mollie_mandate_id` is never cleared, so a Local subscription still counted as mandate-backed and the app was told to proceed straight into a `UsageLimitExceededException`.
 - Deferred prorata upgrades dropped `allow_hidden_plan` from the stored `pending_plan_change`, so an approved move onto a hidden plan was rejected in Phase 2 after the payment settled. The payload is now serialized via `SubscriptionChangeContext::toPendingArray()`.
+- `ScheduleSubscriptionChange::schedule()` re-asserts the hidden-plan rule against the locked and refreshed row. The check in `UpdateSubscription::update()` runs on the caller's model, so a request built before a concurrent plan change could store a scheduled move onto a hidden plan that only failed at period end.
 - `UpdateSubscription::update()` validated the plan target only on the immediate path — a change with `apply_at => end_of_period` was stored unvalidated and failed at period end instead. Plan-target validation now runs before the scheduling branch.
 
 ## [0.3.8] - 2026-07-20

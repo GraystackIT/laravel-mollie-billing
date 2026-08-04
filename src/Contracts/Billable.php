@@ -83,6 +83,15 @@ interface Billable
     // Overage policy
     public function allowsBillingOverage(): bool;
 
+    /**
+     * Whether an overage on this usage type could actually be billed — mandate,
+     * per-billable opt-in and a configured overage price all present.
+     *
+     * Both `hasBillingQuotaLeft()` and the hard cap in `WalletUsageService::debit()`
+     * resolve through this, so the gate and the enforcement cannot drift apart.
+     */
+    public function canChargeBillingOverage(string $type): bool;
+
     // Trial management (admin actions)
     public function extendBillingTrialUntil(CarbonInterface $until): void;
 

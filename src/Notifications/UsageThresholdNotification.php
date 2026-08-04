@@ -30,7 +30,11 @@ class UsageThresholdNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $hint = $this->billable->allowsBillingOverage()
+        // Asks the same question the hard cap in WalletUsageService::debit() asks,
+        // so the mail never promises that overage will be charged when the booking
+        // would in fact be refused — e.g. because no overage price is configured
+        // for this usage type on the current plan.
+        $hint = $this->billable->canChargeBillingOverage($this->usageType)
             ? __('billing::notifications.usage_threshold.overage_allowed')
             : __('billing::notifications.usage_threshold.overage_blocked', ['type' => $this->usageType]);
 
@@ -57,7 +61,7 @@ class UsageThresholdNotification extends Notification
             'type' => 'usage_threshold',
             'usage_type' => $this->usageType,
             'percent' => $this->percent,
-            'overage_allowed' => $this->billable->allowsBillingOverage(),
+            'overage_allowed' => $this->billable->canChargeBillingOverage($this->usageType),
         ];
     }
 }

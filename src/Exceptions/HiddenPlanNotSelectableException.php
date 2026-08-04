@@ -26,7 +26,9 @@ use RuntimeException;
  *   subscriber's own hidden plan like any other.
  *
  * Apps that legitimately need to move an existing billable onto a hidden plan
- * pass `allow_hidden_plan => true` through UpdateSubscription.
+ * pass a typed SubscriptionUpdateRequest with `allowHiddenPlan: true` to
+ * UpdateSubscription. The override is deliberately not readable from array
+ * payloads, so request data can never enable it.
  */
 class HiddenPlanNotSelectableException extends RuntimeException
 {

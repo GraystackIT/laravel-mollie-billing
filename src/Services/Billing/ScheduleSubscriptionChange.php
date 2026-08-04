@@ -19,6 +19,7 @@ class ScheduleSubscriptionChange
 {
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
+        private readonly ValidateSubscriptionChange $validator,
     ) {
     }
 
@@ -44,6 +45,15 @@ class ScheduleSubscriptionChange
             $newPlan = $dto->planCode ?? $currentPlan;
             $newInterval = $dto->interval ?? $currentInterval;
             $planChanged = $newPlan !== $currentPlan;
+
+            // Re-assert the hidden-plan rule against the locked row. UpdateSubscription
+            // already ran it, but on the caller's model — which may predate a plan change
+            // committed in the meantime. Only then does `planChanged` flip to true here,
+            // and the guard has to see that: a scheduled move onto a hidden plan would
+            // otherwise be stored now and blow up when it is applied at period end.
+            if (! $dto->allowHiddenPlan) {
+                $this->validator->assertPlanSelectable($billable, $newPlan);
+            }
 
             // Auto-derive seats from the new plan.
             $usedSeats = $billable->getUsedBillingSeats();
@@ -141,12 +151,21 @@ class ScheduleSubscriptionChange
         }
 
         $payload = (array) $scheduledChange;
+        $allowHiddenPlan = ($payload['allow_hidden_plan'] ?? false) === true;
         $payload['apply_at'] = 'immediate';
         $payload['internal'] = true;
-        unset($payload['scheduled_at']);
+        unset($payload['scheduled_at'], $payload['allow_hidden_plan']);
+
+        // Trusted re-entry: the override was approved when the change was scheduled,
+        // so it is re-applied through the typed API here. `from()` ignores the array
+        // key on purpose — see SubscriptionUpdateRequest::from().
+        $dto = SubscriptionUpdateRequest::from($payload);
+        if ($allowHiddenPlan) {
+            $dto = $dto->withAllowHiddenPlan();
+        }
 
         try {
-            app(UpdateSubscription::class)->update($billable, $payload);
+            app(UpdateSubscription::class)->update($billable, $dto);
 
             // Clear scheduled change on success.
             if ($billable instanceof Model) {

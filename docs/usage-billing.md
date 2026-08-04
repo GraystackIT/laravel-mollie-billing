@@ -45,9 +45,9 @@ Defined per plan per interval inside `intervals.{monthly|yearly}`:
 
 Note: usage quotas are plan-scoped only. Addons do not contribute `included_usages`. See `SubscriptionCatalogInterface::includedUsage()` for details.
 
-The `included_usages` and `usage_overage_prices` keys must line up — a quota without a price means overages cannot be charged, and a price without a quota means the wallet starts at 0. Run `php artisan billing:check-config` to detect such mismatches (it also verifies that any `products.*.usage_type` exists in some plan's usage types).
+The `included_usages` and `usage_overage_prices` keys must line up — a quota without a price is hard-capped at the quota (nothing could be collected past it), and a price without a quota means the wallet starts at 0. Run `php artisan billing:check-config` to detect such mismatches (it also verifies that any `products.*.usage_type` exists in some plan's usage types).
 
-When a quota is *meant* to have no overage (typical for internal and supplier plans), declare it as `'Tokens' => false` in `usage_overage_prices` rather than leaving the key out. Runtime behaviour is identical — `usageOveragePrice()` returns `null` either way — but the explicit `false` tells `check-config` that the missing price is deliberate, so it stops warning. See [Declaring a quota with no overage](configuration.md#declaring-a-quota-with-no-overage).
+When a quota is *meant* to have no overage (typical for internal and supplier plans), declare it as `'Tokens' => false` in `usage_overage_prices` rather than leaving the key out. Runtime behaviour is identical — `usageOveragePrice()` returns `null` either way, and the quota is hard-capped — but the explicit `false` tells `check-config` that the missing price is deliberate, so it stops warning. See [Declaring a quota with no overage](configuration.md#declaring-a-quota-with-no-overage).
 
 ### Usage type names
 
@@ -156,11 +156,11 @@ For metered usage specifically:
 |---|---|
 | Plan-quota credit on activation | yes — `included_usages` from the plan/interval are credited like any other source |
 | Plan-quota refill on renewal | yes — `PrepareUsageOverageJob` resets the wallet at each period boundary (`resetLocalQuota`) |
-| Tracking consumption past zero (negative balance) | yes — `recordBillingUsage()` does not block on source |
-| **Charging the resulting overage** | **never** — `PrepareUsageOverageJob` only routes `Mollie + mandate` billables to `ChargeUsageOverageDirectly`. Local users keep using the app; the negative balance is reset on the next period boundary. |
+| Consumption past zero (negative balance) | **no** — since no overage could ever be collected, `WalletUsageService::debit()` hard-caps at the remaining balance and throws `UsageLimitExceededException` (plus a `UsageLimitReached` event). A booking that fits into the remaining balance always goes through — including one that exceeds `included_usages` because purchased credits raised the balance. |
+| **Charging an overage** | **never** — no mandate, so `PrepareUsageOverageJob` never routes Local billables to `ChargeUsageOverageDirectly`. Negative balances can only arise from a plan change or an admin adjustment, and are reset at the next period boundary. |
 | Buying purchased credits via one-time orders | **opt-in** via `config('mollie-billing.local_subscription.allow_one_time_orders')`. Default `false` — `StartOneTimeOrderCheckout` throws `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons. Set to `true` if your free plan is intended as a default tier monetised through token packs etc. |
 
-In short: a Local user can exceed the included quota, but you will not collect for it automatically. If your business model requires charging Local users for overages, do not make that plan free — price it at the lowest non-zero amount so Mollie collects a mandate during checkout. If you want free users to top up credits manually, enable `local_subscription.allow_one_time_orders`.
+In short: a Local user is capped at whatever the wallet actually holds, not at the plan quota. Purchased credits count towards that balance, so with `local_subscription.allow_one_time_orders` enabled a Local user can consume well past `included_usages` — what they can never do is go negative. The app has to handle `UsageLimitExceededException`: `hasBillingQuotaLeft($type)` only answers "is there any balance left (or a chargeable overage)" and reserves nothing, so a booking larger than the remaining balance still throws even right after the gate returned `true`. If your business model requires charging these users for overages, do not make that plan free — price it at the lowest non-zero amount so Mollie collects a mandate during checkout. If you want free users to top up credits manually, enable `local_subscription.allow_one_time_orders`.
 
 The same applies to `access_grant` coupon redemptions and `Mollie → Free` downgrades, which both produce a Local subscription with the same constraints.
 
@@ -265,7 +265,8 @@ The `HasBilling` trait provides display-ready methods:
 | `purchasedBillingCredits($type)` | Remaining purchased credits (one-time orders + coupons) |
 | `billingOverageCount($type)` | Overage units (negative balance magnitude) |
 | `billingOveragePrice($type)` | Configured overage unit price from catalog |
-| `hasBillingQuotaLeft($type)` | `true` if balance > 0 or mandate exists (allows overage) |
+| `hasBillingQuotaLeft($type)` | `true` if the balance is positive, or if an overage on this type is chargeable |
+| `canChargeBillingOverage($type)` | Whether an overage could actually be billed: non-Local, mandate present, `allowsBillingOverage()`, and an overage price > 0 for this type. Also drives the hard cap in `WalletUsageService::debit()`, so the gate and the enforcement always agree. |
 
 ### Usage Meter UI
 

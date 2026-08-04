@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
+use GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\ValidateSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
@@ -134,11 +135,11 @@ it('carries allow_hidden_plan into the pending plan change so Phase 2 still acce
 
     $b = makeMollieSubBillable();
 
-    app(UpdateSubscription::class)->update($b, [
-        'plan_code' => 'pro',
-        'interval' => 'monthly',
-        'allow_hidden_plan' => true,
-    ]);
+    app(UpdateSubscription::class)->update($b, (new SubscriptionUpdateRequest(
+        planCode: 'pro',
+        interval: 'monthly',
+        allowHiddenPlan: true,
+    )));
 
     $meta = $b->refresh()->getBillingSubscriptionMeta();
     expect($meta['pending_plan_change']['allow_hidden_plan'] ?? null)->toBeTrue();

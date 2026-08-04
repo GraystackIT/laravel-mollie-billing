@@ -22,10 +22,12 @@ class SubscriptionUpdateRequest
         public readonly bool $internal = false,
         /**
          * Escape hatch for moving a billable onto a hidden plan (internal /
-         * supplier / grandfathered). Never set from user input — the portal and
-         * checkout leave it false so a forged request is rejected. Apps use it
-         * for programmatic admin moves, e.g. putting an existing tenant on a
-         * supplier plan without going through ActivateLocalSubscription.
+         * supplier / grandfathered). Settable only through this typed argument
+         * (or `withAllowHiddenPlan()`) — `from()` deliberately ignores any
+         * `allow_hidden_plan` key in array payloads, so no request data can flip
+         * it. Apps use it for programmatic admin moves, e.g. putting an existing
+         * tenant on a supplier plan without going through
+         * ActivateLocalSubscription.
          */
         public readonly bool $allowHiddenPlan = false,
         ?array $couponCodes = null,
@@ -41,6 +43,17 @@ class SubscriptionUpdateRequest
         $this->couponCodes = array_values(array_unique(array_map('strtoupper', $codes)));
     }
 
+    /**
+     * Build the DTO from a loosely typed payload.
+     *
+     * `allow_hidden_plan` is intentionally NOT read here. It overrides an
+     * authorization check, so it must not be reachable from data: an app that
+     * forwards `request()->all()` (or any other array it did not build itself)
+     * into `update()` would otherwise let a caller select a hidden plan. The
+     * override is only available through the typed API — the constructor's
+     * `allowHiddenPlan:` argument or `withAllowHiddenPlan()` — which request
+     * data cannot produce.
+     */
     public static function from(array|self $request): self
     {
         if ($request instanceof self) {
@@ -60,8 +73,32 @@ class SubscriptionUpdateRequest
             couponCode: $request['coupon_code'] ?? $request['couponCode'] ?? null,
             applyAt: $request['apply_at'] ?? $request['applyAt'] ?? 'immediate',
             internal: (bool) ($request['internal'] ?? false),
-            allowHiddenPlan: (bool) ($request['allow_hidden_plan'] ?? $request['allowHiddenPlan'] ?? false),
             couponCodes: $couponCodes,
+        );
+    }
+
+    /**
+     * Trusted copy with the hidden-plan override enabled.
+     *
+     * Two kinds of callers use it: app code performing a deliberate admin move,
+     * and the internal re-entry paths that replay a change which already passed
+     * the guard — `ScheduleSubscriptionChange::apply()` at period end. Phase 2 of
+     * a deferred prorata change goes through
+     * `SubscriptionChangeContext::fromPendingArray()` instead, which reads the
+     * flag from the payload the package itself wrote into `subscription_meta`.
+     */
+    public function withAllowHiddenPlan(bool $allow = true): self
+    {
+        return new self(
+            planCode: $this->planCode,
+            interval: $this->interval,
+            seats: $this->seats,
+            addons: $this->addons,
+            couponCode: $this->couponCode,
+            applyAt: $this->applyAt,
+            internal: $this->internal,
+            allowHiddenPlan: $allow,
+            couponCodes: $this->couponCodes,
         );
     }
 

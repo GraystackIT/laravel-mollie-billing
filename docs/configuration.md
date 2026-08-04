@@ -312,9 +312,9 @@ A quota whose usage type has no entry in `usage_overage_prices` cannot be charge
 
 `usageOveragePrice()` returns `null` for both the omitted key and the explicit `false` — runtime behaviour is identical, only the warning disappears. `true` is rejected as an error; it would read as a price without being one.
 
-The enforcement path is unchanged either way — `false` only silences the warning. What decides whether a booking beyond the quota is accepted is `WalletUsageService::debit()`: when no overage can be charged at all (Local subscription, no Mollie mandate, or `allowsBillingOverage()` false) it hard-caps at the remaining balance and throws `UsageLimitExceededException`. Only when overage *is* possible is the booking recorded and the wallet pushed negative, which `ChargeUsageOverageDirectly` bills later.
+A quota with no chargeable overage is hard-capped. `WalletUsageService::debit()` refuses a booking beyond the remaining balance with `UsageLimitExceededException` whenever `Billable::canChargeBillingOverage($type)` is false — which needs all four of: a non-Local subscription, a Mollie mandate, `allowsBillingOverage()`, and an overage price > 0 for the current (plan, interval, usage type). Only when overage *is* chargeable does the booking go through and push the wallet negative, which `ChargeUsageOverageDirectly` bills later. Purchased credits are unaffected: any positive balance is always spendable.
 
-Note that a configured quota with no price is not part of that hard cap: a billable with a mandate and overage enabled can still overrun a quota whose overage price is missing (or `false`), and the resulting negative balance is then not chargeable. For a supplier on a hidden plan this is moot — no mandate, so the hard cap applies.
+Whether you omit the key or write `false` makes no difference to that gate — `usageOveragePrice()` returns `null` either way. The explicit `false` only documents the intent and silences the config warning.
 
 ### Hidden plans
 
@@ -338,14 +338,14 @@ At least one plan must stay visible — `billing:check-config` errors when every
 **Moving an existing billable onto a hidden plan** is refused by default, including through `HasBilling::changeBillingPlan()`. When that is what you actually want (admin action, migration script), opt in explicitly:
 
 ```php
-app(UpdateSubscription::class)->update($billable, [
-    'plan_code'         => 'supplier',
-    'interval'          => 'monthly',
-    'allow_hidden_plan' => true,
-]);
+app(UpdateSubscription::class)->update($billable, new SubscriptionUpdateRequest(
+    planCode: 'supplier',
+    interval: 'monthly',
+    allowHiddenPlan: true,
+));
 ```
 
-Never derive this flag from user input. It is carried through scheduled and deferred changes so a move that was deliberately allowed is not rejected later when it is applied.
+The override exists **only** on the typed `SubscriptionUpdateRequest` — as the constructor argument above or via `->withAllowHiddenPlan()`. `SubscriptionUpdateRequest::from()` ignores an `allow_hidden_plan` key in array payloads on purpose: it overrides an authorization check, so an app that forwards `request()->all()` into `update()` must not be able to hand a caller a hidden plan. Once set, it is carried through scheduled and deferred changes so a move that was deliberately allowed is not rejected later when it is applied.
 
 > **Note for custom catalogs:** apps that implement `SubscriptionCatalogInterface` themselves (instead of extending `ConfigSubscriptionCatalog`) must add `visiblePlans()` and `planIsHidden()`.
 

@@ -38,6 +38,25 @@ class WalletUsageService
         }
 
         DB::transaction(function () use ($billable, $type, $quantity, $reason): void {
+            // Billable row first, wallet second — the same acquisition order the
+            // subscription-change path uses (UpdateSubscription locks the billable,
+            // then WalletPlanChangeAdjuster mutates the wallets), so the two can
+            // never deadlock against each other. The lock is exclusive because
+            // maybeNotifyThreshold() writes `subscription_meta` further down; a
+            // shared lock would have to be upgraded and two concurrent debits could
+            // deadlock on that upgrade.
+            //
+            // The refresh matters for the overage policy below: plan, interval,
+            // mandate and the opt-in flag are read from the committed row, not from
+            // a caller model that may have been loaded before a plan change.
+            if ($billable instanceof Model) {
+                $billable->newQuery()
+                    ->whereKey($billable->getKey())
+                    ->lockForUpdate()
+                    ->first();
+                $billable->refresh();
+            }
+
             $wallet = $this->resolveWallet($billable, $type);
 
             // Pessimistic lock for atomic balance reads.
@@ -46,9 +65,11 @@ class WalletUsageService
 
             $balanceBefore = (int) $wallet->balanceInt;
 
-            $hardCap = $billable->isLocalBillingSubscription()
-                || ! $billable->hasMollieMandate()
-                || ! $billable->allowsBillingOverage();
+            // Same rule the `hasBillingQuotaLeft()` gate answers with, so a booking
+            // the app was told it may make cannot throw here — and a quota whose
+            // overage price is missing (or explicitly `false`) is capped instead of
+            // running up a negative balance that nothing can collect.
+            $hardCap = ! $billable->canChargeBillingOverage($type);
 
             $remaining = max(0, $balanceBefore);
 

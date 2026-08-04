@@ -46,6 +46,8 @@ class UpdateSubscription
         // scheduled changes never reach ValidateSubscriptionChange in this call,
         // so without this a forged `apply_at=end_of_period` request would be
         // happily stored and only blow up when it is applied at period end.
+        // This runs against the caller's model; ScheduleSubscriptionChange::schedule()
+        // repeats it on the locked+refreshed row for the immediate-path equivalence.
         if (! $dto->allowHiddenPlan) {
             $this->validator->assertPlanSelectable($billable, $dto->planCode);
         }
