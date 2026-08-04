@@ -127,6 +127,29 @@ it('stores pending plan change for Mollie upgrade and does not apply immediately
     Event::assertDispatched(PlanChangePending::class);
 });
 
+it('carries allow_hidden_plan into the pending plan change so Phase 2 still accepts it', function (): void {
+    Event::fake([PlanChangePending::class]);
+
+    config()->set('mollie-billing-plans.plans.pro.hidden', true);
+
+    $b = makeMollieSubBillable();
+
+    app(UpdateSubscription::class)->update($b, [
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'allow_hidden_plan' => true,
+    ]);
+
+    $meta = $b->refresh()->getBillingSubscriptionMeta();
+    expect($meta['pending_plan_change']['allow_hidden_plan'] ?? null)->toBeTrue();
+
+    // Phase 2 re-validates from the stored payload — the approved hidden-plan
+    // move must survive the prorata payment settlement.
+    app(UpdateSubscription::class)->applyPendingPlanChange($b->refresh());
+
+    expect($b->refresh()->subscription_plan_code)->toBe('pro');
+});
+
 it('applies pending plan change and cancels+recreates Mollie subscription', function (): void {
     $b = makeMollieSubBillable();
 

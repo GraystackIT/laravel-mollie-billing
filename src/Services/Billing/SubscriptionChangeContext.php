@@ -40,6 +40,12 @@ class SubscriptionChangeContext
         public readonly bool $isMollie,
         public readonly ?string $couponCode = null,
         public readonly bool $seatsExplicit = false,
+        /**
+         * Carries SubscriptionUpdateRequest::$allowHiddenPlan so
+         * ValidateSubscriptionChange can waive the hidden-plan target check for
+         * deliberate programmatic moves. Never true for user-initiated changes.
+         */
+        public readonly bool $allowHiddenPlan = false,
     ) {}
 
     /**
@@ -61,6 +67,9 @@ class SubscriptionChangeContext
             'new_net' => $this->newNet,
             'prorata_charge_net' => $this->prorataChargeNet,
             'coupon_code' => $this->couponCode,
+            // Preserved so the Phase 2 re-validation (after the prorata payment
+            // settled) does not reject a move that Phase 1 deliberately allowed.
+            'allow_hidden_plan' => $this->allowHiddenPlan,
             'requested_at' => BillingTime::nowUtc()->toIso8601String(),
         ];
     }
@@ -92,6 +101,7 @@ class SubscriptionChangeContext
             isMollie: $isMollie,
             couponCode: $data['coupon_code'] ?? null,
             seatsExplicit: true, // Seats were pre-computed in Phase 1
+            allowHiddenPlan: (bool) ($data['allow_hidden_plan'] ?? false),
         );
     }
 }

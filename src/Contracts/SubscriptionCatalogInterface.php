@@ -58,8 +58,36 @@ interface SubscriptionCatalogInterface
     /** @return array<int, string> */
     public function addonFeatures(string $addonCode): array;
 
-    /** @return array<int, string> */
+    /**
+     * Every plan code, including hidden ones.
+     *
+     * This is a lookup-scope listing — admin pickers (access grants, coupon
+     * restrictions, bulk filters) rely on hidden plans being present. For
+     * anything a customer chooses from, use visiblePlans().
+     *
+     * @return array<int, string>
+     */
     public function allPlans(): array;
+
+    /**
+     * Plan codes that may be offered to customers — everything except hidden plans.
+     *
+     * Hidden means unlisted, never unresolvable: a hidden plan still resolves
+     * through every by-code lookup (planName(), planFeatures(), basePriceNet(), …)
+     * so a subscriber sitting on one has their plan rendered like any other.
+     *
+     * @return array<int, string>
+     */
+    public function visiblePlans(): array;
+
+    /**
+     * Whether the plan is excluded from customer-facing listings.
+     *
+     * Internal, supplier, grandfathered and legacy plans set this. Checkout and
+     * the portal's plan-change screen filter on it, and it is enforced
+     * server-side as a change target by ValidateSubscriptionChange.
+     */
+    public function planIsHidden(string $planCode): bool;
 
     /** @return array<int, string> */
     public function allAddons(): array;
@@ -77,6 +105,15 @@ interface SubscriptionCatalogInterface
 
     public function usageTypeName(string $usageType): string;
 
+    /**
+     * Overage price per unit for a (plan, interval, usageType), or null when no
+     * overage can be charged.
+     *
+     * Null covers both "no price configured" and the explicit `overage => false`
+     * declaration — the two are behaviourally identical, the latter only exists
+     * so `billing:check-config` can tell a deliberate no-overage quota apart
+     * from a forgotten price.
+     */
     public function usageOveragePrice(string $planCode, ?string $interval, string $usageType): ?int;
 
     public function usageRollover(string $usageType): bool;

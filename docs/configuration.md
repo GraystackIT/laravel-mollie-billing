@@ -253,7 +253,8 @@ Each plan is keyed by its `planCode`.
 'pro' => [
     'name'           => 'Pro',                              // fallback when no translation exists
     'description'    => null,
-    'tier'           => 2,                                  // numeric tier (upgrade/downgrade detection)
+    'hidden'         => false,                              // optional — true keeps the plan out of every customer-facing list
+    'tier'           => 2,                                  // numeric plan rank, see the field table below
     'included_seats' => 3,
     'feature_keys'   => ['dashboard', 'advanced-reports'],  // references into 'features'
     'allowed_addons' => ['softdrinks'],                     // references into 'addons'
@@ -279,7 +280,8 @@ Each plan is keyed by its `planCode`.
 | Field | Description |
 |-------|-------------|
 | `name`, `description` | Display values. If a translation exists under `billing::plans.<code>.{name,description}` it overrides these. |
-| `tier` | Integer. Higher = more expensive/larger. Drives upgrade/downgrade detection in `UpdateSubscription`. |
+| `hidden` *(optional)* | Boolean, default `false`. Keeps the plan out of the checkout plan step and the portal's plan-change screen, and refuses it as a change target server-side. See [Hidden plans](#hidden-plans). |
+| `tier` | Integer. Higher = more expensive/larger. Declares plan rank for your own app's use; the package itself only validates it (`billing:check-config` warns when two visible plans share a tier). Up-/downgrade behaviour in `UpdateSubscription` is derived from the prorata amounts, not from `tier`. |
 | `included_seats` | Number of seats included in the base price. `SyncSeats` charges anything above this as additional seats. |
 | `feature_keys` | List of feature keys from the `features` block. Resolved together with addon features by `FeatureAccess`. |
 | `allowed_addons` | Whitelist of addons. Other addons cannot be enabled on this plan. |
@@ -295,9 +297,57 @@ Each plan is keyed by its `planCode`.
 | `seat_price_net` | ✓ | Net price per additional seat in cents, or `null` if the plan does not allow seat upgrades. When `null` for every plan/interval in your config, the portal hides the **Seats** sidebar entry and the `/billing/seats` page returns the "not available" callout — there is nothing for the user to change. The server-side guard in `ValidateSubscriptionChange` also rejects explicit seat increases above `included_seats` for plans with `seat_price_net === null`. |
 | `trial_days` *(optional)* | | Trial length in days for this specific interval. Missing or `0` means no trial. Trials only apply on fresh checkout — never on plan changes. See [Trial flow](subscription-lifecycle.md#trial-flow). |
 | `included_usages` | ✓ | Map `usage_type => quantity`. These quantities are credited additively to the wallet on every period rollover (negative balances from prior overage are preserved). |
-| `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. |
+| `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. Use `false` instead of a price to declare that a quota deliberately has no overage — see below. |
 
 > **Important:** `included_usages`, `usage_overage_prices`, and `trial_days` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
+
+#### Declaring a quota with no overage
+
+A quota whose usage type has no entry in `usage_overage_prices` cannot be charged for overuse. That is a legitimate setup (typical for internal and supplier plans) but indistinguishable from a forgotten price, so `billing:check-config` warns about it. Declare the intent explicitly instead:
+
+```php
+'included_usages'      => ['Tokens' => 5000],
+'usage_overage_prices' => ['Tokens' => false],   // deliberate: quota, but no overage
+```
+
+`usageOveragePrice()` returns `null` for both the omitted key and the explicit `false` — runtime behaviour is identical, only the warning disappears. `true` is rejected as an error; it would read as a price without being one.
+
+The enforcement path is unchanged either way — `false` only silences the warning. What decides whether a booking beyond the quota is accepted is `WalletUsageService::debit()`: when no overage can be charged at all (Local subscription, no Mollie mandate, or `allowsBillingOverage()` false) it hard-caps at the remaining balance and throws `UsageLimitExceededException`. Only when overage *is* possible is the booking recorded and the wallet pushed negative, which `ChargeUsageOverageDirectly` bills later.
+
+Note that a configured quota with no price is not part of that hard cap: a billable with a mandate and overage enabled can still overrun a quota whose overage price is missing (or `false`), and the resulting negative balance is then not chargeable. For a supplier on a hidden plan this is moot — no mandate, so the hard cap applies.
+
+### Hidden plans
+
+Set `hidden => true` on a plan to keep it out of everything a customer chooses from. Internal, supplier, grandfathered and legacy plans are the typical cases.
+
+**Hidden means unlisted, never unresolvable.** Filtering applies to listings only, never to lookup by code:
+
+| | Behaviour with `hidden => true` |
+|---|---|
+| Checkout plan step | Plan is not offered. A hidden code passed via `?plan=` on `MollieBilling::checkoutUrl()` is ignored, and `StartSubscriptionCheckout` throws `HiddenPlanNotSelectableException` if one reaches it anyway. |
+| Portal plan-change screen | Plan is not listed — except for the subscriber's own plan, which stays visible with its "current" badge so a hidden-plan subscriber sees name, features, seats and quota, and can still switch interval. |
+| `SubscriptionCatalogInterface::allPlans()` | Still contains the plan. Admin pickers (access grants, coupon plan restrictions, bulk filters) rely on this. |
+| `SubscriptionCatalogInterface::visiblePlans()` | Excludes the plan. Use this for anything customer-facing. |
+| Every by-code lookup (`planName()`, `planFeatures()`, `includedSeats()`, `basePriceNet()`, …) | Resolves normally, so the portal and invoices render the plan like any other. |
+| `ActivateLocalSubscription` | Unaffected — this is how hidden plans are assigned programmatically. |
+| Plan change onto the plan | Refused with `HiddenPlanNotSelectableException`, both immediately and as a scheduled (`apply_at => end_of_period`) change. |
+| Staying on the plan / changing interval within it | Allowed. |
+
+At least one plan must stay visible — `billing:check-config` errors when every plan is hidden, since the checkout would have nothing to offer. A hidden plan is also exempt from the duplicate-`tier` warning: it is not part of the offered ladder, so it may mirror a public plan's tier.
+
+**Moving an existing billable onto a hidden plan** is refused by default, including through `HasBilling::changeBillingPlan()`. When that is what you actually want (admin action, migration script), opt in explicitly:
+
+```php
+app(UpdateSubscription::class)->update($billable, [
+    'plan_code'         => 'supplier',
+    'interval'          => 'monthly',
+    'allow_hidden_plan' => true,
+]);
+```
+
+Never derive this flag from user input. It is carried through scheduled and deferred changes so a move that was deliberately allowed is not rejected later when it is applied.
+
+> **Note for custom catalogs:** apps that implement `SubscriptionCatalogInterface` themselves (instead of extending `ConfigSubscriptionCatalog`) must add `visiblePlans()` and `planIsHidden()`.
 
 ### `usage_types`
 

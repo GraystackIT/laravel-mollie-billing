@@ -24,6 +24,7 @@ Upgrades on Mollie subscriptions with a prorata charge > 0 are split into two ph
 Phase 1 — User initiates upgrade (synchronous)
   1. Build SubscriptionChangeContext (compute seats, addons, prorata, etc.)
   2. ValidateSubscriptionChange::validate()
+     - Target plan: throw HiddenPlanNotSelectableException for hidden plans
      - Seats: auto-derive or throw SeatDowngradeRequiredException
      - Addons: strip incompatible
      - Wallet usage: charge overage if needed
@@ -302,4 +303,5 @@ Plan definitions, pricing, quotas, and addon compatibility all come from `Subscr
 | Local → Local plan switch | Never enters the deferred path. Applies immediately, source stays Local. |
 | Local → Mollie via `UpdateSubscription` (no UI) | Throws `LocalSubscriptionUpgradeRequiresMolliePathException`. Use `UpgradeLocalToMollie` instead. |
 | Paid extras on a Local subscription | Throws `LocalSubscriptionDoesNotSupportPaidExtrasException`. UI surfaces this as a callout that links to the plan-change page. |
+| Change onto a plan marked `hidden` | Throws `HiddenPlanNotSelectableException` — for immediate *and* scheduled (`apply_at => end_of_period`) changes, the latter before anything is stored. Staying on a hidden plan and changing interval within it are allowed. Pass `allow_hidden_plan => true` for deliberate programmatic moves. See [Hidden plans](configuration.md#hidden-plans). |
 | Second plan change while one is pending | `InvalidSubscriptionStateException` thrown. |

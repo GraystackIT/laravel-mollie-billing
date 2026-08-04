@@ -20,6 +20,14 @@ class SubscriptionUpdateRequest
         public readonly ?string $couponCode = null,
         public readonly string $applyAt = 'immediate', // 'immediate' | 'end_of_period'
         public readonly bool $internal = false,
+        /**
+         * Escape hatch for moving a billable onto a hidden plan (internal /
+         * supplier / grandfathered). Never set from user input — the portal and
+         * checkout leave it false so a forged request is rejected. Apps use it
+         * for programmatic admin moves, e.g. putting an existing tenant on a
+         * supplier plan without going through ActivateLocalSubscription.
+         */
+        public readonly bool $allowHiddenPlan = false,
         ?array $couponCodes = null,
     ) {
         // Normalise into a deduped, non-empty array. The single `couponCode`
@@ -52,6 +60,7 @@ class SubscriptionUpdateRequest
             couponCode: $request['coupon_code'] ?? $request['couponCode'] ?? null,
             applyAt: $request['apply_at'] ?? $request['applyAt'] ?? 'immediate',
             internal: (bool) ($request['internal'] ?? false),
+            allowHiddenPlan: (bool) ($request['allow_hidden_plan'] ?? $request['allowHiddenPlan'] ?? false),
             couponCodes: $couponCodes,
         );
     }
@@ -62,6 +71,11 @@ class SubscriptionUpdateRequest
      * The `internal` flag is intentionally omitted — it is a transient marker
      * for the `ScheduleSubscriptionChange::apply()` re-entry path and must not
      * be carried back through stored payloads.
+     *
+     * `allow_hidden_plan` *is* carried, and only when true: a scheduled or
+     * deferred move onto a hidden plan must still pass the hidden-plan guard
+     * when it is applied later, otherwise the change would be accepted now and
+     * fail at period end (or after the prorata payment already went through).
      */
     public function toArray(): array
     {
@@ -73,6 +87,7 @@ class SubscriptionUpdateRequest
             'coupon_code' => $this->couponCode,
             'coupon_codes' => $this->couponCodes !== [] ? $this->couponCodes : null,
             'apply_at' => $this->applyAt,
+            'allow_hidden_plan' => $this->allowHiddenPlan ?: null,
         ], fn ($v) => $v !== null);
     }
 }

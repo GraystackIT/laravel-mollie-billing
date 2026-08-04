@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Hidden plans: `hidden => true` per plan keeps it out of the checkout plan step and the portal's plan-change screen while every by-code lookup keeps resolving, so a subscriber on one still sees their plan. Enforced server-side via `HiddenPlanNotSelectableException` (plan change, scheduled change, checkout, Local→Mollie upgrade); staying on a hidden plan and changing interval within it stay allowed, and `ActivateLocalSubscription` still assigns them programmatically. New `SubscriptionCatalogInterface::visiblePlans()` / `planIsHidden()` — **breaking for apps that implement the interface themselves** rather than extending `ConfigSubscriptionCatalog`. Opt out per call with `allow_hidden_plan => true`.
+- `usage_overage_prices` accepts `false` per usage type to declare a quota that deliberately has no overage; `billing:check-config` no longer warns about it, and `usageOveragePrice()` returns `null` (not `0`) so the UI does not render a "€0.00 per unit" price.
+- `billing:check-config` errors when every plan is hidden, validates that `hidden` is a boolean, and no longer reports an ambiguous `tier` when the collision only involves a hidden plan.
+
+### Fixed
+
+- Deferred prorata upgrades dropped `allow_hidden_plan` from the stored `pending_plan_change`, so an approved move onto a hidden plan was rejected in Phase 2 after the payment settled. The payload is now serialized via `SubscriptionChangeContext::toPendingArray()`.
+- `UpdateSubscription::update()` validated the plan target only on the immediate path — a change with `apply_at => end_of_period` was stored unvalidated and failed at period end instead. Plan-target validation now runs before the scheduling branch.
+
 ## [0.3.8] - 2026-07-20
 
 ### Added

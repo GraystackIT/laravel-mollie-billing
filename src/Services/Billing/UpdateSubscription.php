@@ -42,6 +42,14 @@ class UpdateSubscription
         $this->validateApplyAt($dto);
         $this->guardPeriodNotLapsed($billable, $dto);
 
+        // Hidden-plan targets are rejected here, before the scheduling branch:
+        // scheduled changes never reach ValidateSubscriptionChange in this call,
+        // so without this a forged `apply_at=end_of_period` request would be
+        // happily stored and only blow up when it is applied at period end.
+        if (! $dto->allowHiddenPlan) {
+            $this->validator->assertPlanSelectable($billable, $dto->planCode);
+        }
+
         if ($dto->applyAt === 'end_of_period') {
             $this->scheduleService->schedule($billable, $dto);
 
@@ -139,21 +147,15 @@ class UpdateSubscription
                 // immediately anyway, and the webhook clears the `pending_prorata_change` marker.
                 if ($hasPendingCharge && ($context->planChanged || $context->intervalChanged)) {
                     $meta = $billable->getBillingSubscriptionMeta();
-                    $meta['pending_plan_change'] = [
-                        'current_plan' => $context->currentPlan,
-                        'current_interval' => $context->currentInterval,
-                        'current_seats' => $context->currentSeats,
-                        'current_addons' => $context->currentAddons,
-                        'plan_code' => $context->newPlan,
-                        'interval' => $context->newInterval,
+                    // Serialized via the context so every field Phase 2 reconstructs
+                    // (incl. allow_hidden_plan) is carried — only the locals read back
+                    // after validation and the stacked coupon codes are layered on top.
+                    $meta['pending_plan_change'] = array_merge($context->toPendingArray(), [
                         'seats' => $newSeats,
                         'addons' => array_values($newAddons),
                         'new_net' => $newNet,
-                        'prorata_charge_net' => $context->prorataChargeNet,
-                        'coupon_code' => $dto->couponCode,
                         'coupon_codes' => $dto->couponCodes,
-                        'requested_at' => BillingTime::nowUtc()->toIso8601String(),
-                    ];
+                    ]);
                     $meta['prorata_pending_payment_id'] = $billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
                     $billable->forceFill(['subscription_meta' => $meta])->save();
 
@@ -825,6 +827,7 @@ class UpdateSubscription
             isMollie: $isMollie,
             couponCode: $dto->couponCode,
             seatsExplicit: $dto->seats !== null,
+            allowHiddenPlan: $dto->allowHiddenPlan,
         );
     }
 

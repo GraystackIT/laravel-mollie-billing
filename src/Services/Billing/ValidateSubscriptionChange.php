@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
+use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
@@ -49,10 +50,12 @@ class ValidateSubscriptionChange
      * @throws SeatDowngradeRequiredException
      * @throws DowngradeRequiresMandateException
      * @throws InvalidSubscriptionStateException
+     * @throws HiddenPlanNotSelectableException
      */
     public function validate(Billable $billable, SubscriptionChangeContext $context): void
     {
         $this->validateSubscriptionEstablished($billable);
+        $this->validateTargetPlanNotHidden($billable, $context);
         $this->validateSeats($billable, $context);
         $this->validateAddons($billable, $context);
         $this->validateLocalSubscriptionExtras($billable, $context);
@@ -88,6 +91,51 @@ class ValidateSubscriptionChange
             throw new InvalidSubscriptionStateException(
                 'Cannot change plan — no active subscription. Complete checkout first.'
             );
+        }
+    }
+
+    /**
+     * Reject a hidden plan as the target of a change.
+     *
+     * Only fires when the plan actually changes, which is exactly the boundary
+     * the ticket asks for: a billable already sitting on a hidden plan may keep
+     * it and may switch interval within it — `planChanged` is false in both
+     * cases. Only moving *onto* a hidden plan from outside is refused.
+     *
+     * @throws HiddenPlanNotSelectableException
+     */
+    protected function validateTargetPlanNotHidden(Billable $billable, SubscriptionChangeContext $context): void
+    {
+        if (! $context->planChanged || $context->allowHiddenPlan) {
+            return;
+        }
+
+        $this->assertPlanSelectable($billable, $context->newPlan);
+    }
+
+    /**
+     * Assert that a plan code may be selected as a change target.
+     *
+     * Kept public and context-free so callers that do not build a
+     * SubscriptionChangeContext can reuse the exact same rule — notably
+     * UpdateSubscription, which hands scheduled changes off to
+     * ScheduleSubscriptionChange *before* validate() ever runs.
+     *
+     * @throws HiddenPlanNotSelectableException
+     */
+    public function assertPlanSelectable(Billable $billable, ?string $targetPlanCode): void
+    {
+        if ($targetPlanCode === null || $targetPlanCode === '') {
+            return;
+        }
+
+        // Keeping the current plan is always allowed, hidden or not.
+        if ($targetPlanCode === $billable->getBillingSubscriptionPlanCode()) {
+            return;
+        }
+
+        if ($this->catalog->planIsHidden($targetPlanCode)) {
+            throw new HiddenPlanNotSelectableException($billable, $targetPlanCode);
         }
     }
 

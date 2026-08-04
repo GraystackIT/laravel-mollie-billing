@@ -89,6 +89,19 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return array_keys(config($this->configKey.'.plans', []));
     }
 
+    public function visiblePlans(): array
+    {
+        return array_values(array_filter(
+            $this->allPlans(),
+            fn (string $code): bool => ! $this->planIsHidden($code),
+        ));
+    }
+
+    public function planIsHidden(string $planCode): bool
+    {
+        return (bool) ($this->plan($planCode)['hidden'] ?? false);
+    }
+
     public function allAddons(): array
     {
         return array_keys((array) config($this->configKey.'.addons', []));
@@ -178,7 +191,14 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         $prices = (array) ($this->plan($planCode)['intervals'][$interval]['usage_overage_prices'] ?? []);
         $value = $this->lookupCaseInsensitive($prices, $usageType);
 
-        return $value === null ? null : (int) $value;
+        // `false` is the explicit "this quota has no overage" declaration. It must
+        // resolve to null, not 0: a 0 price would render as "€0.00 per unit" in the
+        // checkout and plan-change usage lists.
+        if ($value === null || $value === false) {
+            return null;
+        }
+
+        return (int) $value;
     }
 
     /**

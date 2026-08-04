@@ -470,7 +470,7 @@ return [
                     'trial_days' => 14, // optional, per-interval trial length
                     // Included quota per billing period (here: per month)
                     'included_usages' => ['tokens' => 100, 'sms' => 50],
-                    // Cents per unit over quota; omit a key for "no overage"
+                    // Cents per unit over quota; use `false` for a deliberate "no overage"
                     'usage_overage_prices' => ['tokens' => 10, 'sms' => 15],
                 ],
                 'yearly' => [
@@ -497,6 +497,21 @@ return [
     ],
 ];
 ```
+
+### Hidden plans
+
+A plan can be marked `hidden => true` to keep it out of the checkout plan selector and the portal's plan-change screen — for internal, supplier, grandfathered or legacy plans:
+
+```php
+'supplier' => [
+    'name'   => 'Supplier',
+    'hidden' => true,
+    'tier'   => 3,
+    // …
+],
+```
+
+Hidden means **unlisted, not unresolvable**: lookups by code keep working, so a subscriber on a hidden plan still sees its name, features, seats and quota in the portal and can switch interval within it. `ActivateLocalSubscription` assigns hidden plans programmatically, while moving *onto* one from checkout or a plan change is refused server-side with `HiddenPlanNotSelectableException`. See [Hidden plans](docs/configuration.md#hidden-plans) for the full behaviour table and the `allow_hidden_plan` opt-in.
 
 ## The Billable contract
 

@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
+use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
@@ -32,12 +33,21 @@ class StartSubscriptionCheckout
      * @return array{checkout_url:?string,payment_id:string}
      *
      * @throws \RuntimeException if the billable already has an accessible subscription
+     * @throws HiddenPlanNotSelectableException if the requested plan is hidden
      */
     public function handle(Billable $billable, array $request): array
     {
         /** @var Model&Billable $billable */
         if ($billable->hasAccessibleBillingSubscription()) {
             throw new \RuntimeException('Billable already has an active subscription.');
+        }
+
+        // Hidden plans are never bookable through checkout — not via the plan
+        // step, not via `?plan=` on the checkout URL, and not via an AccessGrant
+        // coupon pointing at one. Hidden plans are assigned programmatically
+        // (ActivateLocalSubscription) or by an admin issuing a grant directly.
+        if ($this->catalog->planIsHidden((string) $request['plan_code'])) {
+            throw new HiddenPlanNotSelectableException($billable, (string) $request['plan_code']);
         }
 
         $couponCode = $request['coupon_code'] ?? null;

@@ -73,6 +73,14 @@ class ScheduleSubscriptionChange
                 'scheduled_at' => $scheduledAt->toIso8601String(),
             ];
 
+            // Only persisted when set, so existing meta payloads stay byte-identical.
+            // apply() replays this array through UpdateSubscription, which re-runs the
+            // hidden-plan guard — without the flag a deliberately allowed move onto a
+            // hidden plan would be rejected at period end.
+            if ($dto->allowHiddenPlan) {
+                $scheduledChange['allow_hidden_plan'] = true;
+            }
+
             $meta = $billable->getBillingSubscriptionMeta();
             $previous = $meta['scheduled_change'] ?? null;
             $meta['scheduled_change'] = $scheduledChange;

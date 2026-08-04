@@ -56,8 +56,37 @@ new class extends Component {
         $this->dropExtraSeats = false;
     }
 
+    /**
+     * Plan cards to render: every visible plan, plus the billable's own plan when
+     * that one is hidden.
+     *
+     * Keeping the own plan in the list is what makes a subscriber on a hidden
+     * plan see it at all — with the "current" badge, its features, seats and
+     * quota — and it is the only UI affordance for the interval switch that
+     * stays allowed within a hidden plan.
+     *
+     * @return array<int, string>
+     */
+    public function selectablePlans(?Billable $billable = null): array
+    {
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $ownPlan = ($billable ?? $this->resolveBillable())?->getBillingSubscriptionPlanCode();
+
+        return array_values(array_filter(
+            $catalog->allPlans(),
+            fn (string $code): bool => ! $catalog->planIsHidden($code) || $code === $ownPlan,
+        ));
+    }
+
     public function previewFor(string $planCode, PreviewService $service): void
     {
+        // Livewire methods are callable from the client, so the card list being
+        // filtered is not enough — a crafted call would otherwise expose the
+        // pricing of a hidden plan through the preview.
+        if (! in_array($planCode, $this->selectablePlans(), true)) {
+            return;
+        }
+
         $this->selectedPlan = $planCode;
         $this->refreshPreview($service);
     }
@@ -602,7 +631,7 @@ new class extends Component {
 
         return [
             'billable' => $billable,
-            'plans' => app(SubscriptionCatalogInterface::class)->allPlans(),
+            'plans' => $this->selectablePlans($billable),
             'catalog' => app(SubscriptionCatalogInterface::class),
             'scheduledChange' => $scheduledChange,
             'pendingPlanChange' => $pendingPlanChange,

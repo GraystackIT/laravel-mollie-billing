@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -27,6 +29,7 @@ class UpgradeLocalToMollie
 {
     public function __construct(
         private readonly MollieCustomerResolver $customerResolver,
+        private readonly SubscriptionCatalogInterface $catalog,
     ) {
     }
 
@@ -35,6 +38,7 @@ class UpgradeLocalToMollie
      * @return array{checkout_url:?string,payment_id:string}
      *
      * @throws LocalSubscriptionUpgradeRequiresMolliePathException When called on a non-local subscription
+     * @throws HiddenPlanNotSelectableException When the target plan is hidden
      */
     public function handle(Billable $billable, array $request): array
     {
@@ -43,6 +47,16 @@ class UpgradeLocalToMollie
                 $billable,
                 (string) $request['plan_code'],
             );
+        }
+
+        // The Local→Mollie upgrade is a customer-driven plan choice made in the
+        // portal, so it obeys the same rule as checkout. Staying on the current
+        // plan is exempt — a hidden free plan converting to paid on the same
+        // plan code is a mandate change, not a move onto a hidden plan.
+        $targetPlan = (string) $request['plan_code'];
+        if ($targetPlan !== $billable->getBillingSubscriptionPlanCode()
+            && $this->catalog->planIsHidden($targetPlan)) {
+            throw new HiddenPlanNotSelectableException($billable, $targetPlan);
         }
 
         $customerId = $this->customerResolver->resolve($billable);

@@ -47,6 +47,8 @@ Note: usage quotas are plan-scoped only. Addons do not contribute `included_usag
 
 The `included_usages` and `usage_overage_prices` keys must line up — a quota without a price means overages cannot be charged, and a price without a quota means the wallet starts at 0. Run `php artisan billing:check-config` to detect such mismatches (it also verifies that any `products.*.usage_type` exists in some plan's usage types).
 
+When a quota is *meant* to have no overage (typical for internal and supplier plans), declare it as `'Tokens' => false` in `usage_overage_prices` rather than leaving the key out. Runtime behaviour is identical — `usageOveragePrice()` returns `null` either way — but the explicit `false` tells `check-config` that the missing price is deliberate, so it stops warning. See [Declaring a quota with no overage](configuration.md#declaring-a-quota-with-no-overage).
+
 ### Usage type names
 
 Usage types can be given translated display names via `resources/lang/{locale}/usages.php`:

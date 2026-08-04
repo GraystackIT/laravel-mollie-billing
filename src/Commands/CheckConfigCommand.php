@@ -396,6 +396,8 @@ class CheckConfigCommand extends Command
 
         if ($plans === []) {
             $this->addError($scope, 'plans is empty — at least one plan must be defined.');
+        } elseif ($this->visiblePlanCodes($plans) === []) {
+            $this->addError($scope, 'every plan is marked `hidden` — the checkout plan step would have nothing to offer. At least one plan must stay visible.');
         }
 
         $featureKeys = array_keys($features);
@@ -477,9 +479,16 @@ class CheckConfigCommand extends Command
                 $this->addWarning($scope, "{$where}.name is empty — translations may still be used.");
             }
 
+            if (array_key_exists('hidden', $plan) && ! is_bool($plan['hidden'])) {
+                $this->addError($scope, "{$where}.hidden must be a boolean.");
+            }
+
             if (! isset($plan['tier']) || ! is_int($plan['tier'])) {
                 $this->addError($scope, "{$where}.tier must be an integer (used to compare plan rank).");
-            } else {
+            } elseif (empty($plan['hidden'])) {
+                // Only visible plans form the offered ladder, so only they can make
+                // its ranking ambiguous. A hidden internal plan is free to mirror a
+                // public plan's tier without being told off for it.
                 $tiers[(int) $plan['tier']][] = (string) $code;
             }
 
@@ -576,8 +585,14 @@ class CheckConfigCommand extends Command
             if (! is_string($type) || $type === '') {
                 $this->addError($scope, "{$base}.usage_overage_prices contains an invalid usage type key.");
             }
+            // `false` is the explicit "this quota deliberately has no overage"
+            // declaration (see the missing-price warning below). `true` is not
+            // accepted — it would read as a price without being one.
+            if ($price === false) {
+                continue;
+            }
             if (! is_int($price) || $price < 0) {
-                $this->addError($scope, "{$base}.usage_overage_prices.{$type} must be a non-negative integer.");
+                $this->addError($scope, "{$base}.usage_overage_prices.{$type} must be a non-negative integer, or `false` to declare that this quota has no overage.");
             }
         }
 
@@ -587,12 +602,18 @@ class CheckConfigCommand extends Command
         $missingPrices = array_diff($includedKeys, $overageKeys);
         foreach ($missingPrices as $type) {
             if (($included[$type] ?? 0) > 0) {
-                $this->addWarning($scope, "{$base}.included_usages defines [{$type}] but {$base}.usage_overage_prices has no entry — overages cannot be charged.");
+                $this->addWarning($scope, "{$base}.included_usages defines [{$type}] but {$base}.usage_overage_prices has no entry — overages cannot be charged. Set `'{$type}' => false` there if the quota is meant to have no overage.");
             }
         }
 
+        // An explicit `false` declares intent about a quota, so it does not need a
+        // matching quota entry to be meaningful — warning here would punish exactly
+        // the declaration we just asked for.
         $missingIncluded = array_diff($overageKeys, $includedKeys);
         foreach ($missingIncluded as $type) {
+            if (($overage[$type] ?? null) === false) {
+                continue;
+            }
             $this->addWarning($scope, "{$base}.usage_overage_prices defines [{$type}] but {$base}.included_usages has no matching entry — quota will default to 0.");
         }
     }
@@ -707,6 +728,29 @@ class CheckConfigCommand extends Command
                 $this->addError($scope, "{$where}.onetimeonly must be a boolean.");
             }
         }
+    }
+
+    /**
+     * Plan codes that are offered to customers.
+     *
+     * Read straight from the raw config rather than through the catalog: this
+     * command validates the config file itself, and a rebound catalog may not be
+     * backed by it at all.
+     *
+     * @param  array<string, mixed>  $plans
+     * @return list<string>
+     */
+    private function visiblePlanCodes(array $plans): array
+    {
+        $visible = [];
+        foreach ($plans as $code => $plan) {
+            if (is_array($plan) && ! empty($plan['hidden'])) {
+                continue;
+            }
+            $visible[] = (string) $code;
+        }
+
+        return $visible;
     }
 
     /**

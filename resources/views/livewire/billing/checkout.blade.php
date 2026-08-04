@@ -141,10 +141,25 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return CountryResolver::resolve();
     }
 
-    /** @return array<string, array<string, mixed>> */
+    /**
+     * Plans offered in the checkout plan step.
+     *
+     * Hidden plans (internal / supplier / grandfathered) are filtered out, which
+     * also makes every downstream check inherit the rule for free: the `?plan=`
+     * pre-selection in mount(), the `in:` rule in validateStep2() and the
+     * re-validation in submit() all read this list.
+     *
+     * @return array<string, array<string, mixed>>
+     */
     public function plans(): array
     {
-        return config('mollie-billing-plans.plans', []);
+        $catalog = app(SubscriptionCatalogInterface::class);
+
+        return array_filter(
+            config('mollie-billing-plans.plans', []),
+            fn ($plan, $code) => ! $catalog->planIsHidden((string) $code),
+            ARRAY_FILTER_USE_BOTH,
+        );
     }
 
     /** @return array<string, array<string, mixed>> */

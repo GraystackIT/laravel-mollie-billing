@@ -3,10 +3,22 @@
 declare(strict_types=1);
 
 return [
+    // Each plan may set `hidden => true` to keep it out of everything a customer
+    // chooses from — the checkout plan step and the portal's plan-change screen.
+    // Use it for internal, supplier, grandfathered and legacy plans.
+    //
+    // Hidden means unlisted, never unresolvable: lookups by code keep working, so
+    // a subscriber on a hidden plan still sees its name, features, seats and quota
+    // in the portal, and `ActivateLocalSubscription` can assign it programmatically.
+    // Moving *onto* a hidden plan from outside is refused server-side with
+    // `HiddenPlanNotSelectableException`; staying on one and switching interval
+    // within it stay allowed. At least one plan must remain visible —
+    // `billing:check-config` errors otherwise.
     'plans' => [
         'free' => [
             'name' => 'Free',
             'description' => null,
+            'hidden' => false,
             'tier' => 1,
             'included_seats' => 1,
             'feature_keys' => ['dashboard'],
@@ -16,6 +28,11 @@ return [
                     'base_price_net' => 0,
                     'seat_price_net' => null,
                     'included_usages' => ['Tokens' => 0, 'SMS' => 0],
+                    // A quota with no overage price cannot be charged for overuse.
+                    // When that is deliberate, declare it as `'Tokens' => false`
+                    // instead of omitting the key — otherwise `billing:check-config`
+                    // cannot tell the intent apart from a forgotten price. Both
+                    // behave identically at runtime.
                     'usage_overage_prices' => [],
                 ],
                 'yearly' => [
