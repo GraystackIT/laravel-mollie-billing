@@ -32,7 +32,7 @@ new class extends Component {
         $b = $class ? $class::find($id) : null;
         if ($b) {
             RetryUsageOverageChargeJob::dispatch($class, $b->getKey());
-            $this->flash = "Retry dispatched for {$b->getBillingName()}.";
+            $this->flash = __('billing::admin.past_due.retry_dispatched', ['name' => $b->getBillingName()]);
         }
     }
 
@@ -61,8 +61,8 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Past due"
-        subtitle="Billables whose last recurring charge or overage payment failed."
+        :title="__('billing::admin.past_due.title')"
+        :subtitle="__('billing::admin.past_due.subtitle')"
     />
 
     <x-mollie-billing::admin.flash :success="$flash" />
@@ -71,15 +71,15 @@ new class extends Component {
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="exclamation-triangle"
-                title="No billable model configured"
-                description="Set config('mollie-billing.billable_model') to populate this list."
+                :title="__('billing::admin.common.no_billable_model')"
+                :description="__('billing::admin.common.no_billable_model_description')"
             />
         </flux:card>
     @else
         <flux:input
             type="search"
             wire:model.live.debounce.300ms="search"
-            placeholder="Search by name or email"
+            :placeholder="__('billing::admin.common.search_name_email')"
             icon="magnifying-glass"
         />
 
@@ -87,17 +87,17 @@ new class extends Component {
             <flux:card>
                 <x-mollie-billing::admin.empty
                     icon="check-circle"
-                    title="Nothing past due"
-                    description="All billables are currently up to date."
+                    :title="__('billing::admin.past_due.empty_title')"
+                    :description="__('billing::admin.past_due.empty_description')"
                 />
             </flux:card>
         @else
             <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table :paginate="$billables">
                     <flux:table.columns>
-                        <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Billable</flux:table.column>
-                        <flux:table.column sortable :sorted="$sortBy === 'updated_at'" :direction="$sortDirection" wire:click="sort('updated_at')">Since</flux:table.column>
-                        <flux:table.column>Last failure</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">{{ __('billing::admin.past_due.column.billable') }}</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'updated_at'" :direction="$sortDirection" wire:click="sort('updated_at')">{{ __('billing::admin.past_due.column.since') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.past_due.column.last_failure') }}</flux:table.column>
                         <flux:table.column class="w-32"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
@@ -115,7 +115,7 @@ new class extends Component {
                                     <flux:text size="xs" class="text-zinc-500">{{ data_get($b->getBillingSubscriptionMeta(), 'payment_failure.reason', '—') }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:button size="xs" icon="arrow-path" wire:click='retry({{ \Illuminate\Support\Js::from($b->getKey()) }})'>Retry</flux:button>
+                                    <flux:button size="xs" icon="arrow-path" wire:click='retry({{ \Illuminate\Support\Js::from($b->getKey()) }})'>{{ __('billing::admin.common.retry') }}</flux:button>
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

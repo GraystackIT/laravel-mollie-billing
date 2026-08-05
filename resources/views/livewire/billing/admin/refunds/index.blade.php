@@ -84,14 +84,14 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Refunds"
-        subtitle="Credit notes issued for partial or full refunds."
+        :title="__('billing::admin.refunds.title')"
+        :subtitle="__('billing::admin.refunds.subtitle')"
     />
 
     <flux:input
         type="search"
         wire:model.live.debounce.300ms="search"
-        placeholder="Search by name, email, billable id or serial"
+        :placeholder="__('billing::admin.refunds.search')"
         icon="magnifying-glass"
     />
 
@@ -99,18 +99,18 @@ new class extends Component {
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="arrow-uturn-left"
-                title="No refunds yet"
-                description="Credit notes issued from the invoices tab will appear here."
+                :title="__('billing::admin.refunds.empty_title')"
+                :description="__('billing::admin.refunds.empty_description')"
             />
         </flux:card>
     @else
         <flux:card class="p-0! sm:px-6! sm:py-2!">
             <flux:table :paginate="$notes">
                 <flux:table.columns>
-                    <flux:table.column sortable :sorted="$sortBy === 'created_at'" :direction="$sortDirection" wire:click="sort('created_at')">Date</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'serial_number'" :direction="$sortDirection" wire:click="sort('serial_number')">Serial</flux:table.column>
-                    <flux:table.column>Billable</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'amount_gross'" :direction="$sortDirection" wire:click="sort('amount_gross')" align="end">Amount</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'created_at'" :direction="$sortDirection" wire:click="sort('created_at')">{{ __('billing::admin.refunds.column.date') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'serial_number'" :direction="$sortDirection" wire:click="sort('serial_number')">{{ __('billing::admin.refunds.column.serial') }}</flux:table.column>
+                    <flux:table.column>{{ __('billing::admin.refunds.column.billable') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'amount_gross'" :direction="$sortDirection" wire:click="sort('amount_gross')" align="end">{{ __('billing::admin.refunds.column.amount') }}</flux:table.column>
                     <flux:table.column class="w-16"></flux:table.column>
                 </flux:table.columns>
                 <flux:table.rows>
@@ -150,7 +150,7 @@ new class extends Component {
                                     variant="ghost"
                                     icon="arrow-top-right-on-square"
                                     wire:click="openDetail({{ $n->id }})"
-                                >Open</flux:button>
+                                >{{ __('billing::admin.common.open') }}</flux:button>
                             </flux:table.cell>
                         </flux:table.row>
                     @endforeach
@@ -223,7 +223,7 @@ new class extends Component {
                     <div class="relative flex items-start justify-between gap-4">
                         <div class="min-w-0 flex-1">
                             <div class="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-700/80 dark:text-amber-400/80">
-                                <span>Refund</span>
+                                <span>{{ __('billing::admin.refunds.detail.refund') }}</span>
                                 @if ($detail->serial_number)
                                     <span class="text-amber-300 dark:text-amber-600/60">·</span>
                                     <span class="font-mono normal-case tracking-normal">{{ $detail->serial_number }}</span>
@@ -238,7 +238,15 @@ new class extends Component {
                                 <span class="tabular-nums">{{ BillingTime::displayUtc($detail->created_at)->format('Y-m-d · H:i') }} UTC</span>
                                 @if ($vatAbs > 0)
                                     <span class="text-amber-300 dark:text-amber-600/60">·</span>
-                                    <span class="tabular-nums">net <x-mollie-billing::admin.money :cents="$netAbs" /> + VAT <x-mollie-billing::admin.money :cents="$vatAbs" /></span>
+                                    @php
+                                        // Inline money strings — the <x-…money> component
+                                        // can't be nested inside a translation placeholder.
+                                        $refundMoney = fn (int $cents) => '€'.number_format($cents / 100, 2);
+                                    @endphp
+                                    <span class="tabular-nums">{{ __('billing::admin.refunds.detail.net_vat', [
+                                        'net' => $refundMoney($netAbs),
+                                        'vat' => $refundMoney($vatAbs),
+                                    ]) }}</span>
                                 @endif
                             </div>
                         </div>
@@ -259,7 +267,7 @@ new class extends Component {
                                 :href="$refundDownloadUrl"
                                 target="_blank"
                                 class="text-amber-800! hover:bg-amber-100/60! dark:text-amber-300! dark:hover:bg-amber-500/10!"
-                            >Refund PDF</flux:button>
+                            >{{ __('billing::admin.refunds.detail.refund_pdf') }}</flux:button>
                         </div>
                     @endif
                 </div>
@@ -278,7 +286,7 @@ new class extends Component {
                             <div class="flex items-start justify-between gap-4">
                                 <div class="min-w-0 flex-1">
                                     <div class="mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">
-                                        Original invoice
+                                        {{ __('billing::admin.refunds.detail.original_invoice') }}
                                     </div>
                                     @if ($parent)
                                         <div class="flex items-baseline gap-3">
@@ -304,7 +312,7 @@ new class extends Component {
                                         </div>
                                     @else
                                         <div class="text-sm text-zinc-500 dark:text-zinc-400">
-                                            Original invoice not available.
+                                            {{ __('billing::admin.refunds.detail.original_unavailable') }}
                                         </div>
                                     @endif
 
@@ -319,7 +327,7 @@ new class extends Component {
 
                             @if ($parentDownloadUrl)
                                 <div class="mt-4 flex justify-end border-t border-zinc-200/70 pt-3 dark:border-white/10">
-                                    <flux:button size="xs" variant="ghost" icon="arrow-down-tray" :href="$parentDownloadUrl" target="_blank">Original PDF</flux:button>
+                                    <flux:button size="xs" variant="ghost" icon="arrow-down-tray" :href="$parentDownloadUrl" target="_blank">{{ __('billing::admin.refunds.detail.original_pdf') }}</flux:button>
                                 </div>
                             @endif
                         </div>
@@ -330,7 +338,7 @@ new class extends Component {
                 @if ($hasInformativeLineItems)
                     <div>
                         <div class="mb-2.5 flex items-end justify-between">
-                            <div class="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">Refunded line items</div>
+                            <div class="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.refunds.detail.line_items') }}</div>
                             <div class="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">{{ count($detail->line_items) }}</div>
                         </div>
                         <ul class="divide-y divide-zinc-200/70 rounded-xl border border-zinc-200/70 dark:divide-white/10 dark:border-white/10">
@@ -353,7 +361,7 @@ new class extends Component {
                                                     <span class="text-zinc-300 dark:text-zinc-600">·</span>
                                                 @endif
                                                 @if ($qty > 1)
-                                                    <span class="tabular-nums">qty {{ $qty }}</span>
+                                                    <span class="tabular-nums">{{ __('billing::admin.refunds.detail.qty', ['count' => $qty]) }}</span>
                                                 @endif
                                             </div>
                                         @endif
@@ -370,7 +378,7 @@ new class extends Component {
                 {{-- Footer action: just the primary next step. PDF links live next to their card. --}}
                 @if ($detailBillable)
                     <div class="flex justify-end">
-                        <flux:button size="sm" variant="primary" icon-trailing="arrow-right" :href="route(BillingRoute::admin('billables.show'), $detailBillable)">Open billable</flux:button>
+                        <flux:button size="sm" variant="primary" icon-trailing="arrow-right" :href="route(BillingRoute::admin('billables.show'), $detailBillable)">{{ __('billing::admin.refunds.detail.open_billable') }}</flux:button>
                     </div>
                 @endif
             </div>

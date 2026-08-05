@@ -41,7 +41,7 @@ new class extends Component {
         $this->error = null;
         $class = config('mollie-billing.billable_model');
         $b = $class ? (new $class)->resolveRouteBinding($this->billableId) : null;
-        if (! $b) { $this->error = 'Billable not found.'; return; }
+        if (! $b) { $this->error = __('billing::admin.common.billable_not_found'); return; }
 
         $code = 'GRANT-'.Str::upper(Str::random(8));
         try {
@@ -49,11 +49,14 @@ new class extends Component {
                 ? $service->accessGrantCoupon($code, $this->planCode, $this->interval, $this->addonCodes, $this->durationDays)
                 : $service->addonGrantCoupon($code, $this->addonCodes);
             $service->redeem($coupon, $b, []);
-            session()->flash('status', "Grant {$code} issued and redeemed for {$b->getBillingName()}.");
+            session()->flash('status', __('billing::admin.grants.issued', [
+                'code' => $code,
+                'name' => $b->getBillingName(),
+            ]));
             return $this->redirectRoute(BillingRoute::admin('billables.show'), ['billable' => $b], navigate: true);
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'An unexpected error occurred. Please try again.';
+            $this->error = __('billing::admin.common.error_unexpected');
         }
     }
 };
@@ -62,53 +65,55 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Issue access grant"
-        :subtitle="$billable ? 'For '.$billable->getBillingName().' ('.$billable->getBillingEmail().')' : 'Grants plan and/or addon access without charge.'"
+        :title="__('billing::admin.grants.title')"
+        :subtitle="$billable
+            ? __('billing::admin.grants.subtitle_for', ['name' => $billable->getBillingName(), 'email' => $billable->getBillingEmail()])
+            : __('billing::admin.grants.subtitle_default')"
         :back="$billable ? route(BillingRoute::admin('billables.show'), $billable) : route(BillingRoute::admin('billables.index'))"
-        :backLabel="$billable ? $billable->getBillingName() : 'Billables'"
+        :backLabel="$billable ? $billable->getBillingName() : __('billing::admin.nav.billables')"
     />
 
     <x-mollie-billing::admin.flash :error="$error" />
 
     <form wire:submit="issue" class="space-y-6">
-        <x-mollie-billing::admin.section title="Grant configuration" description="Pick the mode and, for full grants, plan and duration.">
+        <x-mollie-billing::admin.section :title="__('billing::admin.grants.config_title')" :description="__('billing::admin.grants.config_description')">
             <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <flux:select wire:model.live="mode" label="Mode" description="Full grants include a plan; addon grants only toggle addons.">
-                    <flux:select.option value="full">Full — plan + addons + duration</flux:select.option>
-                    <flux:select.option value="addon">Addon-only</flux:select.option>
+                <flux:select wire:model.live="mode" :label="__('billing::admin.grants.mode')" :description="__('billing::admin.grants.mode_description')">
+                    <flux:select.option value="full">{{ __('billing::admin.grants.mode_full') }}</flux:select.option>
+                    <flux:select.option value="addon">{{ __('billing::admin.grants.mode_addon') }}</flux:select.option>
                 </flux:select>
 
                 @if ($mode === 'full')
                     <flux:input
                         type="number"
                         wire:model="durationDays"
-                        label="Duration"
-                        description="Length of the grant."
+                        :label="__('billing::admin.grants.duration')"
+                        :description="__('billing::admin.grants.duration_description')"
                         placeholder="30"
-                        suffix="days"
+                        :suffix="__('billing::admin.common.days')"
                         min="1"
                     />
 
-                    <flux:select wire:model="planCode" label="Plan" required>
+                    <flux:select wire:model="planCode" :label="__('billing::admin.common.plan')" required>
                         @foreach ($planOptions as $code => $name)
                             <flux:select.option value="{{ $code }}">{{ $name }}</flux:select.option>
                         @endforeach
                     </flux:select>
-                    <flux:select wire:model="interval" label="Interval">
-                        <flux:select.option value="monthly">Monthly</flux:select.option>
-                        <flux:select.option value="yearly">Yearly</flux:select.option>
+                    <flux:select wire:model="interval" :label="__('billing::admin.common.interval')">
+                        <flux:select.option value="monthly">{{ __('billing::admin.common.monthly') }}</flux:select.option>
+                        <flux:select.option value="yearly">{{ __('billing::admin.common.yearly') }}</flux:select.option>
                     </flux:select>
                 @endif
             </div>
         </x-mollie-billing::admin.section>
 
-        <x-mollie-billing::admin.section title="Addons" description="Optional — granted alongside the plan.">
+        <x-mollie-billing::admin.section :title="__('billing::admin.grants.addons_title')" :description="__('billing::admin.grants.addons_description')">
             <flux:select
                 wire:model="addonCodes"
-                label="Addons"
+                :label="__('billing::admin.grants.addons')"
                 multiple
                 variant="listbox"
-                :placeholder="count($addonOptions) ? 'Select addons…' : 'No addons configured'"
+                :placeholder="count($addonOptions) ? __('billing::admin.grants.addons_placeholder') : __('billing::admin.grants.addons_none')"
             >
                 @foreach ($addonOptions as $code => $name)
                     <flux:select.option value="{{ $code }}">{{ $name }}</flux:select.option>
@@ -117,8 +122,8 @@ new class extends Component {
         </x-mollie-billing::admin.section>
 
         <div class="flex justify-end gap-2">
-            <flux:button type="button" variant="ghost" :href="$billable ? route(BillingRoute::admin('billables.show'), $billable) : route(BillingRoute::admin('billables.index'))">Cancel</flux:button>
-            <flux:button type="submit" variant="primary" icon="gift">Issue grant</flux:button>
+            <flux:button type="button" variant="ghost" :href="$billable ? route(BillingRoute::admin('billables.show'), $billable) : route(BillingRoute::admin('billables.index'))">{{ __('billing::admin.common.cancel') }}</flux:button>
+            <flux:button type="submit" variant="primary" icon="gift">{{ __('billing::admin.grants.submit') }}</flux:button>
         </div>
     </form>
 </div>

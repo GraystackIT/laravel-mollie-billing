@@ -4,14 +4,14 @@
     $logoUrl = config('mollie-billing.logo_url');
     $faviconUrl = config('mollie-billing.favicon_url', '/favicon.ico');
     $primaryColor = config('mollie-billing.primary_color', 'teal');
-    $portalTitle = config('app.name').' Billing Portal';
+    $portalTitle = __('billing::admin.title', ['app' => config('mollie-billing.company_name', config('app.name'))]);
     $currentRoute = request()->route()?->getName();
 @endphp
 <!DOCTYPE html>
-{{-- Admin panel is operator tooling and stays English regardless of app locale.
-     `lang="en"` here also suppresses Chrome's auto-translate prompt, which would
-     otherwise machine-translate the panel into the operator's browser language. --}}
-<html lang="en" class="h-full">
+{{-- `lang` reflects the active locale (pinned by config `mollie-billing.admin_locale`
+     when set, otherwise the app locale). A correct value also suppresses Chrome's
+     auto-translate prompt, which would otherwise machine-translate the panel. --}}
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="h-full">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -37,13 +37,21 @@
 
         <flux:spacer />
 
+        {{-- App-provided header components (e.g. a language switcher). Keyed by
+             index so Livewire keeps them apart across re-renders. A switcher only
+             has an effect while `mollie-billing.admin_locale` is null — a pinned
+             admin locale wins over whatever the switcher sets. --}}
+        @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
+            @livewire($headerComponent, [], 'billing-header-'.$i)
+        @endforeach
+
         <flux:dropdown position="bottom" align="end">
-            <flux:button variant="ghost" size="sm" icon="sun" icon:variant="mini" x-bind:icon="$flux.appearance === 'dark' ? 'moon' : ($flux.appearance === 'light' ? 'sun' : 'computer-desktop')" aria-label="Toggle theme" />
+            <flux:button variant="ghost" size="sm" icon="sun" icon:variant="mini" x-bind:icon="$flux.appearance === 'dark' ? 'moon' : ($flux.appearance === 'light' ? 'sun' : 'computer-desktop')" :aria-label="__('billing::admin.theme.toggle')" />
             <flux:menu>
                 <flux:menu.radio.group x-model="$flux.appearance">
-                    <flux:menu.radio value="light" icon="sun">Light</flux:menu.radio>
-                    <flux:menu.radio value="dark" icon="moon">Dark</flux:menu.radio>
-                    <flux:menu.radio value="system" icon="computer-desktop">System</flux:menu.radio>
+                    <flux:menu.radio value="light" icon="sun">{{ __('billing::admin.theme.light') }}</flux:menu.radio>
+                    <flux:menu.radio value="dark" icon="moon">{{ __('billing::admin.theme.dark') }}</flux:menu.radio>
+                    <flux:menu.radio value="system" icon="computer-desktop">{{ __('billing::admin.theme.system') }}</flux:menu.radio>
                 </flux:menu.radio.group>
             </flux:menu>
         </flux:dropdown>
@@ -53,15 +61,15 @@
         <flux:sidebar.toggle class="lg:hidden" icon="x-mark" inset="left" />
 
         <flux:navlist variant="outline">
-            <flux:navlist.item icon="home" href="{{ route(BillingRoute::admin('dashboard')) }}" :current="$currentRoute === BillingRoute::admin('dashboard')">Dashboard</flux:navlist.item>
-            <flux:navlist.item icon="users" href="{{ route(BillingRoute::admin('billables.index')) }}" :current="str_starts_with($currentRoute ?? '', BillingRoute::admin('billables'))">Billables</flux:navlist.item>
-            <flux:navlist.item icon="ticket" href="{{ route(BillingRoute::admin('coupons.index')) }}" :current="str_starts_with($currentRoute ?? '', BillingRoute::admin('coupons'))">Coupons</flux:navlist.item>
-            <flux:navlist.item icon="calendar" href="{{ route(BillingRoute::admin('scheduled_changes.index')) }}" :current="$currentRoute === BillingRoute::admin('scheduled_changes.index')">Scheduled changes</flux:navlist.item>
-            <flux:navlist.item icon="exclamation-triangle" href="{{ route(BillingRoute::admin('past_due.index')) }}" :current="$currentRoute === BillingRoute::admin('past_due.index')">Past due</flux:navlist.item>
-            <flux:navlist.item icon="globe-europe-africa" href="{{ route(BillingRoute::admin('mismatches.index')) }}" :current="$currentRoute === BillingRoute::admin('mismatches.index')">Country mismatches</flux:navlist.item>
-            <flux:navlist.item icon="arrow-uturn-left" href="{{ route(BillingRoute::admin('refunds.index')) }}" :current="$currentRoute === BillingRoute::admin('refunds.index')">Refunds</flux:navlist.item>
-            <flux:navlist.item icon="document-arrow-down" href="{{ route(BillingRoute::admin('oss.index')) }}" :current="$currentRoute === BillingRoute::admin('oss.index')">OSS export</flux:navlist.item>
-            <flux:navlist.item icon="bolt" href="{{ route(BillingRoute::admin('bulk.index')) }}" :current="$currentRoute === BillingRoute::admin('bulk.index')">Bulk actions</flux:navlist.item>
+            <flux:navlist.item icon="home" href="{{ route(BillingRoute::admin('dashboard')) }}" :current="$currentRoute === BillingRoute::admin('dashboard')">{{ __('billing::admin.nav.dashboard') }}</flux:navlist.item>
+            <flux:navlist.item icon="users" href="{{ route(BillingRoute::admin('billables.index')) }}" :current="str_starts_with($currentRoute ?? '', BillingRoute::admin('billables'))">{{ __('billing::admin.nav.billables') }}</flux:navlist.item>
+            <flux:navlist.item icon="ticket" href="{{ route(BillingRoute::admin('coupons.index')) }}" :current="str_starts_with($currentRoute ?? '', BillingRoute::admin('coupons'))">{{ __('billing::admin.nav.coupons') }}</flux:navlist.item>
+            <flux:navlist.item icon="calendar" href="{{ route(BillingRoute::admin('scheduled_changes.index')) }}" :current="$currentRoute === BillingRoute::admin('scheduled_changes.index')">{{ __('billing::admin.nav.scheduled_changes') }}</flux:navlist.item>
+            <flux:navlist.item icon="exclamation-triangle" href="{{ route(BillingRoute::admin('past_due.index')) }}" :current="$currentRoute === BillingRoute::admin('past_due.index')">{{ __('billing::admin.nav.past_due') }}</flux:navlist.item>
+            <flux:navlist.item icon="globe-europe-africa" href="{{ route(BillingRoute::admin('mismatches.index')) }}" :current="$currentRoute === BillingRoute::admin('mismatches.index')">{{ __('billing::admin.nav.mismatches') }}</flux:navlist.item>
+            <flux:navlist.item icon="arrow-uturn-left" href="{{ route(BillingRoute::admin('refunds.index')) }}" :current="$currentRoute === BillingRoute::admin('refunds.index')">{{ __('billing::admin.nav.refunds') }}</flux:navlist.item>
+            <flux:navlist.item icon="document-arrow-down" href="{{ route(BillingRoute::admin('oss.index')) }}" :current="$currentRoute === BillingRoute::admin('oss.index')">{{ __('billing::admin.nav.oss') }}</flux:navlist.item>
+            <flux:navlist.item icon="bolt" href="{{ route(BillingRoute::admin('bulk.index')) }}" :current="$currentRoute === BillingRoute::admin('bulk.index')">{{ __('billing::admin.nav.bulk') }}</flux:navlist.item>
         </flux:navlist>
 
         <flux:spacer />

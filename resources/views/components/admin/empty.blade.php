@@ -1,6 +1,6 @@
 @props([
     'icon' => 'inbox',
-    'title' => 'Nothing here yet',
+    'title' => null,
     'description' => null,
 ])
 
@@ -8,7 +8,7 @@
     <div class="rounded-full bg-zinc-100 p-3 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">
         <flux:icon :name="$icon" class="h-6 w-6" />
     </div>
-    <flux:heading size="md" class="mt-1">{{ $title }}</flux:heading>
+    <flux:heading size="md" class="mt-1">{{ $title ?? __('billing::admin.common.empty_title') }}</flux:heading>
     @if ($description)
         <flux:text class="max-w-sm text-zinc-500 dark:text-zinc-400">{{ $description }}</flux:text>
     @endif

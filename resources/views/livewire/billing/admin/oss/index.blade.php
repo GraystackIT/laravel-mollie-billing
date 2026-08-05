@@ -17,7 +17,7 @@ new class extends Component {
         $this->flash = $this->error = null;
 
         if ($year < 2000 || $year > 2999) {
-            $this->error = 'Invalid year.';
+            $this->error = __('billing::admin.oss.invalid_year');
             return;
         }
 
@@ -29,7 +29,7 @@ new class extends Component {
             ->exists();
 
         if ($hasPending) {
-            $this->error = 'An export for this year is already running.';
+            $this->error = __('billing::admin.oss.already_running');
             return;
         }
 
@@ -43,7 +43,7 @@ new class extends Component {
 
         GenerateOssExportJob::dispatch($export->id);
 
-        $this->flash = "Queued OSS export for {$year}.";
+        $this->flash = __('billing::admin.oss.queued', ['year' => $year]);
     }
 
     public function with(): array
@@ -117,8 +117,8 @@ new class extends Component {
 
 <div class="space-y-6" @if ($hasPending) wire:poll.5s @endif>
     <x-mollie-billing::admin.page-header
-        title="OSS protocol"
-        subtitle="Export the one-stop-shop VAT protocol as a CSV file, by year. Generation runs in the background — the file becomes downloadable once ready."
+        :title="__('billing::admin.oss.title')"
+        :subtitle="__('billing::admin.oss.subtitle')"
     />
 
     <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
@@ -127,18 +127,18 @@ new class extends Component {
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="document-arrow-down"
-                title="No invoices yet"
-                description="Once invoices exist, the applicable years will appear here for export."
+                :title="__('billing::admin.oss.empty_title')"
+                :description="__('billing::admin.oss.empty_description')"
             />
         </flux:card>
     @else
         <flux:card class="p-0! sm:px-6! sm:py-2!">
             <flux:table>
                 <flux:table.columns>
-                    <flux:table.column>Year</flux:table.column>
-                    <flux:table.column>Status</flux:table.column>
-                    <flux:table.column>Generated</flux:table.column>
-                    <flux:table.column>Size</flux:table.column>
+                    <flux:table.column>{{ __('billing::admin.oss.column.year') }}</flux:table.column>
+                    <flux:table.column>{{ __('billing::admin.oss.column.status') }}</flux:table.column>
+                    <flux:table.column>{{ __('billing::admin.oss.column.generated') }}</flux:table.column>
+                    <flux:table.column>{{ __('billing::admin.oss.column.size') }}</flux:table.column>
                     <flux:table.column align="end"></flux:table.column>
                 </flux:table.columns>
                 <flux:table.rows>
@@ -166,7 +166,7 @@ new class extends Component {
                                 @elseif ($latest)
                                     <span class="text-zinc-400">{{ $latest->created_at->format('Y-m-d H:i') }} UTC</span>
                                 @else
-                                    <span class="text-zinc-400">Never</span>
+                                    <span class="text-zinc-400">{{ __('billing::admin.oss.never') }}</span>
                                 @endif
                             </flux:table.cell>
                             <flux:table.cell class="text-sm text-zinc-500 font-mono">
@@ -180,13 +180,13 @@ new class extends Component {
                                             icon="arrow-down-tray"
                                             href="{{ route(BillingRoute::admin('oss.download'), $latest) }}"
                                         >
-                                            Download
+                                            {{ __('billing::admin.common.download') }}
                                         </flux:button>
                                     @endif
 
                                     @if ($latest?->status?->isPending())
                                         <flux:button size="xs" icon="arrow-path" disabled>
-                                            Generating…
+                                            {{ __('billing::admin.oss.generating') }}
                                         </flux:button>
                                     @else
                                         <flux:button
@@ -195,7 +195,7 @@ new class extends Component {
                                             icon="arrow-path"
                                             wire:click="generate({{ $year }})"
                                         >
-                                            {{ $latest ? 'Regenerate' : 'Generate' }}
+                                            {{ $latest ? __('billing::admin.oss.regenerate') : __('billing::admin.oss.generate') }}
                                         </flux:button>
                                     @endif
                                 </div>
@@ -209,16 +209,16 @@ new class extends Component {
 
     @if ($history->isNotEmpty())
         <div>
-            <flux:heading size="lg" class="mb-3">History</flux:heading>
+            <flux:heading size="lg" class="mb-3">{{ __('billing::admin.oss.history') }}</flux:heading>
             <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table>
                     <flux:table.columns>
-                        <flux:table.column>Year</flux:table.column>
-                        <flux:table.column>Status</flux:table.column>
-                        <flux:table.column>Requested</flux:table.column>
-                        <flux:table.column>Completed</flux:table.column>
-                        <flux:table.column>Rows</flux:table.column>
-                        <flux:table.column>Size</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.oss.column.year') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.oss.column.status') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.oss.column.requested') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.oss.column.completed') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.oss.column.rows') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.oss.column.size') }}</flux:table.column>
                         <flux:table.column align="end"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
@@ -253,7 +253,7 @@ new class extends Component {
                                             icon="arrow-down-tray"
                                             href="{{ route(BillingRoute::admin('oss.download'), $entry) }}"
                                         >
-                                            Download
+                                            {{ __('billing::admin.common.download') }}
                                         </flux:button>
                                     @endif
                                 </flux:table.cell>

@@ -2,7 +2,7 @@
     'title',
     'subtitle' => null,
     'back' => null,
-    'backLabel' => 'Back',
+    'backLabel' => null,
 ])
 
 <div class="flex flex-wrap items-start justify-between gap-4">
@@ -14,7 +14,7 @@
                 variant="ghost"
                 icon="arrow-left"
                 class="-ml-2 mb-1"
-            >{{ $backLabel }}</flux:button>
+            >{{ $backLabel ?? __('billing::admin.common.back') }}</flux:button>
         @endif
         <flux:heading size="xl" class="truncate">{{ $title }}</flux:heading>
         @if ($subtitle)

@@ -50,72 +50,72 @@ new class extends Component {
 
 <div class="space-y-8">
     <x-mollie-billing::admin.page-header
-        title="Billing Admin"
-        subtitle="Revenue and operational overview at a glance."
+        :title="__('billing::admin.dashboard.title')"
+        :subtitle="__('billing::admin.dashboard.subtitle')"
     />
 
     <section class="space-y-3">
-        <flux:heading size="sm" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Revenue</flux:heading>
+        <flux:heading size="sm" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.dashboard.revenue') }}</flux:heading>
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <x-mollie-billing::admin.stat
-                label="MRR"
+                :label="__('billing::admin.dashboard.mrr')"
                 :value="'€'.number_format($kpis['mrr'] / 100, 2)"
                 icon="arrow-trending-up"
-                hint="Monthly recurring revenue"
+                :hint="__('billing::admin.dashboard.mrr_hint')"
             />
             <x-mollie-billing::admin.stat
-                label="ARR"
+                :label="__('billing::admin.dashboard.arr')"
                 :value="'€'.number_format($kpis['arr'] / 100, 2)"
                 icon="chart-bar"
-                hint="Annualised recurring revenue"
+                :hint="__('billing::admin.dashboard.arr_hint')"
             />
             <x-mollie-billing::admin.stat
-                label="Churn (30d)"
+                :label="__('billing::admin.dashboard.churn')"
                 :value="number_format($kpis['churn'] * 100, 1).'%'"
                 icon="arrow-trending-down"
                 :tone="$kpis['churn'] > 0.05 ? 'danger' : null"
             />
             <x-mollie-billing::admin.stat
-                label="Trial → Paid"
+                :label="__('billing::admin.dashboard.trial_conversion')"
                 :value="number_format($kpis['trial_conversion'] * 100, 1).'%'"
                 icon="check-badge"
-                hint="Last 90 days"
+                :hint="__('billing::admin.dashboard.trial_conversion_hint')"
             />
         </div>
     </section>
 
     <section class="space-y-3">
-        <flux:heading size="sm" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Operations</flux:heading>
+        <flux:heading size="sm" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.dashboard.operations') }}</flux:heading>
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <x-mollie-billing::admin.stat
-                label="Past due"
+                :label="__('billing::admin.dashboard.past_due')"
                 :value="$pastDueCount"
                 :href="route(BillingRoute::admin('past_due.index'))"
                 icon="exclamation-triangle"
                 :tone="$pastDueCount > 0 ? 'danger' : null"
-                hint="Failed recurring payments"
+                :hint="__('billing::admin.dashboard.past_due_hint')"
             />
             <x-mollie-billing::admin.stat
-                label="Country mismatches"
+                :label="__('billing::admin.dashboard.mismatches')"
                 :value="$openMismatches"
                 :href="route(BillingRoute::admin('mismatches.index'))"
                 icon="globe-europe-africa"
                 :tone="$openMismatches > 0 ? 'warning' : null"
-                hint="Pending manual review"
+                :hint="__('billing::admin.dashboard.mismatches_hint')"
             />
             <x-mollie-billing::admin.stat
-                label="Scheduled changes"
+                :label="__('billing::admin.dashboard.scheduled_changes')"
                 :value="$scheduledChanges"
                 :href="route(BillingRoute::admin('scheduled_changes.index'))"
                 icon="calendar"
-                hint="Within the next 7 days"
+                :hint="__('billing::admin.dashboard.scheduled_changes_hint')"
             />
             <x-mollie-billing::admin.stat
-                label="Trials ending"
+                :label="__('billing::admin.dashboard.trials_ending')"
                 :value="$trialsEndingSoon"
                 icon="clock"
                 :tone="$trialsEndingSoon > 0 ? 'warning' : null"
-                hint="Within the next 3 days"
+                :hint="__('billing::admin.dashboard.trials_ending_hint')"
             />
         </div>
     </section>

@@ -28,13 +28,13 @@ new class extends Component {
 
         $reasonCode = RefundReasonCode::tryFrom($this->reason);
         if ($reasonCode === null) {
-            $this->error = 'Invalid refund reason.';
+            $this->error = __('billing::admin.refunds.form.invalid_reason');
             return;
         }
 
         $invoice = BillingInvoice::find($this->invoiceId);
         if (! $invoice) {
-            $this->error = 'Invoice not found.';
+            $this->error = __('billing::admin.refunds.form.invoice_not_found');
             return;
         }
 
@@ -46,17 +46,17 @@ new class extends Component {
                 'reason_text' => $this->reasonText,
                 'notify_user' => $this->notifyUser,
             ]);
-            $this->flash = 'Refund issued.';
+            $this->flash = __('billing::admin.refunds.form.issued');
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'Unable to process refund.';
+            $this->error = __('billing::admin.refunds.form.failed');
         }
     }
 };
 
 ?>
 
-<x-mollie-billing::admin.section title="Issue refund" description="Issue a refund by invoice id. Leave amount empty for a full refund.">
+<x-mollie-billing::admin.section :title="__('billing::admin.refunds.form.title')" :description="__('billing::admin.refunds.form.description')">
     <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
 
     <form wire:submit="submit" class="space-y-4">
@@ -64,37 +64,37 @@ new class extends Component {
             <flux:input
                 type="number"
                 wire:model="invoiceId"
-                label="Invoice id"
-                description="Numeric id of the invoice to refund."
+                :label="__('billing::admin.refunds.form.invoice_id')"
+                :description="__('billing::admin.refunds.form.invoice_id_description')"
                 required
                 min="1"
             />
             <flux:input
                 type="number"
                 wire:model="amountCents"
-                label="Net amount"
-                description="Amount in cents. Example: 1000 = €10.00. Empty = refund full invoice."
-                placeholder="Full refund"
-                suffix="cents"
+                :label="__('billing::admin.refunds.form.amount')"
+                :description="__('billing::admin.refunds.form.amount_description')"
+                :placeholder="__('billing::admin.refunds.form.amount_placeholder')"
+                :suffix="__('billing::admin.coupons.create.cents')"
                 min="1"
             />
         </div>
 
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <flux:select wire:model="reason" label="Reason">
+            <flux:select wire:model="reason" :label="__('billing::admin.refunds.form.reason')">
                 @foreach (RefundReasonCode::cases() as $r)
                     <flux:select.option value="{{ $r->value }}">{{ $r->label() }}</flux:select.option>
                 @endforeach
             </flux:select>
             <flux:input
                 wire:model="reasonText"
-                label="Reason text"
-                description="Required when reason is &quot;Other&quot;."
+                :label="__('billing::admin.refunds.form.reason_text')"
+                :description="__('billing::admin.refunds.form.reason_text_description')"
             />
         </div>
 
-        <flux:checkbox wire:model="notifyUser" label="Notify user" description="Send an email to the billable about this refund." />
+        <flux:checkbox wire:model="notifyUser" :label="__('billing::admin.refunds.form.notify_user')" :description="__('billing::admin.refunds.form.notify_user_description')" />
 
-        <flux:button type="submit" size="sm" variant="danger" icon="arrow-uturn-left">Issue refund</flux:button>
+        <flux:button type="submit" size="sm" variant="danger" icon="arrow-uturn-left">{{ __('billing::admin.refunds.form.submit') }}</flux:button>
     </form>
 </x-mollie-billing::admin.section>

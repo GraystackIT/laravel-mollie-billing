@@ -19,10 +19,16 @@ return [
     'dashboard_url' => env('BILLING_DASHBOARD_URL'),
 
     // Livewire components rendered in the portal header (left of the theme
-    // switcher) and in the checkout header (left of the "Back" link) — e.g. a
-    // language switcher. Resolved by the consuming app, so any alias renderable
-    // via @livewire() works. The admin layout is intentionally excluded.
+    // switcher), in the checkout header (left of the "Back" link) and in the
+    // admin header — e.g. a language switcher. Resolved by the consuming app, so
+    // any alias renderable via @livewire() works.
     'header_components' => [],
+
+    // Locale the admin panel renders in. null (default) follows the application
+    // locale, so a header language switcher applies to the admin panel too. Set
+    // a fixed locale (e.g. 'en') to pin the panel regardless of the app locale —
+    // useful when operators share one working language.
+    'admin_locale' => env('BILLING_ADMIN_LOCALE'),
 
     // Where the checkout "Back" link leads when no explicit $backUrl is passed.
     'checkout_back_url' => env('BILLING_CHECKOUT_BACK_URL', '/'),

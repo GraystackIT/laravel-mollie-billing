@@ -35,15 +35,18 @@ new class extends Component {
         $b = $this->billable();
         if (! $b) return;
         if (! $this->creditType) {
-            $this->error = 'Pick a usage type.';
+            $this->error = __('billing::admin.billables.wallet.flash.pick_usage_type');
             return;
         }
         if ($this->creditUnits <= 0) {
-            $this->error = 'Units must be greater than zero.';
+            $this->error = __('billing::admin.billables.wallet.flash.units_positive');
             return;
         }
-        $service->credit($b, $this->creditType, $this->creditUnits, $this->creditReason ?: 'admin credit');
-        $this->flash = "Credited {$this->creditUnits} {$this->creditType}.";
+        $service->credit($b, $this->creditType, $this->creditUnits, $this->creditReason ?: __('billing::admin.billables.wallet.default_reason'));
+        $this->flash = __('billing::admin.billables.wallet.flash.credited', [
+            'units' => $this->creditUnits,
+            'type' => $this->creditType,
+        ]);
         $this->reset(['creditUnits', 'creditReason']);
     }
 };
@@ -56,13 +59,13 @@ new class extends Component {
     @php $b = $this->billable(); @endphp
     @if ($b)
         <div class="grid gap-6 lg:grid-cols-2">
-            <x-mollie-billing::admin.section title="Balances" description="Usage-type wallets held by this billable.">
+            <x-mollie-billing::admin.section :title="__('billing::admin.billables.wallet.balances_title')" :description="__('billing::admin.billables.wallet.balances_description')">
                 @php $wallets = $b->wallets ?? []; @endphp
                 @if (empty($wallets) || (is_countable($wallets) && count($wallets) === 0))
                     <x-mollie-billing::admin.empty
                         icon="wallet"
-                        title="No wallets yet"
-                        description="Wallets are created automatically on the first usage event."
+                        :title="__('billing::admin.billables.wallet.empty_title')"
+                        :description="__('billing::admin.billables.wallet.empty_description')"
                     />
                 @else
                     <ul class="divide-y divide-zinc-200 dark:divide-zinc-700">
@@ -71,7 +74,7 @@ new class extends Component {
                                 <div>
                                     <div class="font-mono text-sm">{{ $wallet->slug }}</div>
                                     @if ($wallet->balanceInt < 0)
-                                        <flux:text size="xs" class="text-red-600 dark:text-red-400">Overage — balance is negative</flux:text>
+                                        <flux:text size="xs" class="text-red-600 dark:text-red-400">{{ __('billing::admin.billables.wallet.overage') }}</flux:text>
                                     @endif
                                 </div>
                                 <flux:badge size="sm" :color="$wallet->balanceInt < 0 ? 'red' : ($wallet->balanceInt > 0 ? 'emerald' : 'zinc')" class="tabular-nums">
@@ -83,9 +86,9 @@ new class extends Component {
                 @endif
             </x-mollie-billing::admin.section>
 
-            <x-mollie-billing::admin.section title="Credit wallet" description="Add units to the billable's wallet without charging.">
+            <x-mollie-billing::admin.section :title="__('billing::admin.billables.wallet.credit_title')" :description="__('billing::admin.billables.wallet.credit_description')">
                 <form wire:submit="credit" class="space-y-3">
-                    <flux:select wire:model="creditType" label="Usage type" description="Which wallet to credit.">
+                    <flux:select wire:model="creditType" :label="__('billing::admin.billables.wallet.usage_type')" :description="__('billing::admin.billables.wallet.usage_type_description')">
                         @foreach ($usageTypes as $type)
                             <flux:select.option value="{{ $type }}">{{ $type }}</flux:select.option>
                         @endforeach
@@ -93,18 +96,18 @@ new class extends Component {
                     <flux:input
                         type="number"
                         wire:model="creditUnits"
-                        label="Units"
-                        description="Whole units to add. Must be greater than zero."
+                        :label="__('billing::admin.billables.wallet.units')"
+                        :description="__('billing::admin.billables.wallet.units_description')"
                         placeholder="100"
                         min="1"
                     />
                     <flux:input
                         wire:model="creditReason"
-                        label="Reason"
-                        description="Shown in the audit log. Defaults to &quot;admin credit&quot;."
-                        placeholder="Goodwill credit"
+                        :label="__('billing::admin.billables.wallet.reason')"
+                        :description="__('billing::admin.billables.wallet.reason_description')"
+                        :placeholder="__('billing::admin.billables.wallet.reason_placeholder')"
                     />
-                    <flux:button type="submit" size="sm" variant="primary" icon="plus">Credit</flux:button>
+                    <flux:button type="submit" size="sm" variant="primary" icon="plus">{{ __('billing::admin.billables.wallet.submit') }}</flux:button>
                 </form>
             </x-mollie-billing::admin.section>
         </div>

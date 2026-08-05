@@ -26,9 +26,10 @@ Global settings. Most values can be overridden via ENV variables — the default
 | `company_name` | — | Default: `APP_NAME`. Used in mails and views. |
 | `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard. |
 | `checkout_back_url` | `BILLING_CHECKOUT_BACK_URL` | Default target of the "Back" link in the checkout when no explicit `$backUrl` is set. |
-| `header_components` | — | Array of Livewire component aliases rendered in the portal and checkout headers (e.g. a language switcher). Default: `[]`. See below. |
+| `header_components` | — | Array of Livewire component aliases rendered in the portal, checkout and admin headers (e.g. a language switcher). Default: `[]`. See below. |
+| `admin_locale` | `BILLING_ADMIN_LOCALE` | Locale the admin panel renders in. `null` (default) follows the application locale. Set a fixed locale (e.g. `en`) to pin the panel. See below. |
 
-#### App components in the portal/checkout header
+#### App components in the portal/checkout/admin header
 
 `header_components` is the supported way to put your own Livewire component into the
 bundled headers — publishing `layouts/portal.blade.php` just to add one is not needed
@@ -50,8 +51,29 @@ Where they render:
 - **Portal** (`layouts/portal.blade.php`): in the sticky header, left of the theme switcher.
 - **Checkout** (`layouts/checkout.blade.php`): top right, left of the "Back" link — the
   checkout is the public-facing flow, so a locale switch has to be reachable before signup.
-- **Admin** (`layouts/admin.blade.php`): intentionally **not** supported. The admin panel
-  stays English.
+- **Admin** (`layouts/admin.blade.php`): in the sticky header, left of the theme switcher.
+  A language switcher only has an effect while `admin_locale` is `null` — see below.
+
+#### Admin panel locale
+
+The admin panel ships fully translated (`billing::admin.*`, English and German) and
+renders in the application locale by default, so a `header_components` language switcher
+applies there too.
+
+```php
+// config/mollie-billing.php
+'admin_locale' => env('BILLING_ADMIN_LOCALE'),   // null → follow the app locale
+```
+
+Set a fixed locale when operators share one working language:
+
+```dotenv
+BILLING_ADMIN_LOCALE=en
+```
+
+`AuthorizeBillingAdmin` then calls `app()->setLocale()` for the whole request, so it also
+drives `<html lang>` (which suppresses Chrome's auto-translate prompt) and Flux's own
+built-in strings. A pinned locale wins over whatever a header switcher sets.
 
 ### Checkout country selection
 

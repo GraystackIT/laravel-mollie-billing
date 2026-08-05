@@ -394,15 +394,15 @@ php artisan vendor:publish --tag=mollie-billing-views
 
 Views are published to `resources/views/vendor/mollie-billing/`. SFC files use the ⚡ prefix convention (e.g. `⚡checkout.blade.php`).
 
-To add your own Livewire component (e.g. a language switcher) to the portal and checkout
-headers, use `mollie-billing.header_components` instead of publishing the layouts:
+To add your own Livewire component (e.g. a language switcher) to the portal, checkout and
+admin headers, use `mollie-billing.header_components` instead of publishing the layouts:
 
 ```php
 // config/mollie-billing.php
 'header_components' => ['pages::components.language-switcher'],
 ```
 
-See [docs/configuration.md](docs/configuration.md#app-components-in-the-portalcheckout-header).
+See [docs/configuration.md](docs/configuration.md#app-components-in-the-portalcheckoutadmin-header).
 
 ### Tailwind CSS content source
 
@@ -815,6 +815,11 @@ class User extends Authenticatable implements AuthorizesBillingAdmin
     }
 }
 ```
+
+The panel is fully translated (`billing::admin.*`, English and German out of the box) and
+renders in the application locale, so a `header_components` language switcher applies here
+too. To pin it to one working language instead, set `BILLING_ADMIN_LOCALE=en` — see
+[docs/configuration.md](docs/configuration.md#admin-panel-locale).
 
 ## Promotion links
 

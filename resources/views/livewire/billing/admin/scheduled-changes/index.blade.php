@@ -39,7 +39,7 @@ new class extends Component {
         $this->flash = $this->error = null;
         $class = config('mollie-billing.billable_model');
         $b = $class ? $class::find($id) : null;
-        if ($b) { $service->cancel($b); $this->flash = 'Scheduled change cancelled.'; }
+        if ($b) { $service->cancel($b); $this->flash = __('billing::admin.scheduled_changes.cancelled'); }
     }
 
     public function applyNow(mixed $id, ScheduleSubscriptionChange $service): void
@@ -48,8 +48,8 @@ new class extends Component {
         $class = config('mollie-billing.billable_model');
         $b = $class ? $class::find($id) : null;
         if ($b) {
-            try { $service->apply($b); $this->flash = 'Scheduled change applied.'; }
-            catch (\Throwable $e) { report($e); $this->error = 'An error occurred while applying the scheduled change.'; }
+            try { $service->apply($b); $this->flash = __('billing::admin.scheduled_changes.applied'); }
+            catch (\Throwable $e) { report($e); $this->error = __('billing::admin.scheduled_changes.apply_failed'); }
         }
     }
 
@@ -79,8 +79,8 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Scheduled changes"
-        subtitle="Plan and interval changes queued to apply at the end of the current billing period."
+        :title="__('billing::admin.scheduled_changes.title')"
+        :subtitle="__('billing::admin.scheduled_changes.subtitle')"
     />
 
     <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
@@ -89,14 +89,14 @@ new class extends Component {
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="exclamation-triangle"
-                title="No billable model configured"
+                :title="__('billing::admin.common.no_billable_model')"
             />
         </flux:card>
     @else
         <flux:input
             type="search"
             wire:model.live.debounce.300ms="search"
-            placeholder="Search by name or email"
+            :placeholder="__('billing::admin.common.search_name_email')"
             icon="magnifying-glass"
         />
 
@@ -104,17 +104,17 @@ new class extends Component {
             <flux:card>
                 <x-mollie-billing::admin.empty
                     icon="calendar"
-                    title="No scheduled changes"
-                    description="When a billable schedules a plan change, it will appear here."
+                    :title="__('billing::admin.scheduled_changes.empty_title')"
+                    :description="__('billing::admin.scheduled_changes.empty_description')"
                 />
             </flux:card>
         @else
             <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table :paginate="$billables">
                     <flux:table.columns>
-                        <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Billable</flux:table.column>
-                        <flux:table.column sortable :sorted="$sortBy === 'scheduled_change_at'" :direction="$sortDirection" wire:click="sort('scheduled_change_at')">At</flux:table.column>
-                        <flux:table.column>Change</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">{{ __('billing::admin.scheduled_changes.column.billable') }}</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'scheduled_change_at'" :direction="$sortDirection" wire:click="sort('scheduled_change_at')">{{ __('billing::admin.scheduled_changes.column.at') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.scheduled_changes.column.change') }}</flux:table.column>
                         <flux:table.column class="w-48"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
@@ -185,7 +185,7 @@ new class extends Component {
                                                     @if ($newSeats !== null)
                                                         <span class="inline-flex items-center gap-1">
                                                             <flux:icon.users variant="micro" class="size-3" />
-                                                            <span class="tabular-nums">{{ $newSeats }} {{ (int) $newSeats === 1 ? 'seat' : 'seats' }}</span>
+                                                            <span class="tabular-nums">{{ trans_choice('billing::admin.scheduled_changes.seats', (int) $newSeats, ['count' => $newSeats]) }}</span>
                                                         </span>
                                                     @endif
                                                     @if (! empty($newAddons))
@@ -207,10 +207,10 @@ new class extends Component {
                                 </flux:table.cell>
                                 <flux:table.cell align="end">
                                     <div class="flex justify-end gap-1">
-                                        <flux:tooltip content="Cancel scheduled change">
-                                            <flux:button size="xs" variant="ghost" icon="x-mark" aria-label="Cancel" wire:click="cancel('{{ $b->getKey() }}')" wire:confirm="Cancel this scheduled change?" />
+                                        <flux:tooltip :content="__('billing::admin.scheduled_changes.cancel_tooltip')">
+                                            <flux:button size="xs" variant="ghost" icon="x-mark" :aria-label="__('billing::admin.scheduled_changes.cancel_aria')" wire:click="cancel('{{ $b->getKey() }}')" wire:confirm="{{ __('billing::admin.scheduled_changes.cancel_confirm') }}" />
                                         </flux:tooltip>
-                                        <flux:button size="xs" variant="primary" icon="play" wire:click="applyNow('{{ $b->getKey() }}')" wire:confirm="Apply this change now?">Apply now</flux:button>
+                                        <flux:button size="xs" variant="primary" icon="play" wire:click="applyNow('{{ $b->getKey() }}')" wire:confirm="{{ __('billing::admin.scheduled_changes.apply_confirm') }}">{{ __('billing::admin.scheduled_changes.apply_now') }}</flux:button>
                                     </div>
                                 </flux:table.cell>
                             </flux:table.row>

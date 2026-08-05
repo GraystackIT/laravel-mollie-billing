@@ -37,7 +37,7 @@ new class extends Component {
             $service->deactivate($coupon);
         }
         $this->selected = [];
-        session()->flash('status', 'Selected coupons deactivated.');
+        session()->flash('status', __('billing::admin.coupons.deactivated_selected'));
     }
 
     public function with(): array
@@ -57,9 +57,9 @@ new class extends Component {
 ?>
 
 <div class="space-y-6">
-    <x-mollie-billing::admin.page-header title="Coupons" subtitle="Discounts, credits, trial extensions, access grants and period extensions.">
+    <x-mollie-billing::admin.page-header :title="__('billing::admin.coupons.title')" :subtitle="__('billing::admin.coupons.subtitle')">
         <x-slot:actions>
-            <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">New coupon</flux:button>
+            <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">{{ __('billing::admin.coupons.new') }}</flux:button>
         </x-slot:actions>
     </x-mollie-billing::admin.page-header>
 
@@ -69,13 +69,13 @@ new class extends Component {
         <flux:input
             type="search"
             wire:model.live.debounce.300ms="search"
-            placeholder="Search by code or name"
+            :placeholder="__('billing::admin.coupons.search')"
             icon="magnifying-glass"
             class="flex-1 basis-64"
         />
         @if (count($selected))
             <flux:button size="sm" variant="danger" icon="no-symbol" wire:click="deactivateSelected" class="shrink-0">
-                Deactivate selected ({{ count($selected) }})
+                {{ __('billing::admin.coupons.deactivate_selected', ['count' => count($selected)]) }}
             </flux:button>
         @endif
     </div>
@@ -84,11 +84,11 @@ new class extends Component {
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="ticket"
-                title="No coupons yet"
-                description="Create your first coupon to offer discounts, credits, trial extensions or free access."
+                :title="__('billing::admin.coupons.empty_title')"
+                :description="__('billing::admin.coupons.empty_description')"
             >
                 <x-slot:cta>
-                    <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">New coupon</flux:button>
+                    <flux:button variant="primary" size="sm" icon="plus" :href="route(BillingRoute::admin('coupons.create'))">{{ __('billing::admin.coupons.new') }}</flux:button>
                 </x-slot:cta>
             </x-mollie-billing::admin.empty>
         </flux:card>
@@ -97,12 +97,12 @@ new class extends Component {
             <flux:table :paginate="$coupons">
                 <flux:table.columns>
                     <flux:table.column class="w-8"></flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'code'" :direction="$sortDirection" wire:click="sort('code')">Code</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Name</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'type'" :direction="$sortDirection" wire:click="sort('type')">Type</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'redemptions_count'" :direction="$sortDirection" wire:click="sort('redemptions_count')">Redemptions</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'valid_until'" :direction="$sortDirection" wire:click="sort('valid_until')">Valid until</flux:table.column>
-                    <flux:table.column sortable :sorted="$sortBy === 'active'" :direction="$sortDirection" wire:click="sort('active')">Status</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'code'" :direction="$sortDirection" wire:click="sort('code')">{{ __('billing::admin.coupons.column.code') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">{{ __('billing::admin.coupons.column.name') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'type'" :direction="$sortDirection" wire:click="sort('type')">{{ __('billing::admin.coupons.column.type') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'redemptions_count'" :direction="$sortDirection" wire:click="sort('redemptions_count')">{{ __('billing::admin.coupons.column.redemptions') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'valid_until'" :direction="$sortDirection" wire:click="sort('valid_until')">{{ __('billing::admin.coupons.column.valid_until') }}</flux:table.column>
+                    <flux:table.column sortable :sorted="$sortBy === 'active'" :direction="$sortDirection" wire:click="sort('active')">{{ __('billing::admin.coupons.column.status') }}</flux:table.column>
                     <flux:table.column class="w-16"></flux:table.column>
                 </flux:table.columns>
                 <flux:table.rows>
@@ -122,11 +122,11 @@ new class extends Component {
                             <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d') ?? '—' }}</flux:table.cell>
                             <flux:table.cell>
                                 <flux:badge :color="$coupon->active ? 'green' : 'zinc'" size="sm">
-                                    {{ $coupon->active ? 'Active' : 'Inactive' }}
+                                    {{ $coupon->active ? __('billing::admin.common.active') : __('billing::admin.common.inactive') }}
                                 </flux:badge>
                             </flux:table.cell>
                             <flux:table.cell>
-                                <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route(BillingRoute::admin('coupons.show'), $coupon)">View</flux:button>
+                                <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route(BillingRoute::admin('coupons.show'), $coupon)">{{ __('billing::admin.common.view') }}</flux:button>
                             </flux:table.cell>
                         </flux:table.row>
                     @endforeach

@@ -93,14 +93,14 @@ new class extends Component {
             ], fn ($v) => $v !== null && $v !== '');
 
             $service->create($attrs);
-            session()->flash('status', "Coupon {$attrs['code']} created.");
+            session()->flash('status', __('billing::admin.coupons.create.created', ['code' => $attrs['code']]));
             return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\InvalidArgumentException $e) {
             // Domain-validation: surface the message directly so the admin can fix the input.
             $this->error = $e->getMessage();
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'Error (Code: '.$e->getCode().')';
+            $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
         }
     }
 };
@@ -109,82 +109,82 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Create coupon"
-        subtitle="Configure a coupon and its benefit. Fields below adapt to the selected type."
+        :title="__('billing::admin.coupons.create.title')"
+        :subtitle="__('billing::admin.coupons.create.subtitle')"
         :back="route(BillingRoute::admin('coupons.index'))"
-        backLabel="Coupons"
+        :backLabel="__('billing::admin.nav.coupons')"
     />
 
-    <x-mollie-billing::admin.flash :error="$error" errorHeading="The coupon couldn't be created" />
+    <x-mollie-billing::admin.flash :error="$error" :errorHeading="__('billing::admin.coupons.create.error_heading')" />
 
     <form wire:submit="save" class="space-y-6">
-        <x-mollie-billing::admin.section title="Basics" description="Coupon identifier and the kind of benefit it grants.">
+        <x-mollie-billing::admin.section :title="__('billing::admin.coupons.create.basics_title')" :description="__('billing::admin.coupons.create.basics_description')">
             <div class="grid grid-cols-1 gap-4 md:grid-cols-3 md:items-start">
-                <flux:select wire:model.live="type" label="Coupon type">
-                    <flux:select.option value="single_payment">Single payment discount</flux:select.option>
-                    <flux:select.option value="recurring">Recurring discount</flux:select.option>
-                    <flux:select.option value="credits">Credits</flux:select.option>
-                    <flux:select.option value="trial_extension">Trial extension</flux:select.option>
-                    <flux:select.option value="access_grant">Access grant</flux:select.option>
-                    <flux:select.option value="period_extension">Period extension</flux:select.option>
+                <flux:select wire:model.live="type" :label="__('billing::admin.coupons.create.coupon_type')">
+                    <flux:select.option value="single_payment">{{ __('billing::admin.coupons.type.single_payment') }}</flux:select.option>
+                    <flux:select.option value="recurring">{{ __('billing::admin.coupons.type.recurring') }}</flux:select.option>
+                    <flux:select.option value="credits">{{ __('billing::admin.coupons.type.credits') }}</flux:select.option>
+                    <flux:select.option value="trial_extension">{{ __('billing::admin.coupons.type.trial_extension') }}</flux:select.option>
+                    <flux:select.option value="access_grant">{{ __('billing::admin.coupons.type.access_grant') }}</flux:select.option>
+                    <flux:select.option value="period_extension">{{ __('billing::admin.coupons.type.period_extension') }}</flux:select.option>
                 </flux:select>
                 <flux:input
                     wire:model="code"
-                    label="Code"
+                    :label="__('billing::admin.coupons.create.code')"
                     placeholder="SUMMER25"
                     required
                 />
                 <flux:input
                     wire:model="name"
-                    label="Name"
-                    placeholder="Defaults to the code"
+                    :label="__('billing::admin.coupons.create.name')"
+                    :placeholder="__('billing::admin.coupons.create.name_placeholder')"
                 />
             </div>
             <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                The code is stored uppercased and shown on invoices. The coupon type determines which fields are required below — name is optional and falls back to the code.
+                {{ __('billing::admin.coupons.create.basics_hint') }}
             </flux:text>
 
             <flux:separator variant="subtle" />
 
             <flux:textarea
                 wire:model="description"
-                label="Internal description"
-                description="Optional. Only visible to admins."
+                :label="__('billing::admin.coupons.create.description')"
+                :description="__('billing::admin.coupons.create.description_hint')"
                 rows="2"
             />
         </x-mollie-billing::admin.section>
 
-        <x-mollie-billing::admin.section title="Validity & limits" description="When the coupon can be used and how often.">
+        <x-mollie-billing::admin.section :title="__('billing::admin.coupons.create.validity_title')" :description="__('billing::admin.coupons.create.validity_description')">
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4 md:items-start">
-                <flux:input type="datetime-local" wire:model="valid_from" label="Valid from" placeholder="Activate immediately" />
-                <flux:input type="datetime-local" wire:model="valid_until" label="Valid until" placeholder="No expiry" />
+                <flux:input type="datetime-local" wire:model="valid_from" :label="__('billing::admin.coupons.create.valid_from')" :placeholder="__('billing::admin.coupons.create.valid_from_placeholder')" />
+                <flux:input type="datetime-local" wire:model="valid_until" :label="__('billing::admin.coupons.create.valid_until')" :placeholder="__('billing::admin.coupons.create.valid_until_placeholder')" />
                 <flux:input
                     type="number"
                     wire:model="max_redemptions"
-                    label="Max total redemptions"
-                    placeholder="Unlimited"
+                    :label="__('billing::admin.coupons.create.max_redemptions')"
+                    :placeholder="__('billing::admin.coupons.create.max_redemptions_placeholder')"
                     min="1"
                 />
                 <flux:input
                     type="number"
                     wire:model="max_redemptions_per_billable"
-                    label="Max per billable"
+                    :label="__('billing::admin.coupons.create.max_per_billable')"
                     min="1"
                 />
             </div>
+            {{-- The two hints carry inline <span> markup for emphasis, hence {!! !!}.
+                 Both strings are package-controlled translations, never user input. --}}
             <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                @if ($type === 'recurring')
-                    For recurring coupons, <span class="font-medium">max per billable</span> defines how many billing periods the discount applies — default <span class="tabular-nums">1</span> means the first recurring charge only (equivalent to a single-payment coupon). Use a higher number or set <span class="font-medium">valid until</span> for multi-period campaigns.
-                @else
-                    Leave dates empty to activate immediately and never expire. <span class="font-medium">Max total</span> caps redemptions across all billables; <span class="font-medium">max per billable</span> caps redemptions for a single billable.
-                @endif
+                {!! $type === 'recurring'
+                    ? __('billing::admin.coupons.create.validity_hint_recurring')
+                    : __('billing::admin.coupons.create.validity_hint_default') !!}
             </flux:text>
 
             <flux:separator variant="subtle" />
 
             <div class="flex flex-wrap items-center gap-6">
-                <flux:checkbox wire:model="active" label="Active" description="Inactive coupons cannot be redeemed." />
-                <flux:checkbox wire:model="stackable" label="Stackable" description="Can combine with other coupons." />
+                <flux:checkbox wire:model="active" :label="__('billing::admin.coupons.create.active')" :description="__('billing::admin.coupons.create.active_description')" />
+                <flux:checkbox wire:model="stackable" :label="__('billing::admin.coupons.create.stackable')" :description="__('billing::admin.coupons.create.stackable_description')" />
             </div>
         </x-mollie-billing::admin.section>
 
@@ -192,25 +192,27 @@ new class extends Component {
             @php
                 $discountValueDescription = $discount_type === 'percentage'
                     ? ($type === 'recurring'
-                        ? 'Whole percent, 1–100. With 100 %, the subscription is free for the discount lifetime, then resumes at full price.'
-                        : 'Whole percent, 1–100. With 100 %, the first charge is free; the subscription then bills regular price from period 2 onwards (Subscription Checkout) or no payment is required at all (One-Time-Order). single_payment coupons cannot be applied on plan change, seat sync, or addon enable — use a recurring coupon there.')
-                    : 'Amount in cents. Example: 500 = €5.00';
+                        ? __('billing::admin.coupons.create.discount_hint_percentage_recurring')
+                        : __('billing::admin.coupons.create.discount_hint_percentage_single'))
+                    : __('billing::admin.coupons.create.discount_hint_fixed');
             @endphp
             <x-mollie-billing::admin.section
-                title="Discount"
-                :description="$type === 'single_payment' ? 'Applied to a single payment only.' : 'Applied to every recurring payment.'"
+                :title="__('billing::admin.coupons.create.discount_title')"
+                :description="$type === 'single_payment'
+                    ? __('billing::admin.coupons.create.discount_description_single')
+                    : __('billing::admin.coupons.create.discount_description_recurring')"
             >
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-3 md:items-start">
-                    <flux:select wire:model.live="discount_type" label="Discount type">
-                        <flux:select.option value="percentage">Percentage</flux:select.option>
-                        <flux:select.option value="fixed">Fixed amount</flux:select.option>
+                    <flux:select wire:model.live="discount_type" :label="__('billing::admin.coupons.create.discount_type')">
+                        <flux:select.option value="percentage">{{ __('billing::admin.coupons.create.discount_percentage') }}</flux:select.option>
+                        <flux:select.option value="fixed">{{ __('billing::admin.coupons.create.discount_fixed') }}</flux:select.option>
                     </flux:select>
                     <flux:input
                         type="number"
                         wire:model="discount_value"
-                        label="Value"
+                        :label="__('billing::admin.coupons.create.discount_value')"
                         :placeholder="$discount_type === 'percentage' ? '25' : '500'"
-                        :suffix="$discount_type === 'percentage' ? '%' : 'cents'"
+                        :suffix="$discount_type === 'percentage' ? '%' : __('billing::admin.coupons.create.cents')"
                         min="1"
                         :max="$discount_type === 'percentage' ? 100 : null"
                         required
@@ -218,26 +220,27 @@ new class extends Component {
                     <flux:input
                         type="number"
                         wire:model="minimum_order_amount_net"
-                        label="Minimum order (net)"
-                        placeholder="No minimum"
-                        suffix="cents"
+                        :label="__('billing::admin.coupons.create.minimum_order')"
+                        :placeholder="__('billing::admin.coupons.create.minimum_order_placeholder')"
+                        :suffix="__('billing::admin.coupons.create.cents')"
                         min="0"
                     />
                 </div>
                 <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                    {{ $discountValueDescription }} <span class="text-zinc-400 dark:text-zinc-500">·</span> Minimum order is the net amount (in cents) the order must reach for the coupon to apply.
+                    {{ $discountValueDescription }} <span class="text-zinc-400 dark:text-zinc-500">·</span> {{ __('billing::admin.coupons.create.minimum_order_hint') }}
                 </flux:text>
             </x-mollie-billing::admin.section>
         @endif
 
         @if ($type === 'credits')
             <x-mollie-billing::admin.section
-                title="Credits"
-                description="On redemption, the specified amount is credited to each wallet listed below. Leave a field empty (or 0) to skip that wallet."
+                :title="__('billing::admin.coupons.create.credits_title')"
+                :description="__('billing::admin.coupons.create.credits_description')"
             >
                 @if (empty($usageTypeOptions))
                     <flux:callout variant="warning" icon="exclamation-triangle" inline>
-                        No usage types are declared in your plans config (<code>included_usages</code> / <code>usage_overage_prices</code>). Define at least one usage type before creating a credits coupon.
+                        {{-- Contains <code> markup; package-controlled string, not user input. --}}
+                        {!! __('billing::admin.coupons.create.credits_no_usage_types') !!}
                     </flux:callout>
                 @else
                     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -253,7 +256,7 @@ new class extends Component {
                         @endforeach
                     </div>
                     <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                        At least one wallet must receive a positive amount. The values represent whole units (e.g. tokens, SMS) that are credited on redemption.
+                        {{ __('billing::admin.coupons.create.credits_hint') }}
                     </flux:text>
                 @endif
             </x-mollie-billing::admin.section>
@@ -261,16 +264,16 @@ new class extends Component {
 
         @if ($type === 'trial_extension')
             <x-mollie-billing::admin.section
-                title="Trial extension"
-                description="Extends the billable's trial by a fixed number of days from the moment the coupon is redeemed."
+                :title="__('billing::admin.coupons.create.trial_title')"
+                :description="__('billing::admin.coupons.create.trial_description')"
             >
                 <flux:input
                     type="number"
                     wire:model="trial_extension_days"
-                    label="Days"
-                    description="Whole days to add. Example: 14"
+                    :label="__('billing::admin.coupons.create.trial_days')"
+                    :description="__('billing::admin.coupons.create.trial_days_description')"
                     placeholder="14"
-                    suffix="days"
+                    :suffix="__('billing::admin.common.days')"
                     min="1"
                     required
                 />
@@ -279,28 +282,28 @@ new class extends Component {
 
         @if ($type === 'access_grant')
             <x-mollie-billing::admin.section
-                title="Access grant"
-                description="Grants a plan (and optional addons) for a duration, free of charge. For an addon-only grant, leave the plan empty and pick at least one addon below."
+                :title="__('billing::admin.coupons.create.grant_title')"
+                :description="__('billing::admin.coupons.create.grant_description')"
             >
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-                    <flux:select wire:model.live="grant_plan_code" label="Plan" description="Leave empty for an addon-only grant.">
-                        <flux:select.option value="">— Addon-only (no plan) —</flux:select.option>
+                    <flux:select wire:model.live="grant_plan_code" :label="__('billing::admin.common.plan')" :description="__('billing::admin.coupons.create.grant_plan_description')">
+                        <flux:select.option value="">{{ __('billing::admin.coupons.create.grant_plan_none') }}</flux:select.option>
                         @foreach ($planOptions as $code => $name)
                             <flux:select.option value="{{ $code }}">{{ $name }}</flux:select.option>
                         @endforeach
                     </flux:select>
-                    <flux:select wire:model="grant_interval" label="Interval" description="Required when a plan is set.">
+                    <flux:select wire:model="grant_interval" :label="__('billing::admin.common.interval')" :description="__('billing::admin.coupons.create.grant_interval_description')">
                         <flux:select.option value="">—</flux:select.option>
-                        <flux:select.option value="monthly">Monthly</flux:select.option>
-                        <flux:select.option value="yearly">Yearly</flux:select.option>
+                        <flux:select.option value="monthly">{{ __('billing::admin.common.monthly') }}</flux:select.option>
+                        <flux:select.option value="yearly">{{ __('billing::admin.common.yearly') }}</flux:select.option>
                     </flux:select>
                     <flux:input
                         type="number"
                         wire:model="grant_duration_days"
-                        label="Duration"
-                        description="Length of the grant. Only applies to plan grants — addon-only grants run for the addon's regular billing period."
+                        :label="__('billing::admin.coupons.create.grant_duration')"
+                        :description="__('billing::admin.coupons.create.grant_duration_description')"
                         placeholder="30"
-                        suffix="days"
+                        :suffix="__('billing::admin.common.days')"
                         min="1"
                     />
                 </div>
@@ -309,13 +312,11 @@ new class extends Component {
                     <flux:separator variant="subtle" />
 
                     <flux:field>
-                        <flux:label>Granted addons</flux:label>
+                        <flux:label>{{ __('billing::admin.coupons.create.granted_addons') }}</flux:label>
                         <flux:description>
-                            @if (empty($grant_plan_code))
-                                Required for addon-only grants — select at least one addon to grant.
-                            @else
-                                Optional. Addons granted alongside the plan for the same duration.
-                            @endif
+                            {{ empty($grant_plan_code)
+                                ? __('billing::admin.coupons.create.granted_addons_required')
+                                : __('billing::admin.coupons.create.granted_addons_optional') }}
                         </flux:description>
                         <flux:checkbox.group wire:model="grant_addon_codes">
                             <div class="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -331,16 +332,16 @@ new class extends Component {
 
         @if ($type === 'period_extension')
             <x-mollie-billing::admin.section
-                title="Period extension"
-                description="Pushes the next billing date forward by the given number of days. Works for both Local and Mollie subscriptions; the plan and all active addons keep running unchanged. We recommend keeping `stackable` disabled for this type."
+                :title="__('billing::admin.coupons.create.period_title')"
+                :description="__('billing::admin.coupons.create.period_description')"
             >
                 <flux:input
                     type="number"
                     wire:model="grant_duration_days"
-                    label="Extend by"
-                    description="Number of days to extend the current billing period."
+                    :label="__('billing::admin.coupons.create.period_extend_by')"
+                    :description="__('billing::admin.coupons.create.period_extend_by_description')"
                     placeholder="14"
-                    suffix="days"
+                    :suffix="__('billing::admin.common.days')"
                     min="1"
                     required
                 />
@@ -349,9 +350,9 @@ new class extends Component {
 
         @if (! empty($addonOptions) && in_array($type, ['single_payment', 'recurring']))
             <x-mollie-billing::admin.collapsible
-                title="Applicable addons"
-                description="Restrict the discount to specific addons. Leave empty to allow any."
-                :badge="count($applicable_addons) > 0 ? count($applicable_addons).' selected' : null"
+                :title="__('billing::admin.coupons.create.applicable_addons')"
+                :description="__('billing::admin.coupons.create.applicable_addons_description')"
+                :badge="count($applicable_addons) > 0 ? __('billing::admin.coupons.create.selected_count', ['count' => count($applicable_addons)]) : null"
                 :open="count($applicable_addons) > 0"
             >
                 <flux:checkbox.group wire:model="applicable_addons">
@@ -366,9 +367,9 @@ new class extends Component {
 
         @if (! empty($productOptions) && in_array($type, ['single_payment', 'recurring']))
             <x-mollie-billing::admin.collapsible
-                title="Applicable products"
-                description="Restrict the discount to specific one-time-order products. Leave empty to allow any."
-                :badge="count($applicable_products) > 0 ? count($applicable_products).' selected' : null"
+                :title="__('billing::admin.coupons.create.applicable_products')"
+                :description="__('billing::admin.coupons.create.applicable_products_description')"
+                :badge="count($applicable_products) > 0 ? __('billing::admin.coupons.create.selected_count', ['count' => count($applicable_products)]) : null"
                 :open="count($applicable_products) > 0"
             >
                 <flux:checkbox.group wire:model="applicable_products">
@@ -382,21 +383,21 @@ new class extends Component {
         @endif
 
         <x-mollie-billing::admin.collapsible
-            title="Advanced"
-            description="Optional automation hooks."
+            :title="__('billing::admin.coupons.create.advanced')"
+            :description="__('billing::admin.coupons.create.advanced_description')"
             :open="!empty($auto_apply_token)"
         >
             <flux:input
                 wire:model="auto_apply_token"
-                label="Auto-apply token"
-                description="If set, this coupon is auto-applied when the signup URL carries ?coupon=<token>. Use a short slug, e.g. welcome10."
+                :label="__('billing::admin.coupons.create.auto_apply_token')"
+                :description="__('billing::admin.coupons.create.auto_apply_token_description')"
                 placeholder="welcome10"
             />
         </x-mollie-billing::admin.collapsible>
 
         <div class="flex justify-end gap-2">
-            <flux:button type="button" variant="ghost" :href="route(BillingRoute::admin('coupons.index'))">Cancel</flux:button>
-            <flux:button type="submit" variant="primary" icon="check">Create coupon</flux:button>
+            <flux:button type="button" variant="ghost" :href="route(BillingRoute::admin('coupons.index'))">{{ __('billing::admin.common.cancel') }}</flux:button>
+            <flux:button type="submit" variant="primary" icon="check">{{ __('billing::admin.coupons.create.submit') }}</flux:button>
         </div>
     </form>
 </div>

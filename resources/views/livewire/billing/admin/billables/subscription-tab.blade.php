@@ -43,25 +43,27 @@ new class extends Component {
     {
         $this->error = $this->flash = null;
         if (! $this->trialUntil) {
-            $this->error = 'Please pick a trial end date.';
+            $this->error = __('billing::admin.billables.subscription.flash.pick_trial_date');
             return;
         }
         $this->billable()?->extendBillingTrialUntil(Carbon::parse($this->trialUntil));
-        $this->flash = 'Trial extended to '.Carbon::parse($this->trialUntil)->format('Y-m-d').'.';
+        $this->flash = __('billing::admin.billables.subscription.flash.trial_extended', [
+            'date' => Carbon::parse($this->trialUntil)->format('Y-m-d'),
+        ]);
     }
 
     public function cancelAtPeriodEnd(CancelSubscription $service): void
     {
         $this->error = $this->flash = null;
         $b = $this->billable();
-        if ($b) { $service->handle($b, false); $this->flash = 'Subscription cancelled. Grace period applies.'; }
+        if ($b) { $service->handle($b, false); $this->flash = __('billing::admin.billables.subscription.flash.cancelled_grace'); }
     }
 
     public function forceCancel(CancelSubscription $service): void
     {
         $this->error = $this->flash = null;
         $b = $this->billable();
-        if ($b) { $service->handle($b, true); $this->flash = 'Subscription cancelled immediately.'; }
+        if ($b) { $service->handle($b, true); $this->flash = __('billing::admin.billables.subscription.flash.cancelled_now'); }
     }
 
     public function resubscribe(ResubscribeSubscription $service): void
@@ -69,8 +71,8 @@ new class extends Component {
         $this->error = $this->flash = null;
         $b = $this->billable();
         if ($b) {
-            try { $service->handle($b); $this->flash = 'Resubscribed.'; }
-            catch (\Throwable $e) { report($e); $this->error = 'Error (Code: '.$e->getCode().')'; }
+            try { $service->handle($b); $this->flash = __('billing::admin.billables.subscription.flash.resubscribed'); }
+            catch (\Throwable $e) { report($e); $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]); }
         }
     }
 
@@ -78,20 +80,20 @@ new class extends Component {
     {
         $this->error = $this->flash = null;
         $redemption = CouponRedemption::find($redemptionId);
-        if (! $redemption) { $this->error = 'Grant not found.'; return; }
+        if (! $redemption) { $this->error = __('billing::admin.billables.subscription.flash.grant_not_found'); return; }
 
         $b = $this->billable();
         if (! $b || $redemption->billable_type !== $b->getMorphClass() || (string) $redemption->billable_id !== (string) $b->getKey()) {
-            $this->error = 'Grant does not belong to this billable.';
+            $this->error = __('billing::admin.billables.subscription.flash.grant_foreign');
             return;
         }
 
         try {
-            $service->revokeGrant($redemption, 'Revoked by admin');
-            $this->flash = 'Grant revoked.';
+            $service->revokeGrant($redemption, __('billing::admin.billables.subscription.flash.revoked_by_admin'));
+            $this->flash = __('billing::admin.billables.subscription.flash.grant_revoked');
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'Error (Code: '.$e->getCode().')';
+            $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
         }
     }
 };
@@ -104,24 +106,24 @@ new class extends Component {
     @php $b = $this->billable(); @endphp
     @if ($b)
         <div class="grid gap-6 lg:grid-cols-2">
-            <x-mollie-billing::admin.section title="Current subscription" description="Snapshot of the billable's subscription state.">
+            <x-mollie-billing::admin.section :title="__('billing::admin.billables.subscription.current_title')" :description="__('billing::admin.billables.subscription.current_description')">
                 <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <x-mollie-billing::admin.detail label="Plan" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.common.plan')" mono>
                         {{ $b->subscription_plan_code ?? '—' }}
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Interval">
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.common.interval')">
                         {{ $b->subscription_interval?->label() ?? '—' }}
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Status">
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.common.status')">
                         <x-mollie-billing::admin.enum-badge :value="$b->subscription_status" />
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Source">
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.source')">
                         <x-mollie-billing::admin.enum-badge :value="$b->subscription_source ?? null" />
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Seats" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.seats')" mono>
                         {{ $b->getBillingSeatCount() }}
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Addons">
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.addons')">
                         @php $addons = $b->getActiveBillingAddonCodes(); @endphp
                         @if (empty($addons))
                             <span class="text-zinc-400">—</span>
@@ -133,13 +135,13 @@ new class extends Component {
                             </div>
                         @endif
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Trial ends (UTC)" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.trial_ends')" mono>
                         {{ BillingTime::displayUtc($b->trial_ends_at)?->format('Y-m-d H:i') ?? '—' }}
                         @if ($b->trial_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->trial_ends_at->diffForHumans() }}</flux:text>
                         @endif
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Subscription ends (UTC)" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.subscription_ends')" mono>
                         {{ BillingTime::displayUtc($b->subscription_ends_at)?->format('Y-m-d H:i') ?? '—' }}
                         @if ($b->subscription_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->subscription_ends_at->diffForHumans() }}</flux:text>
@@ -162,12 +164,12 @@ new class extends Component {
                 $hasAnyAction = $canExtendTrial || $canResubscribe || $canCancel;
             @endphp
 
-            <x-mollie-billing::admin.section title="Actions" description="Administrative overrides.">
+            <x-mollie-billing::admin.section :title="__('billing::admin.billables.subscription.actions_title')" :description="__('billing::admin.billables.subscription.actions_description')">
                 @if (! $hasAnyAction)
                     <x-mollie-billing::admin.empty
                         icon="check-circle"
-                        title="No actions available"
-                        description="There are no administrative overrides applicable to this billable's current state."
+                        :title="__('billing::admin.billables.subscription.no_actions_title')"
+                        :description="__('billing::admin.billables.subscription.no_actions_description')"
                     />
                 @else
                     @if ($canExtendTrial)
@@ -175,11 +177,11 @@ new class extends Component {
                             <flux:input
                                 type="date"
                                 wire:model="trialUntil"
-                                label="Extend trial until"
-                                description="Sets the trial end date."
+                                :label="__('billing::admin.billables.subscription.extend_trial_label')"
+                                :description="__('billing::admin.billables.subscription.extend_trial_description')"
                                 class="flex-1"
                             />
-                            <flux:button type="submit" size="sm" variant="primary" icon="clock" class="shrink-0">Extend</flux:button>
+                            <flux:button type="submit" size="sm" variant="primary" icon="clock" class="shrink-0">{{ __('billing::admin.billables.subscription.extend') }}</flux:button>
                         </form>
                     @endif
 
@@ -190,11 +192,11 @@ new class extends Component {
                     @if ($canResubscribe || $canCancel)
                         <div class="flex flex-wrap gap-2">
                             @if ($canResubscribe)
-                                <flux:button size="sm" icon="arrow-path" wire:click="resubscribe" wire:confirm="Resubscribe this billable?">Resubscribe</flux:button>
+                                <flux:button size="sm" icon="arrow-path" wire:click="resubscribe" wire:confirm="{{ __('billing::admin.billables.subscription.resubscribe_confirm') }}">{{ __('billing::admin.billables.subscription.resubscribe') }}</flux:button>
                             @endif
                             @if ($canCancel)
-                                <flux:button size="sm" icon="pause" wire:click="cancelAtPeriodEnd" wire:confirm="Cancel at the end of the current billing period? The billable keeps access until then.">Cancel at period end</flux:button>
-                                <flux:button size="sm" variant="danger" icon="x-mark" wire:click="forceCancel" wire:confirm="Cancel this subscription immediately? The billable loses access right now.">Force cancel</flux:button>
+                                <flux:button size="sm" icon="pause" wire:click="cancelAtPeriodEnd" wire:confirm="{{ __('billing::admin.billables.subscription.cancel_at_period_end_confirm') }}">{{ __('billing::admin.billables.subscription.cancel_at_period_end') }}</flux:button>
+                                <flux:button size="sm" variant="danger" icon="x-mark" wire:click="forceCancel" wire:confirm="{{ __('billing::admin.billables.subscription.force_cancel_confirm') }}">{{ __('billing::admin.billables.subscription.force_cancel') }}</flux:button>
                             @endif
                         </div>
                     @endif
@@ -204,27 +206,27 @@ new class extends Component {
 
         @php $grants = $this->grants(); @endphp
         <x-mollie-billing::admin.section
-            title="Active grants"
-            :description="'Free plan and addon grants currently applied. '.($grants->isEmpty() ? 'This billable has no active grants.' : $grants->count().' active.')"
+            :title="__('billing::admin.billables.subscription.grants_title')"
+            :description="__('billing::admin.billables.subscription.grants_description').' '.($grants->isEmpty() ? __('billing::admin.billables.subscription.grants_none') : __('billing::admin.billables.subscription.grants_count', ['count' => $grants->count()]))"
         >
             <x-slot:actions>
-                <flux:button size="xs" icon="gift" :href="route(BillingRoute::admin('grants.create'), $b)">Issue grant</flux:button>
+                <flux:button size="xs" icon="gift" :href="route(BillingRoute::admin('grants.create'), $b)">{{ __('billing::admin.billables.subscription.issue_grant') }}</flux:button>
             </x-slot:actions>
 
             @if ($grants->isEmpty())
                 <x-mollie-billing::admin.empty
                     icon="gift"
-                    title="No active grants"
-                    description="Issue a grant to provide plan or addon access without charge."
+                    :title="__('billing::admin.billables.subscription.grants_empty_title')"
+                    :description="__('billing::admin.billables.subscription.grants_empty_description')"
                 />
             @else
                 <flux:table>
                     <flux:table.columns>
-                        <flux:table.column>Code</flux:table.column>
-                        <flux:table.column>Mode</flux:table.column>
-                        <flux:table.column>Plan / Addons</flux:table.column>
-                        <flux:table.column>Applied</flux:table.column>
-                        <flux:table.column>Days</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.subscription.grant_column.code') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.subscription.grant_column.mode') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.subscription.grant_column.plan_addons') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.subscription.grant_column.applied') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.subscription.grant_column.days') }}</flux:table.column>
                         <flux:table.column class="w-24"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
@@ -240,13 +242,13 @@ new class extends Component {
                                 <flux:table.cell variant="strong" class="font-mono">{{ $g->coupon?->code ?? '—' }}</flux:table.cell>
                                 <flux:table.cell>
                                     <flux:badge size="sm" :color="$mode === 'full' ? 'cyan' : 'blue'">
-                                        {{ $mode === 'full' ? 'Full' : ($mode === 'addon_only' ? 'Addon-only' : $mode) }}
+                                        {{ $mode === 'full' ? __('billing::admin.billables.subscription.mode_full') : ($mode === 'addon_only' ? __('billing::admin.billables.subscription.mode_addon_only') : $mode) }}
                                     </flux:badge>
                                 </flux:table.cell>
                                 <flux:table.cell>
                                     <div class="space-y-1">
                                         @if ($plan)
-                                            <div class="font-mono text-sm">{{ $plan }}@if ($interval) <span class="text-zinc-400">·</span> <span class="text-zinc-500">{{ ucfirst($interval) }}</span>@endif</div>
+                                            <div class="font-mono text-sm">{{ $plan }}@if ($interval) <span class="text-zinc-400">·</span> <span class="text-zinc-500">{{ __('billing::enums.subscription_interval.'.$interval) }}</span>@endif</div>
                                         @endif
                                         @if (! empty($addons))
                                             <div class="flex flex-wrap gap-1">
@@ -268,8 +270,8 @@ new class extends Component {
                                         variant="danger"
                                         icon="x-mark"
                                         wire:click="revokeGrant({{ $g->id }})"
-                                        wire:confirm="Revoke this grant? The billable will lose the granted access immediately."
-                                    >Revoke</flux:button>
+                                        wire:confirm="{{ __('billing::admin.billables.subscription.revoke_confirm') }}"
+                                    >{{ __('billing::admin.billables.subscription.revoke') }}</flux:button>
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

@@ -108,45 +108,47 @@ new class extends Component {
 
         $b = $this->billable();
         if (! $b) {
-            $this->error = 'Billable not found.';
+            $this->error = __('billing::admin.common.billable_not_found');
             return;
         }
 
         if (! $this->refundInvoiceId) {
-            $this->error = 'No invoice selected.';
+            $this->error = __('billing::admin.billables.invoices.flash.no_invoice_selected');
             return;
         }
 
         $reason = RefundReasonCode::tryFrom($this->refundReason);
         if ($reason === null) {
-            $this->error = 'Invalid refund reason.';
+            $this->error = __('billing::admin.billables.invoices.flash.invalid_reason');
             return;
         }
 
         $amountCents = $this->parseEuroToCents($this->refundAmount);
         if ($amountCents === false) {
-            $this->error = 'Invalid amount. Use a number with up to 2 decimals, e.g. 10.50.';
+            $this->error = __('billing::admin.billables.invoices.flash.invalid_amount');
             return;
         }
         if ($amountCents !== null && $amountCents <= 0) {
-            $this->error = 'Amount must be greater than zero.';
+            $this->error = __('billing::admin.billables.invoices.flash.amount_positive');
             return;
         }
 
         $invoice = $b->billingInvoices()->where('id', $this->refundInvoiceId)->first();
         if (! $invoice) {
-            $this->error = 'Invoice not found.';
+            $this->error = __('billing::admin.billables.invoices.flash.invoice_not_found');
             return;
         }
 
         if ($invoice->isFullyRefunded()) {
-            $this->error = 'Invoice is already fully refunded.';
+            $this->error = __('billing::admin.billables.invoices.flash.already_refunded');
             return;
         }
 
         $remaining = $invoice->remainingRefundableNet();
         if ($amountCents !== null && $amountCents > $remaining) {
-            $this->error = 'Amount exceeds remaining refundable net of '.number_format($remaining / 100, 2).'.';
+            $this->error = __('billing::admin.billables.invoices.flash.exceeds_remaining', [
+                'amount' => number_format($remaining / 100, 2),
+            ]);
             return;
         }
 
@@ -156,21 +158,21 @@ new class extends Component {
             } else {
                 $service->refundFully($invoice, $reason, $this->refundText);
             }
-            $this->flash = 'Refund processed.';
+            $this->flash = __('billing::admin.billables.invoices.flash.refund_processed');
             $this->showRefundModal = false;
             $this->reset(['refundInvoiceId', 'refundAmount', 'refundText']);
         } catch (RefundExceedsInvoiceAmountException $e) {
             $remaining = $invoice->fresh()->remainingRefundableNet();
             $this->error = $remaining > 0
-                ? 'Amount exceeds remaining refundable net of '.number_format($remaining / 100, 2).'.'
-                : 'This invoice has already been fully refunded.';
+                ? __('billing::admin.billables.invoices.flash.exceeds_remaining', ['amount' => number_format($remaining / 100, 2)])
+                : __('billing::admin.billables.invoices.flash.already_refunded');
         } catch (InvalidRefundTargetException $e) {
             $this->error = $e->getMessage();
         } catch (\InvalidArgumentException $e) {
             $this->error = $e->getMessage();
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'Unable to process refund. The payment provider rejected the request — the invoice may already be fully refunded.';
+            $this->error = __('billing::admin.billables.invoices.flash.refund_failed');
         }
     }
 
@@ -180,28 +182,28 @@ new class extends Component {
 
         $billable = $this->billable();
         if (! $billable) {
-            $this->error = 'Billable not found.';
+            $this->error = __('billing::admin.common.billable_not_found');
             return;
         }
 
         $invoice = $billable->billingInvoices()->where('id', $invoiceId)->first();
         if (! $invoice) {
-            $this->error = 'Invoice not found.';
+            $this->error = __('billing::admin.billables.invoices.flash.invoice_not_found');
             return;
         }
 
         try {
             $success = $service->regeneratePdf($invoice);
             $this->flash = $success
-                ? 'PDF regenerated.'
-                : 'PDF regeneration failed. Check the application log for details.';
+                ? __('billing::admin.billables.invoices.flash.pdf_regenerated')
+                : __('billing::admin.billables.invoices.flash.pdf_failed');
             if (! $success) {
                 $this->error = $this->flash;
                 $this->flash = null;
             }
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'Unable to regenerate PDF: '.$e->getMessage();
+            $this->error = __('billing::admin.billables.invoices.flash.pdf_error', ['message' => $e->getMessage()]);
         }
     }
 };
@@ -216,20 +218,20 @@ new class extends Component {
             <flux:card>
                 <x-mollie-billing::admin.empty
                     icon="document-text"
-                    title="No invoices yet"
-                    description="Invoices will appear here once the billable is charged."
+                    :title="__('billing::admin.billables.invoices.empty_title')"
+                    :description="__('billing::admin.billables.invoices.empty_description')"
                 />
             </flux:card>
         @else
             <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table>
                     <flux:table.columns>
-                        <flux:table.column>Date</flux:table.column>
-                        <flux:table.column>Serial</flux:table.column>
-                        <flux:table.column>Kind</flux:table.column>
-                        <flux:table.column align="end">Net</flux:table.column>
-                        <flux:table.column align="end">Gross</flux:table.column>
-                        <flux:table.column>Status</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.invoices.column.date') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.invoices.column.serial') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.invoices.column.kind') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::admin.billables.invoices.column.net') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::admin.billables.invoices.column.gross') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.billables.invoices.column.status') }}</flux:table.column>
                         <flux:table.column class="w-40"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
@@ -251,10 +253,10 @@ new class extends Component {
                                         <x-mollie-billing::admin.money :cents="$inv->amount_net" />
                                         @if ($partiallyRefunded)
                                             <div class="text-xs text-amber-600 dark:text-amber-400">
-                                                −<x-mollie-billing::admin.money :cents="$effectiveRefundedNet" /> refunded
+                                                −<x-mollie-billing::admin.money :cents="$effectiveRefundedNet" /> {{ __('billing::admin.billables.invoices.refunded_suffix') }}
                                             </div>
                                         @elseif ($fullyRefunded)
-                                            <div class="text-xs text-zinc-500 dark:text-zinc-400">Fully refunded</div>
+                                            <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.billables.invoices.fully_refunded') }}</div>
                                         @endif
                                     </div>
                                 </flux:table.cell>
@@ -272,24 +274,24 @@ new class extends Component {
                                     @endphp
                                     <div class="flex items-center justify-end gap-1">
                                         @if ($refundable && ! $fullyRefunded)
-                                        <flux:tooltip content="Refund">
-                                            <flux:button size="xs" variant="ghost" aria-label="Refund" icon="arrow-uturn-left" wire:click="openRefund({{ $inv->id }})"/>
+                                        <flux:tooltip :content="__('billing::admin.billables.invoices.refund')">
+                                            <flux:button size="xs" variant="ghost" :aria-label="__('billing::admin.billables.invoices.refund')" icon="arrow-uturn-left" wire:click="openRefund({{ $inv->id }})"/>
                                         </flux:tooltip>
                                         @endif
-                                        <flux:tooltip :content="$inv->hasPdf() ? 'Regenerate PDF' : 'Generate PDF'">
+                                        <flux:tooltip :content="$inv->hasPdf() ? __('billing::admin.billables.invoices.regenerate_pdf') : __('billing::admin.billables.invoices.generate_pdf')">
                                             <flux:button
                                                 size="xs"
                                                 variant="ghost"
                                                 icon="arrow-path"
-                                                aria-label="Regenerate invoice PDF"
+                                                :aria-label="__('billing::admin.billables.invoices.regenerate_pdf_aria')"
                                                 wire:click="regeneratePdf({{ $inv->id }})"
                                                 wire:loading.attr="disabled"
                                                 wire:target="regeneratePdf({{ $inv->id }})"
                                             />
                                         </flux:tooltip>
                                         @if ($pdfUrl)
-                                            <flux:tooltip content="Download PDF">
-                                                <flux:button size="xs" variant="ghost" icon="arrow-down-tray" :href="$pdfUrl" target="_blank" aria-label="Download invoice PDF" />
+                                            <flux:tooltip :content="__('billing::admin.billables.invoices.download_pdf')">
+                                                <flux:button size="xs" variant="ghost" icon="arrow-down-tray" :href="$pdfUrl" target="_blank" :aria-label="__('billing::admin.billables.invoices.download_pdf_aria')" />
                                             </flux:tooltip>
                                         @endif
                                     </div>
@@ -309,27 +311,41 @@ new class extends Component {
                 $remainingNet = $refundInvoice->remainingRefundableNet();
                 $alreadyRefundedNet = $refundInvoice->effectiveRefundedNet();
                 $isPartial = $alreadyRefundedNet > 0;
-                $modalTitle = 'Refund invoice'.($refundInvoice->serial_number ? ' '.$refundInvoice->serial_number : ' #'.$refundInvoice->id);
+                $modalTitle = __('billing::admin.billables.invoices.modal.title', [
+                    'invoice' => $refundInvoice->serial_number ?: '#'.$refundInvoice->id,
+                ]);
             @endphp
 
             <div class="space-y-5">
                 @php
                     $currencyCode = strtoupper((string) ($refundInvoice->currency ?: config('mollie-billing.currency', 'EUR')));
+
+                    // Money strings that go through :placeholders below — the
+                    // <x-…money> component can't be nested inside a translation.
+                    $currencySymbol = match ($currencyCode) {
+                        'EUR' => '€',
+                        'USD' => '$',
+                        'GBP' => '£',
+                        default => $currencyCode.' ',
+                    };
+                    $moneyFormat = fn (int $cents) => $currencySymbol.number_format($cents / 100, 2);
                 @endphp
 
                 <div>
                     <flux:heading size="lg">{{ $modalTitle }}</flux:heading>
                     <flux:text class="text-zinc-500 dark:text-zinc-400">
-                        Leave the amount empty to refund the full remaining net. Partial refunds accept a net amount with up to two decimals.
+                        {{ __('billing::admin.billables.invoices.modal.description') }}
                     </flux:text>
                 </div>
 
                 @if ($isPartial)
                     <div class="rounded-lg border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-950/30 dark:text-amber-300">
-                        <span class="font-medium">Partially refunded.</span>
-                        <span class="tabular-nums"><x-mollie-billing::admin.money :cents="$alreadyRefundedNet" /></span> of
-                        <span class="tabular-nums"><x-mollie-billing::admin.money :cents="(int) $refundInvoice->amount_net" /></span> already refunded ·
-                        max remaining: <span class="font-medium tabular-nums"><x-mollie-billing::admin.money :cents="$remainingNet" /></span>
+                        <span class="font-medium">{{ __('billing::admin.billables.invoices.modal.partially_refunded') }}</span>
+                        <span class="tabular-nums">{{ __('billing::admin.billables.invoices.modal.partial_summary', [
+                            'refunded' => $moneyFormat($alreadyRefundedNet),
+                            'total' => $moneyFormat((int) $refundInvoice->amount_net),
+                            'remaining' => $moneyFormat($remainingNet),
+                        ]) }}</span>
                     </div>
                 @endif
 
@@ -343,29 +359,32 @@ new class extends Component {
                             min="0.01"
                             :max="number_format($remainingNet / 100, 2, '.', '')"
                             wire:model="refundAmount"
-                            label="Amount (net)"
-                            placeholder="Full refund"
+                            :label="__('billing::admin.billables.invoices.modal.amount_label')"
+                            :placeholder="__('billing::admin.billables.invoices.modal.amount_placeholder')"
                             :suffix="$currencyCode"
                         />
-                        <flux:select wire:model="refundReason" label="Reason">
+                        <flux:select wire:model="refundReason" :label="__('billing::admin.billables.invoices.modal.reason_label')">
                             @foreach (RefundReasonCode::cases() as $reason)
                                 <flux:select.option value="{{ $reason->value }}">{{ $reason->label() }}</flux:select.option>
                             @endforeach
                         </flux:select>
                         <flux:input
                             wire:model="refundText"
-                            label="Reason text"
-                            placeholder="Required when reason is &quot;Other&quot;"
+                            :label="__('billing::admin.billables.invoices.modal.reason_text_label')"
+                            :placeholder="__('billing::admin.billables.invoices.modal.reason_text_placeholder')"
                         />
                     </div>
                     <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                        Net amount with up to two decimals (e.g. <span class="tabular-nums">10.50</span>). Leave empty to refund the full remaining net (<span class="tabular-nums"><x-mollie-billing::admin.money :cents="$remainingNet" /></span>).
+                        {{ __('billing::admin.billables.invoices.modal.hint', [
+                            'example' => number_format(10.5, 2),
+                            'remaining' => $moneyFormat($remainingNet),
+                        ]) }}
                     </flux:text>
                     <div class="flex justify-end gap-2 pt-2">
                         <flux:modal.close>
-                            <flux:button type="button" size="sm" variant="ghost">Cancel</flux:button>
+                            <flux:button type="button" size="sm" variant="ghost">{{ __('billing::admin.common.cancel') }}</flux:button>
                         </flux:modal.close>
-                        <flux:button type="submit" size="sm" variant="danger" icon="arrow-uturn-left">Issue refund</flux:button>
+                        <flux:button type="submit" size="sm" variant="danger" icon="arrow-uturn-left">{{ __('billing::admin.billables.invoices.modal.submit') }}</flux:button>
                     </div>
                 </form>
             </div>

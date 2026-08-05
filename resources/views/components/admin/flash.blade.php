@@ -1,7 +1,7 @@
 @props([
     'success' => null,
     'error' => null,
-    'errorHeading' => 'Something went wrong',
+    'errorHeading' => null,
     'info' => null,
 ])
 
@@ -11,7 +11,7 @@
 
 @if ($error)
     <flux:callout variant="danger" icon="exclamation-triangle">
-        <flux:callout.heading>{{ $errorHeading }}</flux:callout.heading>
+        <flux:callout.heading>{{ $errorHeading ?? __('billing::admin.common.error_heading') }}</flux:callout.heading>
         <flux:callout.text>{{ $error }}</flux:callout.text>
     </flux:callout>
 @endif

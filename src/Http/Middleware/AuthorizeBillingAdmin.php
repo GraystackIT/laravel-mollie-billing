@@ -18,12 +18,16 @@ class AuthorizeBillingAdmin
             abort(403);
         }
 
-        // Admin panel is operator tooling — pin locale to English for the whole
-        // request so __() resolves against en/* files, <html lang> is "en" (which
-        // suppresses Chrome's auto-translate prompt that would otherwise machine-
-        // translate the panel into the user's browser language), and Flux's own
-        // built-in strings render in English too.
-        app()->setLocale('en');
+        // By default the admin panel follows the application locale, so a header
+        // language switcher (config `header_components`) applies here too. Apps
+        // that want operator tooling pinned to one working language set
+        // `admin_locale` — that locale then drives __(), <html lang> and Flux's
+        // own built-in strings for the whole request.
+        $locale = config('mollie-billing.admin_locale');
+
+        if (is_string($locale) && $locale !== '') {
+            app()->setLocale($locale);
+        }
 
         return $next($request);
     }

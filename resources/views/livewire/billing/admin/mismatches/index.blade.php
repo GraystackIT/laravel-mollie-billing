@@ -69,7 +69,7 @@ new class extends Component {
 
         $chosen = strtoupper(trim((string) $this->resolvingChosen));
         if (strlen($chosen) !== 2) {
-            $this->resolvingError = 'Please choose or enter a valid 2-letter country code before confirming.';
+            $this->resolvingError = __('billing::admin.mismatches.modal.invalid_country');
             return;
         }
 
@@ -81,7 +81,7 @@ new class extends Component {
 
         $billable = $m->billable;
         if ($billable === null) {
-            $this->resolvingError = 'Could not resolve the mismatch. Check the error and try again.';
+            $this->resolvingError = __('billing::admin.mismatches.modal.unresolvable');
             return;
         }
 
@@ -93,7 +93,7 @@ new class extends Component {
             return;
         }
 
-        $this->flash = 'Mismatch resolved. Refunds and reissues have been queued at Mollie — invoices will appear once Mollie confirms the payments.';
+        $this->flash = __('billing::admin.mismatches.modal.resolved');
         $this->flashError = null;
         $this->cancelResolve();
         $this->dispatch('close-resolve-modal');
@@ -136,8 +136,8 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Country mismatches"
-        subtitle="Cases where the user's declared tax country matches neither their payment method country nor their IP country. Resolved by the user via the dashboard self-service modal — manual override available here for edge cases."
+        :title="__('billing::admin.mismatches.title')"
+        :subtitle="__('billing::admin.mismatches.subtitle')"
     />
 
     @if ($flash)
@@ -146,15 +146,15 @@ new class extends Component {
 
     <flux:tab.group>
         <flux:tabs wire:model.live="tab">
-            <flux:tab name="pending" icon="exclamation-triangle">Pending</flux:tab>
-            <flux:tab name="resolved" icon="check-circle">Resolved</flux:tab>
+            <flux:tab name="pending" icon="exclamation-triangle">{{ __('billing::admin.mismatches.tab_pending') }}</flux:tab>
+            <flux:tab name="resolved" icon="check-circle">{{ __('billing::admin.mismatches.tab_resolved') }}</flux:tab>
         </flux:tabs>
 
         <flux:tab.panel name="pending" class="pt-4 space-y-4">
             <flux:input
                 type="search"
                 wire:model.live.debounce.300ms="search"
-                placeholder="Filter by country code (e.g. DE, FR)"
+                :placeholder="__('billing::admin.mismatches.search_pending')"
                 icon="magnifying-glass"
             />
 
@@ -162,19 +162,19 @@ new class extends Component {
                 <flux:card>
                     <x-mollie-billing::admin.empty
                         icon="check-circle"
-                        title="No pending mismatches"
-                        description="All flagged country mismatches have been resolved."
+                        :title="__('billing::admin.mismatches.pending_empty_title')"
+                        :description="__('billing::admin.mismatches.pending_empty_description')"
                     />
                 </flux:card>
             @else
                 <flux:card class="p-0! sm:px-6! sm:py-2!">
                     <flux:table :paginate="$rows">
                         <flux:table.columns>
-                            <flux:table.column>Billable</flux:table.column>
-                            <flux:table.column sortable :sorted="$sortBy === 'tax_country_user'" :direction="$sortDirection" wire:click="sort('tax_country_user')">User</flux:table.column>
-                            <flux:table.column sortable :sorted="$sortBy === 'tax_country_payment'" :direction="$sortDirection" wire:click="sort('tax_country_payment')">Payment</flux:table.column>
-                            <flux:table.column sortable :sorted="$sortBy === 'tax_country_ip'" :direction="$sortDirection" wire:click="sort('tax_country_ip')">IP</flux:table.column>
-                            <flux:table.column>Notified</flux:table.column>
+                            <flux:table.column>{{ __('billing::admin.mismatches.column.billable') }}</flux:table.column>
+                            <flux:table.column sortable :sorted="$sortBy === 'tax_country_user'" :direction="$sortDirection" wire:click="sort('tax_country_user')">{{ __('billing::admin.mismatches.column.user') }}</flux:table.column>
+                            <flux:table.column sortable :sorted="$sortBy === 'tax_country_payment'" :direction="$sortDirection" wire:click="sort('tax_country_payment')">{{ __('billing::admin.mismatches.column.payment') }}</flux:table.column>
+                            <flux:table.column sortable :sorted="$sortBy === 'tax_country_ip'" :direction="$sortDirection" wire:click="sort('tax_country_ip')">{{ __('billing::admin.mismatches.column.ip') }}</flux:table.column>
+                            <flux:table.column>{{ __('billing::admin.mismatches.column.notified') }}</flux:table.column>
                             <flux:table.column class="w-32"></flux:table.column>
                         </flux:table.columns>
                         <flux:table.rows>
@@ -202,7 +202,7 @@ new class extends Component {
                                     <flux:table.cell class="font-mono">{{ $r->tax_country_ip ?? '—' }}</flux:table.cell>
                                     <flux:table.cell class="text-sm text-zinc-500">{{ $r->notified_at?->format('Y-m-d H:i') ?? '—' }}</flux:table.cell>
                                     <flux:table.cell>
-                                        <flux:button size="xs" icon="check" wire:click="openResolve({{ $r->id }})">Resolve</flux:button>
+                                        <flux:button size="xs" icon="check" wire:click="openResolve({{ $r->id }})">{{ __('billing::admin.mismatches.resolve') }}</flux:button>
                                     </flux:table.cell>
                                 </flux:table.row>
                             @endforeach
@@ -216,7 +216,7 @@ new class extends Component {
             <flux:input
                 type="search"
                 wire:model.live.debounce.300ms="search"
-                placeholder="Filter by country code"
+                :placeholder="__('billing::admin.mismatches.search_resolved')"
                 icon="magnifying-glass"
             />
 
@@ -224,18 +224,18 @@ new class extends Component {
                 <flux:card>
                     <x-mollie-billing::admin.empty
                         icon="check-circle"
-                        title="No resolved mismatches yet"
-                        description="Resolved mismatches will appear here as an audit log."
+                        :title="__('billing::admin.mismatches.resolved_empty_title')"
+                        :description="__('billing::admin.mismatches.resolved_empty_description')"
                     />
                 </flux:card>
             @else
                 <flux:card class="p-0! sm:px-6! sm:py-2!">
                     <flux:table :paginate="$rows">
                         <flux:table.columns>
-                            <flux:table.column>Billable</flux:table.column>
-                            <flux:table.column>User / Payment / IP</flux:table.column>
-                            <flux:table.column>Chosen</flux:table.column>
-                            <flux:table.column sortable :sorted="$sortBy === 'resolved_at'" :direction="$sortDirection" wire:click="sort('resolved_at')">Resolved</flux:table.column>
+                            <flux:table.column>{{ __('billing::admin.mismatches.column.billable') }}</flux:table.column>
+                            <flux:table.column>{{ __('billing::admin.mismatches.column.triple') }}</flux:table.column>
+                            <flux:table.column>{{ __('billing::admin.mismatches.column.chosen') }}</flux:table.column>
+                            <flux:table.column sortable :sorted="$sortBy === 'resolved_at'" :direction="$sortDirection" wire:click="sort('resolved_at')">{{ __('billing::admin.mismatches.column.resolved') }}</flux:table.column>
                         </flux:table.columns>
                         <flux:table.rows>
                             @foreach ($rows as $r)
@@ -260,9 +260,9 @@ new class extends Component {
                                     <flux:table.cell class="text-sm text-zinc-500">
                                         {{ $r->resolved_at?->format('Y-m-d H:i') ?? '—' }}
                                         @if ($r->resolved_by_user_id)
-                                            <div class="text-xs text-zinc-400">by user #{{ $r->resolved_by_user_id }}</div>
+                                            <div class="text-xs text-zinc-400">{{ __('billing::admin.mismatches.by_user', ['id' => $r->resolved_by_user_id]) }}</div>
                                         @else
-                                            <div class="text-xs text-zinc-400">by system</div>
+                                            <div class="text-xs text-zinc-400">{{ __('billing::admin.mismatches.by_system') }}</div>
                                         @endif
                                     </flux:table.cell>
                                 </flux:table.row>
@@ -276,7 +276,7 @@ new class extends Component {
 
     <flux:modal name="resolve-mismatch" class="md:w-[520px]" @open-resolve-modal.window="$flux.modal('resolve-mismatch').show()" @close-resolve-modal.window="$flux.modal('resolve-mismatch').close()" @close="$wire.cancelResolve()">
         <div class="space-y-5">
-            <flux:heading size="lg">Resolve country mismatch</flux:heading>
+            <flux:heading size="lg">{{ __('billing::admin.mismatches.modal.title') }}</flux:heading>
 
             @if ($resolvingMismatch)
                 @php
@@ -291,17 +291,11 @@ new class extends Component {
                 @endphp
 
                 <flux:text>
-                    Pick the correct billing country for this billable. All linked invoices will be refunded via Mollie and reissued at the chosen country's VAT rate. The customer must reactivate their subscription themselves after the resolve.
+                    {{ __('billing::admin.mismatches.modal.intro') }}
                 </flux:text>
 
                 <flux:callout variant="secondary" icon="information-circle" inline>
-                    @if ($invoiceCount === 0)
-                        No invoices linked to this mismatch.
-                    @elseif ($invoiceCount === 1)
-                        1 invoice will be refunded and reissued.
-                    @else
-                        {{ $invoiceCount }} invoices will be refunded and reissued.
-                    @endif
+                    {{ trans_choice('billing::admin.mismatches.modal.invoice_count', $invoiceCount, ['count' => $invoiceCount]) }}
                 </flux:callout>
 
                 @if ($hasAnyChoice)
@@ -309,9 +303,9 @@ new class extends Component {
                         @if ($userCountryValid)
                             <flux:radio value="{{ $userCountryRaw }}">
                                 <div>
-                                    <div class="font-medium">User-declared: {{ $userCountryRaw }}</div>
+                                    <div class="font-medium">{{ __('billing::admin.mismatches.modal.user_option', ['country' => $userCountryRaw]) }}</div>
                                     <div class="text-xs text-zinc-500">
-                                        Use this when the user is correct (e.g. corrected a typo). Existing invoices are refunded and reissued at the same VAT rate ({{ $userCountryRaw }}).
+                                        {{ __('billing::admin.mismatches.modal.user_hint', ['country' => $userCountryRaw]) }}
                                     </div>
                                 </div>
                             </flux:radio>
@@ -319,9 +313,9 @@ new class extends Component {
                         @if ($paymentCountryValid)
                             <flux:radio value="{{ $paymentCountryRaw }}">
                                 <div>
-                                    <div class="font-medium">Payment country: {{ $paymentCountryRaw }}</div>
+                                    <div class="font-medium">{{ __('billing::admin.mismatches.modal.payment_option', ['country' => $paymentCountryRaw]) }}</div>
                                     <div class="text-xs text-zinc-500">
-                                        Use this when the payment-method country is correct. Existing invoices are refunded via Mollie and reissued at the {{ $paymentCountryRaw }} VAT rate.
+                                        {{ __('billing::admin.mismatches.modal.payment_hint', ['country' => $paymentCountryRaw]) }}
                                     </div>
                                 </div>
                             </flux:radio>
@@ -329,9 +323,9 @@ new class extends Component {
                         @if ($ipCountryValid)
                             <flux:radio value="{{ $ipCountryRaw }}">
                                 <div>
-                                    <div class="font-medium">IP country: {{ $ipCountryRaw }}</div>
+                                    <div class="font-medium">{{ __('billing::admin.mismatches.modal.ip_option', ['country' => $ipCountryRaw]) }}</div>
                                     <div class="text-xs text-zinc-500">
-                                        Use this when the IP country is correct (typical for residential customers). Existing invoices are refunded via Mollie and reissued at the {{ $ipCountryRaw }} VAT rate.
+                                        {{ __('billing::admin.mismatches.modal.ip_hint', ['country' => $ipCountryRaw]) }}
                                     </div>
                                 </div>
                             </flux:radio>
@@ -340,15 +334,15 @@ new class extends Component {
                 @endif
 
                 <flux:field>
-                    <flux:label>Or enter a country manually</flux:label>
+                    <flux:label>{{ __('billing::admin.mismatches.modal.manual_label') }}</flux:label>
                     <flux:input
                         wire:model.live="resolvingChosen"
-                        placeholder="e.g. AT"
+                        :placeholder="__('billing::admin.mismatches.modal.manual_placeholder')"
                         maxlength="2"
                         class="font-mono uppercase"
                     />
                     <flux:description>
-                        Overrides the selection above. Use this when none of the suggestions is correct.
+                        {{ __('billing::admin.mismatches.modal.manual_description') }}
                     </flux:description>
                 </flux:field>
 
@@ -360,9 +354,9 @@ new class extends Component {
 
                 <div class="flex justify-end gap-2">
                     <flux:modal.close>
-                        <flux:button variant="ghost">Cancel</flux:button>
+                        <flux:button variant="ghost">{{ __('billing::admin.common.cancel') }}</flux:button>
                     </flux:modal.close>
-                    <flux:button variant="primary" icon="check" wire:click="confirmResolve">Confirm resolve</flux:button>
+                    <flux:button variant="primary" icon="check" wire:click="confirmResolve">{{ __('billing::admin.mismatches.modal.confirm') }}</flux:button>
                 </div>
             @endif
         </div>

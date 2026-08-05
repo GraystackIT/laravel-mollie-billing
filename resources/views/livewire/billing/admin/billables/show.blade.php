@@ -41,15 +41,15 @@ new class extends Component {
 <div class="space-y-6">
     @if (! $billable)
         <x-mollie-billing::admin.page-header
-            title="Billable not found"
+            :title="__('billing::admin.billables.show.not_found_title')"
             :back="route(BillingRoute::admin('billables.index'))"
-            backLabel="Billables"
+            :backLabel="__('billing::admin.nav.billables')"
         />
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="user"
-                title="Billable not found"
-                description="The requested billable does not exist or has been removed."
+                :title="__('billing::admin.billables.show.not_found_title')"
+                :description="__('billing::admin.billables.show.not_found_description')"
             />
         </flux:card>
     @else
@@ -62,7 +62,7 @@ new class extends Component {
         @endphp
 
         <div class="space-y-2">
-            <flux:button :href="route(BillingRoute::admin('billables.index'))" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">Billables</flux:button>
+            <flux:button :href="route(BillingRoute::admin('billables.index'))" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">{{ __('billing::admin.nav.billables') }}</flux:button>
 
             <div class="flex flex-wrap items-start justify-between gap-4">
                 <div class="flex min-w-0 items-center gap-4">
@@ -105,7 +105,7 @@ new class extends Component {
 
         <div class="grid gap-4 md:grid-cols-3">
             <x-mollie-billing::admin.stat
-                label="Plan"
+                :label="__('billing::admin.common.plan')"
                 :value="$planName ?? '—'"
                 icon="squares-2x2"
                 :hint="$planHint"
@@ -117,7 +117,7 @@ new class extends Component {
                  it doesn't need its own tile. --}}
             <flux:card class="flex h-full flex-col">
                 <div class="flex items-start justify-between gap-3">
-                    <flux:text size="xs" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Customer</flux:text>
+                    <flux:text size="xs" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.billables.show.customer') }}</flux:text>
                     <flux:icon name="identification" variant="mini" class="text-zinc-400" />
                 </div>
 
@@ -158,7 +158,7 @@ new class extends Component {
                     @else
                         <div class="flex items-center gap-2 text-zinc-400 dark:text-zinc-500">
                             <flux:icon name="map-pin" variant="micro" class="size-3.5" />
-                            <span class="italic">No billing address on file</span>
+                            <span class="italic">{{ __('billing::admin.billables.show.no_address') }}</span>
                         </div>
                     @endif
 
@@ -176,7 +176,7 @@ new class extends Component {
                  details (cf. real card layout). --}}
             <flux:card class="flex h-full flex-col">
                 <div class="flex items-start justify-between gap-3">
-                    <flux:text size="xs" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Mandate</flux:text>
+                    <flux:text size="xs" class="uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.billables.show.mandate') }}</flux:text>
                     @if ($mandate)
                         <span @class([
                             'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium',
@@ -235,7 +235,7 @@ new class extends Component {
                         <div class="mt-3 flex items-end justify-between gap-3 text-xs">
                             @if ($mandateHolder)
                                 <div class="min-w-0">
-                                    <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">Holder</div>
+                                    <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">{{ __('billing::admin.billables.show.holder') }}</div>
                                     <div class="mt-0.5 truncate text-zinc-700 dark:text-zinc-200">{{ $mandateHolder }}</div>
                                 </div>
                             @else
@@ -244,7 +244,7 @@ new class extends Component {
                             @if ($mandateExpiry)
                                 <div class="text-right">
                                     <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
-                                        @if ($mandateExpired) Expired @else Expires @endif
+                                        {{ $mandateExpired ? __('billing::admin.billables.show.expired') : __('billing::admin.billables.show.expires') }}
                                     </div>
                                     <div @class([
                                         'mt-0.5 tabular-nums',
@@ -261,21 +261,21 @@ new class extends Component {
                         {{ $mandate->id }}
                     </div>
                 @elseif ($billable->mollie_mandate_id)
-                    <div class="mt-3 text-2xl font-semibold text-zinc-700 dark:text-zinc-200">Active</div>
-                    <flux:text size="xs" class="mt-1 text-zinc-500 dark:text-zinc-400">Could not load payment method details from Mollie.</flux:text>
+                    <div class="mt-3 text-2xl font-semibold text-zinc-700 dark:text-zinc-200">{{ __('billing::admin.billables.show.mandate_active') }}</div>
+                    <flux:text size="xs" class="mt-1 text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.billables.show.mandate_unavailable') }}</flux:text>
                     <div class="mt-auto pt-3 font-mono text-[11px] text-zinc-400 dark:text-zinc-500">{{ $billable->mollie_mandate_id }}</div>
                 @else
-                    <div class="mt-3 text-2xl font-semibold text-zinc-400 dark:text-zinc-500">None</div>
-                    <flux:text size="xs" class="mt-1 text-zinc-500 dark:text-zinc-400">No payment method on file.</flux:text>
+                    <div class="mt-3 text-2xl font-semibold text-zinc-400 dark:text-zinc-500">{{ __('billing::admin.billables.show.mandate_none') }}</div>
+                    <flux:text size="xs" class="mt-1 text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.billables.show.mandate_none_description') }}</flux:text>
                 @endif
             </flux:card>
         </div>
 
         <flux:tab.group>
             <flux:tabs>
-                <flux:tab name="subscription" icon="arrow-path">Subscription</flux:tab>
-                <flux:tab name="invoices" icon="document-text">Invoices</flux:tab>
-                <flux:tab name="wallet" icon="wallet">Wallet</flux:tab>
+                <flux:tab name="subscription" icon="arrow-path">{{ __('billing::admin.billables.show.tab.subscription') }}</flux:tab>
+                <flux:tab name="invoices" icon="document-text">{{ __('billing::admin.billables.show.tab.invoices') }}</flux:tab>
+                <flux:tab name="wallet" icon="wallet">{{ __('billing::admin.billables.show.tab.wallet') }}</flux:tab>
                 <flux:tab name="audit" icon="clock">{{ __('billing::audit.tab_label') }}</flux:tab>
             </flux:tabs>
 

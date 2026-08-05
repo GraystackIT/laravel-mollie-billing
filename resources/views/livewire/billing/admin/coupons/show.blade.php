@@ -26,7 +26,7 @@ new class extends Component {
         if ($this->coupon) {
             $service->deactivate($this->coupon);
             $this->coupon->refresh();
-            $this->flash = 'Coupon deactivated.';
+            $this->flash = __('billing::admin.coupons.show.deactivated');
         }
     }
 
@@ -35,11 +35,11 @@ new class extends Component {
         if (! $this->coupon) return;
         try {
             $service->delete($this->coupon);
-            session()->flash('status', 'Coupon deleted.');
+            session()->flash('status', __('billing::admin.coupons.show.deleted'));
             return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\Throwable $e) {
             report($e);
-            $this->error = 'Unable to delete coupon. Please try again.';
+            $this->error = __('billing::admin.coupons.show.delete_failed');
         }
     }
 };
@@ -49,15 +49,15 @@ new class extends Component {
 <div class="space-y-6">
     @if (! $coupon)
         <x-mollie-billing::admin.page-header
-            title="Coupon not found"
+            :title="__('billing::admin.coupons.show.not_found_title')"
             :back="route(BillingRoute::admin('coupons.index'))"
-            backLabel="Coupons"
+            :backLabel="__('billing::admin.nav.coupons')"
         />
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="ticket"
-                title="Coupon not found"
-                description="The coupon you tried to open does not exist or has been deleted."
+                :title="__('billing::admin.coupons.show.not_found_title')"
+                :description="__('billing::admin.coupons.show.not_found_description')"
             />
         </flux:card>
     @else
@@ -71,7 +71,7 @@ new class extends Component {
         @endphp
 
         <div class="space-y-2">
-            <flux:button :href="route(BillingRoute::admin('coupons.index'))" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">Coupons</flux:button>
+            <flux:button :href="route(BillingRoute::admin('coupons.index'))" size="xs" variant="ghost" icon="arrow-left" class="-ml-2">{{ __('billing::admin.nav.coupons') }}</flux:button>
 
             <div class="flex flex-wrap items-start justify-between gap-4">
                 <div class="min-w-0 space-y-2">
@@ -79,16 +79,16 @@ new class extends Component {
                         <flux:heading size="xl" class="font-mono">{{ $coupon->code }}</flux:heading>
                         <x-mollie-billing::admin.enum-badge :value="$coupon->type" />
                         @if ($coupon->active && ! $isExpired && ! $isUsedUp)
-                            <flux:badge color="green" size="sm">Active</flux:badge>
+                            <flux:badge color="green" size="sm">{{ __('billing::admin.common.active') }}</flux:badge>
                         @elseif ($isExpired)
-                            <flux:badge color="zinc" size="sm">Expired</flux:badge>
+                            <flux:badge color="zinc" size="sm">{{ __('billing::admin.coupons.show.expired') }}</flux:badge>
                         @elseif ($isUsedUp)
-                            <flux:badge color="zinc" size="sm">Used up</flux:badge>
+                            <flux:badge color="zinc" size="sm">{{ __('billing::admin.coupons.show.used_up') }}</flux:badge>
                         @else
-                            <flux:badge color="zinc" size="sm">Inactive</flux:badge>
+                            <flux:badge color="zinc" size="sm">{{ __('billing::admin.common.inactive') }}</flux:badge>
                         @endif
                         @if ($coupon->stackable)
-                            <flux:badge color="blue" size="sm" icon="squares-plus">Stackable</flux:badge>
+                            <flux:badge color="blue" size="sm" icon="squares-plus">{{ __('billing::admin.coupons.show.stackable') }}</flux:badge>
                         @endif
                     </div>
                     @if ($coupon->name && $coupon->name !== $coupon->code)
@@ -101,9 +101,9 @@ new class extends Component {
 
                 <div class="flex shrink-0 items-center gap-2">
                     @if ($coupon->active)
-                        <flux:button size="sm" icon="no-symbol" wire:click="deactivate" wire:confirm="Deactivate this coupon?">Deactivate</flux:button>
+                        <flux:button size="sm" icon="no-symbol" wire:click="deactivate" wire:confirm="{{ __('billing::admin.coupons.show.deactivate_confirm') }}">{{ __('billing::admin.coupons.show.deactivate') }}</flux:button>
                     @endif
-                    <flux:button size="sm" variant="danger" icon="trash" wire:click="delete" wire:confirm="Delete this coupon? This cannot be undone.">Delete</flux:button>
+                    <flux:button size="sm" variant="danger" icon="trash" wire:click="delete" wire:confirm="{{ __('billing::admin.coupons.show.delete_confirm') }}">{{ __('billing::admin.coupons.show.delete') }}</flux:button>
                 </div>
             </div>
         </div>
@@ -112,36 +112,38 @@ new class extends Component {
 
         <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <x-mollie-billing::admin.stat
-                label="Redemptions"
+                :label="__('billing::admin.coupons.show.redemptions')"
                 :value="$coupon->redemptions_count.($coupon->max_redemptions ? ' / '.$coupon->max_redemptions : '')"
                 icon="ticket"
-                :hint="$redemptionPct !== null ? $redemptionPct.'% used' : 'No cap'"
+                :hint="$redemptionPct !== null
+                    ? __('billing::admin.coupons.show.redemptions_used', ['percent' => $redemptionPct])
+                    : __('billing::admin.coupons.show.redemptions_no_cap')"
             />
             <x-mollie-billing::admin.stat
-                label="Max per billable"
+                :label="__('billing::admin.coupons.show.max_per_billable')"
                 :value="$coupon->max_redemptions_per_billable ?? '∞'"
                 icon="user"
             />
             <x-mollie-billing::admin.stat
-                label="Valid until"
-                :value="BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d') ?? 'No expiry'"
+                :label="__('billing::admin.coupons.show.valid_until')"
+                :value="BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d') ?? __('billing::admin.coupons.show.no_expiry')"
                 icon="calendar"
                 :tone="$isExpired ? 'danger' : null"
                 :hint="$coupon->valid_until ? $coupon->valid_until->diffForHumans() : null"
             />
         </div>
 
-        <x-mollie-billing::admin.section title="Benefit" description="What this coupon grants when redeemed.">
+        <x-mollie-billing::admin.section :title="__('billing::admin.coupons.show.benefit_title')" :description="__('billing::admin.coupons.show.benefit_description')">
             <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
-                <x-mollie-billing::admin.detail label="Type">
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.type')">
                     <x-mollie-billing::admin.enum-badge :value="$coupon->type" />
                 </x-mollie-billing::admin.detail>
 
                 @if (in_array($type, [CouponType::SinglePayment, CouponType::Recurring]))
-                    <x-mollie-billing::admin.detail label="Discount type">
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.discount_type')">
                         {{ $coupon->discount_type->label() }}
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail label="Discount value" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.discount_value')" mono>
                         @if ($coupon->discount_type === DiscountType::Percentage)
                             {{ $coupon->discount_value }}%
                         @else
@@ -149,47 +151,47 @@ new class extends Component {
                         @endif
                     </x-mollie-billing::admin.detail>
                     @if ($coupon->minimum_order_amount_net)
-                        <x-mollie-billing::admin.detail label="Minimum order (net)" mono>
+                        <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.minimum_order')" mono>
                             <x-mollie-billing::admin.money :cents="$coupon->minimum_order_amount_net" />
                         </x-mollie-billing::admin.detail>
                     @endif
                 @endif
 
                 @if ($type === CouponType::TrialExtension)
-                    <x-mollie-billing::admin.detail label="Extends trial by" mono>
-                        {{ $coupon->trial_extension_days }} days
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.extends_trial_by')" mono>
+                        {{ $coupon->trial_extension_days }} {{ __('billing::admin.common.days') }}
                     </x-mollie-billing::admin.detail>
                 @endif
 
                 @if ($type === CouponType::PeriodExtension)
-                    <x-mollie-billing::admin.detail label="Period extension" mono>
-                        {{ $coupon->grant_duration_days }} days
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.period_extension')" mono>
+                        {{ $coupon->grant_duration_days }} {{ __('billing::admin.common.days') }}
                     </x-mollie-billing::admin.detail>
                 @endif
 
                 @if ($type === CouponType::AccessGrant)
-                    <x-mollie-billing::admin.detail label="Plan" mono>
-                        {{ $coupon->grant_plan_code ?? '— (addon-only) —' }}
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.common.plan')" mono>
+                        {{ $coupon->grant_plan_code ?? __('billing::admin.coupons.show.plan_addon_only') }}
                     </x-mollie-billing::admin.detail>
                     @if ($coupon->grant_interval)
-                        <x-mollie-billing::admin.detail label="Interval">
-                            {{ ucfirst($coupon->grant_interval) }}
+                        <x-mollie-billing::admin.detail :label="__('billing::admin.common.interval')">
+                            {{ __('billing::enums.subscription_interval.'.$coupon->grant_interval) }}
                         </x-mollie-billing::admin.detail>
                     @endif
                     @if ($coupon->grant_duration_days)
-                        <x-mollie-billing::admin.detail label="Duration" mono>
-                            {{ $coupon->grant_duration_days }} days
+                        <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.duration')" mono>
+                            {{ $coupon->grant_duration_days }} {{ __('billing::admin.common.days') }}
                         </x-mollie-billing::admin.detail>
                     @endif
                     @if (! empty($coupon->grant_addon_codes))
-                        <x-mollie-billing::admin.detail label="Addons" mono>
+                        <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.addons')" mono>
                             {{ implode(', ', $coupon->grant_addon_codes) }}
                         </x-mollie-billing::admin.detail>
                     @endif
                 @endif
 
                 @if ($type === CouponType::Credits && ! empty($coupon->credits_payload))
-                    <x-mollie-billing::admin.detail label="Credits" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.credits')" mono>
                         @foreach ($coupon->credits_payload as $usage => $units)
                             <div>{{ $units }} × {{ $usage }}</div>
                         @endforeach
@@ -197,56 +199,59 @@ new class extends Component {
                 @endif
 
                 @if (! empty($coupon->applicable_addons))
-                    <x-mollie-billing::admin.detail label="Applicable addons" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.applicable_addons')" mono>
                         {{ implode(', ', (array) $coupon->applicable_addons) }}
                     </x-mollie-billing::admin.detail>
                 @endif
 
                 @if (! empty($coupon->applicable_products))
-                    <x-mollie-billing::admin.detail label="Applicable products" mono>
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.applicable_products')" mono>
                         {{ implode(', ', (array) $coupon->applicable_products) }}
                     </x-mollie-billing::admin.detail>
                 @endif
             </dl>
         </x-mollie-billing::admin.section>
 
-        <x-mollie-billing::admin.section title="Validity & limits">
+        <x-mollie-billing::admin.section :title="__('billing::admin.coupons.show.validity_title')">
             <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
-                <x-mollie-billing::admin.detail label="Valid from (UTC)" mono>
-                    {{ BillingTime::displayUtc($coupon->valid_from)?->format('Y-m-d H:i') ?? 'Immediately' }}
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.valid_from_utc')" mono>
+                    {{ BillingTime::displayUtc($coupon->valid_from)?->format('Y-m-d H:i') ?? __('billing::admin.coupons.show.immediately') }}
                 </x-mollie-billing::admin.detail>
-                <x-mollie-billing::admin.detail label="Valid until (UTC)" mono>
-                    {{ BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d H:i') ?? 'No expiry' }}
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.valid_until_utc')" mono>
+                    {{ BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d H:i') ?? __('billing::admin.coupons.show.no_expiry') }}
                 </x-mollie-billing::admin.detail>
-                <x-mollie-billing::admin.detail label="Redemptions" mono>
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.redemptions')" mono>
                     {{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : ' / ∞' }}
                 </x-mollie-billing::admin.detail>
-                <x-mollie-billing::admin.detail label="Max per billable" mono>
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.max_per_billable')" mono>
                     {{ $coupon->max_redemptions_per_billable ?? '∞' }}
                 </x-mollie-billing::admin.detail>
-                <x-mollie-billing::admin.detail label="Stackable">
-                    <flux:badge :color="$coupon->stackable ? 'blue' : 'zinc'" size="sm">{{ $coupon->stackable ? 'Yes' : 'No' }}</flux:badge>
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.stackable')">
+                    <flux:badge :color="$coupon->stackable ? 'blue' : 'zinc'" size="sm">{{ $coupon->stackable ? __('billing::admin.common.yes') : __('billing::admin.common.no') }}</flux:badge>
                 </x-mollie-billing::admin.detail>
-                <x-mollie-billing::admin.detail label="Auto-apply token" mono>
+                <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.auto_apply_token')" mono>
                     {{ $coupon->auto_apply_token ?? '—' }}
                 </x-mollie-billing::admin.detail>
             </dl>
         </x-mollie-billing::admin.section>
 
-        <x-mollie-billing::admin.section title="Redemption history" :description="$coupon->redemptions_count.' redemption'.($coupon->redemptions_count === 1 ? '' : 's').' recorded.'">
+        <x-mollie-billing::admin.section
+            :title="__('billing::admin.coupons.show.history_title')"
+            :description="trans_choice('billing::admin.coupons.show.history_description', $coupon->redemptions_count, ['count' => $coupon->redemptions_count])"
+        >
             @php $redemptions = $coupon->redemptions()->latest('applied_at')->limit(30)->get(); @endphp
             @if ($redemptions->isEmpty())
                 <x-mollie-billing::admin.empty
                     icon="receipt-percent"
-                    title="No redemptions yet"
-                    description="This coupon has not been redeemed by any billable so far."
+                    :title="__('billing::admin.coupons.show.history_empty_title')"
+                    :description="__('billing::admin.coupons.show.history_empty_description')"
                 />
             @else
                 <flux:table>
                     <flux:table.columns>
-                        <flux:table.column>Applied</flux:table.column>
-                        <flux:table.column>Billable</flux:table.column>
-                        <flux:table.column align="end">Discount (net)</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.coupons.show.history_applied') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.coupons.show.history_billable') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::admin.coupons.show.history_discount') }}</flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
                         @foreach ($redemptions as $r)

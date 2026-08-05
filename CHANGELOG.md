@@ -6,8 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Admin panel is fully translated via the new `billing::admin` lang file (English and German).
+- `mollie-billing.admin_locale` (`BILLING_ADMIN_LOCALE`): pins the admin panel to a fixed locale. `null` (default) follows the app locale.
+
 ### Changed
 
+- `mollie-billing.header_components` now also render in the admin header, so a language switcher works there too.
+- **Breaking-ish:** the admin panel no longer forces English. Set `BILLING_ADMIN_LOCALE=en` to restore the previous behavior.
 - Docs: `notifications.md` now spells out that `notifyBillingAdminsUsing()` / `notifyAdminUsing()` recipients must be notifiable, including the `routeNotificationForMail()` recipe for returning the billable itself.
 
 ### Fixed

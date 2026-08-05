@@ -64,16 +64,16 @@ new class extends Component {
 
 <div class="space-y-6">
     <x-mollie-billing::admin.page-header
-        title="Billables"
-        subtitle="Customers, tenants or organisations subject to billing."
+        :title="__('billing::admin.billables.title')"
+        :subtitle="__('billing::admin.billables.subtitle')"
     />
 
     @if (! $billables)
         <flux:card>
             <x-mollie-billing::admin.empty
                 icon="exclamation-triangle"
-                title="No billable model configured"
-                description="Set config('mollie-billing.billable_model') to your tenant model to populate this list."
+                :title="__('billing::admin.common.no_billable_model')"
+                :description="__('billing::admin.billables.no_model_description')"
             />
         </flux:card>
     @else
@@ -81,12 +81,12 @@ new class extends Component {
             <flux:input
                 type="search"
                 wire:model.live.debounce.300ms="search"
-                placeholder="Search by name or email"
+                :placeholder="__('billing::admin.common.search_name_email')"
                 icon="magnifying-glass"
                 class="flex-1 basis-64"
             />
-            <flux:select wire:model.live="statusFilter" placeholder="All statuses" class="w-56 shrink-0">
-                <flux:select.option value="">All statuses</flux:select.option>
+            <flux:select wire:model.live="statusFilter" :placeholder="__('billing::admin.billables.all_statuses')" class="w-56 shrink-0">
+                <flux:select.option value="">{{ __('billing::admin.billables.all_statuses') }}</flux:select.option>
                 @foreach (SubscriptionStatus::cases() as $status)
                     <flux:select.option value="{{ $status->value }}">{{ $status->label() }}</flux:select.option>
                 @endforeach
@@ -97,18 +97,18 @@ new class extends Component {
             <flux:card>
                 <x-mollie-billing::admin.empty
                     icon="users"
-                    title="No billables match"
-                    description="Try adjusting the search term or status filter."
+                    :title="__('billing::admin.billables.empty_title')"
+                    :description="__('billing::admin.billables.empty_description')"
                 />
             </flux:card>
         @else
             <flux:card class="p-0! sm:px-6! sm:py-2!">
                 <flux:table :paginate="$billables">
                     <flux:table.columns>
-                        <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">Name</flux:table.column>
-                        <flux:table.column sortable :sorted="$sortBy === 'email'" :direction="$sortDirection" wire:click="sort('email')">Email</flux:table.column>
-                        <flux:table.column sortable :sorted="$sortBy === 'subscription_plan_code'" :direction="$sortDirection" wire:click="sort('subscription_plan_code')">Plan</flux:table.column>
-                        <flux:table.column sortable :sorted="$sortBy === 'subscription_status'" :direction="$sortDirection" wire:click="sort('subscription_status')">Status</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'name'" :direction="$sortDirection" wire:click="sort('name')">{{ __('billing::admin.billables.column.name') }}</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'email'" :direction="$sortDirection" wire:click="sort('email')">{{ __('billing::admin.billables.column.email') }}</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'subscription_plan_code'" :direction="$sortDirection" wire:click="sort('subscription_plan_code')">{{ __('billing::admin.billables.column.plan') }}</flux:table.column>
+                        <flux:table.column sortable :sorted="$sortBy === 'subscription_status'" :direction="$sortDirection" wire:click="sort('subscription_status')">{{ __('billing::admin.billables.column.status') }}</flux:table.column>
                         <flux:table.column class="w-16"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
@@ -121,7 +121,7 @@ new class extends Component {
                                     <x-mollie-billing::admin.enum-badge :value="$b->subscription_status" />
                                 </flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route(BillingRoute::admin('billables.show'), $b)">View</flux:button>
+                                    <flux:button size="xs" variant="ghost" icon="arrow-right" :href="route(BillingRoute::admin('billables.show'), $b)">{{ __('billing::admin.common.view') }}</flux:button>
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

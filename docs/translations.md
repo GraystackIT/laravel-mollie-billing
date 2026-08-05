@@ -24,6 +24,7 @@ The package ships with two locales out of the box:
 |------|---------|
 | `portal.php` | Billing portal UI: dashboard, plan change, invoices, usage history, addons, seats, products, payment method, return page, navigation, flash messages |
 | `checkout.php` | Checkout flow: steps, billing address, plan selection, addon/seat configuration, order confirmation, coupon handling, VAT display |
+| `admin.php` | Admin panel UI: navigation, dashboard KPIs, billables, coupons, grants, scheduled changes, past due, country mismatches, refunds, OSS export, bulk actions. Rendered in the app locale unless `config('mollie-billing.admin_locale')` pins it — see [configuration.md](configuration.md#admin-panel-locale). |
 | `notifications.php` | Email notification subjects and bodies: trial reminders, payment failures, invoice available, usage thresholds, overage billing, refunds, plan change failures |
 | `emails.php` | Shared email partials: greeting, action buttons |
 | `errors.php` | User-facing error messages: country validation, coupons, usage limits, access grants, refunds |
@@ -150,6 +151,7 @@ To add a new locale (e.g. French), create the directory and translation files:
 resources/lang/vendor/billing/fr/
     portal.php
     checkout.php
+    admin.php
     notifications.php
     emails.php
     errors.php
