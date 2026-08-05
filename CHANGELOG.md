@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: `notifications.md` now spells out that `notifyBillingAdminsUsing()` / `notifyAdminUsing()` recipients must be notifiable, including the `routeNotificationForMail()` recipe for returning the billable itself.
+
 ### Fixed
 
 - Aborted `mandate_only` payments (portal payment-method change, trial / 100%-coupon checkout) no longer flip an active or trialing subscription to `past_due`: the webhook failure path now short-circuits them instead of falling through to the subscription-payment-failure handler. Without an accessible subscription the abort still runs the after-checkout callback with `success = false`.

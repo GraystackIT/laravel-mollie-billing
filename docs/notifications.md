@@ -25,6 +25,35 @@ MollieBilling::notifyAdminUsing(function () {
 
 Return an empty array to suppress a particular delivery entirely.
 
+### Recipients must be notifiable
+
+Whatever the closures return is passed straight to `Notification::send()`, so every recipient has to be a real notifiable: an Eloquent model using `Illuminate\Notifications\Notifiable`, or an `Illuminate\Notifications\AnonymousNotifiable`. The package does not wrap or validate them.
+
+This bites most often when the closure returns the **billable itself** — a tenant/organisation model is usually not notifiable, and the failure only surfaces later inside the queued `SendQueuedNotifications` job as:
+
+```
+BadMethodCallException: Call to undefined method App\Models\Organization::routeNotificationFor()
+```
+
+If you want the billable to be the recipient, add the trait and route the mail channel explicitly — tenant models rarely have an `email` column, which is what `Notifiable` reads by default:
+
+```php
+use Illuminate\Notifications\Notifiable;
+
+class Organization extends Model implements Billable
+{
+    use HasBilling, Notifiable;
+
+    // Returning null makes Laravel skip delivery instead of failing in the mailer.
+    public function routeNotificationForMail(): ?string
+    {
+        return $this->getBillingEmail() ?: null;
+    }
+}
+```
+
+Otherwise return actual users (`$billable->billingAdmins`) or `new AnonymousNotifiable(['mail' => $billable->getBillingEmail()])`.
+
 ## 2. Override the text via translations
 
 All shipped notifications use the `billing::notifications.*` and `billing::emails.*` translation keys. Publish them and edit at will:
