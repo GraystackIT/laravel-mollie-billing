@@ -79,6 +79,8 @@ MollieBilling::cleanupOrphanedBillableUsing(function ($billable) {
 
 When a trial-eligible plan is checked out, `StartSubscriptionCheckout` routes to `StartMandateCheckout` — a `0.00` payment with `sequenceType=first` whose only purpose is to capture a mandate. If the user never returns from Mollie's hosted page, no `mandate_only` webhook ever fires.
 
+If the user actively cancels on Mollie's hosted page (or the payment eventually expires), Mollie **does** deliver a `canceled` / `expired` / `failed` webhook. The failure path treats `mandate_only` payments specially (`MandateOnlyPaymentHandler::failed()`): an aborted €0 authorisation is not a payment failure, so a billable with an accessible subscription — a payment-method change started from the portal, or a trialing billable — is left completely untouched (no `past_due`, no `PaymentFailed` event, no admin notification). Only a billable **without** an accessible subscription (checkout-time mandate flow) gets the after-checkout callback with `success = false`.
+
 Until the mandate is captured the billable still has `subscription_source ∈ {null, None}` and `subscription_status ∈ {null, New}` — exactly the shape `CleanupOrphanedBillablesJob` matches. Scenario 1 covers it.
 
 Once the mandate arrives and the billable transitions to `subscription_status = Trial`, the trial is owned by a different job. **`ProcessTrialLifecycleJob`** ([src/Jobs/ProcessTrialLifecycleJob.php](../src/Jobs/ProcessTrialLifecycleJob.php)) runs daily (`mollie-billing.trial_lifecycle_job_time`, default `02:05 UTC`) and:

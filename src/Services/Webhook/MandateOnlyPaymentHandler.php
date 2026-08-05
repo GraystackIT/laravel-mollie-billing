@@ -65,6 +65,32 @@ class MandateOnlyPaymentHandler
     }
 
     /**
+     * A failed/canceled/expired mandate-only payment is not a payment failure:
+     * the €0 authorisation was aborted, but any existing subscription and its
+     * mandate at Mollie are untouched — the billable must NOT become PastDue.
+     * Only when there is no accessible subscription (checkout-time mandate flow
+     * for trials / 100%-coupons) does the abort end the checkout.
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    public function failed(object $payment, Billable $billable, array $metadata = []): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        Log::info('Mandate-only payment did not complete', [
+            'billable_id' => $billable->getKey(),
+            'payment_id' => $payment->id ?? null,
+            'status' => $payment->status ?? null,
+        ]);
+
+        if (! $billable->hasAccessibleBillingSubscription()) {
+            MollieBilling::runAfterCheckout($billable, false);
+        }
+    }
+
+    /**
      * @param  array<string, mixed>  $metadata
      */
     protected function activateSubscriptionAfterMandate(object $payment, Billable $billable, array $metadata): void

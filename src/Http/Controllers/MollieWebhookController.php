@@ -240,6 +240,13 @@ class MollieWebhookController extends Controller
                 return;
             }
 
+            // Aborted €0 mandate authorisation (payment-method change or
+            // trial/coupon checkout) — never a subscription payment failure.
+            if ($type === 'mandate_only') {
+                $this->handleMandateOnlyFailed($payment, $billable, $metadata);
+                return;
+            }
+
             if ($type === 'one_time_order') {
                 $this->handleOneTimeOrderFailed($payment, $billable, $metadata);
                 return;
@@ -276,6 +283,14 @@ class MollieWebhookController extends Controller
     protected function handleMandateOnlyPaid(object $payment, Billable $billable, array $metadata = []): void
     {
         $this->mandateOnlyPaymentHandler->paid($payment, $billable, $metadata);
+    }
+
+    /**
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function handleMandateOnlyFailed(object $payment, Billable $billable, array $metadata = []): void
+    {
+        $this->mandateOnlyPaymentHandler->failed($payment, $billable, $metadata);
     }
 
     protected function handleFirstPaymentPaid(object $payment, Billable $billable, array $metadata): void

@@ -8,7 +8,9 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
+use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Events\PlanChangeFailed;
+use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
@@ -220,6 +222,109 @@ it('is idempotent on second delivery of the same payment', function (): void {
     $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_dup'])->assertStatus(200);
 
     expect(BillingProcessedWebhook::where('mollie_payment_id', 'tr_mandate_dup')->count())->toBe(1);
+});
+
+it('does not mark an active subscription past_due when a mandate-only payment is aborted', function (string $status): void {
+    Event::fake([PaymentFailed::class]);
+
+    $billable = webhookBillable();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => now()->subDays(5),
+        'mollie_customer_id' => 'cst_test',
+        'mollie_mandate_id' => 'mdt_existing',
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_test'],
+    ])->save();
+
+    FakeWebhookController::$nextPayment = fakePayment([
+        'id' => 'tr_mandate_abort_'.$status,
+        'status' => $status,
+        'amount' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'metadata' => [
+            'type' => 'mandate_only',
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+        ],
+    ]);
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_abort_'.$status])->assertStatus(200);
+
+    $billable->refresh();
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Active);
+    expect($billable->mollie_mandate_id)->toBe('mdt_existing');
+
+    $meta = $billable->getBillingSubscriptionMeta();
+    expect($meta['payment_failure'] ?? null)->toBeNull();
+    expect($meta['past_due_since'] ?? null)->toBeNull();
+
+    Event::assertNotDispatched(PaymentFailed::class);
+})->with(['canceled', 'expired', 'failed']);
+
+it('keeps a trial subscription on trial when a mandate-only payment is aborted', function (): void {
+    Event::fake([PaymentFailed::class]);
+
+    $billable = webhookBillable();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Trial,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'trial_ends_at' => now()->addDays(7),
+        'mollie_customer_id' => 'cst_test',
+        'mollie_mandate_id' => 'mdt_existing',
+    ])->save();
+
+    FakeWebhookController::$nextPayment = fakePayment([
+        'id' => 'tr_mandate_trial_abort',
+        'status' => 'expired',
+        'amount' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'metadata' => [
+            'type' => 'mandate_only',
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+        ],
+    ]);
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_trial_abort'])->assertStatus(200);
+
+    expect($billable->fresh()->subscription_status)->toBe(SubscriptionStatus::Trial);
+    Event::assertNotDispatched(PaymentFailed::class);
+});
+
+it('runs the after-checkout callback with success=false when a checkout-time mandate payment is aborted', function (): void {
+    $billable = webhookBillable();
+
+    $receivedSuccess = null;
+    MollieBilling::afterCheckoutUsing(function (Billable $b, bool $success) use (&$receivedSuccess): void {
+        $receivedSuccess = $success;
+    });
+
+    FakeWebhookController::$nextPayment = fakePayment([
+        'id' => 'tr_mandate_checkout_abort',
+        'status' => 'canceled',
+        'amount' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'metadata' => [
+            'type' => 'mandate_only',
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+            'pending_subscription_plan_code' => 'pro',
+            'pending_subscription_interval' => 'monthly',
+            'pending_subscription_trial_days' => 14,
+        ],
+    ]);
+
+    try {
+        $this->postJson(route('billing.webhook'), ['id' => 'tr_mandate_checkout_abort'])->assertStatus(200);
+    } finally {
+        $prop = (new ReflectionClass(MollieBilling::class))->getProperty('afterCheckoutCallback');
+        $prop->setValue(null, null);
+    }
+
+    expect($receivedSuccess)->toBeFalse();
+    expect($billable->fresh()->subscription_status)->toBe(SubscriptionStatus::New);
 });
 
 it('does not retry-loop when an invoice already exists for the payment (handler crash recovery)', function (): void {
