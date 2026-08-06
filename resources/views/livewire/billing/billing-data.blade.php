@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Exceptions\ViesUnavailableException;
@@ -15,6 +16,7 @@ use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     use ValidatesVatNumber;
 
     private const EU_COUNTRIES = [
@@ -47,7 +49,7 @@ new class extends Component {
 
     public function mount(VatCalculationService $vat): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
 
         if (request()->boolean('payment_method_updated')) {
             $this->initialMandateId = $billable?->getMollieMandateId();
@@ -96,7 +98,7 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if ($billable === null) {
-            \Flux::toast(__('billing::portal.no_billable'), variant: 'danger');
+            $this->toast(__('billing::portal.no_billable'), 'danger');
 
             return;
         }
@@ -144,6 +146,19 @@ new class extends Component {
             ]);
         }
 
+        // The VAT number decides the same thing the country does — adding one turns a
+        // gross B2C supply into a net reverse-charge one, removing it does the reverse.
+        // Freezing only the country while the tax treatment is under review left that
+        // half of it open, and the reissued invoices would be recomputed against a VAT
+        // status the correction never reviewed.
+        if ($billable->hasOpenCountryMismatch()
+            && CountryResolver::normalizeVatNumber((string) $billable->vat_number)
+                !== CountryResolver::normalizeVatNumber((string) $this->vat_number)) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'vat_number' => __('billing::portal.billing_data.vat_locked_by_mismatch'),
+            ]);
+        }
+
         $countryChanged = strtoupper((string) $billable->getBillingCountry()) !== strtoupper($this->billing_country);
 
         // Atomic: persisting the billable with a vat_number and recording the
@@ -180,9 +195,9 @@ new class extends Component {
         $this->persistedCountry = $this->billing_country;
 
         if ($countryChanged) {
-            \Flux::toast(__('billing::portal.billing_data.country_changed_warning'), variant: 'warning');
+            $this->toast(__('billing::portal.billing_data.country_changed_warning'), 'warning');
         } else {
-            \Flux::toast(__('billing::portal.billing_data.saved_flash'), variant: 'success');
+            $this->toast(__('billing::portal.billing_data.saved_flash'), 'success');
         }
     }
 
@@ -203,7 +218,7 @@ new class extends Component {
         $current = $billable->getMollieMandateId();
         if ($current !== null && $current !== $this->initialMandateId) {
             $this->awaitingMandateUpdate = false;
-            \Flux::toast(__('billing::portal.payment_method.updated_flash'), variant: 'success');
+            $this->toast(__('billing::portal.payment_method.updated_flash'), 'success');
         }
     }
 
@@ -222,6 +237,28 @@ new class extends Component {
     {
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
     }
+
+    /**
+     * The same gate for the read path, which the hardening above skipped.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the company address, the VAT
+     * number and the payment method on file. Withholding the billable leaves the form
+     * empty, while `save()` and `changePaymentMethod()` keep resolving it unguarded so
+     * they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
+    }
+
+    // `toast()` comes from InteractsWithFluxUi — every save path on this page ends in
+    // one, and Flux Pro is absent from this package's own test environment.
 
     /**
      * Reverse-charge applies when a valid EU VAT number is set
@@ -302,7 +339,7 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if ($billable === null) {
-            \Flux::toast(__('billing::portal.no_billable'), variant: 'danger');
+            $this->toast(__('billing::portal.no_billable'), 'danger');
 
             return null;
         }
@@ -318,7 +355,7 @@ new class extends Component {
             $result = $checkout->handle($billable, $returnUrl);
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
 
             return null;
         }
@@ -327,7 +364,7 @@ new class extends Component {
             return $this->redirect($result['checkout_url'], navigate: false);
         }
 
-        \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+        $this->toast(__('billing::portal.flash.error'), 'danger');
 
         return null;
     }
@@ -336,7 +373,7 @@ new class extends Component {
 ?>
 
 @php
-    $billable = $this->resolveBillable();
+    $billable = $this->readableBillable();
     $mandate = $this->mandateInfo($billable);
     $isLocal = $billable && $billable->isLocalBillingSubscription();
     $paymentCountryMismatch = $this->paymentCountryMismatch($billable);
@@ -424,7 +461,7 @@ new class extends Component {
                     <flux:field class="block w-full min-w-0">
                         <flux:label>{{ __('billing::checkout.vat_number') }}</flux:label>
                         <flux:input.group class="w-full">
-                            <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" class="min-w-0 grow" />
+                            <flux:input wire:model.live.debounce.500ms="vat_number" type="text" placeholder="ATU12345678" class="min-w-0 grow" :disabled="$hasOpenMismatch" />
 
                             {{-- Always-rendered suffix; see step-billing.blade.php for the rationale. --}}
                             <flux:input.group.suffix>
@@ -445,7 +482,11 @@ new class extends Component {
                         <div wire:loading.remove wire:target="vat_number,billing_country">
                             <flux:error name="vat_number" />
                         </div>
-                        <flux:description>{{ __('billing::portal.billing_data.vat_number_help') }}</flux:description>
+                        <flux:description>
+                            {{ $hasOpenMismatch
+                                ? __('billing::portal.billing_data.vat_locked_by_mismatch')
+                                : __('billing::portal.billing_data.vat_number_help') }}
+                        </flux:description>
                     </flux:field>
 
                     @if ($countryDirty)

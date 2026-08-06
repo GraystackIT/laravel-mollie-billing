@@ -56,26 +56,31 @@ it('warns about an ending trial exactly once, however often the pass runs', func
 it('warns again when the billable enters a second trial with a later end date', function (): void {
     // The marker holds the date, not a boolean, precisely so a re-trial is not
     // silently left unwarned.
+    //
+    // Done by travelling a month rather than by pushing `trial_ends_at` further out:
+    // the notice window is always exactly tomorrow, so a *different* end date can
+    // never also be inside it at the same instant. Pushing the date out instead made
+    // this pass or fail depending on the clock — after 21:00 UTC, "tomorrow + 3h"
+    // lands on the day after and is correctly not swept.
     $billable = dedupTrialBillable();
 
     (new ProcessTrialLifecycleJob)->handle();
     Notification::assertSentToTimes($billable, TrialEndingSoonNotification::class, 1);
 
-    // Second trial: same billable, new end date, back inside tomorrow's window.
+    $this->travel(31)->days();
+
+    // Second trial: same billable, a new end date that is tomorrow as of *now*.
     $billable->forceFill([
         'subscription_status' => SubscriptionStatus::Trial,
-        'trial_ends_at' => BillingTime::nowUtc()->copy()->addDay()->addHours(3),
-    ])->save();
-
-    $billable->forceFill([
-        'subscription_meta' => array_merge($billable->getBillingSubscriptionMeta(), [
-            'trial_ending_notified_for' => BillingTime::nowUtc()->copy()->subMonth()->toDateString(),
-        ]),
+        'trial_ends_at' => BillingTime::nowUtc()->copy()->addDay(),
     ])->save();
 
     (new ProcessTrialLifecycleJob)->handle();
 
     Notification::assertSentToTimes($billable, TrialEndingSoonNotification::class, 2);
+
+    expect($billable->refresh()->getBillingSubscriptionMeta()['trial_ending_notified_for'])
+        ->toBe(BillingTime::nowUtc()->copy()->addDay()->toDateString());
 });
 
 it('leaves the marker unset when the notification throws, so the next run retries', function (): void {

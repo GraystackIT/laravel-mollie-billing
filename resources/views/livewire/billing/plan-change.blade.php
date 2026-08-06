@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
@@ -20,6 +21,7 @@ use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     use ValidatesVatNumber;
 
     /**
@@ -32,11 +34,17 @@ new class extends Component {
     public string $selectedInterval = 'monthly';
 
     /**
-     * Deliberately NOT #[Locked]: a locked property is restored from its declared
-     * default on every update round-trip, so even the server-side assignment in
-     * `previewFor()` would be gone by the time the customer clicks apply — the lock
-     * silently breaks the flow it was meant to protect. `assertSelectionIsValid()`
-     * carries the protection instead, and must run in every action that acts on it.
+     * Deliberately NOT #[Locked], and not because a lock would be lost — a probe
+     * confirms a locked property assigned server-side survives every later round-trip
+     * untouched, and only a *client* write is rejected. The reason is simpler: the plan
+     * selector is exactly where the customer is meant to write, so locking this would
+     * break the feature outright.
+     *
+     * A lock would also answer the wrong question. "Did the client change this" is not
+     * the risk; "is this a plan they may actually have" is — an unknown code or an
+     * interval priced as free turns a paid subscription into a downgrade-to-free.
+     * `assertSelectionIsValid()` carries that, and must run in every action that acts
+     * on this property.
      */
     public ?string $selectedPlan = null;
 
@@ -76,6 +84,25 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the tenant's current plan, seats,
+     * addons, billing address or the pro-rata preview (which names invoice serials in its
+     * refund-cap notices). Withholding the billable leaves the preview empty, while the
+     * mutating actions keep resolving it unguarded so they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function updatedSelectedInterval(): void
@@ -139,9 +166,7 @@ new class extends Component {
      */
     private function rejectSelection(): void
     {
-        if (class_exists(\Flux::class)) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
-        }
+        $this->toast(__('billing::portal.flash.error'), 'danger');
     }
 
     public function previewFor(string $planCode, PreviewService $service): void
@@ -182,7 +207,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable || ! $this->selectedPlan) {
             return;
         }
@@ -308,7 +333,7 @@ new class extends Component {
 
     private function refreshPreview(PreviewService $service): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable || ! $this->selectedPlan) {
             return;
         }
@@ -337,10 +362,10 @@ new class extends Component {
 
         try {
             $service->cancelScheduledChange($billable);
-            \Flux::toast(__('billing::portal.flash.scheduled_cancelled'), variant: 'success');
+            $this->toast(__('billing::portal.flash.scheduled_cancelled'), 'success');
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -353,10 +378,10 @@ new class extends Component {
 
         try {
             $service->cancelPendingPlanChange($billable);
-            \Flux::toast(__('billing::portal.flash.pending_change_cancelled'), variant: 'success');
+            $this->toast(__('billing::portal.flash.pending_change_cancelled'), 'success');
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -381,7 +406,7 @@ new class extends Component {
                 'coupon_code' => $sc['coupon_code'] ?? null,
                 'apply_at' => 'immediate',
             ]);
-            \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
+            $this->toast(__('billing::portal.flash.plan_changed'), 'success');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Scheduled plan change (apply now) failed', [
                 'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
@@ -395,10 +420,7 @@ new class extends Component {
             ]);
             report($e);
             $service->clearPendingPlanChange($billable);
-            \Flux::toast(
-                config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
-                variant: 'danger',
-            );
+            $this->toast(config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -407,7 +429,7 @@ new class extends Component {
         $billable = $this->resolveBillable();
 
         if (! $billable || ! $this->selectedPlan) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return;
         }
 
@@ -456,9 +478,9 @@ new class extends Component {
 
             if (! empty($result['scheduledFor'])) {
                 $date = BillingTime::display(\Carbon\Carbon::parse((string) $result['scheduledFor'])->setTimezone('UTC'), $billable)->translatedFormat('d. M Y');
-                \Flux::toast(__('billing::portal.flash.plan_scheduled', ['date' => $date]), variant: 'success');
+                $this->toast(__('billing::portal.flash.plan_scheduled', ['date' => $date]), 'success');
             } else {
-                \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
+                $this->toast(__('billing::portal.flash.plan_changed'), 'success');
             }
             $this->preview = [];
             $this->selectedPlan = null;
@@ -481,10 +503,7 @@ new class extends Component {
             ]);
             report($e);
             $service->clearPendingPlanChange($billable);
-            \Flux::toast(
-                config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
-                variant: 'danger',
-            );
+            $this->toast(config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -498,7 +517,7 @@ new class extends Component {
         $billable = $this->resolveBillable();
 
         if (! $billable || ! $this->selectedPlan) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         }
 
@@ -516,7 +535,7 @@ new class extends Component {
 
         $grossAmount = (int) ($this->preview['grossTotal'] ?? 0);
         if ($grossAmount <= 0) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         }
 
@@ -547,18 +566,18 @@ new class extends Component {
                 return $this->redirect($result['checkout_url'], navigate: false);
             }
 
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         }
     }
 
     public function openEditBillingModal(): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -668,12 +687,12 @@ new class extends Component {
             $this->refreshPreview($previewService);
         }
 
-        \Flux::toast(__('billing::portal.flash.billing_details_saved'), variant: 'success');
+        $this->toast(__('billing::portal.flash.billing_details_saved'), 'success');
     }
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $scheduledChange = null;
         $pendingPlanChange = null;
         $planChangeFailed = null;
@@ -706,9 +725,9 @@ new class extends Component {
             // Detect pending → resolved transition (webhook applied the change).
             if ($this->wasPending && $pendingPlanChange === null) {
                 if ($planChangeFailed) {
-                    \Flux::toast(__('billing::portal.flash.plan_change_failed'), variant: 'danger');
+                    $this->toast(__('billing::portal.flash.plan_change_failed'), 'danger');
                 } else {
-                    \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
+                    $this->toast(__('billing::portal.flash.plan_changed'), 'success');
                 }
             }
             $this->wasPending = $pendingPlanChange !== null;
@@ -1051,7 +1070,7 @@ new class extends Component {
                                 'unit' => __('billing::portal.seat_unit'),
                                 'extra' => $seatPrice !== null && $seatPrice > 0 ? $seatPrice : null,
                                 'extra_title' => $seatPrice !== null && $seatPrice > 0
-                                    ? __('billing::portal.seat_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::number($seatPrice / 100)])
+                                    ? __('billing::portal.seat_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($seatPrice)])
                                     : null,
                             ];
                         }
@@ -1065,7 +1084,7 @@ new class extends Component {
                                 'unit' => $usageLabel,
                                 'extra' => $overageDisplay !== null && $overageDisplay > 0 ? $overageDisplay : null,
                                 'extra_title' => $overageDisplay !== null && $overageDisplay > 0
-                                    ? __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::number($overageDisplay / 100), 'type' => $usageLabel])
+                                    ? __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($overageDisplay), 'type' => $usageLabel])
                                     : null,
                             ];
                         }
@@ -1079,7 +1098,7 @@ new class extends Component {
                                     <div class="flex items-baseline justify-between gap-3 text-zinc-600 dark:text-zinc-300">
                                         <span>{{ $row['label'] }}</span>
                                         @if ($row['extra'] !== null)
-                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => BillingMoney::number($row['extra'] / 100), 'unit' => $row['unit']]) }}</span>
+                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($row['extra']), 'unit' => $row['unit']]) }}</span>
                                         @endif
                                     </div>
                                 @endforeach
@@ -1514,12 +1533,36 @@ new class extends Component {
                                             ];
                                         }
 
-                                        $prorataGross = (int) ($preview['prorataTotalGross'] ?? 0);
-                                        $totalGross = $prorataGross + $overageGross;
-                                        $isSidegrade = $totalGross === 0
+                                        // "Due now" is the money Mollie takes now, not the balance of the
+                                        // change. InvoiceService::createCharge() collects the sum of the
+                                        // charge-direction lines; the refund-direction lines become
+                                        // separate Mollie refunds in phase 2, after that payment clears
+                                        // (ProrataExecutor::execute()). Netting them showed "+€5.00" on a
+                                        // plan switch that charges €95 and credits €90 — and the €95 is
+                                        // what the customer sees on their card. Coupon lines are
+                                        // charge-direction with a negative amount, so they belong in
+                                        // $chargeGross exactly as they do in the Mollie total.
+                                        $chargeGross = 0;
+                                        $refundGross = 0;
+                                        foreach ($prorataLines as $line) {
+                                            if (($line['direction'] ?? 'charge') === 'refund') {
+                                                $refundGross += (int) $line['amount_gross'];
+                                            } else {
+                                                $chargeGross += (int) $line['amount_gross'];
+                                            }
+                                        }
+
+                                        // Saldo-zero plan switch: ProrataExecutor books it as a local
+                                        // plan-switch invoice and never touches Mollie, so nothing is due.
+                                        $isSidegrade = ($chargeGross + $refundGross) === 0
+                                            && $chargeGross > 0
                                             && ! empty($linesByCategory['plan'])
                                             && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'charge')) > 0
                                             && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'refund')) > 0;
+
+                                        $chargedNowGross = $isSidegrade ? 0 : max(0, $chargeGross);
+                                        $refundedGross = $isSidegrade ? 0 : abs($refundGross);
+                                        $totalGross = $chargedNowGross + $overageGross;
                                     @endphp
 
                                     <div class="space-y-4">
@@ -1672,14 +1715,18 @@ new class extends Component {
                                         <div class="mt-1 border-t border-zinc-200/70 pt-3 dark:border-zinc-700/60">
                                             <div class="flex items-baseline justify-between gap-3">
                                                 <span class="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.prorata_total') }}</span>
-                                                <span class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">
-                                                    {{ $totalGross < 0 ? '−' : ($totalGross > 0 ? '+' : '') }}{{ BillingMoney::format(abs($totalGross)) }}
+                                                <span class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross > 0 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400' }}">
+                                                    {{ $totalGross > 0 ? '+' : '' }}{{ BillingMoney::format($totalGross) }}
                                                 </span>
                                             </div>
 
                                             @if ($isSidegrade)
                                                 <div class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
                                                     {{ __('billing::portal.prorata_sidegrade_no_charge') }}
+                                                </div>
+                                            @elseif ($refundedGross > 0)
+                                                <div class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
+                                                    {{ __('billing::portal.prorata_refund_separate', ['amount' => BillingMoney::format($refundedGross)]) }}
                                                 </div>
                                             @endif
                                         </div>
@@ -1700,11 +1747,18 @@ new class extends Component {
                                         $dueNowNewPlan = 0;
                                         $dueNowCredit = 0;
                                     }
-                                    $dueNowNet = $dueNowNewPlan - $dueNowCredit + $usageOverageNet;
-                                    $isCredit = $dueNowNet < 0;
+                                    // Collected now = the pro-rata charge plus the usage overage, both
+                                    // taken from the preview's own gross figures. The credit is a
+                                    // separate Mollie refund, so netting it in named an amount nobody
+                                    // moves; and re-deriving VAT from the summed net with the recurring
+                                    // rate disagreed with the per-component rates the preview used
+                                    // (the pro-rata rate comes off the invoice that paid the period).
                                     $dueNowVatRate = (float) ($preview['vatRate'] ?? 0);
-                                    $dueNowVat = (int) round(abs($dueNowNet) * $dueNowVatRate / 100);
-                                    $dueNowGross = $dueNowNet + ($isCredit ? -$dueNowVat : $dueNowVat);
+                                    $dueNowNet = $prorataCharge + $usageOverageNet;
+                                    $dueNowGross = (int) ($preview['prorataChargeGross'] ?? 0)
+                                        + (int) ($preview['usageOverageChargeGross'] ?? 0);
+                                    $dueNowVat = $dueNowGross - $dueNowNet;
+                                    $refundedNet = $prorataCharge > 0 ? 0 : $prorataCredit;
                                 @endphp
                                 <div class="space-y-2">
                                     <div class="flex items-center justify-between text-sm">
@@ -1747,12 +1801,12 @@ new class extends Component {
 
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.net') }}</span>
-                                        <span class="tabular-nums {{ $isCredit ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-600 dark:text-zinc-300' }}">{{ $isCredit ? '−' : '' }}{{ BillingMoney::format(abs($dueNowNet)) }}</span>
+                                        <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ BillingMoney::format($dueNowNet) }}</span>
                                     </div>
                                     @if ($dueNowVat > 0)
                                         <div class="flex items-center justify-between text-sm">
                                             <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.vat') }} ({{ number_format($dueNowVatRate, 0) }}%)</span>
-                                            <span class="tabular-nums {{ $isCredit ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-600 dark:text-zinc-300' }}">{{ $isCredit ? '−' : '' }}{{ BillingMoney::format($dueNowVat) }}</span>
+                                            <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ BillingMoney::format($dueNowVat) }}</span>
                                         </div>
                                     @endif
 
@@ -1760,10 +1814,10 @@ new class extends Component {
 
                                     <div class="flex items-center justify-between">
                                         <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.preview_total') }}</span>
-                                        <span class="text-2xl font-bold tabular-nums {{ $isCredit ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">{{ $isCredit ? '−' : '' }}{{ BillingMoney::format(abs($dueNowGross)) }}</span>
+                                        <span class="text-2xl font-bold tabular-nums {{ $dueNowGross > 0 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400' }}">{{ BillingMoney::format($dueNowGross) }}</span>
                                     </div>
 
-                                    @if ($isCredit)
+                                    @if ($refundedNet > 0)
                                         <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.preview_credit_note') }}</flux:text>
                                     @endif
                                 </div>

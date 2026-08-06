@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
@@ -15,6 +16,7 @@ use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     public bool $processing = false;
 
     /** @var array<string, array<int, string>> applied coupon codes per product */
@@ -31,6 +33,25 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read which products the tenant has
+     * already bought, or probe coupon validity against it. Withholding the billable falls
+     * through to the same empty state as "none resolved"; `purchase()` keeps resolving it
+     * unguarded so it can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function applyCoupon(string $productCode, CouponService $service): void
@@ -54,7 +75,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -208,6 +229,20 @@ new class extends Component {
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
+        // The product code arrives from the client, so the filtering `with()` does is
+        // no guard: a `onetimeonly` product the billable has already paid for is gone
+        // from the card list but still purchasable by a crafted call, and nothing
+        // downstream re-checks — StartOneTimeOrderCheckout knows the flag but never
+        // consults it.
+        if (! in_array($productCode, $billable->availableBillingProducts(), true)) {
+            // Flux Pro is a hard runtime dependency but ships under `suggest`, so it is
+            // absent from this package's own test environment — and a guard that cannot
+            // run under test is a guard nobody can prove works.
+            $this->toast(__('billing::portal.products.unavailable'), 'danger');
+
+            return;
+        }
+
         $this->processing = true;
 
         try {
@@ -231,15 +266,15 @@ new class extends Component {
                 $this->processing = false;
                 $this->appliedCouponCodes[$productCode] = [];
                 $this->couponInputs[$productCode] = '';
-                \Flux::toast(__('billing::portal.products.success'), variant: 'success');
+                $this->toast(__('billing::portal.products.success'), 'success');
                 $this->dispatch('product-purchased', productCode: $productCode);
                 return;
             }
 
-            \Flux::toast(__('billing::portal.products.error'), variant: 'danger');
+            $this->toast(__('billing::portal.products.error'), 'danger');
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.products.error'), variant: 'danger');
+            $this->toast(__('billing::portal.products.error'), 'danger');
         }
 
         $this->processing = false;
@@ -247,7 +282,7 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
         $currencySymbol = BillingMoney::symbol();
 

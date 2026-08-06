@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
@@ -18,6 +19,7 @@ use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     public ?string $flash = null;
     public bool $flashError = false;
     public string $couponCode = '';
@@ -46,6 +48,25 @@ new class extends Component {
     private function authorizeBillingAction(Billable $billable): void
     {
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+    }
+
+    /**
+     * The same gate for the read path, which the hardening above skipped.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the tenant's plan, address,
+     * invoices and wallet balances. Withholding the billable renders the same
+     * "no billable" state as an unresolvable tenant, while the actions keep resolving it
+     * unguarded so they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function openCountryFix(): void
@@ -77,7 +98,7 @@ new class extends Component {
 
         $mismatch = $billable->latestOpenCountryMismatch();
         if ($mismatch === null) {
-            \Flux::modal('fix-country')->close();
+            $this->closeModal('fix-country');
             return;
         }
 
@@ -124,7 +145,7 @@ new class extends Component {
             return;
         }
 
-        \Flux::modal('fix-country')->close();
+        $this->closeModal('fix-country');
         $this->flash = __('billing::portal.country_mismatch.resolved_flash');
         $this->flashError = false;
     }
@@ -432,7 +453,22 @@ new class extends Component {
                 ->get()
             : collect();
         $mismatchInvoiceCount = $invoicesUnderMismatch->count();
-        $mismatchInvoiceTotalGross = (int) $invoicesUnderMismatch->sum('amount_gross');
+
+        // Every one of these invoices is about to be refunded and reissued, so the
+        // figure has to name the same money the refunds will move. Grouping by the
+        // invoice's own currency is what keeps that true: a single sum rendered with one
+        // symbol turned 20.00 GBP plus 10.00 EUR into "€30.00", an amount nobody is
+        // owed. The `:count` above stays a count over all of them.
+        $mismatchInvoiceTotal = $invoicesUnderMismatch
+            ->groupBy(fn ($invoice): string => BillingMoney::normalizeCurrency($invoice->currency))
+            // The query is unordered, so without this the two amounts swap places between
+            // renders of the same data.
+            ->sortKeys()
+            ->map(fn ($group, string $currency): string => BillingMoney::format(
+                (int) $group->sum('amount_gross'),
+                $currency,
+            ))
+            ->join(' + ');
 
         return [
             'status' => $status,
@@ -445,8 +481,9 @@ new class extends Component {
                 'ip' => (string) ($openMismatch->tax_country_ip ?? '-'),
                 'allowed_countries' => $allowedFixCountries,
                 'invoice_count' => $mismatchInvoiceCount,
-                // Sum across the mismatched invoices, so the configured currency.
-                'invoice_total_gross' => BillingMoney::format($mismatchInvoiceTotalGross),
+                'invoice_total_gross' => $mismatchInvoiceTotal !== ''
+                    ? $mismatchInvoiceTotal
+                    : BillingMoney::format(0),
             ] : null,
             'needsReactivate' => $needsReactivate,
             'reactivateInGrace' => $reactivateInGrace,
@@ -512,7 +549,7 @@ new class extends Component {
 ?>
 
 @php
-    $billable = $this->resolveBillable();
+    $billable = $this->readableBillable();
     $d = $this->dashboardData($billable);
 @endphp
 

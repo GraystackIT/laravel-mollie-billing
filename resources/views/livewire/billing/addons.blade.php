@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
@@ -12,6 +13,7 @@ use GraystackIT\MollieBilling\Support\BillingMoney;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     public bool $polling = false;
     public ?string $pendingAddon = null;
     public ?string $pendingAction = null;
@@ -30,6 +32,25 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the tenant's active addons or
+     * probe coupon validity against it. Withholding the billable falls through to the
+     * same empty state as "none resolved"; `enableAddon()`/`disableAddon()` keep
+     * resolving it unguarded so they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function applyCoupon(string $addonCode, CouponService $couponService, PreviewService $previewService): void
@@ -53,7 +74,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -157,7 +178,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -214,7 +235,7 @@ new class extends Component {
         $planCode = $billable->getBillingSubscriptionPlanCode();
 
         if ($planCode === null || ! $catalog->planAllowsAddon($planCode, $addonCode)) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
 
             return;
         }
@@ -239,7 +260,7 @@ new class extends Component {
             );
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -257,13 +278,13 @@ new class extends Component {
             $this->polling = true;
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
     public function pollForChange(): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) return;
 
         $meta = $billable->getBillingSubscriptionMeta();
@@ -276,7 +297,7 @@ new class extends Component {
             $message = $name
                 ? __("billing::portal.addons_flash.{$this->pendingAction}", ['addon' => $name])
                 : __('billing::portal.flash.plan_changed');
-            \Flux::toast($message, variant: 'success');
+            $this->toast($message, 'success');
             $this->pendingAddon = null;
             $this->pendingAction = null;
         }
@@ -284,7 +305,7 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
         $interval = $billable?->getBillingSubscriptionInterval() ?? 'monthly';
         $planCode = $billable?->getBillingSubscriptionPlanCode();
