@@ -11,9 +11,13 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\CountryResolver;
-use Illuminate\Support\Facades\DB;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\Sanitize;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Support\Facades\DB;
 use Livewire\Attributes\Layout;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
@@ -28,6 +32,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public string $billing_city = '';
     public string $billing_country = '';
     public ?string $vat_number = null;
+
+    /**
+     * Outcome of the last server-side VIES check. Locked: this flag alone decides
+     * whether the customer is charged net (reverse charge) instead of gross, so a
+     * client-supplied `true` would strip the VAT off the Mollie payment.
+     */
+    #[Locked]
     public ?bool $vatNumberValid = null;
     public ?string $vatStatusMessage = null;
 
@@ -54,16 +65,39 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public ?string $errorMessage = null;
     public bool $processing = false;
 
-    /** The billable created in the billing-address step (stored as ID + class for Livewire serialisation). */
+    /**
+     * The billable created in the billing-address step (stored as ID + class for
+     * Livewire serialisation).
+     *
+     * Locked: `submit()` writes the billing address, the VIES audit row and the
+     * pending first payment onto whatever this pair resolves to. Unlocked, a
+     * crafted `updates` payload would repoint both at another tenant and rewrite
+     * its billing data — and `billableClass` additionally feeds a container
+     * lookup, so it must never be client-supplied.
+     */
+    #[Locked]
     public ?string $billableId = null;
+    #[Locked]
     public ?string $billableClass = null;
+
+    /**
+     * True when this component instance created the billable itself (anonymous
+     * signup). Those billables have no owner to authorize against yet, so the
+     * authorization gate in `submit()` is skipped for them — and only for them.
+     */
+    #[Locked]
+    public bool $billableCreatedHere = false;
 
     /**
      * True when the checkout was entered with a pre-existing billable that already
      * carries persisted billing data (e.g. after a previously cancelled subscription
      * or an access-grant-activated local subscription). The billing-address step is
      * skipped and the data is shown read-only on the confirm step.
+     *
+     * Locked: flipping it to false is what would re-enable the billing-address
+     * write in `submit()` for a billable the user only entered checkout with.
      */
+    #[Locked]
     public bool $billing_locked = false;
 
     // -------------------------------------------------------------------------
@@ -91,9 +125,10 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             $this->billing_city = (string) $existing->getBillingCity();
             $this->billing_country = (string) $existing->getBillingCountry();
             $this->vat_number = $existing->vat_number;
-            // VAT number is treated as confirmed when it was previously persisted
-            // — the audit trail captured the VIES result at the time it was set.
-            if (filled($this->vat_number)) {
+            // A persisted VAT number only counts as confirmed when the audit trail
+            // actually says so. Treating "vat_number is set" as valid would grant
+            // reverse charge to a number VIES rejected.
+            if (filled($this->vat_number) && $this->billableUsesReverseCharge($existing)) {
                 $this->vatNumberValid = true;
             }
             $this->billing_locked = true;
@@ -493,9 +528,15 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return max(0, $net - $discount);
     }
 
+    /**
+     * Reverse charge — net prices, no VAT — requires BOTH a VAT number in the form
+     * and a server-side VIES confirmation for it. The `filled()` half is not
+     * cosmetic: without it a blank VAT number combined with a stale `true` flag
+     * would zero out the VAT while the VIES block in `validateStep1()` is skipped.
+     */
     public function showsNetPrices(): bool
     {
-        return $this->vatNumberValid === true;
+        return $this->vatNumberValid === true && filled($this->vat_number);
     }
 
     public function vatRate(VatCalculationService $vat): float
@@ -524,9 +565,11 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $net = $this->totalNet();
         $reverseCharge = $this->showsNetPrices();
 
-        // Trust the live VIES result captured in vatNumberValid — never re-hit VIES on render.
+        // Reuse the VIES result captured in vatNumberValid — never re-hit VIES on render.
         // Otherwise a flaky VIES call could disagree with what the UI just rendered, producing
-        // a "Reverse-Charge" label next to a gross-with-VAT total.
+        // a "Reverse-Charge" label next to a gross-with-VAT total. The flag is #[Locked] and
+        // only ever written by validateVatNumberLive(), so this is server state, not input;
+        // `submit()` re-runs validateStep1() before pricing, which refreshes it.
         if ($reverseCharge) {
             return [
                 'net' => $net,
@@ -549,7 +592,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         ];
     }
 
-    /** @return array{vatRate:float,showsNet:bool,priceFormatter:\Closure,totals:array,customStepCount:int,customStepViews:array} */
+    /** @return array{vatRate:float,showsNet:bool,priceFormatter:\Closure,money:\Closure,currencySymbol:string,totals:array,customStepCount:int,customStepViews:array} */
     public function with(VatCalculationService $vat): array
     {
         $rate = $this->vatRate($vat);
@@ -566,6 +609,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
                 return $netCents + (int) round($netCents * $rate / 100);
             },
+            // Handed down to the @include'd step partials, which are compiled as
+            // separate views and therefore cannot see this file's imports. Single
+            // money-rendering strategy for the whole checkout; `currencySymbol` is
+            // only for the lang strings that place the symbol themselves.
+            'money' => fn (?int $cents): string => BillingMoney::format($cents),
+            'moneyNumber' => fn (?int $cents): string => BillingMoney::number((int) ($cents ?? 0) / 100),
+            'currencySymbol' => BillingMoney::symbol(),
             'totals' => $this->totals($vat),
             'customStepCount' => count($customSteps),
             'customStepViews' => array_map(fn (array $s): string => $s['view'], $customSteps),
@@ -918,6 +968,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
         $this->billableId = (string) $billable->getKey();
         $this->billableClass = $billable->getMorphClass();
+        $this->billableCreatedHere = true;
 
         event(new CheckoutStarted($billable));
     }
@@ -943,9 +994,28 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return null;
         }
 
-        $model = app($this->billableClass);
+        // `billableClass` holds a morph class, which is the morph-map alias when the
+        // app registered one — resolve that back to the model class first. The
+        // is_a() gate keeps the lookup inside Billable models even if the property
+        // is ever reached by something other than createBillable()/mount().
+        $class = Relation::getMorphedModel($this->billableClass) ?? $this->billableClass;
 
-        return $model->find($this->billableId);
+        if (! is_string($class) || ! is_a($class, Model::class, true) || ! is_a($class, Billable::class, true)) {
+            return null;
+        }
+
+        /** @var \Illuminate\Database\Eloquent\Model $model */
+        $model = app($class);
+
+        $found = $model->newQuery()->find($this->billableId);
+
+        return $found instanceof Billable ? $found : null;
+    }
+
+    /** Whether a persisted, VIES-confirmed validation exists for the billable's current VAT number. */
+    private function billableUsesReverseCharge(Billable $billable): bool
+    {
+        return method_exists($billable, 'usesReverseCharge') && $billable->usesReverseCharge();
     }
 
     // -------------------------------------------------------------------------
@@ -963,6 +1033,20 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $this->validateStep2();
         if ($this->hasAddonsOrSeatsStep()) {
             $this->validateStep3();
+        }
+
+        // Authorize before anything mutates, and outside the try below so the 403
+        // is not swallowed by its catchall. Livewire actions bypass the checkout
+        // route's middleware, and from here on we overwrite the billable's billing
+        // address, write a VIES audit row for it and open a Mollie payment on its
+        // customer. Anonymous signup is the one exemption: a billable this very
+        // component instance created has no owner to authorize against yet.
+        if (! $this->billableCreatedHere) {
+            $existing = $this->resolveBillable();
+
+            if ($existing !== null) {
+                abort_unless(MollieBilling::authorizes(request(), $existing), 403);
+            }
         }
 
         $this->processing = true;

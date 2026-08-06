@@ -62,7 +62,7 @@
         {{-- App-provided header components (e.g. a language switcher). Keyed by
              index so Livewire keeps them apart across re-renders. --}}
         @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
-            @livewire($headerComponent, [], 'billing-header-'.$i)
+            @livewire($headerComponent, [], key('billing-header-'.$i))
         @endforeach
 
         <flux:dropdown position="bottom" align="end">

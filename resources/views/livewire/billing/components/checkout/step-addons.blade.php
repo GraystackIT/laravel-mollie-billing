@@ -13,7 +13,7 @@
                 @foreach ($allowedAddons as $addonCode)
                     @php($addon = $this->addons()[$addonCode] ?? null)
                     @if ($addon)
-                        @php($addonPrice = number_format($priceFormatter((int) ($addon['intervals'][$interval]['price_net'] ?? 0)) / 100, 2))
+                        @php($addonPrice = $money($priceFormatter((int) ($addon['intervals'][$interval]['price_net'] ?? 0))))
                         <label class="flex items-center justify-between gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50 p-4 transition hover:border-zinc-300 hover:bg-white dark:border-white/10 dark:bg-white/2 dark:hover:border-white/30">
                             <div class="flex items-center gap-3">
                                 <flux:checkbox wire:model="addon_codes" value="{{ $addonCode }}" />
@@ -22,7 +22,7 @@
                                 </div>
                             </div>
                             <div class="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
-                                €{{ $addonPrice }} / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
+                                {{ $addonPrice }} / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
                             </div>
                         </label>
                     @endif
@@ -41,7 +41,7 @@
                     </flux:text>
                     <flux:text class="text-sm">
                         {{ __('billing::checkout.extra_seat_price') }}
-                        <strong class="font-semibold text-zinc-900 dark:text-white">€{{ number_format($priceFormatter((int) $seatPrice) / 100, 2) }}</strong>
+                        <strong class="font-semibold text-zinc-900 dark:text-white">{{ $money($priceFormatter((int) $seatPrice)) }}</strong>
                     </flux:text>
                 </div>
                 <div class="flex shrink-0 items-center gap-2">

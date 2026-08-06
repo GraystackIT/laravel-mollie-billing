@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Livewire\Component;
@@ -20,10 +21,9 @@ new class extends Component {
     public function with(): array
     {
         $billable = $this->resolveBillable();
-        $currency = config('mollie-billing.currency_symbol', '€');
 
         if (! $billable) {
-            return ['invoices' => null, 'currency' => $currency, 'stats' => null, 'billable' => null, 'redemptions' => collect()];
+            return ['invoices' => null, 'stats' => null, 'billable' => null, 'redemptions' => collect()];
         }
 
         $invoices = $billable->billingInvoices()->latest()->paginate(20);
@@ -42,7 +42,9 @@ new class extends Component {
             ->sum('amount_gross'); // negativ
         $spentGross = $paidGross + $refundGross; // Saldo = bezahlt − gutschriften
 
-        $fmt = fn (int $cents) => $currency . number_format($cents / 100, 2);
+        // The stats add up every invoice, so they can only be shown in one currency:
+        // the configured one. Per-row amounts below use each invoice's own currency.
+        $fmt = fn (int $cents): string => BillingMoney::format($cents);
 
         $stats = [
             'total' => $query->count(),
@@ -62,7 +64,6 @@ new class extends Component {
 
         return [
             'invoices' => $invoices,
-            'currency' => $currency,
             'stats' => $stats,
             'billable' => $billable,
             'redemptions' => $redemptions,
@@ -146,9 +147,9 @@ new class extends Component {
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->invoice_kind?->color() ?? 'zinc'">{{ $invoice->invoice_kind?->label() ?? '—' }}</flux:badge>
                                         </flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums">{{ $currency }}{{ number_format($invoice->amount_net / 100, 2) }}</flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums text-zinc-400">{{ $currency }}{{ number_format($invoice->amount_vat / 100, 2) }}</flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums font-medium">{{ $currency }}{{ number_format($invoice->amount_gross / 100, 2) }}</flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums">{{ BillingMoney::format($invoice->amount_net, $invoice->currency) }}</flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums text-zinc-400">{{ BillingMoney::format($invoice->amount_vat, $invoice->currency) }}</flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums font-medium">{{ BillingMoney::format($invoice->amount_gross, $invoice->currency) }}</flux:table.cell>
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->status->color()">{{ $invoice->status->label() }}</flux:badge>
                                         </flux:table.cell>
@@ -188,7 +189,7 @@ new class extends Component {
                                         $coupon = $redemption->coupon;
                                         $benefit = match (true) {
                                             $redemption->discount_amount_net > 0
-                                                => $currency . number_format($redemption->discount_amount_net / 100, 2),
+                                                => BillingMoney::format($redemption->discount_amount_net, $coupon?->currency),
                                             ($redemption->trial_days_added ?? 0) > 0
                                                 => trans_choice('billing::portal.redemptions.benefit_days', (int) $redemption->trial_days_added, ['days' => $redemption->trial_days_added]),
                                             ($redemption->grant_days_added ?? 0) > 0

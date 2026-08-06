@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use Mollie\Laravel\Facades\Mollie;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
@@ -35,6 +36,9 @@ new class extends Component {
     public string $billing_city = '';
     public string $billing_country = '';
     public ?string $vat_number = null;
+
+    /** Outcome of the last server-side VIES check — locked so the client cannot claim reverse charge. */
+    #[Locked]
     public ?bool $vatNumberValid = null;
     public ?string $vatStatusMessage = null;
 
@@ -96,6 +100,8 @@ new class extends Component {
 
             return;
         }
+
+        $this->authorizeBillingAction($billable);
 
         $validCountries = array_keys($this->countries());
 
@@ -207,6 +213,17 @@ new class extends Component {
     }
 
     /**
+     * Livewire actions bypass the portal route middleware, so `save()` and
+     * `changePaymentMethod()` authorize here. The address and VAT number saved on
+     * this page decide the VAT treatment of every future invoice, so a member the
+     * host app denies billing management to must not be able to rewrite them.
+     */
+    private function authorizeBillingAction(Billable $billable): void
+    {
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+    }
+
+    /**
      * Reverse-charge applies when a valid EU VAT number is set
      * and the destination country is also EU.
      */
@@ -289,6 +306,8 @@ new class extends Component {
 
             return null;
         }
+
+        $this->authorizeBillingAction($billable);
 
         $returnUrl = route(
             BillingRoute::name('billing-data'),

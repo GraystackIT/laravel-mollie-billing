@@ -57,7 +57,7 @@
                      so a locale switch has to be reachable before signup. --}}
                 <div class="flex items-center gap-4">
                     @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
-                        @livewire($headerComponent, [], 'billing-header-'.$i)
+                        @livewire($headerComponent, [], key('billing-header-'.$i))
                     @endforeach
 
                     <flux:link :href="$resolvedBackUrl" class="text-sm" icon="arrow-left">

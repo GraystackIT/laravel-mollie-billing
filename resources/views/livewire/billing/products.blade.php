@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
@@ -248,8 +249,7 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
 
         $availableCodes = $billable?->availableBillingProducts() ?? [];
         $boughtCodes = $billable?->boughtBillingProducts() ?? [];
@@ -436,7 +436,7 @@ new class extends Component {
                                 <div class="flex items-center gap-6 sm:shrink-0">
                                     <div class="text-right">
                                         <div class="flex items-baseline gap-1">
-                                            <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($product['price_net'] / 100, 2) }}</span>
+                                            <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($product['price_net']) }}</span>
                                         </div>
                                         <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                                     </div>
@@ -466,7 +466,7 @@ new class extends Component {
                                     <flux:text>
                                         {{ __('billing::portal.products.confirm.body', [
                                             'product' => $product['name'],
-                                            'price' => $currencySymbol . number_format($product['price_net'] / 100, 2),
+                                            'price' => BillingMoney::format($product['price_net']),
                                         ]) }}
                                     </flux:text>
                                 </div>
@@ -506,7 +506,7 @@ new class extends Component {
 
                                     @if (($couponDiscounts[$product['code']] ?? 0) > 0)
                                         <flux:text class="text-xs text-emerald-600 dark:text-emerald-400">
-                                            −{{ $currencySymbol }}{{ number_format(($couponDiscounts[$product['code']] ?? 0) / 100, 2) }} {{ __('billing::portal.coupon_discount_applied') }}
+                                            −{{ BillingMoney::format($couponDiscounts[$product['code']] ?? 0) }} {{ __('billing::portal.coupon_discount_applied') }}
                                         </flux:text>
                                     @endif
 
@@ -583,7 +583,7 @@ new class extends Component {
                                 {{-- Right: price (no button) --}}
                                 <div class="flex items-center sm:shrink-0">
                                     <div class="text-right">
-                                        <span class="text-2xl font-bold tabular-nums tracking-tight text-zinc-400 dark:text-zinc-500">{{ $currencySymbol }}{{ number_format($product['price_net'] / 100, 2) }}</span>
+                                        <span class="text-2xl font-bold tabular-nums tracking-tight text-zinc-400 dark:text-zinc-500">{{ BillingMoney::format($product['price_net']) }}</span>
                                     </div>
                                 </div>
                             </div>

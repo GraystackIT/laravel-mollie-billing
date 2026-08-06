@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
@@ -36,10 +37,23 @@ new class extends Component {
         return MollieBilling::resolveBillable(request());
     }
 
+    /**
+     * Livewire actions bypass the portal route middleware, so every action below
+     * that touches the billable authorizes here. Without it a member the host app
+     * denies billing management to could still cancel the tenant's subscription,
+     * end its trial or rewrite its billing address straight from the dashboard.
+     */
+    private function authorizeBillingAction(Billable $billable): void
+    {
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+    }
+
     public function openCountryFix(): void
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
 
         $this->fixCountry = (string) ($billable->getBillingCountry() ?? '');
         $this->fixStreet = (string) ($billable->getBillingStreet() ?? '');
@@ -58,6 +72,8 @@ new class extends Component {
             $this->fixError = __('billing::portal.no_billable');
             return;
         }
+
+        $this->authorizeBillingAction($billable);
 
         $mismatch = $billable->latestOpenCountryMismatch();
         if ($mismatch === null) {
@@ -117,6 +133,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             $service->handle($billable);
             $this->flash = __('billing::portal.flash.resubscribed');
@@ -132,6 +150,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             $billable->cancelBillingSubscription();
             $this->flash = __('billing::portal.flash.cancelled');
@@ -149,6 +169,8 @@ new class extends Component {
         if (! $billable || ! $billable->isOnBillingTrial()) {
             return;
         }
+
+        $this->authorizeBillingAction($billable);
         try {
             // Immediate cancel: trial ends now, Mollie subscription cancelled,
             // status flips to Cancelled with subscription_ends_at = now. The
@@ -170,6 +192,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             $billable->resubscribeBillingPlan();
             $this->flash = __('billing::portal.flash.resubscribed');
@@ -186,6 +210,8 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        $this->authorizeBillingAction($billable);
+
         if ($gate->forceImmediateCharge($billable)) {
             $this->flash = __('billing::portal.flash.force_charge_scheduled');
             $this->flashError = false;
@@ -199,6 +225,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
                 ->cancelScheduledChange($billable);
@@ -227,6 +255,8 @@ new class extends Component {
             $this->couponMessageError = true;
             return;
         }
+
+        $this->authorizeBillingAction($billable);
 
         $catalog = app(SubscriptionCatalogInterface::class);
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
@@ -323,7 +353,6 @@ new class extends Component {
         $status = $b->getBillingSubscriptionStatus();
         $planCode = $b->getBillingSubscriptionPlanCode();
         $interval = $b->getBillingSubscriptionInterval();
-        $currency = config('mollie-billing.currency', 'EUR');
         $addonCodes = $b->getActiveBillingAddonCodes();
 
         $usageTypes = [];
@@ -343,14 +372,15 @@ new class extends Component {
             }
         }
 
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        // Each row renders in its own invoice currency — the billable may have
+        // been charged in more than one over time.
         $invoices = $b->billingInvoices()->latest()->limit(5)->get()->map(fn ($inv) => [
             'date' => BillingTime::display($inv->created_at, $b)->translatedFormat('d. M Y'),
             'kind' => $inv->invoice_kind?->label() ?? '—',
             'kindColor' => $inv->invoice_kind?->color() ?? 'zinc',
-            'net' => $currencySymbol . number_format($inv->amount_net / 100, 2),
-            'vat' => $currencySymbol . number_format($inv->amount_vat / 100, 2),
-            'gross' => $currencySymbol . number_format($inv->amount_gross / 100, 2),
+            'net' => BillingMoney::format($inv->amount_net, $inv->currency),
+            'vat' => BillingMoney::format($inv->amount_vat, $inv->currency),
+            'gross' => BillingMoney::format($inv->amount_gross, $inv->currency),
             'status' => $inv->status->label(),
             'statusColor' => $inv->status->color(),
             'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
@@ -415,7 +445,8 @@ new class extends Component {
                 'ip' => (string) ($openMismatch->tax_country_ip ?? '-'),
                 'allowed_countries' => $allowedFixCountries,
                 'invoice_count' => $mismatchInvoiceCount,
-                'invoice_total_gross' => $currencySymbol . number_format($mismatchInvoiceTotalGross / 100, 2),
+                // Sum across the mismatched invoices, so the configured currency.
+                'invoice_total_gross' => BillingMoney::format($mismatchInvoiceTotalGross),
             ] : null,
             'needsReactivate' => $needsReactivate,
             'reactivateInGrace' => $reactivateInGrace,

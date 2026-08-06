@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Livewire\Component;
 
 new class extends Component {
@@ -276,8 +277,7 @@ new class extends Component {
         $catalog = app(SubscriptionCatalogInterface::class);
         $planCode = $billable?->getBillingSubscriptionPlanCode();
         $interval = $billable?->getBillingSubscriptionInterval() ?? 'monthly';
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
 
         $includedSeats = $planCode ? $catalog->includedSeats($planCode) : 0;
         $seatPriceNet = $planCode ? $catalog->seatPriceNet($planCode, $interval) : null;
@@ -435,7 +435,7 @@ new class extends Component {
                         </div>
                     </div>
                     <div class="mt-3">
-                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($seatPrice / 100, 2) }}</span>
+                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($seatPrice) }}</span>
                     </div>
                     <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                 </flux:card>
@@ -492,21 +492,21 @@ new class extends Component {
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-600 dark:text-zinc-300">
                                             {{ $extraSeats }} {{ __('billing::portal.seats_extra') }}
-                                            <span class="text-zinc-400">&times; {{ $currencySymbol }}{{ number_format($seatPrice / 100, 2) }}</span>
+                                            <span class="text-zinc-400">&times; {{ BillingMoney::format($seatPrice) }}</span>
                                         </span>
-                                        <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ $currencySymbol }}{{ number_format($extraCost / 100, 2) }}</span>
+                                        <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ BillingMoney::format($extraCost) }}</span>
                                     </div>
                                 @endif
                                 @if (($couponDiscountNet ?? 0) > 0)
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.discount') }}</span>
-                                        <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($couponDiscountNet / 100, 2) }}</span>
+                                        <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ BillingMoney::format($couponDiscountNet) }}</span>
                                     </div>
                                 @endif
                                 <flux:separator class="my-1!" />
                                 <div class="flex items-center justify-between">
                                     <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.seats_total_cost') }}</span>
-                                    <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0)) / 100, 2) }}</span>
+                                    <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ BillingMoney::format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0))) }}</span>
                                 </div>
                                 <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
 

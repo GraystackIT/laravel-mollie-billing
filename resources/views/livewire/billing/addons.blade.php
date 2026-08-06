@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Livewire\Component;
 
 new class extends Component {
@@ -273,8 +274,7 @@ new class extends Component {
         $interval = $billable?->getBillingSubscriptionInterval() ?? 'monthly';
         $planCode = $billable?->getBillingSubscriptionPlanCode();
         $activeAddons = $billable?->getActiveBillingAddonCodes() ?? [];
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
 
         $reverseCharge = $billable !== null
             && method_exists($billable, 'usesReverseCharge')
@@ -395,7 +395,7 @@ new class extends Component {
                             @endif
                             <div class="text-right">
                                 <div class="flex items-baseline gap-1">
-                                    <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($addon['price'] / 100, 2) }}</span>
+                                    <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($addon['price']) }}</span>
                                     <span class="text-sm text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }}</span>
                                 </div>
                                 <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
@@ -443,7 +443,7 @@ new class extends Component {
                         <div class="space-y-6">
                             <div class="space-y-2">
                                 <flux:heading size="lg">{{ __('billing::portal.addons_enable_confirm.title') }}</flux:heading>
-                                <flux:text>{{ __('billing::portal.addons_enable_confirm.body', ['addon' => $addon['name'], 'price' => $currencySymbol . number_format($addon['price'] / 100, 2), 'interval' => $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year')]) }}</flux:text>
+                                <flux:text>{{ __('billing::portal.addons_enable_confirm.body', ['addon' => $addon['name'], 'price' => BillingMoney::format($addon['price']), 'interval' => $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year')]) }}</flux:text>
                             </div>
 
                             <div class="space-y-2">
@@ -481,7 +481,7 @@ new class extends Component {
 
                                 @if (($couponDiscounts[$addon['code']] ?? 0) > 0)
                                     <flux:text class="text-xs text-emerald-600 dark:text-emerald-400">
-                                        −{{ $currencySymbol }}{{ number_format(($couponDiscounts[$addon['code']] ?? 0) / 100, 2) }} {{ __('billing::portal.coupon_discount_applied') }}
+                                        −{{ BillingMoney::format($couponDiscounts[$addon['code']] ?? 0) }} {{ __('billing::portal.coupon_discount_applied') }}
                                     </flux:text>
                                 @endif
 
