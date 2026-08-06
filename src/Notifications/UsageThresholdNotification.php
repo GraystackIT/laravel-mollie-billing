@@ -5,19 +5,23 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class UsageThresholdNotification extends Notification
+class UsageThresholdNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly Billable $billable,
         public readonly string $usageType,
         public readonly int $percent,
     ) {
+        $this->initializeBillingQueue();
     }
 
     /**

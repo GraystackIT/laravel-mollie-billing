@@ -5,18 +5,22 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class TrialExpiredNotification extends Notification
+class TrialExpiredNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use UsesBillingQueue;
 
     public function __construct(public readonly Billable $billable)
     {
+        $this->initializeBillingQueue();
     }
 
     /**

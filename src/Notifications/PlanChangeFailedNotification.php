@@ -5,28 +5,22 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
-use Illuminate\Contracts\Queue\ShouldQueue;
 
 class PlanChangeFailedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly Billable $billable,
         public readonly string $paymentId,
     ) {
-        $connection = config('mollie-billing.queue.connection');
-        if (is_string($connection) && $connection !== '') {
-            $this->onConnection($connection);
-        }
-
-        $queue = config('mollie-billing.queue.name');
-        if (is_string($queue) && $queue !== '') {
-            $this->onQueue($queue);
-        }
+        $this->initializeBillingQueue();
     }
 
     /**

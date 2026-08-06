@@ -49,11 +49,24 @@ class CreateSubscription
     }
 
     /**
-     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string,trial_days?:int}  $spec
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string,trial_days?:int,trial_ends_at?:\Carbon\CarbonInterface,paid_period_ends_at?:\Carbon\CarbonInterface}  $spec
      *         `trial_days` is set exclusively by the trial-activation webhook path.
      *         When present and > 0, the Mollie subscription's startDate is pushed
      *         out to `now + trial_days` (no charge during the trial), the local
      *         status is set to Trial, and `trial_ends_at` is populated.
+     *
+     *         `trial_ends_at` is the same thing with an absolute target instead of a
+     *         day count — ResubscribeSubscription uses it to put a cancelled trial
+     *         back on its *original* end date rather than granting a fresh trial.
+     *
+     *         `paid_period_ends_at` anchors Mollie's first recurring charge to the end
+     *         of a period the customer has already paid for. Only the checkout callers
+     *         may omit it: there the first payment just happened, so `now + 1 interval`
+     *         is the correct cadence. ResubscribeSubscription runs mid-grace, where the
+     *         paid period ends *earlier* than that — without the anchor the days
+     *         between the old period end and the restarted cadence go unbilled.
+     *         `subscription_period_starts_at` is back-dated by one interval to match,
+     *         so `nextBillingDate()` agrees with Mollie's schedule.
      */
     public function handle(Billable $billable, array $spec): void
     {
@@ -64,7 +77,13 @@ class CreateSubscription
         $extraSeats = (int) ($spec['extra_seats'] ?? 0);
         $recurringDiscountNet = max(0, (int) ($spec['recurring_discount_net'] ?? 0));
         $trialDays = max(0, (int) ($spec['trial_days'] ?? 0));
-        $isTrial = $trialDays > 0;
+        $trialEndsAt = isset($spec['trial_ends_at'])
+            ? BillingTime::toUtc($spec['trial_ends_at'])
+            : ($trialDays > 0 ? BillingTime::nowUtc()->addDays($trialDays) : null);
+        $isTrial = $trialEndsAt !== null;
+        $paidPeriodEndsAt = isset($spec['paid_period_ends_at'])
+            ? BillingTime::toUtc($spec['paid_period_ends_at'])
+            : null;
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
         $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
@@ -97,11 +116,13 @@ class CreateSubscription
         // Mollie schedules the first recurring charge at $startDate. Default cadence:
         // the first billing period is already paid via the checkout's first-payment,
         // so Mollie's first recurring charge must happen one full period later.
-        // Trial override: first charge fires exactly at trial end (now + trialDays).
+        // Trial override: first charge fires exactly at trial end.
         // Full-coverage override: skip past the discount lifetime.
+        // Anchor override: the caller knows when the already-paid period ends.
         $startDate = match (true) {
-            $isTrial => BillingTime::nowUtc()->addDays($trialDays),
+            $isTrial => $trialEndsAt,
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
+            $paidPeriodEndsAt !== null => $paidPeriodEndsAt,
             $interval === 'yearly' => BillingTime::nowUtc()->addYear(),
             default => BillingTime::nowUtc()->addMonth(),
         };
@@ -125,6 +146,12 @@ class CreateSubscription
         $meta['seat_count'] = $totalSeats;
         $meta['mollie_subscription_id'] = (string) ($subscription->id ?? '');
 
+        // With an anchor the local period must line up with Mollie's schedule: the
+        // period that ends at the anchor started one interval before it, not now.
+        $periodStartsAt = $paidPeriodEndsAt !== null && ! $isTrial
+            ? ($interval === 'yearly' ? $paidPeriodEndsAt->copy()->subYear() : $paidPeriodEndsAt->copy()->subMonth())
+            : BillingTime::nowUtc();
+
         $billable->forceFill([
             'subscription_source' => SubscriptionSource::Mollie,
             'subscription_status' => $isTrial ? SubscriptionStatus::Trial : SubscriptionStatus::Active,
@@ -132,9 +159,9 @@ class CreateSubscription
             'subscription_interval' => SubscriptionInterval::from($interval),
             'active_addon_codes' => $addonCodes,
             'subscription_meta' => $meta,
-            'subscription_period_starts_at' => BillingTime::nowUtc(),
+            'subscription_period_starts_at' => $periodStartsAt,
             'subscription_ends_at' => null,
-            'trial_ends_at' => $isTrial ? BillingTime::nowUtc()->addDays($trialDays) : null,
+            'trial_ends_at' => $trialEndsAt,
         ])->save();
 
         SubscriptionCreated::dispatch($billable, $planCode, $interval);

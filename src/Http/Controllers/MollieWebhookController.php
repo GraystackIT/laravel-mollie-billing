@@ -60,7 +60,7 @@ class MollieWebhookController extends Controller
 
         $reservation = $this->reserve($paymentId);
         if ($reservation === null) {
-            Log::info('Webhook skipped — already processed or in progress', ['payment_id' => $paymentId]);
+            Log::info('Webhook skipped — another delivery for this payment is in progress', ['payment_id' => $paymentId]);
             return response('', 200);
         }
 
@@ -75,13 +75,37 @@ class MollieWebhookController extends Controller
             return response('', 503);
         }
 
+        $outcome = $this->outcomeSignatureFor($payment, $paymentId);
+
+        // Non-terminal status (open/pending/authorized): route() matches no
+        // branch, so nothing happened and nothing may be recorded as processed —
+        // otherwise the genuine terminal delivery would look like a duplicate
+        // and the payment would never be booked.
+        if ($outcome === null) {
+            Log::info('Webhook ignored — payment not in a terminal state yet', [
+                'payment_id' => $paymentId,
+                'status' => $payment->status ?? null,
+            ]);
+            $reservation->delete();
+            return response('', 200);
+        }
+
+        if ($this->outcomeAlreadyProcessed($paymentId, $outcome)) {
+            Log::info('Webhook skipped — this outcome was already processed', [
+                'payment_id' => $paymentId,
+                'outcome' => $outcome,
+            ]);
+            $reservation->delete();
+            return response('', 200);
+        }
+
         $billable = $this->resolveBillableFromMetadata($payment);
 
         try {
             $this->route($payment, $billable);
 
             $reservation->update([
-                'event_signature' => BillingProcessedWebhook::finalSignature($paymentId, (string) ($payment->status ?? 'unknown')),
+                'event_signature' => $outcome,
                 'processed_at' => BillingTime::nowUtc(),
             ]);
 
@@ -98,22 +122,21 @@ class MollieWebhookController extends Controller
         }
     }
 
+    /**
+     * Claim the right to process this payment id right now. The row is written
+     * with the pending signature and rewritten to the delivery's outcome
+     * signature once processing succeeded, so only one delivery of a given
+     * payment can be in flight at a time while later deliveries that carry NEW
+     * information (a terminal status after a non-terminal one, or a refund that
+     * appeared after the paid run) can still claim their turn.
+     */
     protected function reserve(string $paymentId): ?BillingProcessedWebhook
     {
-        $signature = BillingProcessedWebhook::pendingSignature($paymentId);
-
-        $existingFinal = BillingProcessedWebhook::query()
-            ->where('mollie_payment_id', $paymentId)
-            ->where('event_signature', '!=', $signature)
-            ->whereNotNull('processed_at')
-            ->exists();
-
-        if ($existingFinal) {
-            return null;
-        }
-
         $reservation = BillingProcessedWebhook::firstOrCreate(
-            ['mollie_payment_id' => $paymentId, 'event_signature' => $signature],
+            [
+                'mollie_payment_id' => $paymentId,
+                'event_signature' => BillingProcessedWebhook::pendingSignature($paymentId),
+            ],
             ['received_at' => BillingTime::nowUtc()],
         );
 
@@ -122,6 +145,39 @@ class MollieWebhookController extends Controller
         }
 
         return $reservation;
+    }
+
+    /**
+     * Signature describing what this delivery would do: the terminal status plus
+     * the refunded total. Returns null while Mollie reports a non-terminal
+     * status, because such a delivery has no outcome to deduplicate on.
+     */
+    protected function outcomeSignatureFor(object $payment, string $paymentId): ?string
+    {
+        $status = (string) ($payment->status ?? '');
+
+        if (! in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
+            return null;
+        }
+
+        return BillingProcessedWebhook::outcomeSignature(
+            $paymentId,
+            $status,
+            $this->refundedAmount($payment),
+        );
+    }
+
+    /**
+     * True when an earlier delivery already finished processing exactly this
+     * outcome — a genuine duplicate that must not run its side-effects twice.
+     */
+    protected function outcomeAlreadyProcessed(string $paymentId, string $outcome): bool
+    {
+        return BillingProcessedWebhook::query()
+            ->where('mollie_payment_id', $paymentId)
+            ->where('event_signature', $outcome)
+            ->whereNotNull('processed_at')
+            ->exists();
     }
 
     protected function fetchPayment(string $paymentId): object
@@ -194,6 +250,9 @@ class MollieWebhookController extends Controller
 
             if ($type === 'one_time_order') {
                 $this->handleOneTimeOrderPaid($payment, $billable, $metadata);
+                if ($this->hasRefunds($payment)) {
+                    $this->handleRefundWebhook($payment, $billable);
+                }
                 return;
             }
 
@@ -267,9 +326,28 @@ class MollieWebhookController extends Controller
                 return;
             }
 
-            // First checkout payment that never resulted in a subscription.
-            if ($subscriptionId === '' && ! $billable->hasAccessibleBillingSubscription()) {
-                MollieBilling::runAfterCheckout($billable, false);
+            // Aborted checkout payment: a first checkout, a Local→Mollie upgrade
+            // or a stale earlier attempt. None of them carries a Mollie
+            // subscriptionId and none of them can be a recurring-payment
+            // failure — no charge was ever attempted against an existing
+            // subscription. Marking the billable PastDue here would lock the
+            // customer out of the free Local plan they still hold (aborted
+            // upgrade) or out of the subscription a later attempt already
+            // activated (stale first attempt).
+            if ($subscriptionId === '') {
+                if (($metadata['upgrade_from_local'] ?? false) === true
+                    || ! $billable->hasAccessibleBillingSubscription()
+                ) {
+                    MollieBilling::runAfterCheckout($billable, false);
+                    return;
+                }
+
+                Log::info('Aborted checkout payment for a billable that already has an accessible subscription — not treated as a payment failure', [
+                    'payment_id' => $payment->id ?? null,
+                    'status' => $status,
+                    'type' => $type,
+                ]);
+
                 return;
             }
 
@@ -511,6 +589,11 @@ class MollieWebhookController extends Controller
     protected function hasRefunds(object $payment): bool
     {
         return $this->support->hasRefunds($payment);
+    }
+
+    protected function refundedAmount(object $payment): int
+    {
+        return $this->support->refundedAmount($payment);
     }
 
     protected function handleOneTimeOrderPaid(object $payment, Billable $billable, array $metadata): void

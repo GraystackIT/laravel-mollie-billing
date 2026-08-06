@@ -38,11 +38,13 @@
         <flux:spacer />
 
         {{-- App-provided header components (e.g. a language switcher). Keyed by
-             index so Livewire keeps them apart across re-renders. A switcher only
-             has an effect while `mollie-billing.admin_locale` is null — a pinned
-             admin locale wins over whatever the switcher sets. --}}
+             index so Livewire keeps them apart across re-renders — the directive
+             only picks up a literal `key(...)` call, a bare third argument is
+             dropped. A switcher only has an effect while
+             `mollie-billing.admin_locale` is null — a pinned admin locale wins
+             over whatever the switcher sets. --}}
         @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
-            @livewire($headerComponent, [], 'billing-header-'.$i)
+            @livewire($headerComponent, [], key('billing-header-'.$i))
         @endforeach
 
         <flux:dropdown position="bottom" align="end">

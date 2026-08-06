@@ -1,8 +1,10 @@
 <?php
 
-use Carbon\Carbon;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingTime;
+use Illuminate\Database\Eloquent\Model;
 use Livewire\Component;
 
 new class extends Component {
@@ -40,12 +42,23 @@ new class extends Component {
         if ($this->creditUnits <= 0) { $this->error = __('billing::admin.bulk.units_positive'); return; }
         if ($this->creditType === '') { $this->error = __('billing::admin.bulk.select_usage_type'); return; }
 
-        $count = 0;
-        $class::query()->where('subscription_plan_code', $this->planFilter)->each(function ($b) use ($service, &$count): void {
-            $service->credit($b, $this->creditType, $this->creditUnits, 'bulk credit');
-            $count++;
-        });
-        $this->flash = __('billing::admin.bulk.credited', ['count' => $count]);
+        [$count, $failed] = $this->runBatch(
+            $class::query()->where('subscription_plan_code', $this->planFilter),
+            function ($b) use ($service): void {
+                $service->credit($b, $this->creditType, $this->creditUnits, 'bulk credit');
+
+                // Register as purchased balance, exactly like the Credits-coupon path:
+                // otherwise a renewal with rollover disabled discards the credit.
+                if ($b instanceof Model) {
+                    $wallet = $b->getWallet($this->creditType);
+                    if ($wallet !== null) {
+                        WalletUsageService::addPurchasedBalance($wallet, $this->creditUnits);
+                    }
+                }
+            },
+        );
+
+        $this->report($count, $failed, 'credited', 'credited_partial', 'no_matching_billables');
     }
 
     public function extendTrials(): void
@@ -54,12 +67,64 @@ new class extends Component {
         $class = config('mollie-billing.billable_model');
         if (! $class) { $this->error = __('billing::admin.bulk.no_model'); return; }
 
+        $until = BillingTime::nowUtc()->addDays($this->trialDays);
+
+        // Trials only. extendBillingTrialUntil() flips the status to `trial` and, for
+        // Mollie-source subscriptions, PATCHes the live subscription's startDate — run
+        // unfiltered it rewrites the billing schedule of every paying customer on the plan.
+        $query = $class::query()
+            ->where('subscription_plan_code', $this->planFilter)
+            ->where(fn ($w) => $w
+                ->where('subscription_status', SubscriptionStatus::Trial->value)
+                ->orWhere('trial_ends_at', '>', BillingTime::nowUtc()));
+
+        [$count, $failed] = $this->runBatch($query, fn ($b) => $b->extendBillingTrialUntil($until));
+
+        $this->report($count, $failed, 'extended', 'extended_partial', 'no_matching_trials');
+    }
+
+    /**
+     * Walk the batch row by row. Each row does its own Mollie roundtrip, so one
+     * failure must not abort the rest — and the caller has to be able to say how
+     * far it got instead of leaving the operator guessing.
+     *
+     * @return array{0: int, 1: int} applied and failed row counts
+     */
+    private function runBatch(mixed $query, callable $apply): array
+    {
         $count = 0;
-        $class::query()->where('subscription_plan_code', $this->planFilter)->each(function ($b) use (&$count): void {
-            $b->extendBillingTrialUntil(Carbon::now()->addDays($this->trialDays));
-            $count++;
+        $failed = 0;
+
+        $query->chunkById(100, function ($rows) use ($apply, &$count, &$failed): void {
+            foreach ($rows as $b) {
+                try {
+                    $apply($b);
+                    $count++;
+                } catch (\Throwable $e) {
+                    report($e);
+                    $failed++;
+                }
+            }
         });
-        $this->flash = __('billing::admin.bulk.extended', ['count' => $count]);
+
+        return [$count, $failed];
+    }
+
+    private function report(int $count, int $failed, string $okKey, string $partialKey, string $emptyKey): void
+    {
+        if ($failed > 0) {
+            $this->error = __('billing::admin.bulk.'.$partialKey, ['count' => $count, 'failed' => $failed]);
+
+            return;
+        }
+
+        if ($count === 0) {
+            $this->error = __('billing::admin.bulk.'.$emptyKey);
+
+            return;
+        }
+
+        $this->flash = __('billing::admin.bulk.'.$okKey, ['count' => $count]);
     }
 };
 

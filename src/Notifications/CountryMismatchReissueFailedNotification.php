@@ -5,20 +5,24 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class CountryMismatchReissueFailedNotification extends Notification
+class CountryMismatchReissueFailedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly Billable $billable,
         public readonly BillingCountryMismatch $mismatch,
         public readonly string $reason,
     ) {
+        $this->initializeBillingQueue();
     }
 
     /**

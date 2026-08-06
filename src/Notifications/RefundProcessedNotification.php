@@ -5,19 +5,24 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class RefundProcessedNotification extends Notification
+class RefundProcessedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly Billable $billable,
         public readonly BillingInvoice $creditNote,
     ) {
+        $this->initializeBillingQueue();
     }
 
     /**
@@ -30,8 +35,12 @@ class RefundProcessedNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $currency = ($this->creditNote->currency) ?: config('mollie-billing.currency', 'EUR');
-        $amount = number_format(abs((int) $this->creditNote->amount_gross) / 100, 2, ',', '.').' '.$currency;
+        // A credit note carries a negative gross; the copy reads "your refund of €5.00",
+        // so the magnitude is what belongs in the sentence.
+        $amount = BillingMoney::format(
+            abs((int) $this->creditNote->amount_gross),
+            $this->creditNote->currency ?: null,
+        );
 
         return (new MailMessage())
             ->subject(__('billing::notifications.refund_processed.subject', ['amount' => $amount]))

@@ -11,6 +11,15 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionResumed;
 use Illuminate\Database\Eloquent\Model;
 
+/**
+ * Undo a cancellation while the grace period is still running.
+ *
+ * "Undo" is the operative word: resubscribing restores the state the billable was in
+ * before the cancel, it does not start a new subscription. Concretely that means the
+ * already-paid period keeps its boundary (so Mollie's first charge lands there, not one
+ * interval from now), a cancelled trial goes back to being a trial on its original end
+ * date, and a duration-limited access grant keeps its expiry.
+ */
 class ResubscribeSubscription
 {
     public function __construct(
@@ -31,12 +40,17 @@ class ResubscribeSubscription
             throw new \RuntimeException('Cannot resubscribe: grace period has already ended.');
         }
 
+        $meta = $billable->getBillingSubscriptionMeta();
         $isLocal = $billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value;
 
         if ($isLocal) {
+            $restoredEndsAt = $this->endsAtBeforeCancel($meta, $endsAt);
+            unset($meta['cancelled_from']);
+
             $billable->forceFill([
                 'subscription_status' => SubscriptionStatus::Active,
-                'subscription_ends_at' => null,
+                'subscription_ends_at' => $restoredEndsAt,
+                'subscription_meta' => $meta,
             ])->save();
 
             SubscriptionResumed::dispatch($billable);
@@ -50,7 +64,7 @@ class ResubscribeSubscription
             throw new \RuntimeException('Cannot resubscribe: plan or interval missing.');
         }
 
-        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+        $marker = $meta['active_recurring_coupon'] ?? null;
         $recurringDiscountNet = 0;
         if (is_array($marker)) {
             $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $billable->getExtraBillingSeats());
@@ -65,20 +79,65 @@ class ResubscribeSubscription
             $recurringDiscountNet = $this->computeMarkerDiscount($marker, $baseNet);
         }
 
-        $this->createSubscription->handle($billable, [
+        $spec = [
             'plan_code' => $planCode,
             'interval' => $interval,
             'addon_codes' => $billable->getActiveBillingAddonCodes(),
             'extra_seats' => $billable->getExtraBillingSeats(),
             'recurring_discount_net' => $recurringDiscountNet,
-        ]);
+        ];
 
-        $billable->forceFill([
-            'subscription_status' => SubscriptionStatus::Active,
-            'subscription_ends_at' => null,
-        ])->save();
+        $trialEndsAt = $billable->getBillingTrialEndsAt();
+
+        if ($trialEndsAt !== null && $trialEndsAt->isFuture()) {
+            // Cancelled mid-trial (the state a graceful trial cancel and the
+            // country-mismatch flow both produce): nothing has been paid, so the
+            // subscription must go back to being a trial that ends when it always
+            // would have. Activating it instead would hand out a paid-looking
+            // subscription with the first charge a full interval away.
+            $spec['trial_ends_at'] = $trialEndsAt;
+        } else {
+            // Mid-grace: the period the customer paid for runs until $endsAt, so that
+            // is where Mollie's first charge belongs. Letting CreateSubscription fall
+            // back to `now + 1 interval` would give away the remainder of the paid
+            // period a second time.
+            $spec['paid_period_ends_at'] = $endsAt;
+        }
+
+        unset($meta['cancelled_from']);
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        // CreateSubscription writes status (Trial or Active), `trial_ends_at`,
+        // `subscription_ends_at = null` and the period window itself.
+        $this->createSubscription->handle($billable, $spec);
 
         SubscriptionResumed::dispatch($billable);
+    }
+
+    /**
+     * The `subscription_ends_at` the billable had *before* it was cancelled.
+     *
+     * CancelSubscription records it because both graceful branches overwrite the column
+     * with a grace boundary, which makes an unlimited plan and a duration-limited access
+     * grant indistinguishable afterwards. Only a recorded `null` (the plan really had no
+     * expiry) clears the date — with no marker at all, e.g. rows cancelled by an older
+     * release or by the past-due auto-cancel, the surviving expiry is kept. Turning a
+     * finite grant into a perpetual subscription on a guess is the one outcome nothing
+     * downstream can reclaim.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    private function endsAtBeforeCancel(array $meta, \Carbon\CarbonInterface $current): ?\Carbon\CarbonInterface
+    {
+        $recorded = $meta['cancelled_from'] ?? null;
+
+        if (! is_array($recorded) || ! array_key_exists('ends_at', $recorded)) {
+            return $current;
+        }
+
+        return $recorded['ends_at'] !== null
+            ? \Carbon\Carbon::parse((string) $recorded['ends_at'])
+            : null;
     }
 
     /**

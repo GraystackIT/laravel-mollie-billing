@@ -53,8 +53,8 @@ class LocalToMollieUpgradeHandler
         $oldPlan = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
         $oldInterval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
 
-        $invoice = $this->firstPaymentArtifacts->persist($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
-
+        // Priced BEFORE the invoice is persisted: the upgrade charged the
+        // discounted gross, and the invoice header is derived from its line items.
         $pricedCoupon = $this->firstPaymentCouponPricing->price(
             $billable,
             (string) ($metadata['coupon_code'] ?? ''),
@@ -64,6 +64,16 @@ class LocalToMollieUpgradeHandler
             $extraSeats,
         );
         $recurringDiscountNet = $pricedCoupon['recurring_discount_net'] ?? 0;
+
+        $invoice = $this->firstPaymentArtifacts->persist(
+            $payment,
+            $billable,
+            $planCode,
+            $interval,
+            $addonCodes,
+            $extraSeats,
+            $this->firstPaymentArtifacts->couponLineItems($pricedCoupon),
+        );
 
         try {
             $this->createSubscription->handle($billable, [

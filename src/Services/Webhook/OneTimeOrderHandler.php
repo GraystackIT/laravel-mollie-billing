@@ -111,6 +111,27 @@ class OneTimeOrderHandler
             }
         }
 
+        $this->ensureBillingCountry($billable);
+
+        // The line items above are rebuilt from the catalog and from coupons
+        // re-validated right now — a coupon that expired since checkout, a price
+        // an admin changed, a per-billable limit consumed by a parallel order all
+        // make them disagree with what Mollie collected. The payment wins.
+        $expectedNet = $priceNet - $totalDiscountNet;
+        $vat = $this->vatService->calculate(
+            (string) ($billable->getBillingCountry() ?? ''),
+            $expectedNet,
+            $billable,
+        );
+        $lineItems = $this->support->reconcileWithPaidAmount(
+            $payment,
+            $billable,
+            $lineItems,
+            $expectedNet,
+            (int) $vat['gross'],
+            (float) ($vat['rate'] ?? 0.0),
+        );
+
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'one_time_order', $lineItems, $billable);
 
         foreach ($resolvedCoupons as $entry) {

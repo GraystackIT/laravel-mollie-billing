@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -17,6 +18,8 @@ new class extends Component {
     public ?string $flash = null;
     public ?string $flashError = null;
 
+    /** Locked: which mismatch confirmResolve() writes to is decided by openResolve(), not by the browser. */
+    #[Locked]
     public ?int $resolvingId = null;
     public ?string $resolvingChosen = null;
     public ?string $resolvingError = null;

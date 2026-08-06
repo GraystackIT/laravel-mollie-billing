@@ -7,18 +7,30 @@ use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    /** Locked: every action below is scoped to this billable's invoices. */
+    #[Locked]
     public mixed $billableId = null;
+    /** Locked: which invoice the modal refunds is decided by openRefund(), not by the browser. */
+    #[Locked]
     public ?int $refundInvoiceId = null;
     public bool $showRefundModal = false;
-    /** Euro decimal string entered by the admin (e.g. "10.50" or "10,50"). Parsed to cents on submit. */
+    /** Decimal string entered by the admin (e.g. "10.50" or "10,50"). Parsed to cents on submit. */
     public ?string $refundAmount = null;
     public string $refundReason = 'goodwill';
     public ?string $refundText = null;
     public ?string $flash = null;
     public ?string $error = null;
+
+    /**
+     * Locale-grouping characters ICU may emit inside a formatted amount, so an
+     * operator can paste a displayed value straight back into the field:
+     * regular space, NBSP, narrow NBSP (fr), thin space, right single quote (de_CH).
+     */
+    private const GROUPING_CHARS = [' ', "\u{00A0}", "\u{202F}", "\u{2009}", "\u{2019}"];
 
     public function mount(mixed $billableId = null): void { $this->billableId = $billableId; }
 
@@ -30,31 +42,28 @@ new class extends Component {
         $this->showRefundModal = true;
     }
 
-    public function closeRefund(): void
+    /**
+     * The modal's close button and ESC only flip `showRefundModal`, so the reset
+     * has to hang off that property — a `closeRefund()` action would never run.
+     */
+    public function updatedShowRefundModal(bool $value): void
     {
-        $this->showRefundModal = false;
-        $this->reset(['refundInvoiceId', 'refundAmount', 'refundText']);
+        if (! $value) {
+            $this->reset(['refundInvoiceId', 'refundAmount', 'refundText', 'error']);
+        }
     }
 
     /**
-     * Parse the euro string entered in the modal to integer cents. Accepts both `.`
-     * and `,` as decimal separator, optional thousands separator stripped. Empty
-     * string / null means "full refund" — return null. Anything that does not parse
-     * to a non-negative number returns false so the caller can flash an error.
+     * Parse the decimal string entered in the modal to integer cents. Accepts both
+     * `.` and `,` as decimal separator plus the locale grouping characters the
+     * formatter emits; anything else (including scientific notation, which would
+     * silently inflate the amount) returns false so the caller can flash an error.
      */
-    private function parseEuroToCents(?string $input): null|int|false
+    private function parseAmountToCents(string $input): int|false
     {
-        if ($input === null) {
-            return null;
-        }
-        $trimmed = trim($input);
-        if ($trimmed === '') {
-            return null;
-        }
-
         // Strip thousands separators heuristically. We accept "1.234,56" and "1,234.56"
         // by removing every separator that is not the last decimal mark.
-        $normalized = str_replace([' ', "\u{00A0}"], '', $trimmed);
+        $normalized = str_replace(self::GROUPING_CHARS, '', trim($input));
         $lastComma = strrpos($normalized, ',');
         $lastDot = strrpos($normalized, '.');
         $decimalPos = max($lastComma === false ? -1 : $lastComma, $lastDot === false ? -1 : $lastDot);
@@ -70,15 +79,12 @@ new class extends Component {
             $normalized = preg_replace('/[.,]/', '', $normalized);
         }
 
-        if (! is_numeric($normalized)) {
-            return false;
-        }
-        $value = (float) $normalized;
-        if ($value < 0) {
+        // Digits only, optional 1–2 decimals. `is_numeric` would accept "1e3".
+        if (preg_match('/^\d+(?:\.\d{1,2})?$/', $normalized) !== 1) {
             return false;
         }
 
-        return (int) round($value * 100);
+        return (int) round(((float) $normalized) * 100);
     }
 
     public function billable(): mixed
@@ -103,62 +109,116 @@ new class extends Component {
         ];
     }
 
-    public function refund(RefundInvoiceService $service): void
+    /**
+     * Resolve the invoice this modal addresses, scoped to the locked billable.
+     * Sets `$error` and returns null when the target cannot be refunded.
+     */
+    private function refundTarget(): mixed
     {
-        $this->flash = $this->error = null;
-
         $b = $this->billable();
         if (! $b) {
             $this->error = __('billing::admin.common.billable_not_found');
-            return;
+            return null;
         }
 
         if (! $this->refundInvoiceId) {
             $this->error = __('billing::admin.billables.invoices.flash.no_invoice_selected');
-            return;
-        }
-
-        $reason = RefundReasonCode::tryFrom($this->refundReason);
-        if ($reason === null) {
-            $this->error = __('billing::admin.billables.invoices.flash.invalid_reason');
-            return;
-        }
-
-        $amountCents = $this->parseEuroToCents($this->refundAmount);
-        if ($amountCents === false) {
-            $this->error = __('billing::admin.billables.invoices.flash.invalid_amount');
-            return;
-        }
-        if ($amountCents !== null && $amountCents <= 0) {
-            $this->error = __('billing::admin.billables.invoices.flash.amount_positive');
-            return;
+            return null;
         }
 
         $invoice = $b->billingInvoices()->where('id', $this->refundInvoiceId)->first();
         if (! $invoice) {
             $this->error = __('billing::admin.billables.invoices.flash.invoice_not_found');
-            return;
+            return null;
         }
 
         if ($invoice->isFullyRefunded()) {
             $this->error = __('billing::admin.billables.invoices.flash.already_refunded');
+            return null;
+        }
+
+        return $invoice;
+    }
+
+    private function refundReasonCode(): ?RefundReasonCode
+    {
+        $reason = RefundReasonCode::tryFrom($this->refundReason);
+        if ($reason === null) {
+            $this->error = __('billing::admin.billables.invoices.flash.invalid_reason');
+        }
+
+        return $reason;
+    }
+
+    /**
+     * Partial refund. The amount is mandatory: an empty field must never fall
+     * through to a full refund — that is what refundFull() is for.
+     */
+    public function refund(RefundInvoiceService $service): void
+    {
+        $this->flash = $this->error = null;
+
+        $reason = $this->refundReasonCode();
+        if ($reason === null) {
+            return;
+        }
+
+        $invoice = $this->refundTarget();
+        if (! $invoice) {
+            return;
+        }
+
+        $raw = trim((string) ($this->refundAmount ?? ''));
+        if ($raw === '') {
+            $this->error = __('billing::admin.billables.invoices.flash.amount_required');
+            return;
+        }
+
+        $amountCents = $this->parseAmountToCents($raw);
+        if ($amountCents === false) {
+            $this->error = __('billing::admin.billables.invoices.flash.invalid_amount', [
+                'example' => BillingMoney::number(10.5),
+            ]);
+            return;
+        }
+        if ($amountCents <= 0) {
+            $this->error = __('billing::admin.billables.invoices.flash.amount_positive');
             return;
         }
 
         $remaining = $invoice->remainingRefundableNet();
-        if ($amountCents !== null && $amountCents > $remaining) {
+        if ($amountCents > $remaining) {
             $this->error = __('billing::admin.billables.invoices.flash.exceeds_remaining', [
                 'amount' => BillingMoney::format($remaining, $invoice->currency),
             ]);
             return;
         }
 
+        $this->runRefund($invoice, fn () => $service->refundPartially($invoice, $amountCents, $reason, $this->refundText));
+    }
+
+    /** Refund the whole remaining net — a deliberate, separately confirmed action. */
+    public function refundFull(RefundInvoiceService $service): void
+    {
+        $this->flash = $this->error = null;
+
+        $reason = $this->refundReasonCode();
+        if ($reason === null) {
+            return;
+        }
+
+        $invoice = $this->refundTarget();
+        if (! $invoice) {
+            return;
+        }
+
+        $this->runRefund($invoice, fn () => $service->refundFully($invoice, $reason, $this->refundText));
+    }
+
+    private function runRefund(mixed $invoice, callable $refund): void
+    {
         try {
-            if ($amountCents !== null) {
-                $service->refundPartially($invoice, $amountCents, $reason, $this->refundText);
-            } else {
-                $service->refundFully($invoice, $reason, $this->refundText);
-            }
+            $refund();
             $this->flash = __('billing::admin.billables.invoices.flash.refund_processed');
             $this->showRefundModal = false;
             $this->reset(['refundInvoiceId', 'refundAmount', 'refundText']);
@@ -251,10 +311,10 @@ new class extends Component {
                                 <flux:table.cell><x-mollie-billing::admin.enum-badge :value="$inv->invoice_kind" /></flux:table.cell>
                                 <flux:table.cell align="end">
                                     <div class="space-y-0.5">
-                                        <x-mollie-billing::admin.money :cents="$inv->amount_net" />
+                                        <x-mollie-billing::admin.money :cents="$inv->amount_net" :currency="$inv->currency" />
                                         @if ($partiallyRefunded)
                                             <div class="text-xs text-amber-600 dark:text-amber-400">
-                                                −<x-mollie-billing::admin.money :cents="$effectiveRefundedNet" /> {{ __('billing::admin.billables.invoices.refunded_suffix') }}
+                                                −<x-mollie-billing::admin.money :cents="$effectiveRefundedNet" :currency="$inv->currency" /> {{ __('billing::admin.billables.invoices.refunded_suffix') }}
                                             </div>
                                         @elseif ($fullyRefunded)
                                             <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.billables.invoices.fully_refunded') }}</div>
@@ -262,7 +322,7 @@ new class extends Component {
                                     </div>
                                 </flux:table.cell>
                                 <flux:table.cell align="end">
-                                         <div><x-mollie-billing::admin.money :cents="$inv->amount_gross" /></div>
+                                         <div><x-mollie-billing::admin.money :cents="$inv->amount_gross" :currency="$inv->currency" /></div>
                                 </flux:table.cell>
                                 <flux:table.cell>
                                     <x-mollie-billing::admin.enum-badge :value="$inv->status" />
@@ -348,15 +408,18 @@ new class extends Component {
 
                 <form wire:submit="refund" class="space-y-4">
                     <div class="grid grid-cols-1 gap-4 md:grid-cols-3 md:items-start">
+                        {{-- Free text, not type="number": the hint shows a locale-formatted
+                             example ("10,50" under de) and a number input's sanitizer would
+                             hand us an empty string for it. --}}
                         <flux:input
-                            type="number"
-                            step="0.01"
-                            min="0.01"
-                            :max="number_format($remainingNet / 100, 2, '.', '')"
+                            type="text"
+                            inputmode="decimal"
+                            autocomplete="off"
                             wire:model="refundAmount"
                             :label="__('billing::admin.billables.invoices.modal.amount_label')"
-                            :placeholder="__('billing::admin.billables.invoices.modal.amount_placeholder')"
+                            :placeholder="BillingMoney::number(10.5)"
                             :suffix="$currencyCode"
+                            required
                         />
                         <flux:select wire:model="refundReason" :label="__('billing::admin.billables.invoices.modal.reason_label')">
                             @foreach (RefundReasonCode::cases() as $reason)
@@ -375,11 +438,22 @@ new class extends Component {
                             'remaining' => $moneyFormat($remainingNet),
                         ]) }}
                     </flux:text>
-                    <div class="flex justify-end gap-2 pt-2">
+                    <div class="flex flex-wrap justify-end gap-2 pt-2">
                         <flux:modal.close>
                             <flux:button type="button" size="sm" variant="ghost">{{ __('billing::admin.common.cancel') }}</flux:button>
                         </flux:modal.close>
-                        <flux:button type="submit" size="sm" variant="danger" icon="arrow-uturn-left">{{ __('billing::admin.billables.invoices.modal.submit') }}</flux:button>
+                        {{-- Refunding everything is its own confirmed action, so an empty
+                             amount field can never be mistaken for that intent. --}}
+                        <flux:button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            icon="banknotes"
+                            wire:click="refundFull"
+                            wire:confirm="{{ __('billing::admin.billables.invoices.modal.refund_full_confirm', ['amount' => $moneyFormat($remainingNet)]) }}"
+                            wire:loading.attr="disabled"
+                        >{{ __('billing::admin.billables.invoices.modal.refund_full', ['amount' => $moneyFormat($remainingNet)]) }}</flux:button>
+                        <flux:button type="submit" size="sm" variant="danger" icon="arrow-uturn-left" wire:loading.attr="disabled">{{ __('billing::admin.billables.invoices.modal.submit') }}</flux:button>
                     </div>
                 </form>
             </div>

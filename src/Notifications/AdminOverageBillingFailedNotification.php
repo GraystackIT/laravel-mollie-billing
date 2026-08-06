@@ -5,19 +5,38 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Notifications;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
+use GraystackIT\MollieBilling\Notifications\Concerns\ReadsPendingOverage;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 use Throwable;
 
-class AdminOverageBillingFailedNotification extends Notification
+class AdminOverageBillingFailedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use ReadsPendingOverage;
+    use UsesBillingQueue;
+
+    public readonly ?int $amountGross;
+
+    public readonly ?string $currency;
+
+    public readonly string $reason;
 
     public function __construct(
         public readonly Billable $billable,
-        public readonly Throwable $exception,
+        Throwable $exception,
     ) {
+        [$this->amountGross, $this->currency] = $this->pendingOverageAmount($billable);
+
+        // Only the message is kept: a queued notification is serialized, and an
+        // exception trace routinely carries closures, which PHP refuses to serialize.
+        $this->reason = $exception->getMessage();
+
+        $this->initializeBillingQueue();
     }
 
     /**
@@ -31,11 +50,9 @@ class AdminOverageBillingFailedNotification extends Notification
     public function toMail(object $notifiable): MailMessage
     {
         $customer = $this->billable->getBillingName();
-        $invoice = $this->billable->latestBillingInvoice();
-        $currency = ($invoice?->currency) ?: config('mollie-billing.currency', 'EUR');
-        $amount = $invoice
-            ? number_format(((int) $invoice->amount_gross) / 100, 2, ',', '.').' '.$currency
-            : 'unknown';
+        $amount = $this->amountGross !== null
+            ? BillingMoney::format($this->amountGross, $this->currency)
+            : (string) __('billing::notifications.amount_unknown');
 
         return (new MailMessage())
             ->subject(__('billing::notifications.admin_overage_billing_failed.subject', ['customer' => $customer]))
@@ -43,7 +60,7 @@ class AdminOverageBillingFailedNotification extends Notification
                 'customer' => $customer,
                 'amount' => $amount,
             ]))
-            ->line('Exception: '.$this->exception->getMessage())
+            ->line('Exception: '.$this->reason)
             ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
     }
 
@@ -55,7 +72,9 @@ class AdminOverageBillingFailedNotification extends Notification
         return [
             'type' => 'admin_overage_billing_failed',
             'customer' => $this->billable->getBillingName(),
-            'exception' => $this->exception->getMessage(),
+            'amount_gross' => $this->amountGross,
+            'currency' => $this->currency,
+            'exception' => $this->reason,
         ];
     }
 }

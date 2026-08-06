@@ -39,7 +39,17 @@ new class extends Component {
         $this->flash = $this->error = null;
         $class = config('mollie-billing.billable_model');
         $b = $class ? $class::find($id) : null;
-        if ($b) { $service->cancel($b); $this->flash = __('billing::admin.scheduled_changes.cancelled'); }
+        if (! $b) { $this->error = __('billing::admin.common.billable_not_found'); return; }
+
+        // Both service methods return silently when there is nothing scheduled —
+        // check first so the operator is not told about a change that never existed.
+        if (! $this->hasScheduledChange($b)) {
+            $this->error = __('billing::admin.scheduled_changes.nothing_scheduled');
+            return;
+        }
+
+        $service->cancel($b);
+        $this->flash = __('billing::admin.scheduled_changes.cancelled');
     }
 
     public function applyNow(mixed $id, ScheduleSubscriptionChange $service): void
@@ -47,10 +57,38 @@ new class extends Component {
         $this->flash = $this->error = null;
         $class = config('mollie-billing.billable_model');
         $b = $class ? $class::find($id) : null;
-        if ($b) {
-            try { $service->apply($b); $this->flash = __('billing::admin.scheduled_changes.applied'); }
-            catch (\Throwable $e) { report($e); $this->error = __('billing::admin.scheduled_changes.apply_failed'); }
+        if (! $b) { $this->error = __('billing::admin.common.billable_not_found'); return; }
+
+        if (! $this->hasScheduledChange($b)) {
+            $this->error = __('billing::admin.scheduled_changes.nothing_scheduled');
+            return;
         }
+
+        try {
+            $service->apply($b);
+        } catch (\Throwable $e) {
+            report($e);
+            $this->error = __('billing::admin.scheduled_changes.apply_failed');
+            return;
+        }
+
+        // apply() clears the marker on success only; a still-present marker means
+        // the change did not go through even though nothing was thrown.
+        if ($this->hasScheduledChange($b)) {
+            $this->error = __('billing::admin.scheduled_changes.apply_incomplete');
+            return;
+        }
+
+        $this->flash = __('billing::admin.scheduled_changes.applied');
+    }
+
+    private function hasScheduledChange(mixed $billable): bool
+    {
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $billable->refresh();
+        }
+
+        return ($billable->getBillingSubscriptionMeta()['scheduled_change'] ?? null) !== null;
     }
 
     public function with(): array
@@ -208,9 +246,9 @@ new class extends Component {
                                 <flux:table.cell align="end">
                                     <div class="flex justify-end gap-1">
                                         <flux:tooltip :content="__('billing::admin.scheduled_changes.cancel_tooltip')">
-                                            <flux:button size="xs" variant="ghost" icon="x-mark" :aria-label="__('billing::admin.scheduled_changes.cancel_aria')" wire:click="cancel('{{ $b->getKey() }}')" wire:confirm="{{ __('billing::admin.scheduled_changes.cancel_confirm') }}" />
+                                            <flux:button size="xs" variant="ghost" icon="x-mark" :aria-label="__('billing::admin.scheduled_changes.cancel_aria')" wire:click='cancel({{ \Illuminate\Support\Js::from($b->getKey()) }})' wire:confirm="{{ __('billing::admin.scheduled_changes.cancel_confirm') }}" />
                                         </flux:tooltip>
-                                        <flux:button size="xs" variant="primary" icon="play" wire:click="applyNow('{{ $b->getKey() }}')" wire:confirm="{{ __('billing::admin.scheduled_changes.apply_confirm') }}">{{ __('billing::admin.scheduled_changes.apply_now') }}</flux:button>
+                                        <flux:button size="xs" variant="primary" icon="play" wire:click='applyNow({{ \Illuminate\Support\Js::from($b->getKey()) }})' wire:confirm="{{ __('billing::admin.scheduled_changes.apply_confirm') }}">{{ __('billing::admin.scheduled_changes.apply_now') }}</flux:button>
                                     </div>
                                 </flux:table.cell>
                             </flux:table.row>

@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\TrialConverted;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\SubscriptionPaymentFailedNotification;
+use GraystackIT\MollieBilling\Notifications\TrialConvertedNotification;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
@@ -95,32 +96,14 @@ class SubscriptionPaymentHandler
 
         $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
         if ($couponDiscountNet > 0) {
-            $vatRate = (float) ($vat['rate'] ?? 0.0);
-            $vatAmount = (int) round($couponDiscountNet * $vatRate / 100);
-            $lineItems[] = [
-                'kind' => 'coupon',
-                'description' => 'Coupon discount',
-                'qty' => 1,
-                'unit_price_net' => -$couponDiscountNet,
-                'amount_net' => -$couponDiscountNet,
-                'vat_rate' => $vatRate,
-                'vat_amount' => -$vatAmount,
-                'amount_gross' => -($couponDiscountNet + $vatAmount),
-            ];
+            $markerCode = (string) ($this->couponService->getActiveRecurringCouponMarker($billable)['code'] ?? '');
+            $lineItems[] = $this->couponLine($couponDiscountNet, $markerCode);
         }
         if ($pendingTrialCoupon !== null && $pendingTrialDiscountNet > 0) {
-            $vatRate = (float) ($vat['rate'] ?? 0.0);
-            $vatAmount = (int) round($pendingTrialDiscountNet * $vatRate / 100);
-            $lineItems[] = [
-                'kind' => 'coupon',
-                'description' => 'Coupon '.$pendingTrialCoupon['coupon']->code,
-                'qty' => 1,
-                'unit_price_net' => -$pendingTrialDiscountNet,
-                'amount_net' => -$pendingTrialDiscountNet,
-                'vat_rate' => $vatRate,
-                'vat_amount' => -$vatAmount,
-                'amount_gross' => -($pendingTrialDiscountNet + $vatAmount),
-            ];
+            $lineItems[] = $this->couponLine(
+                $pendingTrialDiscountNet,
+                (string) $pendingTrialCoupon['coupon']->code,
+            );
         }
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
 
@@ -239,12 +222,35 @@ class SubscriptionPaymentHandler
 
         event(new PaymentSucceeded($billable, $invoice));
 
+        if ($wasTrial) {
+            $this->notifyTrialConverted($billable, $invoice);
+        }
+
         $this->support->notifyInvoiceAvailable($billable, $invoice);
     }
 
+    /**
+     * A recurring charge failed. Only a billable that is actually being billed
+     * can go PastDue: `Cancelled` still inside its grace period, `Expired`,
+     * `New` and already-`PastDue`-with-markers states must survive untouched —
+     * a stale delivery for one of those would otherwise revoke access (or reset
+     * `past_due_since` and thus the auto-cancel clock) for a charge that no
+     * longer relates to the current subscription.
+     */
     public function failed(object $payment, Billable $billable): void
     {
         if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $status = $billable->getBillingSubscriptionStatus();
+        if (! in_array($status, [SubscriptionStatus::Active, SubscriptionStatus::Trial, SubscriptionStatus::PastDue], true)) {
+            Log::info('Recurring payment failure ignored — subscription is not in a billable state', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'current_status' => $status->value,
+            ]);
+
             return;
         }
 
@@ -268,6 +274,54 @@ class SubscriptionPaymentHandler
         if (! empty($recipients)) {
             Notification::send($recipients, MollieBilling::resolveNotification(SubscriptionPaymentFailedNotification::class, $billable, (string) $payment->id));
         }
+    }
+
+    /**
+     * The first recurring charge after a trial has settled. `TrialConverted` is
+     * the app-facing event; the notification goes to the billable's billing
+     * admins like every other customer-facing billing mail. The invoice of this
+     * exact charge is handed over so the mail states the amount that was really
+     * collected instead of looking up "the latest invoice" later.
+     */
+    protected function notifyTrialConverted(Billable $billable, \GraystackIT\MollieBilling\Models\BillingInvoice $invoice): void
+    {
+        $recipients = MollieBilling::notifyBillingAdmins($billable);
+        $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
+
+        if ($recipients === []) {
+            return;
+        }
+
+        Notification::send(
+            $recipients,
+            MollieBilling::resolveNotification(TrialConvertedNotification::class, $billable, $invoice),
+        );
+    }
+
+    /**
+     * Negative discount line for a renewal invoice.
+     *
+     * Emits the canonical key set (`label`, `quantity`, `unit_price`,
+     * `unit_price_net`, `total_net`) the other handlers use: InvoiceService
+     * derives the header net from `total_net` and cross-checks it against
+     * `quantity × unit_price`, so a line missing those keys is silently dropped
+     * from both totals — the header would stay undiscounted while the persisted
+     * lines carry the discount, and the mismatch guard could never fire. `label`
+     * keeps the PDF from rendering the raw kind ("coupon") as the line title.
+     *
+     * @return array<string, mixed>
+     */
+    protected function couponLine(int $discountNet, string $couponCode): array
+    {
+        return [
+            'kind' => 'coupon',
+            'code' => $couponCode !== '' ? $couponCode : null,
+            'label' => $couponCode !== '' ? 'Coupon '.$couponCode : 'Coupon discount',
+            'quantity' => 1,
+            'unit_price' => -$discountNet,
+            'unit_price_net' => -$discountNet,
+            'total_net' => -$discountNet,
+        ];
     }
 
     /**

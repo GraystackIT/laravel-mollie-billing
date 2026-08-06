@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class FirstPaymentHandler
@@ -39,6 +40,28 @@ class FirstPaymentHandler
             return;
         }
 
+        // The duplicate guard, the invoice and CreateSubscription run under a row
+        // lock on the billable: reserve() only serializes deliveries of the SAME
+        // payment id, so two different first payments (two checkout tabs) would
+        // otherwise both pass hasAccessibleBillingSubscription(), both write an
+        // invoice (different mollie_payment_id — the unique index does not help)
+        // and both create a Mollie subscription, the second forceFill hiding the
+        // first one's id. The sequential case is already handled via
+        // DuplicatePaymentReceived; the lock closes the concurrent window.
+        DB::transaction(function () use ($payment, $billable, $metadata): void {
+            $billable->newQuery()->whereKey($billable->getKey())->lockForUpdate()->first();
+            $billable->refresh();
+
+            $this->activate($payment, $billable, $metadata);
+        });
+    }
+
+    /**
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function activate(object $payment, Billable $billable, array $metadata): void
+    {
+        /** @var Model&Billable $billable */
         $planCode = (string) ($metadata['plan_code'] ?? '');
         $interval = (string) ($metadata['interval'] ?? 'monthly');
         $addonCodes = (array) ($metadata['addon_codes'] ?? []);
@@ -67,8 +90,8 @@ class FirstPaymentHandler
             return;
         }
 
-        $invoice = $this->firstPaymentArtifacts->persist($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats);
-
+        // Priced BEFORE the invoice is persisted: the checkout charged the
+        // discounted gross, and the invoice header is derived from its line items.
         $pricedCoupon = $this->firstPaymentCouponPricing->price(
             $billable,
             (string) ($metadata['coupon_code'] ?? ''),
@@ -78,6 +101,16 @@ class FirstPaymentHandler
             $extraSeats,
         );
         $recurringDiscountNet = $pricedCoupon['recurring_discount_net'] ?? 0;
+
+        $invoice = $this->firstPaymentArtifacts->persist(
+            $payment,
+            $billable,
+            $planCode,
+            $interval,
+            $addonCodes,
+            $extraSeats,
+            $this->firstPaymentArtifacts->couponLineItems($pricedCoupon),
+        );
 
         try {
             $this->createSubscription->handle($billable, [

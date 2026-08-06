@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\PlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
@@ -25,6 +26,7 @@ class SingleChargeHandler
         protected readonly WebhookSupport $support,
         protected readonly InvoiceService $salesInvoiceService,
         protected readonly UpdateSubscription $updateSubscription,
+        protected readonly WalletUsageService $walletService,
     ) {
     }
 
@@ -65,6 +67,8 @@ class SingleChargeHandler
             $meta = $billable->getBillingSubscriptionMeta();
             unset($meta['usage_overage'], $meta['usage_overage_status'], $meta['usage_overage_attempts']);
             $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            $this->settleOverageWallets($billable, $lineItems);
 
             event(new OverageCharged($billable, $invoice, $lineItems));
         }
@@ -114,11 +118,55 @@ class SingleChargeHandler
         $this->support->notifyInvoiceAvailable($billable, $invoice);
     }
 
+    /**
+     * The overage charge settled, so the units the customer just paid for are no
+     * longer owed: credit them back so the negative balance disappears. Without
+     * this the customer pays cash for the units and still loses them from the
+     * next period's quota (rollover types add the new quota on top of the
+     * negative balance), a plan change in the same window feeds the already-paid
+     * negative balance into WalletPlanChangeAdjuster and charges it a second
+     * time, and for non-rollover types the renewal reset makes a failed charge
+     * indistinguishable from a paid one.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     */
+    protected function settleOverageWallets(Billable $billable, array $lineItems): void
+    {
+        foreach ($lineItems as $line) {
+            if (($line['kind'] ?? 'overage') !== 'overage') {
+                continue;
+            }
+
+            $usageType = (string) ($line['type'] ?? $line['code'] ?? '');
+            $quantity = (int) ($line['quantity'] ?? 0);
+
+            if ($usageType === '' || $quantity <= 0) {
+                continue;
+            }
+
+            try {
+                $this->walletService->credit($billable, $usageType, $quantity, 'overage_settlement');
+            } catch (\Throwable $e) {
+                Log::error('Wallet credit after a paid overage charge failed — negative balance stays and would be charged again', [
+                    'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                    'usage_type' => $usageType,
+                    'quantity' => $quantity,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
     public function failed(object $payment, Billable $billable, string $type): void
     {
         if ($type === 'overage' && $billable instanceof Model) {
+            // The FQCN, not getMorphClass(): RetryUsageOverageChargeJob resolves
+            // the billable via `class_exists($this->billableClass)` and returns
+            // silently otherwise, so a morph alias would make the retry (and with
+            // it the attempt counting, past_due transition and notification) a
+            // permanent no-op. Mirrors PrepareUsageOverageJob.
             RetryUsageOverageChargeJob::dispatch(
-                $billable->getMorphClass(),
+                $billable::class,
                 $billable->getKey(),
                 1,
             );

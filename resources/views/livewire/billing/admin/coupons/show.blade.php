@@ -147,12 +147,12 @@ new class extends Component {
                         @if ($coupon->discount_type === DiscountType::Percentage)
                             {{ $coupon->discount_value }}%
                         @else
-                            <x-mollie-billing::admin.money :cents="$coupon->discount_value ?? 0" />
+                            <x-mollie-billing::admin.money :cents="$coupon->discount_value ?? 0" :currency="$coupon->currency" />
                         @endif
                     </x-mollie-billing::admin.detail>
                     @if ($coupon->minimum_order_amount_net)
                         <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.minimum_order')" mono>
-                            <x-mollie-billing::admin.money :cents="$coupon->minimum_order_amount_net" />
+                            <x-mollie-billing::admin.money :cents="$coupon->minimum_order_amount_net" :currency="$coupon->currency" />
                         </x-mollie-billing::admin.detail>
                     @endif
                 @endif
@@ -259,7 +259,7 @@ new class extends Component {
                                 <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($r->applied_at)?->format('Y-m-d H:i') }}</flux:table.cell>
                                 <flux:table.cell variant="strong" class="font-mono">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</flux:table.cell>
                                 <flux:table.cell align="end">
-                                    <x-mollie-billing::admin.money :cents="$r->discount_amount_net ?? 0" />
+                                    <x-mollie-billing::admin.money :cents="$r->discount_amount_net ?? 0" :currency="$coupon->currency" />
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

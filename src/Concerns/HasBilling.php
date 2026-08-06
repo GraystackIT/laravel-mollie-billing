@@ -409,10 +409,25 @@ trait HasBilling
         return in_array($this->subscription_plan_code, $planCodes, true);
     }
 
+    /**
+     * The single gate `RequireActiveSubscription`, `FeatureAccess` and the checkout
+     * guard all read.
+     *
+     * `Active` consults `subscription_ends_at` because an Active subscription can carry
+     * a hard expiry: an AccessGrant coupon and `ActivateLocalSubscription($durationDays)`
+     * both write `status = Active` with `subscription_ends_at = now + duration`. Without
+     * this a 30-day grant granted access forever, kept recharging wallet quotas, and
+     * blocked the customer from re-checking-out because they still "have an active
+     * subscription". Mollie-source subscriptions always keep `ends_at = null`, so they
+     * are unaffected.
+     *
+     * `Trial` is deliberately unconditional — a trial's boundary is `trial_ends_at`,
+     * which ProcessTrialLifecycleJob owns.
+     */
     public function hasAccessibleBillingSubscription(): bool
     {
         return match ($this->subscription_status) {
-            SubscriptionStatus::Active => true,
+            SubscriptionStatus::Active => ! $this->hasExpiredBillingSubscription(),
             SubscriptionStatus::Trial => true,
             SubscriptionStatus::Cancelled => $this->subscription_ends_at?->isFuture() ?? false,
             SubscriptionStatus::PastDue, SubscriptionStatus::Expired => false,

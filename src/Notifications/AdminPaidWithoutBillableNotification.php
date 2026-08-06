@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Notifications;
 
+use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
@@ -15,9 +17,10 @@ use Illuminate\Notifications\Notification;
  * no invoice / wallet credit / subscription transition could be applied —
  * needs manual reconciliation.
  */
-class AdminPaidWithoutBillableNotification extends Notification
+class AdminPaidWithoutBillableNotification extends Notification implements ShouldQueue
 {
     use Queueable;
+    use UsesBillingQueue;
 
     public function __construct(
         public readonly string $paymentId,
@@ -25,7 +28,9 @@ class AdminPaidWithoutBillableNotification extends Notification
         public readonly ?string $billableId,
         public readonly ?int $amountCents,
         public readonly ?string $currency,
-    ) {}
+    ) {
+        $this->initializeBillingQueue();
+    }
 
     /**
      * @return array<int, string>

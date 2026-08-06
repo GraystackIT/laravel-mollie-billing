@@ -7,10 +7,13 @@ namespace GraystackIT\MollieBilling\Services\Webhook;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
 
 class FirstPaymentCouponPricing
 {
@@ -107,11 +110,76 @@ class FirstPaymentCouponPricing
                 'invoice_id' => $invoiceId,
             ]);
         } catch (\Throwable $e) {
-            Log::warning('First-payment coupon redemption failed', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'coupon_code' => (string) $priced['coupon']->code,
-                'error' => $e->getMessage(),
-            ]);
+            $this->compensateFailedRedemption($billable, $priced, $e);
         }
+    }
+
+    /**
+     * Redemption runs AFTER the Mollie subscription has been created, and for a
+     * Recurring coupon that subscription already carries the discounted amount.
+     * A failed redemption (global cap consumed by a concurrent redeem, transient
+     * DB error) therefore cannot just be logged away: without the
+     * `active_recurring_coupon` marker every renewal would compute a 0 discount,
+     * invoice the full price and fire PaymentAmountMismatch for the rest of the
+     * subscription's life.
+     *
+     * We self-heal the pricing side by setting the marker the successful
+     * redemption would have set, and surface the missing audit row to the admins
+     * — the CouponRedemption itself cannot be created behind the coupon's own
+     * limit check.
+     *
+     * @param  array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount_net: int, recurring_discount_net: int, order_amount_net: int}  $priced
+     */
+    protected function compensateFailedRedemption(Billable $billable, array $priced, \Throwable $error): void
+    {
+        $coupon = $priced['coupon'];
+        $isRecurring = $coupon->type === CouponType::Recurring
+            && (int) ($priced['recurring_discount_net'] ?? 0) > 0;
+
+        if ($isRecurring) {
+            try {
+                $this->couponService->applyRecurringMarker(
+                    $coupon,
+                    $billable,
+                    (int) $priced['order_amount_net'],
+                );
+            } catch (\Throwable $markerError) {
+                Log::error('First-payment coupon redemption failed AND the recurring marker could not be set — Mollie charges the discount but local pricing does not', [
+                    'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                    'coupon_code' => (string) $coupon->code,
+                    'error' => $markerError->getMessage(),
+                ]);
+            }
+        }
+
+        Log::error('First-payment coupon redemption failed after the subscription was created', [
+            'billable' => $billable instanceof Model ? $billable->getKey() : null,
+            'coupon_code' => (string) $coupon->code,
+            'recurring_marker_applied' => $isRecurring,
+            'error' => $error->getMessage(),
+        ]);
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send(
+            $admins,
+            MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'Coupon redemption failed after the subscription was created — the redemption record is missing',
+                [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'coupon_code' => (string) $coupon->code,
+                    'discount_net' => (int) $priced['discount_net'],
+                    'recurring_discount_net' => (int) ($priced['recurring_discount_net'] ?? 0),
+                    'recurring_marker_applied' => $isRecurring,
+                    'error' => $error->getMessage(),
+                ],
+            ),
+        );
     }
 }

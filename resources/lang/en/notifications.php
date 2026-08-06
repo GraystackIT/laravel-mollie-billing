@@ -1,6 +1,9 @@
 <?php
 
 return [
+    // Stands in for :amount when the amount behind a failed charge cannot be
+    // resolved, so no notification ever renders a wrong or zero amount.
+    'amount_unknown' => 'an unknown amount',
     'trial_ending_soon' => [
         'subject' => 'Your trial ends in :days days',
         'body_with_mandate' => 'Your :app trial ends on :date. We will automatically convert it to a paid subscription using your saved payment method — no action required.',
@@ -64,5 +67,10 @@ return [
     'plan_change_failed' => [
         'subject' => 'Your plan upgrade could not be completed',
         'body' => 'We were unable to process the payment for your plan upgrade. Please update your payment method and try again, or contact :app support.',
+    ],
+    'admin_plan_change_failed' => [
+        'subject' => '[Admin] Plan change operation failed permanently',
+        'reason' => 'Reason: :reason',
+        'context' => 'Context: :context',
     ],
 ];

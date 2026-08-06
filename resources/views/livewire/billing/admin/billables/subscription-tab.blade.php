@@ -8,13 +8,23 @@ use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    /** Locked: every action below acts on the billable whose tab is open. */
+    #[Locked]
     public mixed $billableId = null;
     public ?string $trialUntil = null;
     public ?string $flash = null;
     public ?string $error = null;
+
+    /**
+     * Stable, locale-independent reason persisted on the redemption and carried in
+     * the GrantRevoked event. Translated only for display — a localized string in
+     * the column would make the same action unqueryable across locales.
+     */
+    private const REVOKE_REASON = 'admin_revoke';
 
     public function mount(mixed $billableId = null): void { $this->billableId = $billableId; }
 
@@ -46,10 +56,39 @@ new class extends Component {
             $this->error = __('billing::admin.billables.subscription.flash.pick_trial_date');
             return;
         }
-        $this->billable()?->extendBillingTrialUntil(Carbon::parse($this->trialUntil));
+
+        // The date input carries a bare date, and `trial_ends_at` is stored and
+        // displayed in UTC. Parsing it in app.timezone would store a different
+        // instant than the operator picked and than the tab reads back.
+        try {
+            $until = Carbon::createFromFormat('!Y-m-d', $this->trialUntil, 'UTC');
+        } catch (\Throwable) {
+            $until = null;
+        }
+
+        if ($until === null) {
+            $this->error = __('billing::admin.billables.subscription.flash.trial_date_invalid');
+            return;
+        }
+
+        // extendBillingTrialUntil() keeps max(previous, until) and skips the status
+        // flip for non-future targets, so a past date is a silent no-op.
+        if (! $until->isFuture()) {
+            $this->error = __('billing::admin.billables.subscription.flash.trial_date_past');
+            return;
+        }
+
+        $b = $this->billable();
+        if (! $b) {
+            $this->error = __('billing::admin.common.billable_not_found');
+            return;
+        }
+
+        $b->extendBillingTrialUntil($until);
         $this->flash = __('billing::admin.billables.subscription.flash.trial_extended', [
-            'date' => Carbon::parse($this->trialUntil)->format('Y-m-d'),
+            'date' => $until->format('Y-m-d H:i'),
         ]);
+        $this->reset('trialUntil');
     }
 
     public function cancelAtPeriodEnd(CancelSubscription $service): void
@@ -89,8 +128,10 @@ new class extends Component {
         }
 
         try {
-            $service->revokeGrant($redemption, __('billing::admin.billables.subscription.flash.revoked_by_admin'));
-            $this->flash = __('billing::admin.billables.subscription.flash.grant_revoked');
+            $service->revokeGrant($redemption, self::REVOKE_REASON);
+            $this->flash = __('billing::admin.billables.subscription.flash.grant_revoked', [
+                'reason' => __('billing::admin.billables.subscription.revoke_reason.'.self::REVOKE_REASON),
+            ]);
         } catch (\Throwable $e) {
             report($e);
             $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
@@ -177,6 +218,7 @@ new class extends Component {
                             <flux:input
                                 type="date"
                                 wire:model="trialUntil"
+                                :min="BillingTime::nowUtc()->addDay()->format('Y-m-d')"
                                 :label="__('billing::admin.billables.subscription.extend_trial_label')"
                                 :description="__('billing::admin.billables.subscription.extend_trial_description')"
                                 class="flex-1"

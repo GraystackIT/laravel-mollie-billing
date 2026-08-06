@@ -2,9 +2,13 @@
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use Illuminate\Database\Eloquent\Model;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    /** Locked: the credit always lands on the billable whose tab is open. */
+    #[Locked]
     public mixed $billableId = null;
     public string $creditType = '';
     public int $creditUnits = 0;
@@ -43,6 +47,17 @@ new class extends Component {
             return;
         }
         $service->credit($b, $this->creditType, $this->creditUnits, $this->creditReason ?: __('billing::admin.billables.wallet.default_reason'));
+
+        // Register as purchased balance, exactly like the Credits-coupon path: a
+        // renewal with rollover disabled rebuilds the wallet from quota + purchased
+        // remaining, so an unregistered goodwill credit would silently evaporate.
+        if ($b instanceof Model) {
+            $wallet = $b->getWallet($this->creditType);
+            if ($wallet !== null) {
+                WalletUsageService::addPurchasedBalance($wallet, $this->creditUnits);
+            }
+        }
+
         $this->flash = __('billing::admin.billables.wallet.flash.credited', [
             'units' => $this->creditUnits,
             'type' => $this->creditType,

@@ -25,10 +25,27 @@ use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class MandateOnlyPaymentHandler
 {
+    /**
+     * Subscription states a mandate-only activation may run from. `New` is the
+     * regular first checkout; PastDue, Expired and a Cancelled subscription
+     * whose grace period has run out are recovery checkouts — StartSubscriptionCheckout
+     * admits all of them (it gates only on `! hasAccessibleBillingSubscription()`)
+     * and routes 100%-coupon and trial checkouts through this handler, and
+     * FirstPaymentHandler allows the same set. Anything still accessible was
+     * already caught in activateLocked() and never reaches the activation.
+     */
+    protected const ACTIVATABLE_STATES = [
+        SubscriptionStatus::New,
+        SubscriptionStatus::PastDue,
+        SubscriptionStatus::Expired,
+        SubscriptionStatus::Cancelled,
+    ];
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly SubscriptionCatalogInterface $catalog,
@@ -99,6 +116,23 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        // Row lock around duplicate check + activation: reserve() only serializes
+        // deliveries of the same payment id, so two mandate-only payments for the
+        // same billable (two checkout tabs) could otherwise both pass the
+        // duplicate check and each create a Mollie subscription.
+        DB::transaction(function () use ($payment, $billable, $metadata): void {
+            $billable->newQuery()->whereKey($billable->getKey())->lockForUpdate()->first();
+
+            $this->activateLocked($payment, $billable, $metadata);
+        });
+    }
+
+    /**
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function activateLocked(object $payment, Billable $billable, array $metadata): void
+    {
+        /** @var Model&Billable $billable */
         $planCode = (string) ($metadata['pending_subscription_plan_code'] ?? '');
         $interval = (string) ($metadata['pending_subscription_interval'] ?? 'monthly');
         $addonCodes = (array) ($metadata['pending_subscription_addon_codes'] ?? []);
@@ -162,8 +196,8 @@ class MandateOnlyPaymentHandler
     ): void {
         /** @var Model&Billable $billable */
 
-        if ($billable->getBillingSubscriptionStatus() !== SubscriptionStatus::New) {
-            Log::info('Mandate-only coupon activation skipped — billable already past initial state', [
+        if (! in_array($billable->getBillingSubscriptionStatus(), self::ACTIVATABLE_STATES, true)) {
+            Log::info('Mandate-only coupon activation skipped — subscription is not in an activatable state', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $payment->id ?? null,
                 'current_status' => $billable->getBillingSubscriptionStatus()->value,
@@ -234,13 +268,29 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        // A Recurring coupon keeps discounting the renewals, so its discount must
+        // reach CreateSubscription — and the marker has to exist *before* that
+        // call: at 100% coverage Mollie cannot accept amount 0, so CreateSubscription
+        // sends the full price and instead defers startDate past the marker's
+        // valid_until. Without the marker it falls back to "one period from now"
+        // and charges the full price from the second period on. redeem() below
+        // re-writes the same marker; that is idempotent.
+        $recurringDiscountNet = (int) ($pricedCoupon['recurring_discount_net'] ?? 0);
+        if ($recurringDiscountNet > 0) {
+            $this->couponService->applyRecurringMarker(
+                $pricedCoupon['coupon'],
+                $billable,
+                (int) $pricedCoupon['order_amount_net'],
+            );
+        }
+
         try {
             $this->createSubscription->handle($billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'recurring_discount_net' => 0,
+                'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
@@ -301,8 +351,8 @@ class MandateOnlyPaymentHandler
     ): void {
         /** @var Model&Billable $billable */
 
-        if ($billable->getBillingSubscriptionStatus() !== SubscriptionStatus::New) {
-            Log::info('Mandate-only trial activation skipped — billable already past initial state', [
+        if (! in_array($billable->getBillingSubscriptionStatus(), self::ACTIVATABLE_STATES, true)) {
+            Log::info('Mandate-only trial activation skipped — subscription is not in an activatable state', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $payment->id ?? null,
                 'current_status' => $billable->getBillingSubscriptionStatus()->value,
