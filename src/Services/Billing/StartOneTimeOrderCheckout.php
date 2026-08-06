@@ -186,6 +186,7 @@ class StartOneTimeOrderCheckout
                 'origin' => 'products',
                 self::ORDER_TOKEN_PARAM => $orderToken,
             ])),
+            locale: MollieBilling::mollieLocale(),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: array_merge($customMetadata, [
                 'billable_type' => $billable->getMorphClass(),

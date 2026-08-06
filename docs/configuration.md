@@ -98,7 +98,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | Key | ENV | Description |
 |-----|-----|-------------|
 | `redirect_after_return` | `BILLING_REDIRECT_AFTER_RETURN` | URL to redirect to after a successful Mollie return. |
-| `require_payment_method_for_zero_amount` | `BILLING_REQUIRE_PM_ZERO` | When `true`, a mandate is required even for 0 € plans (so later paid changes can charge it). Default: `true`. |
+| `checkout_country_fallback` | `BILLING_CHECKOUT_COUNTRY_FALLBACK` | VAT country used when a billable has none persisted at the moment something has to be priced. Distinct from `default_billing_country`, which only pre-selects a dropdown: this one decides the rate actually charged. Checkout and webhook read the same key, because when they disagreed a paid order could not be invoiced at all and Mollie re-delivered the webhook forever. Default: `DE`. |
 | `currency` | `BILLING_CURRENCY` | ISO-4217 code. Amounts in `mollie-billing-plans.php` and coupons are interpreted in this currency. Default: `EUR`. |
 | `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Optional override for the display symbol used by `Support\BillingMoney` wherever an amount is rendered. Unset (the default) derives the symbol from `currency`: `EUR` → `€`, `USD` → `$`, `GBP` → `£`, anything else → the ISO code followed by a space. Only set this when the derived symbol is wrong for your currency (e.g. `Fr.` for CHF) — a value here applies to the configured currency regardless of which one that is. |
 | `allow_overage_default` | `BILLING_ALLOW_OVERAGE` | Default for `Billable::allowsBillingOverage()`. Overridable per billable. |
@@ -150,6 +150,7 @@ PDF invoices are generated locally via `elegantly/laravel-invoices` and stored o
 ```php
 'invoices' => [
     'disk' => env('BILLING_INVOICE_DISK', 'local'),
+    'locale' => env('BILLING_INVOICE_LOCALE'),   // null → app.fallback_locale
     'path' => 'billing/invoices',           // → {disk}/billing/invoices/{YYYY/MM}/{serial}.pdf
     'logo' => env('BILLING_INVOICE_LOGO'),
     'seller' => [ /* company master data */ ],
@@ -172,7 +173,9 @@ Supported `logo` formats:
 - absolute path: `/var/www/public/logo.png`
 - data URI: `data:image/png;base64,…`
 
-Serial numbers are issued atomically by `InvoiceNumberGenerator`.
+Serial numbers are issued atomically by `InvoiceNumberGenerator`: the number is allocated and the row inserted inside one transaction, so two concurrent webhooks cannot mint the same serial.
+
+`invoices.locale` pins the language a PDF renders in. This matters because `InvoiceDownloadController` regenerates a PDF whose stored file has gone missing — without a pinned locale that regeneration follows whatever locale the triggering request ran in, so a German invoice re-downloaded from the admin panel came back with English labels and `€1,234.56`, permanently overwriting the archived document. Each invoice also stores its own `locale`, which wins over the config value; rows created before that column existed fall back to it.
 
 ### IP geolocation
 
@@ -239,6 +242,11 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
 ### VAT / OSS
 
 ```php
+'vat' => [
+    'seller_country' => env('BILLING_SELLER_COUNTRY'),                    // ISO-3166-1 alpha-2
+    'require_seller_country' => env('BILLING_REQUIRE_SELLER_COUNTRY', false),
+],
+
 'vat_rate_overrides' => [
     // 'DE' => 19.0,
 ],
@@ -254,6 +262,8 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
 ],
 ```
 
+- `vat.seller_country` — **your own** country. Reverse charge under Art. 196 VAT Directive applies to cross-border B2B supplies only, so this is what separates a domestic business customer (owes domestic VAT) from a cross-border one (0%, reverse charge). Falls back to `invoices.seller.address.country`. While neither is set the package logs a warning and grants reverse charge on VIES validity alone — which invoices a customer in your own country at 0% and under-declares your domestic output VAT. `VatCalculationService::reverseChargeApplies()` is the single decision point; the portal, the checkout and the preview all read it, so the label and the charged amount cannot diverge.
+- `vat.require_seller_country` — set `true` to refuse reverse charge entirely while no seller country is known, instead of the backwards-compatible fallback above.
 - `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code.
 - `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list.
 - `oss.disk` — Laravel filesystem disk where generated OSS protocol CSVs are stored. Works with any S3-compatible private bucket; the admin portal hands out a short-lived presigned URL via `Storage::temporaryUrl()`. When `null`, the disk configured under `invoices.disk` is reused.

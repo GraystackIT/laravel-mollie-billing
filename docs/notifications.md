@@ -64,9 +64,18 @@ php artisan vendor:publish --tag=billing-lang
 
 Subjects, body lines, button labels and signatures live in `resources/lang/vendor/billing/{locale}/notifications.php`. Laravel resolves vendor translations first, so app overrides take precedence over package defaults. See [translations.md](translations.md) for the full file list and placeholder reference.
 
+### Queueing
+
+Every shipped notification implements `ShouldQueue` and is routed onto the connection and queue from the [`queue`](configuration.md#queue) config block, so a mail-transport outage can no longer fail the webhook that triggered it — previously an SMTP error propagated out of `Notification::send()`, the webhook returned 500, Mollie re-delivered and the state event fired twice.
+
+Two consequences for replacement classes registered via `resolveNotificationUsing()`:
+
+- They must be serializable. `Illuminate\Notifications\Notification` already uses `SerializesModels`, so model properties are reloaded from the database when the job runs — capture any point-in-time value (an amount, an end date) in the constructor rather than reading it in `toMail()`. That is also why the package's own notifications no longer hold a `Throwable`: exception traces routinely carry closures, which makes the job permanently unqueueable.
+- Money is rendered through `Support\BillingMoney`, using the invoice's own currency where one is stored.
+
 ### Choosing the locale per recipient
 
-The package does not introduce its own "notification language" setting. Notifications render in whatever locale is active when `Notification::send()` runs — which is usually `config('app.locale')` for queued jobs and webhook handlers (no HTTP request → no auto-detected request locale).
+The package does not introduce its own "notification language" setting. Notifications render in whatever locale is active when `Notification::send()` runs — which for queued notifications is `config('app.locale')` at the moment the job executes, not the locale of the request that queued it.
 
 To send each customer their preferred language, implement Laravel's `Illuminate\Contracts\Translation\HasLocalePreference` on the **notifiable** that `notifyBillingAdminsUsing()` / `notifyAdminUsing()` returns (typically your `User` model). Laravel calls `preferredLocale()` automatically before rendering the mail and switches the translator for the duration of that notification — no changes needed inside the package.
 
@@ -127,8 +136,8 @@ From that point on, every `Notification::send(..., new TrialEndingSoonNotificati
 | `TrialExpiredNotification` | Trial passed without a successful first charge — billable was flipped to `PastDue`. | `(Billable $billable)` |
 | `InvoiceAvailableNotification` | A new invoice (subscription renewal, one-time order, plan-change proration) has been generated. | `(Billable $billable, BillingInvoice $invoice)` |
 | `SubscriptionCancelledNotification` | Subscription cancelled (immediate or end-of-period). | `(Billable $billable)` |
-| `SubscriptionPaymentFailedNotification` | Recurring subscription payment failed. | `(Billable $billable, string $paymentId)` |
-| `OverageBillingFailedNotification` | Wallet-overage charge failed after retries. | `(Billable $billable)` |
+| `SubscriptionPaymentFailedNotification` | Recurring subscription payment failed. The amount, currency and failure date come from the Mollie payment at the call site — a failed payment produces no invoice, so looking one up returned an unrelated document (last month's renewal, or a credit note's negative gross). | `(Billable $billable, string $paymentId, ?int $amountGross = null, ?string $currency = null, ?CarbonInterface $failedAt = null)` |
+| `OverageBillingFailedNotification` | Wallet-overage charge failed after retries. The amount is read from `subscription_meta['usage_overage']` — the failed charge never produced an invoice, so the previous version quoted an unrelated one. | `(Billable $billable)` |
 | `UsageThresholdNotification` | Wallet for a usage type hit the configured warning threshold (`usage_threshold_percent`). | `(Billable $billable, string $type, int $percent)` |
 | `PlanChangeFailedNotification` | Immediate-prorata or scheduled plan change failed at the Mollie payment step. | `(Billable $billable, string $paymentId)` |
 | `RefundProcessedNotification` | Refund / credit note issued. | `(Billable $billable, BillingCreditNote $creditNote)` |

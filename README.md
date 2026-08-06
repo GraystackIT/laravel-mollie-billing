@@ -860,15 +860,23 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use GraystackIT\MollieBilling\Testing\BillableStateHelper;
 
-MollieBilling::fake();
+$fake = MollieBilling::fake();
 
 $billable = TestBillable::factory()->create();
 BillableStateHelper::onPaidPlan($billable, 'pro', 'monthly');
 
 $billable->recordBillingUsage('api_calls', 1_500);
 
-MollieBilling::assertSubscriptionStarted($billable);
+$fake->assertSubscriptionCreated($billable);
 ```
+
+`MollieBilling::fake()` swaps in Mollie's `MockMollieClient`, so nothing reaches the
+network — register the responses your flow needs on the returned fake. It also fakes
+events and notifications, which is what backs `assertEventDispatched()` and
+`assertNotificationSent()`. Call `MollieBilling::resetFake()` in `tearDown()`: the fake
+is memoised per application instance, and the package's callbacks
+(`resolveBillableUsing()`, `authUsing()`, …) live in statics that otherwise outlive the
+test that registered them.
 
 ## Commands
 

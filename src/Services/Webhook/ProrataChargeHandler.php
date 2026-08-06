@@ -129,17 +129,28 @@ class ProrataChargeHandler
             return;
         }
 
-        // Wallet rebalance FIRST: WalletPlanChangeAdjuster derives the prorated
-        // old-plan entitlement from getBillingPeriodStartsAt()/nextBillingDate(),
-        // so it has to see the OLD period and interval. Running it after the
-        // switch below made the elapsed fraction ~0, the prorated old quota 0 and
-        // therefore every unit consumed in the old period "excess" — which the
-        // preview, validateWalletUsage and the synchronous path never showed, and
-        // which can even trigger an unannounced overage charge.
+        // The prorated old-plan entitlement is measured over the OLD period, so the
+        // boundaries are captured here and passed explicitly. Running the adjuster
+        // after the switch below (or letting it re-derive them) made the elapsed
+        // fraction ~0, the prorated old quota 0 and therefore every unit consumed
+        // in the old period "excess" — which the preview, validateWalletUsage and
+        // the synchronous path never showed, and which can even trigger an
+        // unannounced overage charge.
         $billable->refresh();
+        $oldPeriodStart = $billable->getBillingPeriodStartsAt();
+        $oldPeriodEnd = $billable->nextBillingDate();
+
         if ($startsNewPeriod) {
             try {
-                $this->walletAdjuster->adjust($billable, $oldPlan, $oldInterval, $newPlanCode, $newIntervalCode);
+                $this->walletAdjuster->adjust(
+                    $billable,
+                    $oldPlan,
+                    $oldInterval,
+                    $newPlanCode,
+                    $newIntervalCode,
+                    $oldPeriodStart,
+                    $oldPeriodEnd,
+                );
             } catch (\Throwable $e) {
                 Log::warning('Wallet adjust during prorata charge phase 2 failed', [
                     'billable' => $billable->getKey(),

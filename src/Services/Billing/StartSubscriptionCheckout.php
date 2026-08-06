@@ -163,6 +163,7 @@ class StartSubscriptionCheckout
             description: "Subscription {$request['plan_code']}",
             amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            locale: MollieBilling::mollieLocale(),
             cancelUrl: route(BillingRoute::checkout(), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: [

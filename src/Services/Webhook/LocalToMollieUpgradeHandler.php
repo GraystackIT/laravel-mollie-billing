@@ -53,6 +53,12 @@ class LocalToMollieUpgradeHandler
         $oldPlan = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
         $oldInterval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
 
+        // The Local period the customer is upgrading out of. CreateSubscription
+        // rewrites the period below, so the wallet adjuster has to be handed these
+        // rather than re-deriving them from a model that already moved on.
+        $oldPeriodStart = $billable->getBillingPeriodStartsAt();
+        $oldPeriodEnd = $billable->nextBillingDate();
+
         // Priced BEFORE the invoice is persisted: the upgrade charged the
         // discounted gross, and the invoice header is derived from its line items.
         $pricedCoupon = $this->firstPaymentCouponPricing->price(
@@ -111,7 +117,15 @@ class LocalToMollieUpgradeHandler
         }
 
         if ($oldPlan !== '') {
-            $this->walletAdjuster->adjust($billable, $oldPlan, $oldInterval, $planCode, $interval);
+            $this->walletAdjuster->adjust(
+                $billable,
+                $oldPlan,
+                $oldInterval,
+                $planCode,
+                $interval,
+                $oldPeriodStart,
+                $oldPeriodEnd,
+            );
         }
 
         $this->firstPaymentArtifacts->runCountryMatchCheck($billable);

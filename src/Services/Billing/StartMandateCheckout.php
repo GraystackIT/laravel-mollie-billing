@@ -65,6 +65,7 @@ class StartMandateCheckout
             description: 'Payment method authorisation',
             amount: new Money($currency, '0.00'),
             redirectUrl: $redirectUrl ?? route(BillingRoute::name('return'), $urlParams),
+            locale: MollieBilling::mollieLocale(),
             cancelUrl: route(BillingRoute::checkout(), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: $metadata,

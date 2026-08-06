@@ -69,7 +69,6 @@ return [
 
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN'),
 
-    'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),
 
     // Package-wide currency (ISO-4217). Prices in mollie-billing-plans.php and coupon amounts
     // are interpreted in this currency. Mollie payments, sales invoices and BillingInvoice

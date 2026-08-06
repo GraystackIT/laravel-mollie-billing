@@ -285,6 +285,12 @@ class UpdateSubscription
 
                 $meta['seat_count'] = $newSeats;
 
+                // The wallet adjuster prorates the old plan's entitlement over the
+                // OLD period, so capture it before the write below moves the interval
+                // (and, on a downgrade to free, the period start itself).
+                $oldPeriodStart = $billable->getBillingPeriodStartsAt();
+                $oldPeriodEnd = $billable->nextBillingDate();
+
                 $billable->forceFill([
                     'subscription_plan_code' => $context->newPlan,
                     'subscription_interval' => $context->newInterval,
@@ -299,7 +305,15 @@ class UpdateSubscription
             }
 
             if ($context->planChanged || $context->intervalChanged) {
-                $this->walletAdjuster->adjust($billable, $context->currentPlan, $context->currentInterval, $context->newPlan, $context->newInterval);
+                $this->walletAdjuster->adjust(
+                    $billable,
+                    $context->currentPlan,
+                    $context->currentInterval,
+                    $context->newPlan,
+                    $context->newInterval,
+                    $oldPeriodStart,
+                    $oldPeriodEnd,
+                );
             }
 
             return $this->dispatchEventsAndBuildResult(
@@ -550,6 +564,11 @@ class UpdateSubscription
             $isMollie = $billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value;
             $context = SubscriptionChangeContext::fromPendingArray($pendingData, $isMollie);
 
+            // Captured before any write below moves the interval — the wallet
+            // adjuster prorates the old entitlement over the OLD period.
+            $oldPeriodStart = $billable->getBillingPeriodStartsAt();
+            $oldPeriodEnd = $billable->nextBillingDate();
+
             // Re-validate: state may have changed between Phase 1 and webhook.
             $this->validator->validate($billable, $context);
 
@@ -605,6 +624,8 @@ class UpdateSubscription
                     $context->currentInterval,
                     $context->newPlan,
                     $context->newInterval,
+                    $oldPeriodStart,
+                    $oldPeriodEnd,
                 );
             }
 
