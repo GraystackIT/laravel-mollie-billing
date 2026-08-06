@@ -6,9 +6,16 @@ use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    /**
+     * Locked: deactivate() and delete() act on whatever this points at. Livewire
+     * re-resolves a model property from the checksummed snapshot rather than from
+     * the incoming value, so this turns a silently ignored retarget into a refusal.
+     */
+    #[Locked]
     public ?Coupon $coupon = null;
     public ?string $flash = null;
     public ?string $error = null;

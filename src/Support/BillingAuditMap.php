@@ -330,6 +330,10 @@ final class BillingAuditMap
                 fn (Events\CountryMismatchResolved $e): array => [
                     'declared_country' => $e->mismatch->tax_country_user,
                     'payment_country' => $e->mismatch->tax_country_payment,
+                    // The two things an auditor actually asks of this entry: which
+                    // country won, and on what grounds. Neither was recorded.
+                    'chosen_country' => $e->mismatch->chosen_country,
+                    'justification' => self::truncate($e->justification),
                     'mismatch_id' => $e->mismatch->getKey(),
                 ]),
         ];

@@ -4,9 +4,12 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Billing\MollieMandateInspector;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MandateSummary;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    /** Locked: this page and the child tabs it keys are scoped to the routed billable. */
+    #[Locked]
     public mixed $billable = null;
 
     public function mount(array $routeParameters = []): void
