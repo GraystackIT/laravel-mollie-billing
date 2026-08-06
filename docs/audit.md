@@ -65,6 +65,13 @@ so an app that uses activitylog for its own purposes never bleeds into the billi
 | `usage` | wallet credited, wallet reset, usage limit reached |
 | `compliance` | country mismatch flagged / resolved |
 
+`country_mismatch_resolved` is the one entry worth knowing the shape of, because it is the only
+one that records a human tax decision rather than a system transition. Its `replace` values carry
+`declared_country`, `payment_country`, `chosen_country`, `mismatch_id` and `justification` — the
+operator's free-text reason, truncated. Resolution accepts any ISO-2 code, including one that
+matches none of the three signals, so the justification is what makes the entry answerable to an
+auditor. A resolution triggered from the customer-facing modal carries no justification.
+
 ## Configuration
 
 ```php
