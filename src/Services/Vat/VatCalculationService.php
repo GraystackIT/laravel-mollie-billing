@@ -9,25 +9,52 @@ use GraystackIT\MollieBilling\Exceptions\NonEuCountryException;
 use GraystackIT\MollieBilling\Exceptions\ViesUnavailableException;
 use GraystackIT\MollieBilling\Models\BillingVatValidation;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
 use Mpociot\VatCalculator\Exceptions\VATCheckUnavailableException;
 use Mpociot\VatCalculator\VatCalculator;
 use Throwable;
 
 class VatCalculationService
 {
+    /**
+     * SOAP fault codes VIES returns for input it considers unusable. Everything
+     * else it faults on (MS_UNAVAILABLE, SERVER_BUSY, TIMEOUT,
+     * GLOBAL_MAX_CONCURRENT_REQ, …) is a service problem, not a verdict.
+     *
+     * @var list<string>
+     */
+    private const VIES_INVALID_INPUT_FAULTS = [
+        'INVALID_INPUT',
+        'INVALID_REQUESTER_INFO',
+    ];
+
+    /** Guard so an unconfigured seller country is logged once per process, not per line item. */
+    private static bool $sellerCountryWarned = false;
+
     public function __construct(
         private readonly VatCalculator $vatCalculator,
     ) {
+        // mpociot swallows VIES SoapFaults and returns `false` unless this flag is
+        // set, which makes "service down" indistinguishable from "number invalid".
+        // Turning it on here means every calculator resolved from the container
+        // afterwards reports outages as exceptions; `fetchViesDetails()` still
+        // treats a bare `false` as an outage for calculators built before this ran.
+        if (config('vat_calculator.forward_soap_faults') !== true) {
+            config(['vat_calculator.forward_soap_faults' => true]);
+        }
     }
 
     /**
      * Compute VAT split for a given net amount and country.
      *
-     * Reverse-charge (0% VAT) applies if the billable has a current VIES
-     * validation marked `valid=true` for an EU country. The validation must
-     * be persisted on the billable beforehand via `validateAndPersist()` —
-     * `calculate()` itself never talks to VIES.
+     * Reverse-charge (0% VAT) applies only to *cross-border* EU B2B supplies
+     * (Art. 196 VAT Directive): the billable needs a persisted VIES validation
+     * marked `valid=true` **and** its country must differ from the merchant's own
+     * country. A domestic B2B supply carries domestic VAT even with a valid VAT
+     * number. The validation must be persisted on the billable beforehand via
+     * `validateAndPersist()` — `calculate()` itself never talks to VIES.
      *
      * @return array{net:int,vat:int,gross:int,rate:float}
      */
@@ -41,9 +68,10 @@ class VatCalculationService
             throw new NonEuCountryException($country);
         }
 
-        // B2B reverse-charge: an active VIES validation marked valid=true
-        // for an EU country -> no VAT. Reads only persisted state, never VIES.
-        if ($isEu && $billable !== null && $this->hasActiveReverseCharge($billable)) {
+        // B2B reverse-charge: an active VIES validation marked valid=true for an
+        // EU country other than the seller's -> no VAT. Reads only persisted
+        // state, never VIES.
+        if ($isEu && $billable !== null && $this->reverseChargeApplies($billable, $country)) {
             return [
                 'net' => $netAmount,
                 'vat' => 0,
@@ -90,27 +118,89 @@ class VatCalculationService
     }
 
     /**
+     * The merchant's own country as an ISO alpha-2 code, or null when it is not
+     * configured. Reverse-charge cannot be decided without it.
+     *
+     * Sources: `mollie-billing.vat.seller_country` (explicit), falling back to
+     * the address already used for invoice PDFs
+     * (`mollie-billing.invoices.seller.address.country`).
+     */
+    public function sellerCountry(): ?string
+    {
+        foreach ([
+            config('mollie-billing.vat.seller_country'),
+            config('mollie-billing.invoices.seller.address.country'),
+        ] as $candidate) {
+            if (is_string($candidate) && trim($candidate) !== '') {
+                return CountryResolver::isoFromVatPrefix($candidate);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Single decision point for "is this supply reverse-charged?".
+     *
+     * Used by `calculate()` and intended for every price-display site so the
+     * label and the amount can never disagree. Three conditions must hold:
+     *
+     *   1. the billable has a persisted VIES validation marked `valid=true`;
+     *   2. the VAT number's country differs from the merchant's own country;
+     *   3. the country being invoiced differs from the merchant's own country.
+     *
+     * (2) and (3) are the same test in practice — `ValidatesVatNumber` forces the
+     * VAT prefix to equal the billing country — but both are checked because
+     * either one alone would let a domestic supply through if the two ever
+     * diverge (imported data, an admin edit).
+     *
+     * When the seller country is not configured we cannot tell domestic from
+     * cross-border. `mollie-billing.vat.require_seller_country` decides that case:
+     * `true` refuses reverse-charge (safe: VAT is charged and can be corrected),
+     * `false` (default, backwards compatible) grants it and logs a warning.
+     */
+    public function reverseChargeApplies(Billable $billable, ?string $invoiceCountry = null): bool
+    {
+        $validation = $this->currentValidation($billable);
+        if ($validation === null) {
+            return false;
+        }
+
+        $sellerCountry = $this->sellerCountry();
+
+        if ($sellerCountry === null) {
+            $this->warnAboutMissingSellerCountry();
+
+            return config('mollie-billing.vat.require_seller_country', false) !== true;
+        }
+
+        $customerCountry = $this->validationCountry($validation);
+        if ($customerCountry !== null && CountryResolver::sameCountry($customerCountry, $sellerCountry)) {
+            return false;
+        }
+
+        $invoiceCountry ??= $billable->getBillingCountry();
+        if ($invoiceCountry !== null && CountryResolver::sameCountry($invoiceCountry, $sellerCountry)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
      * Live VIES validation without persistence. For Livewire form feedback.
+     *
+     * A VIES outage is never reported as "invalid": it raises
+     * ViesUnavailableException so the caller can surface "try again later"
+     * instead of telling a legitimate business its VAT number is wrong.
      *
      * @throws ViesUnavailableException when the VIES service is unreachable
      */
     public function validateVatNumber(string $vatNumber): bool
     {
-        try {
-            return $this->vatCalculator->isValidVATNumber($vatNumber);
-        } catch (VATCheckUnavailableException $e) {
-            throw new ViesUnavailableException(
-                'VIES temporarily unavailable: '.$e->getMessage(),
-                0,
-                $e,
-            );
-        } catch (Throwable $e) {
-            throw new ViesUnavailableException(
-                'VIES temporarily unavailable: '.$e->getMessage(),
-                0,
-                $e,
-            );
-        }
+        $details = $this->fetchViesDetails($vatNumber);
+
+        return $this->interpretViesDetails($details)['valid'];
     }
 
     /**
@@ -124,7 +214,13 @@ class VatCalculationService
      * Always returns a saved model with `valid` set to either true or false.
      * No row is created when VIES is unreachable — a `ViesUnavailableException`
      * propagates up so the calling Livewire component can surface a "try later"
-     * error instead of letting the user proceed with an unverified state.
+     * error instead of letting the user proceed with an unverified state, and so
+     * a transient outage never persists a `valid=false` row that would suppress
+     * reverse-charge for good.
+     *
+     * `country_code` is stored as the ISO alpha-2 code, not the VAT prefix, so it
+     * lines up with `billing_country` and every other country column (`EL…` is
+     * persisted as `GR`).
      *
      * @throws ViesUnavailableException if VIES is unreachable — caller must abort the save flow
      */
@@ -134,31 +230,18 @@ class VatCalculationService
             throw new \InvalidArgumentException('Billable must be an Eloquent model to persist VAT validations.');
         }
 
-        // getVATDetails throws on transport failures; re-wrap as ViesUnavailableException.
-        $details = $this->fetchViesDetails($vatNumber);
+        $normalized = CountryResolver::normalizeVatNumber($vatNumber);
 
-        // Normalise: SOAP returns an object, the UK HMRC branch returns an array
-        // with 'vatNumber' as the validity marker. Both are coerced to a plain
-        // associative array for storage.
-        if (is_object($details)) {
-            $payload = json_decode(json_encode($details), true) ?: [];
-            $isValid = (bool) ($payload['valid'] ?? false);
-        } elseif (is_array($details)) {
-            $payload = $details;
-            $isValid = isset($details['vatNumber']);
-        } else {
-            // false → invalid (mpociot returns false on validation failure)
-            $payload = [];
-            $isValid = false;
-        }
+        // getVATDetails throws on transport failures; re-wrap as ViesUnavailableException.
+        $interpreted = $this->interpretViesDetails($this->fetchViesDetails($normalized));
 
         $validation = new BillingVatValidation;
         $validation->billable_type = $billable->getMorphClass();
         $validation->billable_id = $billable->getKey();
-        $validation->vat_number = $vatNumber;
-        $validation->country_code = strtoupper(substr($vatNumber, 0, 2));
-        $validation->valid = $isValid;
-        $validation->vies_response = $payload;
+        $validation->vat_number = $normalized;
+        $validation->country_code = CountryResolver::isoFromVatPrefix(substr($normalized, 0, 2));
+        $validation->valid = $interpreted['valid'];
+        $validation->vies_response = $interpreted['payload'];
         $validation->checked_at = BillingTime::nowUtc();
         $validation->save();
 
@@ -174,9 +257,17 @@ class VatCalculationService
      */
     private function fetchViesDetails(string $vatNumber)
     {
+        $vatNumber = CountryResolver::normalizeVatNumber($vatNumber);
+
         try {
-            return $this->vatCalculator->getVATDetails($vatNumber);
+            $details = $this->vatCalculator->getVATDetails($vatNumber);
         } catch (VATCheckUnavailableException $e) {
+            if ($this->faultMeansInvalidInput($e->getMessage())) {
+                // VIES rejected the request itself (malformed number / requester
+                // info). That is a verdict, not an outage.
+                return false;
+            }
+
             throw new ViesUnavailableException(
                 'VIES temporarily unavailable: '.$e->getMessage(),
                 0,
@@ -189,16 +280,105 @@ class VatCalculationService
                 $e,
             );
         }
+
+        // An invalid-but-well-formed number comes back as a response object with
+        // `valid => false`. A bare `false` from the SOAP branch means mpociot
+        // caught a SoapFault and swallowed it (see `forward_soap_faults`), i.e.
+        // VIES never answered — which must not be shown as "invalid".
+        // The GB/HMRC branch is REST and does return `false` for a real 400/404.
+        if ($details === false && ! $this->isHmrcNumber($vatNumber)) {
+            throw new ViesUnavailableException("VIES temporarily unavailable: no response for {$vatNumber}.");
+        }
+
+        return $details;
     }
 
-    private function hasActiveReverseCharge(Billable $billable): bool
+    /**
+     * Normalise a VIES/HMRC response into a validity verdict plus the payload to
+     * persist as the audit trail.
+     *
+     * @param  object|array<string,mixed>|false  $details
+     * @return array{valid:bool,payload:array<string,mixed>}
+     */
+    private function interpretViesDetails($details): array
+    {
+        // SOAP returns an object; the UK HMRC branch returns an array with
+        // 'vatNumber' as the validity marker. Both are coerced to a plain
+        // associative array for storage.
+        if (is_object($details)) {
+            $payload = json_decode(json_encode($details), true) ?: [];
+
+            return ['valid' => (bool) ($payload['valid'] ?? false), 'payload' => $payload];
+        }
+
+        if (is_array($details)) {
+            return ['valid' => isset($details['vatNumber']), 'payload' => $details];
+        }
+
+        // false → invalid (mpociot returns false on validation failure)
+        return ['valid' => false, 'payload' => []];
+    }
+
+    private function faultMeansInvalidInput(string $message): bool
+    {
+        foreach (self::VIES_INVALID_INPUT_FAULTS as $fault) {
+            if (str_contains(strtoupper($message), $fault)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isHmrcNumber(string $vatNumber): bool
+    {
+        return strtoupper(substr($vatNumber, 0, 2)) === 'GB';
+    }
+
+    private function currentValidation(Billable $billable): ?BillingVatValidation
     {
         if (! method_exists($billable, 'currentVatValidation')) {
-            return false;
+            return null;
         }
 
         $validation = $billable->currentVatValidation();
-        return $validation instanceof BillingVatValidation && $validation->valid === true;
+
+        return $validation instanceof BillingVatValidation && $validation->valid === true
+            ? $validation
+            : null;
+    }
+
+    /**
+     * The customer's country for a validation: the stored ISO code, falling back
+     * to the VAT number's prefix for rows written before EL/GR was normalised.
+     */
+    private function validationCountry(BillingVatValidation $validation): ?string
+    {
+        $stored = (string) ($validation->country_code ?? '');
+        if ($stored !== '') {
+            return CountryResolver::isoFromVatPrefix($stored);
+        }
+
+        $number = (string) ($validation->vat_number ?? '');
+
+        return strlen($number) >= 2
+            ? CountryResolver::isoFromVatPrefix(substr($number, 0, 2))
+            : null;
+    }
+
+    private function warnAboutMissingSellerCountry(): void
+    {
+        if (self::$sellerCountryWarned) {
+            return;
+        }
+
+        self::$sellerCountryWarned = true;
+
+        Log::warning(
+            'mollie-billing: seller country is not configured, so domestic B2B supplies cannot be '
+            .'distinguished from cross-border ones and reverse-charge is granted on VIES validity alone. '
+            .'Set BILLING_SELLER_COUNTRY (or mollie-billing.vat.seller_country).'
+        );
     }
 
     private function hasAdditionalCountry(string $country): bool

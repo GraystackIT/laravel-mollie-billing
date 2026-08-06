@@ -17,6 +17,7 @@ use GraystackIT\MollieBilling\Notifications\UsageThresholdNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 
 class WalletUsageService
@@ -37,7 +38,9 @@ class WalletUsageService
             return;
         }
 
-        DB::transaction(function () use ($billable, $type, $quantity, $reason): void {
+        $thresholdPercent = null;
+
+        DB::transaction(function () use ($billable, $type, $quantity, $reason, &$thresholdPercent): void {
             // Billable row first, wallet second — the same acquisition order the
             // subscription-change path uses (UpdateSubscription locks the billable,
             // then WalletPlanChangeAdjuster mutates the wallets), so the two can
@@ -103,9 +106,18 @@ class WalletUsageService
                 ));
             }
 
-            // Threshold notification.
-            $this->maybeNotifyThreshold($billable, $type, $balanceAfter);
+            // Threshold marker only — the mail itself is sent after the commit.
+            $thresholdPercent = $this->markThresholdNotified($billable, $type, $balanceAfter);
         });
+
+        // Deliberately outside the transaction: UsageThresholdNotification is not
+        // queued, so a mail-transport failure used to propagate out of debit()'s
+        // transaction and roll the forceWithdraw back — recorded usage was lost
+        // because an email failed, and since the marker rolled back too, every
+        // subsequent debit above the threshold retried the same failing send.
+        if ($thresholdPercent !== null) {
+            $this->sendThresholdNotification($billable, $type, $thresholdPercent);
+        }
     }
 
     /**
@@ -194,6 +206,10 @@ class WalletUsageService
         'subscription_renewal_rollover',
         'subscription_trial_start',
         'coupon_credit',
+        // Overage that has been paid for is credited back to the wallet. The
+        // consumption was already counted when it was debited — counting the
+        // settlement too would report every overage unit twice.
+        'overage_settlement',
     ];
 
     /**
@@ -318,10 +334,17 @@ class WalletUsageService
         return $wallet;
     }
 
-    private function maybeNotifyThreshold(Billable $billable, string $type, int $balanceAfter): void
+    /**
+     * Claim the once-per-period threshold notification for this usage type.
+     *
+     * Runs inside the debit transaction so two concurrent debits cannot both
+     * claim it. Returns the usage percentage to notify about, or null when the
+     * threshold is not reached or was already claimed this period.
+     */
+    private function markThresholdNotified(Billable $billable, string $type, int $balanceAfter): ?int
     {
         if (! $billable instanceof Model) {
-            return;
+            return null;
         }
 
         $included = $this->catalog->includedUsage(
@@ -331,7 +354,7 @@ class WalletUsageService
         );
 
         if ($included <= 0) {
-            return;
+            return null;
         }
 
         $used = max(0, $included - $balanceAfter);
@@ -339,7 +362,7 @@ class WalletUsageService
         $threshold = (int) config('mollie-billing.usage_threshold_percent', 80);
 
         if ($percent < $threshold) {
-            return;
+            return null;
         }
 
         $meta = $billable->getBillingSubscriptionMeta();
@@ -351,20 +374,41 @@ class WalletUsageService
             && Carbon::parse((string) $notified)->setTimezone('UTC')->greaterThanOrEqualTo($periodStart);
 
         if ($alreadyNotified) {
-            return;
+            return null;
         }
 
         $meta['usage_threshold_notified_at'][$type] = BillingTime::nowUtc()->toIso8601String();
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
-        $recipients = MollieBilling::notifyBillingAdmins($billable);
-        $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
+        return $percent;
+    }
 
-        if ($recipients !== []) {
+    /**
+     * Send the threshold notification. Never throws: recorded usage must not
+     * depend on the mail transport being up. The marker is already committed, so
+     * a failed send is not retried on the next debit — it is logged instead.
+     */
+    private function sendThresholdNotification(Billable $billable, string $type, int $percent): void
+    {
+        try {
+            $recipients = MollieBilling::notifyBillingAdmins($billable);
+            $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
+
+            if ($recipients === []) {
+                return;
+            }
+
             Notification::send(
                 $recipients,
                 MollieBilling::resolveNotification(UsageThresholdNotification::class, $billable, $type, $percent),
             );
+        } catch (\Throwable $e) {
+            Log::warning('Usage threshold notification failed', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'usage_type' => $type,
+                'percent' => $percent,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 }

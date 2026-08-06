@@ -224,9 +224,23 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return null;
     }
 
+    /**
+     * Whether unused quota of this usage type carries over into the next period.
+     *
+     * Looked up case-insensitively, like every other usage-type lookup here:
+     * the type reaching this method is the plan's `included_usages` key, so a
+     * plan declaring `['Tokens' => 1000]` against
+     * `usage_types => ['tokens' => ['rollover' => true]]` must still find its
+     * entry — otherwise the fallback silently wipes carried-over credits.
+     */
     public function usageRollover(string $usageType): bool
     {
-        $typeValue = config("{$this->configKey}.usage_types.{$usageType}.rollover");
+        $entry = $this->lookupCaseInsensitive(
+            (array) config("{$this->configKey}.usage_types", []),
+            $usageType,
+        );
+
+        $typeValue = is_array($entry) ? ($entry['rollover'] ?? null) : null;
 
         if (is_bool($typeValue)) {
             return $typeValue;

@@ -95,6 +95,17 @@ class CountryResolver
     }
 
     /**
+     * ISO 3166-1 alpha-2 => VIES/VAT-number prefix, for the codes where the two
+     * registries disagree. Greece files VAT numbers under `EL` but is `GR`
+     * everywhere else (ISO, our country select, `billing_country`, invoices).
+     *
+     * @var array<string, string>
+     */
+    private const VAT_PREFIX_OVERRIDES = [
+        'GR' => 'EL',
+    ];
+
+    /**
      * Get the raw EU-27 ISO codes (useful for VAT-related logic).
      *
      * @return list<string>
@@ -102,6 +113,60 @@ class CountryResolver
     public static function euCountryCodes(): array
     {
         return array_keys(self::EU_COUNTRIES);
+    }
+
+    /**
+     * VAT-number prefix for an ISO alpha-2 country code (GR -> EL).
+     *
+     * Use whenever a VAT number is built, prefix-checked or sent to VIES.
+     */
+    public static function vatPrefixFor(?string $iso): string
+    {
+        $iso = strtoupper(trim((string) $iso));
+
+        return self::VAT_PREFIX_OVERRIDES[$iso] ?? $iso;
+    }
+
+    /**
+     * ISO alpha-2 country code for a VAT-number prefix (EL -> GR).
+     *
+     * Use whenever a country is derived *from* a VAT number, so the value lines
+     * up with `billing_country` and every other country column in the schema.
+     */
+    public static function isoFromVatPrefix(?string $prefix): string
+    {
+        $prefix = strtoupper(trim((string) $prefix));
+        $iso = array_search($prefix, self::VAT_PREFIX_OVERRIDES, true);
+
+        return $iso === false ? $prefix : $iso;
+    }
+
+    /**
+     * Rewrite a VAT number's leading two characters to the VIES prefix, so a
+     * customer who typed the ISO form (`GR123456789`) is not rejected by VIES.
+     */
+    public static function normalizeVatNumber(string $vatNumber): string
+    {
+        $vatNumber = strtoupper(preg_replace('/\s+/', '', $vatNumber) ?? '');
+
+        if (strlen($vatNumber) < 3) {
+            return $vatNumber;
+        }
+
+        return self::vatPrefixFor(substr($vatNumber, 0, 2)).substr($vatNumber, 2);
+    }
+
+    /**
+     * Whether two country references denote the same country, comparing ISO
+     * codes and VAT prefixes interchangeably (`GR` === `EL`).
+     */
+    public static function sameCountry(?string $a, ?string $b): bool
+    {
+        if ($a === null || $b === null || $a === '' || $b === '') {
+            return false;
+        }
+
+        return self::isoFromVatPrefix($a) === self::isoFromVatPrefix($b);
     }
 
     /**

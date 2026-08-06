@@ -18,6 +18,16 @@ use Mollie\Laravel\Facades\Mollie;
 
 class ChargeUsageOverageDirectly
 {
+    /**
+     * `subscription_meta.usage_overage_status` value meaning "a charge exists that
+     * has not been confirmed yet". The daily PrepareUsageOverageJob sweep looks
+     * for exactly this value.
+     */
+    public const STATUS_PENDING = 'pending';
+
+    /** `subscription_meta` key holding the snapshot of the charge in flight. */
+    public const META_KEY = 'usage_overage';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -29,32 +39,103 @@ class ChargeUsageOverageDirectly
      * Iterate the billable's wallets, build line items from any negative
      * balances, and create a Mollie payment for the gross amount. The
      * resulting BillingInvoice is created later, in the webhook.
+     *
+     * The result always says which of the three possible things happened —
+     * "nothing owed" and "payment created" used to be indistinguishable.
      */
-    public function handle(Billable $billable): ?BillingInvoice
+    public function handle(Billable $billable): UsageOverageChargeResult
     {
         $lineItems = $this->buildLineItemsFromWallets($billable);
 
         if ($lineItems === []) {
-            return null;
+            return UsageOverageChargeResult::nothingToCharge();
         }
 
         return $this->charge($billable, $lineItems);
     }
 
     /**
-     * Same as {@see handle()} but with caller-supplied line items. Used by
-     * ChangePlan for downgrade-overage where wallets have already been
-     * settled.
+     * Same as {@see handle()} but with caller-supplied line items. Used by the
+     * plan-change path (WalletPlanChangeAdjuster) where the wallets have already
+     * been rebalanced, so their balances no longer describe what is owed.
      *
      * @param  array<int, array{type:string,quantity:int,unit_price_net:int,total_net:int}>  $lineItems
      */
-    public function handleExplicit(Billable $billable, array $lineItems): ?BillingInvoice
+    public function handleExplicit(Billable $billable, array $lineItems): UsageOverageChargeResult
     {
         if ($lineItems === []) {
-            return null;
+            return UsageOverageChargeResult::nothingToCharge();
         }
 
         return $this->charge($billable, $lineItems);
+    }
+
+    /**
+     * Retry an overage charge without consulting the wallets.
+     *
+     * This is the entry point retries must use. Rebuilding from wallet balances
+     * cannot work after `handleExplicit()`: the plan-change path zeroes the
+     * wallets *before* charging, so a retry would find nothing owed and report
+     * success while the money was never collected. The persisted snapshot is the
+     * source of truth, and a snapshot whose payment already produced an invoice
+     * is reported as settled instead of charged a second time.
+     */
+    public function retry(Billable $billable): UsageOverageChargeResult
+    {
+        $pending = $this->pendingCharge($billable);
+
+        if ($pending !== null && $this->pendingChargeIsSettled($billable)) {
+            return UsageOverageChargeResult::alreadySettled(
+                $pending['payment_id'] ?? null,
+                (array) ($pending['line_items'] ?? []),
+            );
+        }
+
+        $lineItems = (array) ($pending['line_items'] ?? []);
+
+        if ($lineItems !== []) {
+            return $this->charge($billable, $lineItems);
+        }
+
+        return $this->handle($billable);
+    }
+
+    /**
+     * The snapshot of the overage charge in flight, or null when there is none.
+     *
+     * Exposed so the retry job and the daily sweep can inspect `payment_id`
+     * before creating another payment.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function pendingCharge(Billable $billable): ?array
+    {
+        if (! $billable instanceof Model) {
+            return null;
+        }
+
+        $pending = $billable->getBillingSubscriptionMeta()[self::META_KEY] ?? null;
+
+        return is_array($pending) && $pending !== [] ? $pending : null;
+    }
+
+    /**
+     * Whether the pending charge's Mollie payment already produced an invoice.
+     *
+     * `SingleChargeHandler::paid()` normally clears the whole snapshot, so this
+     * is the safety net for the case where the webhook created the invoice but
+     * died before clearing it — without the check, the next retry pass would
+     * charge the customer twice for the same overage.
+     */
+    public function pendingChargeIsSettled(Billable $billable): bool
+    {
+        $paymentId = (string) ($this->pendingCharge($billable)['payment_id'] ?? '');
+
+        if ($paymentId === '') {
+            return false;
+        }
+
+        return BillingInvoice::query()->where('mollie_payment_id', $paymentId)->exists();
     }
 
     /**
@@ -117,40 +198,73 @@ class ChargeUsageOverageDirectly
     /**
      * @param  array<int, array{type:string,quantity:int,unit_price_net:int,total_net:int}>  $lineItems
      */
-    private function charge(Billable $billable, array $lineItems): ?BillingInvoice
+    private function charge(Billable $billable, array $lineItems): UsageOverageChargeResult
     {
         $totalNet = array_sum(array_column($lineItems, 'total_net'));
 
         if ($totalNet <= 0) {
-            return null;
+            return UsageOverageChargeResult::nothingToCharge();
         }
 
-        $country = $billable->getBillingCountry() ?? 'DE';
+        // Shared fallback with checkout and the webhook: the country decides the
+        // rate actually charged, so all sites must agree on it. Not
+        // `default_billing_country`, which only pre-selects a dropdown.
+        $country = $billable->getBillingCountry()
+            ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
 
         $vat = $this->vatService->calculate($country, $totalNet, $billable);
 
+        // Persist the snapshot BEFORE talking to Mollie and mark the charge
+        // pending. If the API call fails the amount owed is still on record, so
+        // the daily sweep can pick it up instead of the charge evaporating with
+        // the wallet balances it was derived from.
+        $this->persistPendingCharge($billable, null, $lineItems, $vat);
+
         $payment = $this->createMolliePayment($billable, $vat, $lineItems);
 
-        // Persist the pending overage on subscription_meta so the webhook can
-        // create the BillingInvoice when the payment confirms.
-        if ($billable instanceof Model) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['usage_overage'] = [
-                'payment_id' => is_object($payment) ? ($payment->id ?? null) : null,
-                'line_items' => $lineItems,
-                'amount_net' => $vat['net'],
-                'amount_gross' => $vat['gross'],
-                'vat_amount' => $vat['vat'],
-                'vat_rate' => $vat['rate'],
-                'currency' => (string) config('mollie-billing.currency', 'EUR'),
-                'created_at' => BillingTime::nowUtc()->toIso8601String(),
-            ];
-            $billable->forceFill(['subscription_meta' => $meta])->save();
-        }
+        $paymentId = is_object($payment) ? ($payment->id ?? null) : null;
+        $this->persistPendingCharge($billable, is_string($paymentId) ? $paymentId : null, $lineItems, $vat);
 
         // The actual BillingInvoice is created in the webhook handler when
-        // the payment moves to "paid" state.
-        return null;
+        // the payment moves to "paid" state, so it cannot be returned here.
+        return UsageOverageChargeResult::charged(
+            is_string($paymentId) ? $paymentId : null,
+            $lineItems,
+            (int) $vat['net'],
+            (int) $vat['gross'],
+        );
+    }
+
+    /**
+     * Write the pending overage onto `subscription_meta` so the webhook can create
+     * the BillingInvoice when the payment confirms, and so a retry can rebuild the
+     * exact same line items without the wallets.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     * @param  array{net:int,vat:int,gross:int,rate:float}  $vat
+     */
+    private function persistPendingCharge(Billable $billable, ?string $paymentId, array $lineItems, array $vat): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $existing = (array) ($meta[self::META_KEY] ?? []);
+
+        $meta[self::META_KEY] = [
+            'payment_id' => $paymentId ?? ($existing['payment_id'] ?? null),
+            'line_items' => $lineItems,
+            'amount_net' => $vat['net'],
+            'amount_gross' => $vat['gross'],
+            'vat_amount' => $vat['vat'],
+            'vat_rate' => $vat['rate'],
+            'currency' => (string) config('mollie-billing.currency', 'EUR'),
+            'created_at' => $existing['created_at'] ?? BillingTime::nowUtc()->toIso8601String(),
+        ];
+        $meta['usage_overage_status'] = self::STATUS_PENDING;
+
+        $billable->forceFill(['subscription_meta' => $meta])->save();
     }
 
     /**

@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Concerns;
 
 use GraystackIT\MollieBilling\Exceptions\ViesUnavailableException;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\CountryResolver;
 
 /**
  * Live VAT-number validation for Livewire components: format → country-prefix → VIES.
@@ -31,7 +32,10 @@ trait ValidatesVatNumber
             return;
         }
 
-        $normalized = strtoupper(preg_replace('/\s+/', '', $value) ?? '');
+        // Rewrite the prefix to the VIES form (GR -> EL) before anything else, so
+        // a Greek customer who typed the ISO code is not rejected by the prefix
+        // gate below and VIES is queried with the country code it expects.
+        $normalized = CountryResolver::normalizeVatNumber($value);
         $this->vat_number = $normalized;
 
         if (! preg_match('/^[A-Z]{2}[A-Z0-9]{2,12}$/', $normalized)) {
@@ -41,7 +45,9 @@ trait ValidatesVatNumber
             return;
         }
 
-        if (substr($normalized, 0, 2) !== strtoupper($this->billing_country)) {
+        // Compare via the VAT-prefix registry, not raw ISO codes: `EL123456789`
+        // belongs to billing country `GR`.
+        if (substr($normalized, 0, 2) !== CountryResolver::vatPrefixFor($this->billing_country)) {
             $this->addError($field, __('billing::checkout.vat_country_mismatch'));
             $this->vatNumberValid = false;
 
