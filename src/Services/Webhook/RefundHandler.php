@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use Illuminate\Support\Facades\Log;
 
 class RefundHandler
 {
@@ -24,6 +25,11 @@ class RefundHandler
      * Each Mollie refund has a unique ID (e.g. re_xxx). We store it in the
      * credit note's line_items so we can deduplicate by refund ID rather than
      * by amount (which would fail for multiple partial refunds of the same value).
+     *
+     * The refund amount arrives as a gross decimal; the local net/VAT split is
+     * derived from the original invoice's line composition
+     * (see {@see InvoiceService::creditNetForGross()}), never from one line's
+     * VAT rate applied to the whole gross.
      */
     public function handle(object $payment, Billable $billable): void
     {
@@ -53,26 +59,53 @@ class RefundHandler
                 continue;
             }
 
-            $refundAmountCents = (int) round(((float) ($refund->amount->value ?? 0)) * 100);
+            $refundAmountCents = InvoiceService::mollieAmountToMinor(
+                $refund->amount->value ?? null,
+                $refund->amount->currency ?? $original->currency,
+            );
 
-            $originalLines = (array) ($original->line_items ?? []);
-            $firstLine = $originalLines[0] ?? null;
-            $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
-            $netAmount = $rate > 0
-                ? (int) round($refundAmountCents / (1 + $rate / 100))
-                : $refundAmountCents;
+            // Mollie returns a GROSS amount; the net/VAT split is ours. Backing
+            // the net out of that gross with line[0]'s rate under-credits every
+            // invoice whose lines are not uniformly taxed and leaves
+            // `refunded_net` short of `amount_net` forever, so the net is
+            // resolved against the invoice's own line composition instead —
+            // and clamped to what is still refundable.
+            $netAmount = $this->salesInvoiceService->creditNetForGross($original, $refundAmountCents);
+
+            if ($netAmount <= 0) {
+                Log::warning('Mollie refund carries no creditable net', [
+                    'invoice_id' => $original->id,
+                    'mollie_refund_id' => $refundId,
+                    'refund_gross' => $refundAmountCents,
+                    'remaining_refundable_net' => $original->remainingRefundableNet(),
+                ]);
+
+                continue;
+            }
+
+            // Snapshot the effective refunded net BEFORE the credit note exists:
+            // afterwards effectiveRefundedNet() already derives this refund from
+            // the new credit note's lines and the increment below would count it
+            // twice. Starting from the effective value (rather than the cached
+            // column) reconciles invoices whose credit notes were written by a
+            // legacy path that never touched the cache.
+            $reconciledBaseNet = $original->effectiveRefundedNet();
 
             $creditNote = $this->salesInvoiceService->createCreditNote($original, $netAmount);
+            // Stamp every line, not just the first: a mixed-rate credit note has
+            // one line per credited original line and the dedup check scans them
+            // all, so a partially stamped note would still be re-created if the
+            // unstamped line were ever read on its own.
             $lines = (array) $creditNote->line_items;
-            if (isset($lines[0])) {
-                $lines[0]['mollie_refund_id'] = $refundId;
-                $creditNote->line_items = $lines;
+            foreach (array_keys($lines) as $index) {
+                $lines[$index]['mollie_refund_id'] = $refundId;
             }
+            $creditNote->line_items = $lines;
             $creditNote->refund_reason_code = RefundReasonCode::Other;
             $creditNote->refund_reason_text = 'synced from Mollie dashboard';
             $creditNote->save();
 
-            $original->refunded_net = (int) $original->refunded_net + $netAmount;
+            $original->refunded_net = $reconciledBaseNet + $netAmount;
             $original->save();
 
             event(new InvoiceRefunded($billable, $original, $creditNote, [

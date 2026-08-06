@@ -105,6 +105,51 @@ class BillingInvoice extends Model
         return $sum;
     }
 
+    /**
+     * Net and VAT already credited back per original line item, keyed by the
+     * line's index in this invoice's `line_items`.
+     *
+     * Read from every refund-invoice line that points at this invoice via
+     * `parent_invoice_id` **and** carries a `parent_line_item_index`. Credit
+     * lines without that index (custom `line_items` handed to the refund
+     * service) cannot be attributed to a single line and are therefore absent
+     * here — invoice-level accounting still sees them through
+     * {@see derivedRefundedNet()}.
+     *
+     * Credit-note amounts are stored negative; the sums are absolute so callers
+     * can subtract them from what the original charged.
+     *
+     * @return array<int, array{net: int, vat: int}>
+     */
+    public function creditedPerOriginalLine(): array
+    {
+        $credited = [];
+
+        $children = self::query()
+            ->where('billable_type', $this->billable_type)
+            ->where('billable_id', $this->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($children as $child) {
+            foreach ((array) ($child->line_items ?? []) as $line) {
+                if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
+                    continue;
+                }
+                if (! isset($line['parent_line_item_index'])) {
+                    continue;
+                }
+
+                $index = (int) $line['parent_line_item_index'];
+                $credited[$index] ??= ['net' => 0, 'vat' => 0];
+                $credited[$index]['net'] += abs((int) ($line['amount_net'] ?? 0));
+                $credited[$index]['vat'] += abs((int) ($line['vat_amount'] ?? 0));
+            }
+        }
+
+        return $credited;
+    }
+
     public function hasPdf(): bool
     {
         return $this->pdf_path !== null;

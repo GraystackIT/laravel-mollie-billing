@@ -48,6 +48,10 @@ class RefundInvoiceService
      *
      * All other public methods on this service delegate here.
      *
+     * Everything up to and including the credit note happens in one transaction
+     * (see {@see performRefund()}); only the admin alert for a failed Mollie call
+     * is sent from here, after that transaction has rolled back.
+     *
      * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
      *
      * @throws InvalidRefundTargetException        Invoice is not paid or has no Mollie payment.
@@ -74,7 +78,46 @@ class RefundInvoiceService
             throw new InvalidRefundTargetException('Invoice has no Mollie payment id.');
         }
 
-        return DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems): BillingInvoice {
+        // The admin alert for a failed Mollie refund has to survive the rollback
+        // the failure triggers: the notification is queued, and a job row
+        // inserted inside the transaction disappears with it — nobody would ever
+        // be told the refund failed. It is therefore collected here and sent from
+        // the rethrow site below, once the transaction is gone.
+        $mollieFailure = null;
+
+        try {
+            return $this->performRefund($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems, $mollieFailure);
+        } catch (\Throwable $e) {
+            if ($mollieFailure !== null) {
+                $this->notifyAdminsOfFailedRefund($mollieFailure['billable'], $mollieFailure['exception']);
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * The transactional body of {@see refund()}.
+     *
+     * `$mollieFailure` is an out-parameter: when the Mollie refund call fails it
+     * receives the billable and the exception so the caller can alert the admins
+     * after the rollback.
+     *
+     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
+     * @param  array<string,int>  $walletCredits
+     * @param  array{billable: Billable, exception: \Throwable}|null  $mollieFailure
+     */
+    private function performRefund(
+        BillingInvoice $invoice,
+        array $request,
+        RefundReasonCode $reasonCode,
+        ?string $reasonText,
+        array $walletCredits,
+        bool $notifyUser,
+        ?array $lineItems,
+        ?array &$mollieFailure,
+    ): BillingInvoice {
+        return DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems, &$mollieFailure): BillingInvoice {
             $invoice = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
             $refundAmountNet = $request['amount_net'] ?? $invoice->remainingRefundableNet();
@@ -114,9 +157,8 @@ class RefundInvoiceService
             } catch (\Throwable $e) {
                 Log::warning('Mollie refund failed for invoice '.$invoice->id, ['exception' => $e->getMessage()]);
 
-                $recipients = MollieBilling::notifyAdmin();
-                if ($billable !== null && ! empty($recipients)) {
-                    Notification::send($recipients, MollieBilling::resolveNotification(AdminRefundFailedNotification::class, $billable, $e));
+                if ($billable !== null) {
+                    $mollieFailure = ['billable' => $billable, 'exception' => $e];
                 }
 
                 throw $e;
@@ -152,6 +194,11 @@ class RefundInvoiceService
                 event(new InvoiceRefunded($billable, $invoice, $creditNote, $request));
 
                 if ($notifyUser) {
+                    // Safe inside the transaction only because the credit note is
+                    // already saved above AND UsesBillingQueue sets
+                    // $afterCommit — a worker that dequeued before the commit
+                    // would fail to resolve the serialized credit note. Keep both
+                    // conditions if this block ever moves.
                     $recipients = MollieBilling::notifyBillingAdmins($billable);
                     if (! empty($recipients)) {
                         Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $billable, $creditNote));
@@ -161,6 +208,24 @@ class RefundInvoiceService
 
             return $creditNote;
         });
+    }
+
+    /**
+     * Alert the configured admins that a Mollie refund call failed.
+     *
+     * Must be called with no transaction open: the notification is queued, so a
+     * job row written inside the transaction the failure rolls back would vanish
+     * together with it.
+     */
+    private function notifyAdminsOfFailedRefund(Billable $billable, \Throwable $exception): void
+    {
+        $recipients = MollieBilling::notifyAdmin();
+
+        if (empty($recipients)) {
+            return;
+        }
+
+        Notification::send($recipients, MollieBilling::resolveNotification(AdminRefundFailedNotification::class, $billable, $exception));
     }
 
     /**

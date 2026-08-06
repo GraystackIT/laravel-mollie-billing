@@ -20,9 +20,12 @@ use GraystackIT\MollieBilling\Events\CreditNoteIssued;
 use GraystackIT\MollieBilling\Events\InvoiceCreated;
 use GraystackIT\MollieBilling\Events\InvoicePdfRegenerated;
 use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
+use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use GraystackIT\MollieBilling\Support\ProrataLine;
@@ -40,6 +43,8 @@ use Illuminate\Support\Str;
 
 class InvoiceService
 {
+    use MutatesBillingMeta;
+
     /**
      * Whether billing_invoices carries the optional `locale` column, resolved
      * once per process so the check does not run on every invoice.
@@ -77,6 +82,10 @@ class InvoiceService
      * summed net: the PDF taxes every line separately, so only a per-line sum
      * keeps the persisted header identical to the rendered document.
      *
+     * A line may carry its own `vat_rate` for mixed-rate invoices, but only
+     * where the supply is taxed at all: on a reverse-charged (or otherwise
+     * zero-rated) supply every line is forced to 0%.
+     *
      * @param  array<int, array<string, mixed>>  $lineItems
      */
     public function createForPayment(object $payment, string $invoiceKind, array $lineItems, Billable $billable): BillingInvoice
@@ -93,20 +102,27 @@ class InvoiceService
         $vat = $this->vat->calculate($country, $summedNet, $billable);
         $rate = (float) $vat['rate'];
 
+        // A reverse-charged (or otherwise zero-rated) supply carries no VAT on
+        // ANY line. A caller-supplied `vat_rate` is a per-line override for
+        // mixed-rate invoices, never a licence to re-introduce tax the country
+        // lookup ruled out — and createForPayment() is public API, so the clamp
+        // has to live here rather than in the emitters.
+        $zeroRated = abs($rate) < 0.0001;
+
         // Period for line items: prefer the billable's current subscription period
         // (so currentPeriodLines() can later locate them for refunds), else fall back
         // to "now → now+1 month" as a defensive default for one-off charges.
         $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
         $linePeriodEnd = $billable->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
 
-        $normalizedLines = array_map(function (array $line) use ($rate, $linePeriodStart, $linePeriodEnd): array {
+        $normalizedLines = array_map(function (array $line) use ($rate, $zeroRated, $linePeriodStart, $linePeriodEnd): array {
             // Normalize legacy kind alias.
             if (($line['kind'] ?? null) === 'seat') {
                 $line['kind'] = 'seats';
             }
 
             $netLine = self::lineNet($line);
-            $lineRate = (float) ($line['vat_rate'] ?? $rate);
+            $lineRate = $zeroRated ? 0.0 : (float) ($line['vat_rate'] ?? $rate);
             $vatLine = (int) round($netLine * $lineRate / 100);
 
             $line['vat_rate'] = $lineRate;
@@ -167,11 +183,26 @@ class InvoiceService
      * VAT it charged and the credit note's header matches its own line items.
      *
      * @param  array<int, array<string, mixed>>|null  $lineItems  Custom line items; if null, one credit line per credited original line is created.
+     *
+     * @throws RefundExceedsInvoiceAmountException  when more net is credited than the original charged.
      */
     public function createCreditNote(BillingInvoice $original, int $amountNet, ?array $lineItems = null, ?string $description = null): BillingInvoice
     {
         if ($amountNet <= 0) {
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
+        }
+
+        // Upper bound, not just a lower one: a caller that derives the net from a
+        // gross amount can land above the original (e.g. a per-line-rounded
+        // header divided by a single rate), and the surplus would be allocated
+        // onto credit lines that exceed the original lines they reverse — with
+        // refunded_net summing past amount_net so the invoice never reads as
+        // fully refunded. Remaining-balance checks stay with the refund
+        // services; this is the invariant of the document itself.
+        if ($amountNet > (int) $original->amount_net) {
+            throw new RefundExceedsInvoiceAmountException(
+                "Credit note of {$amountNet} exceeds invoice {$original->id} net amount {$original->amount_net}."
+            );
         }
 
         $creditVat = $this->creditNoteVat($original, $amountNet, $lineItems);
@@ -249,7 +280,9 @@ class InvoiceService
      * Every original line is taxed at its own rate, so the credit VAT is the sum
      * of the per-line VAT — never one line's rate applied to the whole net. For a
      * full credit that reproduces the VAT actually charged; for a partial credit
-     * the net is allocated across the lines proportionally first.
+     * the net is allocated across the lines proportionally first and capped
+     * against the VAT earlier credit notes already gave back, so repeated
+     * partials can never credit more tax than the invoice charged.
      *
      * @param  array<int, array<string, mixed>>|null  $lineItems  Custom credit lines; when they carry `vat_amount`, they are authoritative.
      */
@@ -279,30 +312,104 @@ class InvoiceService
     }
 
     /**
+     * Net to credit for a gross amount that was actually refunded at Mollie.
+     *
+     * Mollie only ever knows the gross of the original payment; the net/VAT
+     * split is ours. Dividing that gross by a single VAT rate mis-splits every
+     * invoice whose lines are not uniformly taxed — 45.90 EUR off a 3000@20% +
+     * 900@10% invoice backs out 3825 instead of 3900 net, leaving 89 cents of
+     * returned money on no credit note at all and `refunded_net` permanently
+     * short of `amount_net`. The net is therefore resolved against the
+     * invoice's own line composition: the largest remaining net whose per-line
+     * credit VAT (see {@see creditNoteVat()}) still fits inside the money
+     * Mollie gave back. A gross that covers the whole remaining balance maps
+     * onto the remaining net exactly, so a full refund always closes the
+     * invoice out.
+     *
+     * Returns 0 when nothing is left to credit, or when not even one cent of
+     * net fits into `$grossAmount`.
+     */
+    public function creditNetForGross(BillingInvoice $original, int $grossAmount): int
+    {
+        if ($grossAmount <= 0) {
+            return 0;
+        }
+
+        $remainingNet = $original->remainingRefundableNet();
+
+        if ($remainingNet <= 0) {
+            return 0;
+        }
+
+        $grossFor = fn (int $net): int => $net + $this->creditNoteVat($original, $net);
+
+        $remainingGross = $grossFor($remainingNet);
+
+        if ($grossAmount >= $remainingGross) {
+            return $remainingNet;
+        }
+
+        // The seed is exact up to per-line VAT rounding, so the walk moves a few
+        // cents at most. Both loops are bounded because per-part rounding can
+        // make gross(net) non-monotonic by a cent and must not be able to spin.
+        $net = (int) floor($grossAmount * $remainingNet / max(1, $remainingGross));
+        $net = max(1, min($remainingNet, $net));
+
+        for ($i = 0; $i < 8 && $net > 1 && $grossFor($net) > $grossAmount; $i++) {
+            $net--;
+        }
+
+        for ($i = 0; $i < 8 && $net < $remainingNet && $grossFor($net + 1) <= $grossAmount; $i++) {
+            $net++;
+        }
+
+        return $grossFor($net) <= $grossAmount ? $net : 0;
+    }
+
+    /**
      * Split a credited net amount across the original invoice's line items.
      *
+     * Every part carries the budget of the line it credits — the net and the VAT
+     * that line was actually charged, minus what earlier credit notes already
+     * gave back — so a chunk can never credit more tax than is left and the
+     * chunk that exhausts a line absorbs the rounding residual exactly (see
+     * {@see partCreditVat()}).
+     *
      * Discount lines (negative net) are folded into the positive line that
-     * carries the same VAT rate: keeping them as separate credit lines would
-     * make `BillingInvoice::derivedRefundedNet()` — which sums the absolute net
-     * per refund line — count the discount twice. Degenerate input (no lines,
-     * a non-positive total, or a fold that cannot produce positive parts) falls
-     * back to a single part at the dominant line's rate.
+     * carries the same VAT rate, budget included: keeping them as separate
+     * credit lines would make `BillingInvoice::derivedRefundedNet()` — which
+     * sums the absolute net per refund line — count the discount twice, and
+     * dropping their VAT would credit tax the discount had already removed.
+     * Degenerate input (no lines, a non-positive total, or a fold that cannot
+     * produce positive parts) falls back to a single part at the dominant line's
+     * rate, capped against the invoice's own remaining VAT.
      *
      * @return list<array{index: int, net: int, vat: int, rate: float, label: ?string}>
      */
     private function allocateCredit(BillingInvoice $original, int $amountNet): array
     {
+        $credited = $original->creditedPerOriginalLine();
+
         $parts = [];
         foreach ((array) ($original->line_items ?? []) as $index => $line) {
             if (! is_array($line)) {
                 continue;
             }
 
+            $net = self::lineNet($line);
+            $rate = (float) ($line['vat_rate'] ?? 0.0);
+
             $parts[] = [
                 'index' => (int) $index,
-                'net' => self::lineNet($line),
-                'rate' => (float) ($line['vat_rate'] ?? 0.0),
+                'net' => $net,
+                'rate' => $rate,
                 'label' => isset($line['label']) ? (string) $line['label'] : (isset($line['description']) ? (string) $line['description'] : null),
+                // What the document says this line was taxed — not net × rate:
+                // the original rounded per line, so only its own figure adds
+                // back up to the header VAT it charged.
+                'charged_vat' => array_key_exists('vat_amount', $line) ? (int) $line['vat_amount'] : (int) round($net * $rate / 100),
+                'credited_net' => (int) ($credited[(int) $index]['net'] ?? 0),
+                'credited_vat' => (int) ($credited[(int) $index]['vat'] ?? 0),
             ];
         }
 
@@ -319,7 +426,7 @@ class InvoiceService
             return [[
                 'index' => $fallback['index'],
                 'net' => $amountNet,
-                'vat' => (int) round($amountNet * $fallback['rate'] / 100),
+                'vat' => $this->capAtRemainingInvoiceVat($original, (int) round($amountNet * $fallback['rate'] / 100), $credited),
                 'rate' => $fallback['rate'],
                 'label' => $fallback['label'],
             ]];
@@ -334,6 +441,9 @@ class InvoiceService
                 ? $part['net']
                 : (int) round($amountNet * $part['net'] / $totalNet);
             $sum += $net;
+            // `net` becomes the credited chunk; the line's own (folded) net is
+            // kept as the budget partCreditVat() measures the chunk against.
+            $part['charged_net'] = $part['net'];
             $part['net'] = $net;
             $allocated[] = $part;
         }
@@ -354,17 +464,66 @@ class InvoiceService
                 continue;
             }
 
-            $part['vat'] = (int) round($part['net'] * $part['rate'] / 100);
+            $part['vat'] = $this->partCreditVat($part);
             $result[] = $part;
         }
 
         return $result !== [] ? $result : [[
             'index' => $folded[0]['index'],
             'net' => $amountNet,
-            'vat' => (int) round($amountNet * $folded[0]['rate'] / 100),
+            'vat' => $this->capAtRemainingInvoiceVat($original, (int) round($amountNet * $folded[0]['rate'] / 100), $credited),
             'rate' => $folded[0]['rate'],
             'label' => $folded[0]['label'],
         ]];
+    }
+
+    /**
+     * VAT to credit for one allocated chunk of an original line.
+     *
+     * Rounding every chunk on its own over-credits across repeated partial
+     * refunds: four 25-cent refunds of a 100-cent line at 19% round to 4 × 5 =
+     * 20 for 19 charged, and the fourth Mollie refund then asks for more gross
+     * than the payment collected — which Mollie rejects, so the last legitimate
+     * partial refund becomes impossible. The chunk is therefore capped at the
+     * line's not-yet-credited VAT, and the chunk that exhausts the line's
+     * remaining net absorbs the whole residual, so the sum over all refunds is
+     * exactly the VAT charged.
+     *
+     * @param  array{net: int, rate: float, charged_net: int, charged_vat: int, credited_net: int, credited_vat: int}  $part
+     */
+    private function partCreditVat(array $part): int
+    {
+        $remainingNet = $part['charged_net'] - $part['credited_net'];
+        $remainingVat = $part['charged_vat'] - $part['credited_vat'];
+
+        if ($remainingVat <= 0) {
+            return 0;
+        }
+
+        if ($part['net'] >= $remainingNet) {
+            return $remainingVat;
+        }
+
+        return min((int) round($part['net'] * $part['rate'] / 100), $remainingVat);
+    }
+
+    /**
+     * Cap a blended single-part credit at the VAT the invoice has left to give
+     * back. Used only on the degenerate fallback paths, where no per-line budget
+     * can be established but the invoice-level ceiling still holds — including
+     * the case where the header charged no VAT at all (reverse charge), which
+     * must not gain any through a blended rate.
+     *
+     * @param  array<int, array{net: int, vat: int}>  $credited
+     */
+    private function capAtRemainingInvoiceVat(BillingInvoice $original, int $vat, array $credited): int
+    {
+        $creditedVat = 0;
+        foreach ($credited as $entry) {
+            $creditedVat += $entry['vat'];
+        }
+
+        return max(0, min($vat, abs((int) $original->amount_vat) - $creditedVat));
     }
 
     /**
@@ -373,8 +532,12 @@ class InvoiceService
      * when the merge cannot leave every remaining part positive — the caller
      * then falls back to a single blended part.
      *
-     * @param  list<array{index: int, net: int, rate: float, label: ?string}>  $parts
-     * @return list<array{index: int, net: int, rate: float, label: ?string}>
+     * The negative part's VAT budget travels with its net even when it lands on
+     * a differently-taxed line: a discount removed tax from the invoice, so
+     * dropping its VAT here would credit tax that was never charged.
+     *
+     * @param  list<array{index: int, net: int, rate: float, label: ?string, charged_vat: int, credited_net: int, credited_vat: int}>  $parts
+     * @return list<array{index: int, net: int, rate: float, label: ?string, charged_vat: int, credited_net: int, credited_vat: int}>
      */
     private function foldNegativeParts(array $parts, int $totalNet): array
     {
@@ -406,6 +569,9 @@ class InvoiceService
             }
 
             $positives[$target]['net'] += $negative['net'];
+            $positives[$target]['charged_vat'] += $negative['charged_vat'];
+            $positives[$target]['credited_net'] += $negative['credited_net'];
+            $positives[$target]['credited_vat'] += $negative['credited_vat'];
         }
 
         foreach ($positives as $positive) {
@@ -419,9 +585,11 @@ class InvoiceService
 
     /**
      * The line that should carry a blended single-part credit: the one with the
-     * largest absolute net, so its VAT rate dominates the result.
+     * largest absolute net, so its VAT rate dominates the result. Only the
+     * identifying subset of a part is read — the VAT budgets do not survive a
+     * blend and the caller caps the result invoice-wide instead.
      *
-     * @param  list<array{index: int, net: int, rate: float, label: ?string}>  $parts
+     * @param  list<array{index: int, net: int, rate: float, label: ?string, ...}>  $parts
      * @return array{index: int, net: int, rate: float, label: ?string}
      */
     private function dominantPart(array $parts): array
@@ -997,19 +1165,42 @@ class InvoiceService
     }
 
     /**
-     * Normalise a currency code to the uppercase ISO-4217 form brick/money and
-     * Mollie expect, falling back to the configured currency when empty. A
-     * lowercase `BILLING_CURRENCY` would otherwise blow up PDF generation.
+     * Hand failed refund lines to RetryRefundLineJob via subscription_meta.
+     *
+     * Under a lock: the retry job's WithoutOverlapping serialises the retry chain
+     * against itself, but a plan change refunding through ProrataExecutor holds no
+     * such lock, and an unlocked append writes back a snapshot in which the
+     * concurrent job's line is still pending — resurrecting it into a second payout
+     * on the next sweep.
+     *
+     * Every Billable is an Eloquent model (the contract itself returns Builder and
+     * MorphMany, and this method's callers use forceFill/save on it), so the
+     * instanceof only narrows the type for the shared locking helper.
+     *
+     * @param  list<array<string, mixed>>  $failedLines
+     */
+    private function appendPendingRefundRetries(Billable $billable, array $failedLines): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($failedLines): array {
+            $existing = (array) ($meta['pending_refund_retries'] ?? []);
+            $meta['pending_refund_retries'] = array_merge($existing, $failedLines);
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Retained as public API for callers and subclasses; {@see BillingMoney} holds
+     * the implementation so the invoice side and the outbound Mollie side cannot
+     * disagree about a currency's scale.
      */
     public static function normalizeCurrency(?string $currency): string
     {
-        $code = strtoupper(trim((string) $currency));
-
-        if ($code === '') {
-            $code = strtoupper(trim((string) config('mollie-billing.currency', 'EUR')));
-        }
-
-        return $code !== '' ? $code : 'EUR';
+        return BillingMoney::normalizeCurrency($currency);
     }
 
     /**
@@ -1026,20 +1217,16 @@ class InvoiceService
         return $currency;
     }
 
-    /**
-     * Format integer minor units as the decimal string Mollie's Money expects.
-     * The number of decimals is a property of the currency — JPY has none, so a
-     * hardcoded 2 would send 1/100th of the intended amount.
-     */
+    /** @see BillingMoney::mollieAmount() */
     public static function molliePrice(int $minor, ?string $currency = null): string
     {
-        $code = self::normalizeCurrency($currency);
+        return BillingMoney::mollieAmount($minor, $currency);
+    }
 
-        try {
-            return (string) Money::ofMinor($minor, $code)->getAmount();
-        } catch (UnknownCurrencyException) {
-            return number_format($minor / 100, 2, '.', '');
-        }
+    /** @see BillingMoney::minorFromMollieAmount() */
+    public static function mollieAmountToMinor(string|float|int|null $amount, ?string $currency = null): int
+    {
+        return BillingMoney::minorFromMollieAmount($amount, $currency);
     }
 
     /**
@@ -1050,6 +1237,16 @@ class InvoiceService
      * concurrent generator hand out the same number and the serial_number unique
      * index rejects one of the two at save time — after the Mollie side effects
      * have already happened.
+     *
+     * Lock-order constraint: when this runs inside a caller's transaction the
+     * generator's lock is held until that outer transaction commits. Callers
+     * that also lock a specific billing_invoices row must therefore keep the
+     * generator's lock footprint narrow — `InvoiceNumberGenerator` has to select
+     * the highest serial over an index-usable range, never a scan that locks
+     * unrelated rows, or an admin refund (row lock first, serial second) and a
+     * renewal webhook (serial first) deadlock on the same table. The loser's
+     * QueryException carries no `serial_number`, so it is rethrown and the
+     * webhook 500s.
      */
     private function persistWithSerial(BillingInvoice $invoice, string $kindForSerial): void
     {
@@ -1618,12 +1815,8 @@ class InvoiceService
             }
         }
 
-        // Failed lines stored in pending_refund_retries for the retry job.
         if (! empty($failedLines)) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $existing = (array) ($meta['pending_refund_retries'] ?? []);
-            $meta['pending_refund_retries'] = array_merge($existing, $failedLines);
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            $this->appendPendingRefundRetries($billable, $failedLines);
         }
 
         if (empty($persistedLines)) {
@@ -1678,6 +1871,10 @@ class InvoiceService
      * Saldo-zero sidegrade: local plan-switch invoice with charge and refund lines (saldo=0).
      * NO Mollie call. Only a local accounting invoice for the audit trail.
      *
+     * A derived document: it inherits the currency of the invoices its refund
+     * lines were copied from, falling back to the configured currency when the
+     * switch is charge-only.
+     *
      * @param  list<ProrataLine>  $chargeLines
      * @param  list<ProrataLine>  $refundLines
      */
@@ -1693,12 +1890,36 @@ class InvoiceService
         $sumVat = 0;
         $sumGross = 0;
         $lineItemsForPersist = [];
+        // The refund lines are copies of line items from the invoices they
+        // reverse, so — exactly like createRefund() — this document inherits
+        // their currency instead of stamping today's config on historical
+        // amounts. Without it, a BILLING_CURRENCY change re-labels every
+        // inherited refund amount with the new code.
+        $currencyFromOriginal = null;
 
         foreach ($allLines as $line) {
             $sumNet += $line->amountNet;
             $sumVat += $line->amountVat;
             $sumGross += $line->amountGross;
             $lineItemsForPersist[] = $line->toArray();
+        }
+
+        foreach ($refundLines as $line) {
+            if ($line->originalInvoice !== null) {
+                $currencyFromOriginal ??= (string) $line->originalInvoice->currency;
+            }
+        }
+
+        $currency = self::normalizeCurrency($currencyFromOriginal);
+
+        if ($chargeLines !== [] && $currency !== self::configuredCurrency()) {
+            // One document, one currency: the charge lines were priced in the
+            // configured currency, so flag the mix instead of mis-booking it.
+            Log::warning('Plan-switch invoice mixes currencies', [
+                'billable' => $billable->getKey(),
+                'inherited_currency' => $currency,
+                'configured_currency' => self::configuredCurrency(),
+            ]);
         }
 
         $invoice = new BillingInvoice;
@@ -1709,7 +1930,7 @@ class InvoiceService
         $invoice->invoice_kind = InvoiceKind::Subscription;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper((string) ($billable->getBillingCountry() ?? ''));
-        $invoice->currency = self::configuredCurrency();
+        $invoice->currency = $currency;
         $invoice->amount_net = $sumNet;
         $invoice->amount_vat = $sumVat;
         $invoice->amount_gross = $sumGross;
