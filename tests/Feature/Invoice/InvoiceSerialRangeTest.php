@@ -15,7 +15,7 @@ use GraystackIT\MollieBilling\Testing\TestBillable;
  * pattern covered — this file pins that equivalence, including for custom formats
  * and for the prefixes that must stay in disjoint ranges.
  */
-function serialBillable(): TestBillable
+function serialRangeBillable(): TestBillable
 {
     /** @var TestBillable $b */
     $b = TestBillable::create([
@@ -27,7 +27,7 @@ function serialBillable(): TestBillable
     return $b;
 }
 
-function persistSerial(string $serial, TestBillable $billable): void
+function persistRangeSerial(string $serial, TestBillable $billable): void
 {
     BillingInvoice::create([
         'billable_type' => $billable::class,
@@ -45,14 +45,14 @@ function persistSerial(string $serial, TestBillable $billable): void
 }
 
 it('continues the year it is in and ignores other years', function (): void {
-    $billable = serialBillable();
+    $billable = serialRangeBillable();
     $year = date('y');
     $other = str_pad((string) (((int) $year + 1) % 100), 2, '0', STR_PAD_LEFT);
 
-    persistSerial("IN-{$year}000007", $billable);
+    persistRangeSerial("IN-{$year}000007", $billable);
     // A neighbouring year must not be read as this year's high-water mark, in
     // either direction: 99 sorts above and 00 below.
-    persistSerial("IN-{$other}000999", $billable);
+    persistRangeSerial("IN-{$other}000999", $billable);
 
     expect((new InvoiceNumberGenerator)->generate('invoice'))->toBe("IN-{$year}000008");
 });
@@ -60,11 +60,11 @@ it('continues the year it is in and ignores other years', function (): void {
 it('keeps the invoice and credit-note sequences in disjoint ranges', function (): void {
     // The two prefixes each get their own range, which is what stops an admin refund
     // and a renewal webhook from contending on the same rows.
-    $billable = serialBillable();
+    $billable = serialRangeBillable();
     $year = date('y');
 
-    persistSerial("IN-{$year}000004", $billable);
-    persistSerial("CR-{$year}000011", $billable);
+    persistRangeSerial("IN-{$year}000004", $billable);
+    persistRangeSerial("CR-{$year}000011", $billable);
 
     expect((new InvoiceNumberGenerator)->generate('invoice'))->toBe("IN-{$year}000005")
         ->and((new InvoiceNumberGenerator)->generate('credit_note'))->toBe("CR-{$year}000012")
@@ -72,19 +72,19 @@ it('keeps the invoice and credit-note sequences in disjoint ranges', function ()
 });
 
 it('starts at one when the year is empty', function (): void {
-    serialBillable();
+    serialRangeBillable();
     $year = date('y');
 
     expect((new InvoiceNumberGenerator)->generate('invoice'))->toBe("IN-{$year}000001");
 });
 
 it('honours a custom format, including one with no separator', function (): void {
-    $billable = serialBillable();
+    $billable = serialRangeBillable();
     config()->set('mollie-billing.invoices.serial_number.format', 'PPPYYCCC');
     config()->set('mollie-billing.invoices.serial_number.prefix', ['invoice' => 'INV']);
     $year = date('y');
 
-    persistSerial("INV{$year}041", $billable);
+    persistRangeSerial("INV{$year}041", $billable);
 
     expect((new InvoiceNumberGenerator)->generate('invoice'))->toBe("INV{$year}042");
 });
@@ -94,11 +94,11 @@ it('refuses to restart the counter when it outgrows its slot', function (): void
     // sorts *below* the upper bound — so the overflowed row becomes invisible, the
     // counter silently restarts at 1, and the unique index rejects the invoice after
     // the payment has already been taken. Fail loudly while nothing is lost.
-    $billable = serialBillable();
+    $billable = serialRangeBillable();
     config()->set('mollie-billing.invoices.serial_number.format', 'PP-YYC');
     $year = date('y');
 
-    persistSerial("IN-{$year}9", $billable);
+    persistRangeSerial("IN-{$year}9", $billable);
 
     expect(fn () => (new InvoiceNumberGenerator)->generate('invoice'))
         ->toThrow(RuntimeException::class, 'overflowed');
