@@ -66,10 +66,13 @@ class CouponService
 
     public function update(Coupon $coupon, array $attributes): Coupon
     {
+        // Rows, not `redemptions_count`: the counter is decremented on revoke, so a
+        // fully revoked coupon would read as never redeemed — while the invoices and
+        // PDFs of those redemptions still carry the old code.
         if (
             isset($attributes['code'])
             && strtoupper(trim((string) $attributes['code'])) !== $coupon->code
-            && (int) $coupon->redemptions_count > 0
+            && $coupon->redemptions()->exists()
         ) {
             throw new \InvalidArgumentException(
                 'Cannot change the code of a coupon that has already been redeemed.'
@@ -131,7 +134,9 @@ class CouponService
 
     public function delete(Coupon $coupon): void
     {
-        if ((int) $coupon->redemptions_count > 0) {
+        // Rows, not the counter: revoked redemptions keep their row for audit and
+        // would be orphaned by a delete the decremented counter waved through.
+        if ($coupon->redemptions()->exists()) {
             throw new CouponInUseException(
                 'Cannot delete a coupon that has been redeemed; deactivate it instead.'
             );
@@ -144,18 +149,10 @@ class CouponService
     {
         $coupon = $this->resolveAndValidateShared($code, $billable, $context);
 
-        // Per-billable count
-        if ($billable instanceof Model) {
-            $perBillable = CouponRedemption::query()
-                ->where('coupon_id', $coupon->id)
-                ->where('billable_type', $billable->getMorphClass())
-                ->where('billable_id', $billable->getKey())
-                ->count();
-
-            if ($perBillable >= (int) ($coupon->max_redemptions_per_billable ?? 1)) {
-                throw new InvalidCouponException($billable, (string) $coupon->code, 'per_billable_limit_reached');
-            }
-        }
+        // Per-billable count. Same rule as assertPerBillableLimitLeft(), which
+        // re-checks it under the coupon lock — the two must agree or the UI and
+        // the write path disagree about whether a slot is free.
+        $this->assertPerBillableLimitLeft($coupon, $billable);
 
         if ($coupon->type === CouponType::Recurring) {
             $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
@@ -627,9 +624,15 @@ class CouponService
     }
 
     /**
-     * Mirror of the per-billable check in validate(), but inside redeem()'s transaction
-     * and against the locked coupon row. Counts only live redemptions — a revoked grant
-     * frees its slot, which is what revokeGrant()'s counter decrement already implies.
+     * The per-billable cap, used both by validate() and inside redeem()'s transaction
+     * against the locked coupon row.
+     *
+     * Source of truth is the redemption rows, not `redemptions_count`: that counter
+     * sizes the *campaign* in customers (see redeem()) and is shared by every
+     * billable. Only live rows count — a revoked grant frees its slot, which is what
+     * revokeGrant()'s counter decrement already implies. Both readings must apply the
+     * same filter, or a revoked grant leaves the coupon permanently unusable for that
+     * billable in the UI while redeem() would happily take it.
      *
      * @throws InvalidCouponException
      */

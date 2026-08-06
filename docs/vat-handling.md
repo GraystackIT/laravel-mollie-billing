@@ -59,6 +59,22 @@ Reverse-charge applies when **all three** are true:
 
 When all three conditions hold, `VatCalculationService::calculate()` returns gross = net, rate = 0, and the invoice line shows the customer's VAT number with a reverse-charge note. The invoice currency and the VAT-rate-source mechanics still flow through the same code path.
 
+### The seller country and what happens without a valid one
+
+`VatCalculationService::sellerCountry()` reads `mollie-billing.vat.seller_country`, falling back to `mollie-billing.invoices.seller.address.country` (both default to `BILLING_SELLER_COUNTRY`). A candidate is only accepted as an **ISO-3166-1 alpha-2** code — two letters, case and surrounding whitespace irrelevant, `EL` normalised to `GR`. Anything else (`AUT`, `Austria`, `A`, `AT1`, `de-AT`) is rejected and logged, and the next candidate is tried. The check is structural, not a lookup against the EU-27 list, so a seller in GB, CH or NO stays configurable.
+
+This matters because an unmatched seller country reads as "cross-border" for *every* customer: before the validation, a mistyped code silently reverse-charged every domestic B2B supply at 0% and the seller owed that VAT out of pocket.
+
+When no candidate survives, `reverseChargePolicyWithoutSellerCountry()` decides — and it distinguishes two causes:
+
+| State | Reverse charge | Rationale |
+|---|---|---|
+| Nothing configured, `require_seller_country = false` (default) | Granted on VIES validity alone, warning logged | Backwards compatible with pre-0.4 installs. |
+| Nothing configured, `require_seller_country = true` | Refused (VAT charged) | Opt-in strictness. |
+| Configured but not an alpha-2 code | Refused (VAT charged), regardless of `require_seller_country` | The operator opted into the setting and mistyped it, so the backwards-compatibility allowance does not apply. Charging VAT is recoverable through the credit-note + correction machinery; reverse-charging a domestic supply is not. |
+
+The package deliberately does **not** throw on a malformed value: `sellerCountry()` is on the checkout render path and inside the webhook handler, so a throw would turn a config typo into a checkout outage and a Mollie webhook retry loop. `php artisan billing:check-config` is the place that should fail loudly.
+
 ## Country reconciliation (three-way check)
 
 The package compares **three** country sources to detect billable / payment / IP divergence:
@@ -110,7 +126,9 @@ The address-edit page (`billing-data.blade.php`) disables the country dropdown w
 
 Triggered from the user modal or the admin override. Steps, in order:
 
-1. **Refund every linked invoice** (filter: `mismatch_id = $mismatch->id` AND `invoice_kind != Refund` AND `amount_net > 0` AND not already fully refunded). Each refund goes through `RefundInvoiceService::refundFully()` with `RefundReasonCode::BillingError`, which creates a local credit note and calls Mollie's refund API. The credit-note serial is captured per original invoice for the reissue PDF.
+1. **Refund every linked invoice** (filter: `mismatch_id = $mismatch->id` AND `invoice_kind != Refund` AND `amount_net > 0` AND `remainingRefundableNet() > 0`). Each refund goes through `RefundInvoiceService::refundFully()` with `RefundReasonCode::BillingError`, which creates a local credit note and calls Mollie's refund API. The credit-note serial is captured per original invoice for the reissue PDF.
+
+   The "anything left to refund" gate reads `BillingInvoice::remainingRefundableNet()`, i.e. the *effective* refunded net (`max(refunded_net, sum of credit-note lines pointing at this invoice)`) — never the `refunded_net` column alone. A credit note written by a path that did not update that cache column (legacy pro-rata refunds) leaves it at 0, the gate would wave the invoice through to `refundFully()`, and the resulting `Refund amount must be positive.` is rethrown and aborts the entire resolve — leaving the mismatch Pending with no way out for the customer.
 2. **Update the billable** in a DB transaction: `tax_country_user = billing_country = $newCountry`, plus the mismatch row gets `chosen_country`, `status=Resolved`, `resolved_at`, and `resolved_by_user_id`.
 3. **Issue a Mollie correction charge** per refunded invoice via `InvoiceService::issueCorrectionCharge()` with metadata `type=country_correction`. The customer-facing reissue invoice is created when the `country_correction` payment confirms (in `MollieWebhookController::handleCountryCorrectionPaid()`, which preserves the original invoice's `period_start` / `period_end` for OSS-correct accounting).
 4. Dispatch `CountryMismatchResolved`.
@@ -122,7 +140,7 @@ Triggered from the user modal or the admin override. Steps, in order:
 3. **re-cancels the subscription at period end** (the original cancel from the initial flag was undone when `resolve()` ran — without the re-cancel the billable would keep renewing while the unresolved mismatch sits in the audit log);
 4. notifies the billable's admins via `CountryMismatchReissueFailedNotification`.
 
-The user can retry the resolve modal. The retry path through `retryPendingReissues()` skips refunds that already have a credit note (`refunded_net >= amount_net`) and skips re-charges with a still-pending entry in `subscription_meta.country_corrections` — only the missing pieces are retried, no double refund.
+The user can retry the resolve modal. The retry path through `retryPendingReissues()` skips refunds that already have a credit note (`remainingRefundableNet() <= 0`) and skips re-charges with a still-pending entry in `subscription_meta.country_corrections` — only the missing pieces are retried, no double refund.
 
 **Hung-webhook safety net.** If the `country_correction` webhook never arrives (Mollie outage, webhook-URL misconfig, app downtime that exhausted Mollie's retry window), `CleanupStalePendingCountryCorrectionJob` runs hourly and reconciles the hang by polling Mollie's payment status directly:
 
@@ -138,6 +156,8 @@ The user can retry the resolve modal. The retry path through `retryPendingReissu
 ### Admin override
 
 The admin portal's mismatch list still has Pending and Resolved tabs. The Pending resolve modal lets an admin pick the user-, payment-, or IP-derived country, **or** enter any ISO-2 code freely (admins know the context). The chosen country goes through the same `CountryMatchService::resolve()` path as the user modal. `resolved_by_user_id` records the operator.
+
+The admin modal additionally **requires** a free-text justification (max 500 characters). It is stored at `subscription_meta.tax_country_verified.justification` and lands in the `country_mismatch_resolved` audit entry alongside `chosen_country`, so the trail records not just that a resolution happened but which country won and on what grounds. That justification is what allows an ISO-2 code matching none of the three signals to be accepted at all — the user-facing modal has no such freedom.
 
 ### Edge cases
 

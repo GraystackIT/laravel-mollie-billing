@@ -30,8 +30,26 @@ class VatCalculationService
         'INVALID_REQUESTER_INFO',
     ];
 
+    /**
+     * The config keys a seller country is read from, in precedence order.
+     *
+     * @var list<string>
+     */
+    private const SELLER_COUNTRY_KEYS = [
+        'mollie-billing.vat.seller_country',
+        'mollie-billing.invoices.seller.address.country',
+    ];
+
     /** Guard so an unconfigured seller country is logged once per process, not per line item. */
     private static bool $sellerCountryWarned = false;
+
+    /**
+     * Guard so a malformed seller country is logged once per offending value,
+     * not per line item.
+     *
+     * @var array<string, true>
+     */
+    private static array $sellerCountryRejected = [];
 
     public function __construct(
         private readonly VatCalculator $vatCalculator,
@@ -115,25 +133,102 @@ class VatCalculationService
     }
 
     /**
-     * The merchant's own country as an ISO alpha-2 code, or null when it is not
-     * configured. Reverse-charge cannot be decided without it.
+     * The merchant's own country as an ISO alpha-2 code, or null when none of
+     * the configured sources yields a usable one. Reverse-charge cannot be
+     * decided without it.
      *
      * Sources: `mollie-billing.vat.seller_country` (explicit), falling back to
      * the address already used for invoice PDFs
      * (`mollie-billing.invoices.seller.address.country`).
+     *
+     * A candidate that is not an ISO-3166-1 alpha-2 code (`AUT`, `Austria`,
+     * `A`, `AT1`) is rejected rather than passed on: it can never equal a
+     * billing country, so `reverseChargeApplies()` would read every domestic
+     * B2B supply as cross-border and invoice it at 0%. The next candidate is
+     * tried, and {@see reverseChargePolicyWithoutSellerCountry()} handles the
+     * case where none survives.
      */
     public function sellerCountry(): ?string
     {
-        foreach ([
-            config('mollie-billing.vat.seller_country'),
-            config('mollie-billing.invoices.seller.address.country'),
-        ] as $candidate) {
-            if (is_string($candidate) && trim($candidate) !== '') {
-                return CountryResolver::isoFromVatPrefix($candidate);
+        foreach (self::SELLER_COUNTRY_KEYS as $key) {
+            $candidate = config($key);
+
+            if (! is_string($candidate) || trim($candidate) === '') {
+                continue;
             }
+
+            if (! self::isIsoAlpha2($candidate)) {
+                $this->warnAboutMalformedSellerCountry($key, $candidate);
+
+                continue;
+            }
+
+            return CountryResolver::isoFromVatPrefix($candidate);
         }
 
         return null;
+    }
+
+    /**
+     * Whether reverse-charge may be granted while `sellerCountry()` is null.
+     *
+     * Two different causes hide behind that null and they get different answers:
+     *
+     *  - **nothing configured** — the pre-0.4 state. `vat.require_seller_country`
+     *    decides: `true` refuses reverse-charge (safe: VAT is charged and can be
+     *    corrected), `false` (default, backwards compatible) grants it.
+     *  - **configured but malformed** — the operator opted into the setting and
+     *    mistyped it. The backwards-compatibility allowance does not apply to a
+     *    value that was meant to decide domestic vs cross-border, so reverse-charge
+     *    is refused regardless of `require_seller_country`. Charging VAT is
+     *    recoverable through the credit-note + correction machinery; granting
+     *    reverse-charge on a domestic supply is not — the seller pays that VAT.
+     *
+     * Public because the checkout has to render the same verdict it charges: a
+     * second copy of this policy would show "reverse charge" next to a gross total.
+     */
+    public function reverseChargePolicyWithoutSellerCountry(): bool
+    {
+        if ($this->sellerCountryIsMalformed()) {
+            return false;
+        }
+
+        return config('mollie-billing.vat.require_seller_country', false) !== true;
+    }
+
+    /**
+     * True when at least one seller-country source is set but none of them is a
+     * usable ISO alpha-2 code.
+     */
+    private function sellerCountryIsMalformed(): bool
+    {
+        $configured = false;
+
+        foreach (self::SELLER_COUNTRY_KEYS as $key) {
+            $candidate = config($key);
+
+            if (! is_string($candidate) || trim($candidate) === '') {
+                continue;
+            }
+
+            if (self::isIsoAlpha2($candidate)) {
+                return false;
+            }
+
+            $configured = true;
+        }
+
+        return $configured;
+    }
+
+    /**
+     * Structural check only — two ASCII letters. Deliberately not a lookup
+     * against the EU-27 list: a seller in GB, CH or NO is a legitimate
+     * configuration, and this must not reject one.
+     */
+    private static function isIsoAlpha2(string $candidate): bool
+    {
+        return preg_match('/^[A-Za-z]{2}$/', trim($candidate)) === 1;
     }
 
     /**
@@ -151,10 +246,9 @@ class VatCalculationService
      * either one alone would let a domestic supply through if the two ever
      * diverge (imported data, an admin edit).
      *
-     * When the seller country is not configured we cannot tell domestic from
-     * cross-border. `mollie-billing.vat.require_seller_country` decides that case:
-     * `true` refuses reverse-charge (safe: VAT is charged and can be corrected),
-     * `false` (default, backwards compatible) grants it and logs a warning.
+     * When no usable seller country is known we cannot tell domestic from
+     * cross-border; {@see reverseChargePolicyWithoutSellerCountry()} decides
+     * that case.
      */
     public function reverseChargeApplies(Billable $billable, ?string $invoiceCountry = null): bool
     {
@@ -166,9 +260,13 @@ class VatCalculationService
         $sellerCountry = $this->sellerCountry();
 
         if ($sellerCountry === null) {
-            $this->warnAboutMissingSellerCountry();
+            // A malformed value was already reported by sellerCountry() naming the
+            // offending config key; an absent one has nothing to report it.
+            if (! $this->sellerCountryIsMalformed()) {
+                $this->warnAboutMissingSellerCountry();
+            }
 
-            return config('mollie-billing.vat.require_seller_country', false) !== true;
+            return $this->reverseChargePolicyWithoutSellerCountry();
         }
 
         $customerCountry = $this->validationCountry($validation);
@@ -376,6 +474,24 @@ class VatCalculationService
             .'distinguished from cross-border ones and reverse-charge is granted on VIES validity alone. '
             .'Set BILLING_SELLER_COUNTRY (or mollie-billing.vat.seller_country).'
         );
+    }
+
+    private function warnAboutMalformedSellerCountry(string $configKey, string $value): void
+    {
+        $fingerprint = $configKey.'='.$value;
+        if (isset(self::$sellerCountryRejected[$fingerprint])) {
+            return;
+        }
+
+        self::$sellerCountryRejected[$fingerprint] = true;
+
+        Log::warning(sprintf(
+            'mollie-billing: %s is "%s", which is not an ISO-3166-1 alpha-2 country code. It is ignored '
+            .'when deciding domestic vs cross-border B2B, and while no valid seller country is configured '
+            .'reverse-charge is refused outright (VAT is charged). Set a two-letter code, e.g. AT.',
+            $configKey,
+            $value,
+        ));
     }
 
     private function hasAdditionalCountry(string $country): bool

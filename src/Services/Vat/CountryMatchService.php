@@ -230,7 +230,12 @@ class CountryMatchService
 
         $creditNoteSerialsByOriginal = [];
         foreach ($invoices as $invoice) {
-            if ((int) $invoice->refunded_net >= (int) $invoice->amount_net) {
+            // Effective, not the raw column: a credit note written by a path that
+            // never updated `refunded_net` (legacy pro-rata refunds) leaves the
+            // column at 0, and refundFully() then rejects the second refund with
+            // "Refund amount must be positive" — which is rethrown below and
+            // aborts the whole resolve, leaving the mismatch Pending forever.
+            if ($invoice->remainingRefundableNet() <= 0) {
                 continue;
             }
 
@@ -274,7 +279,7 @@ class CountryMatchService
             $this->issueCorrectionOnce($billable, $mismatch, $invoice, $newCountry, $serial);
         }
 
-        CountryMismatchResolved::dispatch($billable, $mismatch, $resolvedBy);
+        CountryMismatchResolved::dispatch($billable, $mismatch, $resolvedBy, $justification);
     }
 
     /**

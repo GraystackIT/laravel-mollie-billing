@@ -1300,16 +1300,22 @@ class InvoiceService
         $newCountry = strtoupper($newCountry);
         $newLines = $this->cloneLineItemsWithRate($original, $newCountry, $billable);
 
+        // Summed from the lines, not recomputed from the total: createCorrectionInvoice()
+        // builds the reissue invoice's header out of these same lines, so deriving the
+        // charge any other way lets the collected amount and the booked amount differ.
+        // With mixed rates they differ by the whole reduced-rate delta; even on a single
+        // rate `round(Σ net × rate)` and `Σ round(net × rate)` drift by a cent per line.
         $sumNet = 0;
+        $sumGross = 0;
         foreach ($newLines as $line) {
             $sumNet += (int) ($line['amount_net'] ?? 0);
+            $sumGross += (int) ($line['amount_gross'] ?? 0);
         }
 
         if ($sumNet <= 0) {
             throw new \LogicException('Correction charge net amount must be positive.');
         }
 
-        $vat = $this->vat->calculate($newCountry, $sumNet, $billable);
         // Charge in the currency the original invoice was booked in — the reissue
         // invoice inherits it too (see createCorrectionInvoice()), so bank, ledger
         // and PDF must not disagree after a BILLING_CURRENCY change.
@@ -1317,7 +1323,7 @@ class InvoiceService
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: 'Country correction for invoice '.($original->serial_number ?? $original->id),
-            amount: new MollieMoney($currency, self::molliePrice((int) $vat['gross'], $currency)),
+            amount: new MollieMoney($currency, self::molliePrice($sumGross, $currency)),
             metadata: [
                 'type' => 'country_correction',
                 'mismatch_id' => $mismatchId,
@@ -1500,16 +1506,25 @@ class InvoiceService
     private function cloneLineItemsWithRate(BillingInvoice $original, string $newCountry, Billable $billable): array
     {
         $vat = $this->vat->calculate($newCountry, 1, $billable); // probe to detect reverse-charge
-        $newRate = (float) $vat['rate'];
+        $newStandardRate = (float) $vat['rate'];
+        $oldStandardRate = $this->standardRateFor((string) ($original->country ?? ''));
 
         $now = BillingTime::nowUtc();
         $periodStart = ($original->period_start ?? $now)->toIso8601String();
         $periodEnd = ($original->period_end ?? $now)->toIso8601String();
 
         $cloned = [];
-        foreach ((array) $original->line_items as $line) {
+        foreach ((array) $original->line_items as $index => $line) {
             $netLine = (int) ($line['amount_net'] ?? 0);
-            $vatLine = (int) round($netLine * $newRate / 100);
+            $lineRate = $this->correctedLineRate(
+                (float) ($line['vat_rate'] ?? $oldStandardRate),
+                $oldStandardRate,
+                $newStandardRate,
+                $original,
+                $newCountry,
+                (int) $index,
+            );
+            $vatLine = (int) round($netLine * $lineRate / 100);
 
             $cloned[] = [
                 'kind' => (string) ($line['kind'] ?? 'plan'),
@@ -1518,7 +1533,7 @@ class InvoiceService
                 'quantity' => (int) ($line['quantity'] ?? 1),
                 'unit_price_net' => (int) ($line['unit_price_net'] ?? $netLine),
                 'amount_net' => $netLine,
-                'vat_rate' => $newRate,
+                'vat_rate' => $lineRate,
                 'vat_amount' => $vatLine,
                 'amount_gross' => $netLine + $vatLine,
                 'period_start' => $periodStart,
@@ -1529,6 +1544,74 @@ class InvoiceService
         }
 
         return $cloned;
+    }
+
+    /**
+     * The rate a single line carries after the invoice is corrected to another country.
+     *
+     * A correction must not flatten the invoice onto one rate. Stamping the new
+     * country's standard rate over every line over-taxes the customer — an AT invoice
+     * of 2000 @ 20% plus 1000 @ 10% corrected to DE collected 35.70 instead of 34.50 —
+     * and it mis-buckets OSS, because `OssProtocolService::collectBuckets()` buckets by
+     * the line's own `vat_rate`.
+     *
+     * Three cases, because that is as far as the data goes:
+     *  - reverse charge, or a zero-rated line: stays 0. A discount line and an
+     *    already-exempt supply have no destination equivalent to look up.
+     *  - the origin country's standard rate: becomes the destination's standard rate.
+     *    This is the overwhelming majority of lines.
+     *  - anything else — a reduced rate, which only ever enters as a caller-supplied
+     *    per-line override: kept as-is and logged. `vatRateFor()` returns one rate per
+     *    country, so the package has no way to derive "the German equivalent of the
+     *    Austrian reduced rate"; keeping the line's own rate at least preserves the
+     *    reduction rather than silently raising it to standard.
+     */
+    private function correctedLineRate(
+        float $lineRate,
+        float $oldStandardRate,
+        float $newStandardRate,
+        BillingInvoice $original,
+        string $newCountry,
+        int $index,
+    ): float {
+        if ($newStandardRate <= 0.0 || abs($lineRate) < 0.001) {
+            return 0.0;
+        }
+
+        if (abs($lineRate - $oldStandardRate) < 0.001) {
+            return $newStandardRate;
+        }
+
+        Log::warning('Country correction kept a non-standard line rate: no destination equivalent is derivable', [
+            'invoice_id' => $original->id,
+            'line_index' => $index,
+            'line_vat_rate' => $lineRate,
+            'from_country' => $original->country,
+            'from_standard_rate' => $oldStandardRate,
+            'to_country' => $newCountry,
+            'to_standard_rate' => $newStandardRate,
+        ]);
+
+        return $lineRate;
+    }
+
+    /**
+     * The origin country's standard rate, used only to recognise which lines were
+     * charged at it. A country the calculator does not know degrades to 0, which makes
+     * every line fall through to the "keep and log" branch rather than being silently
+     * re-rated off a wrong baseline.
+     */
+    private function standardRateFor(string $country): float
+    {
+        if ($country === '') {
+            return 0.0;
+        }
+
+        try {
+            return $this->vat->vatRateFor($country);
+        } catch (\Throwable) {
+            return 0.0;
+        }
     }
 
     // ========================================================================

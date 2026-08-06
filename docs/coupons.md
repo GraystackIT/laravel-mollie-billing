@@ -65,6 +65,15 @@ Every coupon can be restricted to a subset of plans, intervals, addons, or produ
 | `max_redemptions` | Global cap across all billables (null = unlimited). |
 | `max_redemptions_per_billable` | Per-billable cap (default `1`). For `recurring`, this defines the discount lifetime in periods: `marker.valid_until = now + max_redemptions × intervalDays + 1d`. **Required for recurring coupons** if `valid_until` is empty. |
 
+### What counts against which cap
+
+The two caps read two different sources, deliberately:
+
+- **`max_redemptions`** is measured by the denormalised `coupons.redemptions_count` column. That counter counts *grants*, not applications: `redeem()` increments it only for a first grant, never for a `renewal` re-application of an already-granted recurring coupon (a 50-redemption campaign would otherwise be exhausted by 20 monthly subscribers within months), and `revokeGrant()` decrements it so the slot is freed. The redemption rows cannot answer this question — nothing in the schema marks a row as grant vs. renewal.
+- **`max_redemptions_per_billable`** is measured by the `coupon_redemptions` rows for that billable, **filtered to `revoked_at IS NULL`**. A revoked grant frees its per-billable slot, matching the counter decrement above. `validate()` and `redeem()` share one implementation of this check (`assertPerBillableLimitLeft()`) so the UI and the write path can never disagree — while they differed, revoking a grant left the coupon permanently unusable for that billable, because `validate()` runs first on every UI path.
+
+"Has this coupon ever been redeemed?" — the question behind the guards that refuse to rename or delete a coupon — is answered by the rows **unfiltered**: a revoked redemption still happened, and the invoices and PDFs issued under that code still exist.
+
 ## Full coverage handling — both `recurring` and `single_payment` allow 100 %
 
 A discount coupon that reduces the charge to zero would normally crash at the payment provider — Mollie rejects `amount = 0` on subscription charges. Each coupon type has its own zero-charge path so 100 % discounts are supported across the board:

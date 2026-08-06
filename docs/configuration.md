@@ -264,6 +264,16 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
 
 - `vat.seller_country` — **your own** country. Reverse charge under Art. 196 VAT Directive applies to cross-border B2B supplies only, so this is what separates a domestic business customer (owes domestic VAT) from a cross-border one (0%, reverse charge). Falls back to `invoices.seller.address.country`. While neither is set the package logs a warning and grants reverse charge on VIES validity alone — which invoices a customer in your own country at 0% and under-declares your domestic output VAT. `VatCalculationService::reverseChargeApplies()` is the single decision point; the portal, the checkout and the preview all read it, so the label and the charged amount cannot diverge.
 - `vat.require_seller_country` — set `true` to refuse reverse charge entirely while no seller country is known, instead of the backwards-compatible fallback above.
+
+  There are three states, not two, and `require_seller_country` only governs the middle one:
+
+  | `vat.seller_country` | Reverse charge for a VIES-valid B2B customer |
+  |---|---|
+  | a valid alpha-2 code (`AT`, `de`, `" DE "`) | cross-border → 0%, domestic → your own VAT rate |
+  | unset (and no `invoices.seller.address.country`) | granted unless `require_seller_country` is `true`; a warning is logged |
+  | set but malformed (`AUT`, `Austria`, `de-AT`, `A1`) | **refused regardless of `require_seller_country`**, and logged once per offending value |
+
+  The malformed case is deliberately not covered by the compat allowance: the operator opted into the setting, and the old behaviour silently reverse-charged every domestic B2B supply at 0% with the seller paying that VAT out of pocket — which cannot be unwound, while an over-charged invoice can (credit note plus correction). `billing:check-config` reports a malformed value as an **error**, which is where a typo should stop you. Validation is structural (two ASCII letters), not a registry lookup, so GB/CH/NO sellers stay configurable.
 - `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code.
 - `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list.
 - `oss.disk` — Laravel filesystem disk where generated OSS protocol CSVs are stored. Works with any S3-compatible private bucket; the admin portal hands out a short-lived presigned URL via `Storage::temporaryUrl()`. When `null`, the disk configured under `invoices.disk` is reused.

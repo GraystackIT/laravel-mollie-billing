@@ -309,6 +309,41 @@ class CheckConfigCommand extends Command
                 $this->addWarning($scope, "invoices.seller.address.{$key} is empty — generated invoices will be incomplete.");
             }
         }
+
+        $this->validateSellerCountry($scope);
+    }
+
+    /**
+     * The seller country decides domestic VAT versus cross-border reverse charge, so
+     * a value that is set but not a valid ISO-3166-1 alpha-2 code is an error rather
+     * than a warning: at runtime VatCalculationService refuses it and falls back to
+     * charging VAT, which is recoverable — but every B2B invoice until someone
+     * notices carries the wrong treatment. This is the place a typo should be loud.
+     */
+    private function validateSellerCountry(string $scope): void
+    {
+        $keys = [
+            'mollie-billing.vat.seller_country',
+            'mollie-billing.invoices.seller.address.country',
+        ];
+
+        foreach ($keys as $key) {
+            $value = config($key);
+
+            if ($value === null || (is_string($value) && trim($value) === '')) {
+                continue;
+            }
+
+            if (! is_string($value) || preg_match('/^[A-Za-z]{2}$/', trim($value)) !== 1) {
+                $shown = is_scalar($value) ? (string) $value : gettype($value);
+
+                $this->addError($scope, sprintf(
+                    '%s is "%s", which is not an ISO-3166-1 alpha-2 country code. Reverse charge is refused while it stays malformed, so every cross-border B2B supply is invoiced with domestic VAT.',
+                    str_replace('mollie-billing.', '', $key),
+                    $shown,
+                ));
+            }
+        }
     }
 
     private function validateCheckoutCountries(string $scope): void
