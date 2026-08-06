@@ -321,11 +321,20 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         // An open charge already covers these balances. Creating a second one would
         // double-collect, because the wallets stay negative until the first payment
         // settles — with SEPA that is days, not seconds.
-        $pending = $chargeService->pendingCharge($billable);
-        if ($pending !== null && ! $chargeService->pendingChargeIsSettled($billable)) {
+        //
+        // Gated on the status marker, not merely on the snapshot's presence:
+        // pendingChargeIsSettled() reports "settled" only once an invoice exists, so a
+        // charge that failed for good would otherwise look permanently in flight and
+        // silence every future overage for this billable. RetryUsageOverageChargeJob
+        // leaves the snapshot behind when it gives up, precisely so the amount stays
+        // auditable.
+        $meta = $billable->getBillingSubscriptionMeta();
+        $inFlight = ($meta['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_PENDING;
+
+        if ($inFlight && ! $chargeService->pendingChargeIsSettled($billable)) {
             Log::info('PrepareUsageOverageJob: overage charge already in flight, skipping', [
                 'billable_id' => $billable->getKey(),
-                'payment_id' => $pending['payment_id'] ?? null,
+                'payment_id' => $chargeService->pendingCharge($billable)['payment_id'] ?? null,
             ]);
 
             return;

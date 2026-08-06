@@ -174,6 +174,51 @@ it('does not re-charge in pass 2 when pass 1 already created the payment', funct
         ->toBe('tr_overage_inflight');
 });
 
+it('still attempts a new overage charge after an earlier one failed for good', function (): void {
+    Bus::fake([RetryUsageOverageChargeJob::class]);
+
+    config()->set('mollie-billing-plans.plans.pro', [
+        'name' => 'Pro',
+        'included_seats' => 1,
+        'intervals' => [
+            'monthly' => [
+                'base_price_net' => 1000,
+                'included_usages' => ['tokens' => 100],
+                'usage_overage_prices' => ['tokens' => 5],
+            ],
+        ],
+    ]);
+
+    // RetryUsageOverageChargeJob leaves the snapshot behind when it gives up, so the
+    // amount stays auditable. Gating pass 1 on the snapshot's mere presence therefore
+    // silenced every later overage: pendingChargeIsSettled() only reports "settled"
+    // once an invoice exists, and a charge that failed never produces one — so the
+    // dead snapshot looked like a charge in flight forever.
+    $b = overageLifecycleBillable([
+        'subscription_status' => SubscriptionStatus::Active,
+        'mollie_customer_id' => 'cst_dead',
+        'mollie_mandate_id' => 'mdt_dead',
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subMonth()->addDay(),
+        'subscription_meta' => [
+            'usage_overage_status' => RetryUsageOverageChargeJob::OVERAGE_FAILED,
+            'usage_overage' => [
+                'payment_id' => 'tr_overage_dead',
+                'line_items' => [['type' => 'tokens', 'quantity' => 100, 'unit_price_net' => 1, 'total_net' => 100]],
+            ],
+        ],
+    ]);
+
+    $b->recordBillingUsage('tokens', 150, 'test');
+
+    PrepareUsageOverageJob::dispatchSync();
+
+    // Without a Mollie client the charge throws, and safeCharge()'s catch records a
+    // fresh attempt. Either way the status must have left OVERAGE_FAILED — that is the
+    // observable proof pass 1 did not skip the billable.
+    expect($b->fresh()->getBillingSubscriptionMeta()['usage_overage_status'] ?? null)
+        ->not->toBe(RetryUsageOverageChargeJob::OVERAGE_FAILED);
+});
+
 it('retries in pass 2 when the charge never reached Mollie', function (): void {
     Bus::fake([RetryUsageOverageChargeJob::class]);
 

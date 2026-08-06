@@ -341,10 +341,31 @@ class ProrataChargeHandler
         $paymentId = (string) ($payment->id ?? '');
         $amountCents = $this->support->amountFromMolliePayment($payment);
 
+        // UpdateSubscription::cancelPendingPlanChange() records the payment it could
+        // not cancel under this key, together with the plan change and charge lines it
+        // was for. Reading it here is what turns "some money arrived for nothing" into
+        // an actionable report — and consuming it means the marker does not linger as a
+        // permanent orphan record once the admins have been told.
+        $orphan = null;
+
+        if ($billable instanceof Model) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $candidate = $meta['orphaned_prorata_payment'] ?? null;
+
+            if (is_array($candidate) && (string) ($candidate['payment_id'] ?? '') === $paymentId) {
+                $orphan = $candidate;
+
+                unset($meta['orphaned_prorata_payment']);
+                $billable->forceFill(['subscription_meta' => $meta])->save();
+            }
+        }
+
         Log::error('Paid prorata charge without pending plan change — money collected for a cancelled plan change', [
             'payment_id' => $paymentId,
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             'amount_cents' => $amountCents,
+            'cancel_reason' => $orphan['reason'] ?? null,
+            'cancelled_at' => $orphan['cancelled_at'] ?? null,
         ]);
 
         $admins = MollieBilling::notifyAdmin();
@@ -364,6 +385,10 @@ class ProrataChargeHandler
                     'payment_id' => $paymentId,
                     'amount_cents' => $amountCents,
                     'currency' => isset($payment->amount->currency) ? (string) $payment->amount->currency : null,
+                    'cancel_reason' => $orphan['reason'] ?? null,
+                    'cancelled_at' => $orphan['cancelled_at'] ?? null,
+                    'intended_plan_change' => $orphan['pending_plan_change'] ?? null,
+                    'charge_lines' => $orphan['prorata_charge_lines'] ?? null,
                 ],
             ),
         );

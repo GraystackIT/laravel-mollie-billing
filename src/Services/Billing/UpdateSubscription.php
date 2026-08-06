@@ -829,11 +829,11 @@ class UpdateSubscription
      * cleared, so the paid path has something to reconcile against instead of returning
      * early on an empty pending state.
      *
-     * Contract for the webhook side (ProrataChargeHandler::paid()): when
-     * `pending_prorata_change` is empty but `orphaned_prorata_payment.payment_id` matches
-     * the incoming payment, the change was cancelled locally after the payment went out —
-     * refund it (or apply the recorded `pending_plan_change`) and alert, never silently
-     * return. The marker is the only record that the money belongs to nothing.
+     * Read by ProrataChargeHandler::reportOrphanedCharge(): when the payment settles
+     * anyway, `pending_prorata_change` is empty, so the handler matches this marker on
+     * the payment id, folds the reason and the intended change into the admin alert and
+     * clears it. The refund itself stays manual — reversing a plan change the customer
+     * cancelled is a product decision, not something to automate behind their back.
      */
     private function recordOrphanedProrataPayment(Billable $billable, string $paymentId, string $reason): void
     {
