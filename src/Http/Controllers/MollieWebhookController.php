@@ -464,6 +464,13 @@ class MollieWebhookController extends Controller
         $type = (string) ($metadata['billable_type'] ?? '');
         $id = $metadata['billable_id'] ?? null;
 
+        // Every checkout writes `getMorphClass()` into the metadata, which is a
+        // morph-map alias in apps that register one — resolve it back to the FQCN
+        // before touching the class.
+        if ($type !== '' && ! class_exists($type)) {
+            $type = (string) (\Illuminate\Database\Eloquent\Relations\Relation::getMorphedModel($type) ?? '');
+        }
+
         if ($type === '' || $id === null || ! class_exists($type)) {
             return null;
         }

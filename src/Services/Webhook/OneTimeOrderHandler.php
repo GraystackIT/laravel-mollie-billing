@@ -11,18 +11,29 @@ use GraystackIT\MollieBilling\Events\OneTimeOrderFailed;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
 class OneTimeOrderHandler
 {
+    /**
+     * Country the checkout falls back to when the billable has none —
+     * StartOneTimeOrderCheckout charges VAT for `getBillingCountry() ?? 'DE'`.
+     * Kept in sync manually: the invoice has to state the VAT that was actually
+     * charged, while InvoiceService resolves the country as
+     * `getBillingCountry() ?? ''`, which VatCalculationService rejects.
+     */
+    protected const CHECKOUT_COUNTRY_FALLBACK = 'DE';
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly SubscriptionCatalogInterface $catalog,
         protected readonly CouponService $couponService,
         protected readonly InvoiceService $salesInvoiceService,
         protected readonly WalletUsageService $walletService,
+        protected readonly VatCalculationService $vatService,
     ) {
     }
 
@@ -181,6 +192,35 @@ class OneTimeOrderHandler
         event(new OneTimeOrderCompleted($billable, $invoice, $productCode, $metadata));
         event(new PaymentSucceeded($billable, $invoice));
         $this->support->notifyInvoiceAvailable($billable, $invoice);
+    }
+
+    /**
+     * A billable without a billing country was charged with the checkout's
+     * fallback country, but the invoice pipeline resolves the country as
+     * `getBillingCountry() ?? ''` and VatCalculationService throws
+     * NonEuCountryException on an empty country — before the invoice is saved.
+     * The controller then deletes the reservation and returns 500, so Mollie
+     * retries forever, `invoiceAlreadyExistsForPayment()` never becomes true and
+     * the order never completes: no invoice, no wallet credit, no
+     * OneTimeOrderCompleted. Persisting the country the charge used resolves the
+     * asymmetry and keeps the invoice's VAT equal to the VAT collected.
+     */
+    protected function ensureBillingCountry(Billable $billable): void
+    {
+        if ((string) ($billable->getBillingCountry() ?? '') !== '') {
+            return;
+        }
+
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        Log::warning('One-time order: billable has no billing country — falling back to the country the checkout charged', [
+            'billable_id' => $billable->getKey(),
+            'country' => self::CHECKOUT_COUNTRY_FALLBACK,
+        ]);
+
+        $billable->forceFill(['billing_country' => self::CHECKOUT_COUNTRY_FALLBACK])->save();
     }
 
     /**
