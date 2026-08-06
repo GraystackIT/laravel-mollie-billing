@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `MollieBilling::routes()` — the mounting call README documented all along but that did not exist.
 - `MollieBilling::flushCallbacks()` for use in `tearDown()`.
 - `brick/money` is a declared dependency. It was already installed transitively and used directly by the invoice and money code, which would have broken on any install that resolved it away.
+- Bulk wallet credits require an operator reason, recorded on every credited wallet and in the audit trail instead of the hardcoded `bulk credit`.
+- Revoking an access grant requires a reason. It is appended to the stable `admin_revoke` marker (`admin_revoke: <reason>`), so the marker stays greppable in every locale while carrying the why, and the audit entry records it.
 - New `subscription_meta` keys: `cleanup_vetoed_at` (orphan cleanup vetoed by the app), `usage_overage_counted_payments` (dunning budget, per payment id), `trial_ending_notified_for` (the `trial_ends_at` date already warned about), `orphaned_prorata_payment` (a prorata charge Mollie collected but no webhook completed).
 
 ### Changed
@@ -131,6 +133,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Portal and checkout quota prices read the minor-unit scale off the currency, so a currency without two decimals no longer renders at the wrong order of magnitude.
 - The checkout resolves the no-seller-country reverse-charge policy through `VatCalculationService::reverseChargePolicyWithoutSellerCountry()` rather than a local copy of the condition, which disagreed with the service for a malformed `vat.seller_country`.
 - Every `\Flux::toast()` / `\Flux::modal()` call goes through the new `Concerns\InteractsWithFluxUi` guard. Flux Pro is absent from this package's own test environment, so each of these fataled with `Class "Flux" not found` and made the whole action leading up to it unreachable under test.
+- The past-due retry action refuses any billable the list itself would not show, so a target that is not `past_due` can no longer be pushed into a dunning evaluation through a crafted call.
+- The refunds screen no longer renders a regular invoice inside its credit-note detail modal; the id is checked on write *and* on read, so a row that stops being a credit note drops out of an already-open modal.
+- Bulk wallet credits and trial extensions reject out-of-range amounts and a `usage_type` that is not in the plan catalog. An unvalidated type created a wallet nothing will ever charge or reset, and a mistyped order of magnitude was applied verbatim; a negative trial extension reported success while `extendBillingTrialUntil()` silently kept the previous date.
 - Resolving a country mismatch requires an operator justification (max 500 characters). It is stored at `subscription_meta.tax_country_verified.justification` and recorded in the `country_mismatch_resolved` audit entry, which also gains `chosen_country` — the entry previously recorded that a resolution happened but neither which country won nor why.
 
 ## [0.3.9] - 2026-08-04

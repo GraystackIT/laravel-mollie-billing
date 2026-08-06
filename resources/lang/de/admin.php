@@ -156,6 +156,13 @@ return [
                 'admin_revoke' => 'vom Administrator widerrufen',
             ],
 
+            'revoke_modal' => [
+                'title' => 'Freischaltung widerrufen',
+                'note_label' => 'Grund',
+                'note_placeholder' => 'z. B. Für die falsche Organisation freigeschaltet (Ticket #1234).',
+                'note_description' => 'Wird auf der widerrufenen Freischaltung und im Audit-Log des Kunden festgehalten.',
+            ],
+
             'flash' => [
                 'pick_trial_date' => 'Bitte ein Enddatum für die Testphase wählen.',
                 'trial_date_invalid' => 'Das ist kein gültiges Datum.',
@@ -167,6 +174,8 @@ return [
                 'grant_not_found' => 'Freischaltung nicht gefunden.',
                 'grant_foreign' => 'Die Freischaltung gehört nicht zu diesem Kunden.',
                 'grant_revoked' => 'Freischaltung widerrufen (:reason).',
+                'revoke_note_required' => 'Bitte festhalten, warum diese Freischaltung widerrufen wird.',
+                'revoke_note_too_long' => 'Der Grund darf maximal :max Zeichen lang sein.',
             ],
         ],
 
@@ -241,6 +250,7 @@ return [
             'default_reason' => 'admin credit',
             'flash' => [
                 'pick_usage_type' => 'Bitte eine Nutzungsart wählen.',
+                'unknown_usage_type' => 'Unbekannte Nutzungsart :type — sie steht nicht im Tarifkatalog, dieses Wallet würde also nie berechnet oder zurückgesetzt.',
                 'units_positive' => 'Die Einheiten müssen größer als null sein.',
                 'credited' => ':units :type gutgeschrieben.',
             ],
@@ -472,6 +482,7 @@ return [
             'last_failure' => 'Letzter Fehler',
         ],
         'retry_dispatched' => 'Erneuter Versuch für :name gestartet.',
+        'not_past_due' => ':name ist nicht im Zahlungsrückstand — nur die hier gelisteten Kunden können erneut abgerechnet werden.',
     ],
 
     'mismatches' => [
@@ -530,6 +541,7 @@ return [
         'search' => 'Nach Name, E-Mail, Kunden-ID oder Nummer suchen',
         'empty_title' => 'Noch keine Rückerstattungen',
         'empty_description' => 'Gutschriften aus dem Rechnungs-Tab erscheinen hier.',
+        'not_a_credit_note' => 'Diese Rechnung ist keine Gutschrift — dieser Bereich zeigt nur Erstattungen.',
         'column' => [
             'date' => 'Datum',
             'serial' => 'Nummer',
@@ -587,6 +599,9 @@ return [
         'usage_type_description' => 'Welches Wallet aufgeladen wird.',
         'units' => 'Einheiten je Kunde',
         'units_description' => 'Ganze Einheiten. Beispiel: 100',
+        'reason' => 'Grund',
+        'reason_description' => 'Wird auf jedem aufgeladenen Wallet und in jedem Audit-Log festgehalten.',
+        'reason_placeholder' => 'z. B. Kulanz nach der Störung im März (Ticket #1234)',
         'credit_all' => 'Alle aufladen',
         'credit_all_confirm' => 'Alle Kunden in diesem Tarif aufladen?',
 
@@ -599,7 +614,13 @@ return [
 
         'no_model' => 'Kein Billable-Modell konfiguriert.',
         'units_positive' => 'Die Einheiten müssen größer als null sein.',
+        'units_too_large' => 'Höchstens :max Einheiten je Kunde in einem Durchlauf.',
         'select_usage_type' => 'Bitte eine Nutzungsart wählen.',
+        'unknown_usage_type' => 'Unbekannte Nutzungsart :type — sie steht nicht im Tarifkatalog, diese Wallets würden also nie berechnet oder zurückgesetzt.',
+        'reason_required' => 'Bitte festhalten, warum dieser Durchlauf aufgeladen wird.',
+        'reason_too_long' => 'Der Grund darf maximal :max Zeichen lang sein.',
+        'trial_days_positive' => 'Die Tage müssen größer als null sein.',
+        'trial_days_too_large' => 'Höchstens :max Tage in einem Durchlauf.',
         'credited' => ':count Kunden aufgeladen.',
         'credited_partial' => ':count Kunden aufgeladen, :failed fehlgeschlagen. Details stehen im Anwendungs-Log; ein erneuter Lauf lädt die erfolgreichen Kunden nochmals auf.',
         'extended' => 'Testphasen für :count Kunden verlängert.',

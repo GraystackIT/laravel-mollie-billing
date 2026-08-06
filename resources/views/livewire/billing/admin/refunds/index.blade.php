@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -19,6 +20,7 @@ new class extends Component {
     #[Locked]
     public ?int $detailInvoiceId = null;
     public bool $showDetail = false;
+    public ?string $error = null;
 
     private const ALLOWED_SORTS = ['created_at', 'amount_gross', 'serial_number'];
 
@@ -38,8 +40,26 @@ new class extends Component {
         }
     }
 
+    /**
+     * Credit notes only. The modal presents its subject as a refund of a parent
+     * invoice, so a regular invoice opened here would read as money returned that
+     * never left. There is no separate credit-note kind — a credit note *is* an
+     * InvoiceKind::Refund row.
+     */
     public function openDetail(int $id): void
     {
+        $this->error = null;
+
+        $isCreditNote = BillingInvoice::query()
+            ->whereKey($id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->exists();
+
+        if (! $isCreditNote) {
+            $this->error = __('billing::admin.refunds.not_a_credit_note');
+            return;
+        }
+
         $this->detailInvoiceId = $id;
         $this->showDetail = true;
     }
@@ -47,7 +67,7 @@ new class extends Component {
     public function with(): array
     {
         $q = BillingInvoice::query()
-            ->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)
+            ->where('invoice_kind', InvoiceKind::Refund)
             ->with('billable');
 
         if ($this->search !== '') {
@@ -65,7 +85,10 @@ new class extends Component {
         $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
 
         $detail = $this->showDetail && $this->detailInvoiceId
-            ? BillingInvoice::with('billable')->find($this->detailInvoiceId)
+            ? BillingInvoice::with('billable')
+                ->where('invoice_kind', InvoiceKind::Refund)
+                ->whereKey($this->detailInvoiceId)
+                ->first()
             : null;
 
         $parent = null;
@@ -91,6 +114,8 @@ new class extends Component {
         :title="__('billing::admin.refunds.title')"
         :subtitle="__('billing::admin.refunds.subtitle')"
     />
+
+    <x-mollie-billing::admin.flash :error="$error" />
 
     <flux:input
         type="search"

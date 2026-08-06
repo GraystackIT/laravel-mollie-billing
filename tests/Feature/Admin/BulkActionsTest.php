@@ -142,6 +142,7 @@ it('registers bulk wallet credits as purchased balance so they survive a renewal
         ->set('planFilter', 'pro')
         ->set('creditType', 'emails')
         ->set('creditUnits', 5000)
+        ->set('creditReason', 'goodwill after the March outage')
         ->call('creditWallets')
         ->assertSet('error', null);
 

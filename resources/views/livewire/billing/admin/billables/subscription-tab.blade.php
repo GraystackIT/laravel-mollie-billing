@@ -19,6 +19,12 @@ new class extends Component {
     public ?string $flash = null;
     public ?string $error = null;
 
+    /** Locked: which grant revokeGrant() revokes is decided by openRevoke(), not by the browser. */
+    #[Locked]
+    public ?int $revokingId = null;
+    public bool $showRevokeModal = false;
+    public string $revokeNote = '';
+
     /**
      * Stable, locale-independent reason persisted on the redemption and carried in
      * the GrantRevoked event. Translated only for display — a localized string in
@@ -26,7 +32,14 @@ new class extends Component {
      */
     private const REVOKE_REASON = 'admin_revoke';
 
+    private const MAX_REVOKE_NOTE_LENGTH = 200;
+
     public function mount(mixed $billableId = null): void { $this->billableId = $billableId; }
+
+    public function with(): array
+    {
+        return ['maxRevokeNoteLength' => self::MAX_REVOKE_NOTE_LENGTH];
+    }
 
     public function billable(): mixed
     {
@@ -115,23 +128,79 @@ new class extends Component {
         }
     }
 
-    public function revokeGrant(int $redemptionId, CouponService $service): void
+    /**
+     * Resolve the redemption the revoke modal addresses, scoped to the locked
+     * billable. Sets `$error` and returns null when it is not revocable from here.
+     */
+    private function revokeTarget(): ?CouponRedemption
     {
-        $this->error = $this->flash = null;
-        $redemption = CouponRedemption::find($redemptionId);
-        if (! $redemption) { $this->error = __('billing::admin.billables.subscription.flash.grant_not_found'); return; }
+        if ($this->revokingId === null) {
+            $this->error = __('billing::admin.billables.subscription.flash.grant_not_found');
+            return null;
+        }
+
+        $redemption = CouponRedemption::find($this->revokingId);
+        if (! $redemption) { $this->error = __('billing::admin.billables.subscription.flash.grant_not_found'); return null; }
 
         $b = $this->billable();
         if (! $b || $redemption->billable_type !== $b->getMorphClass() || (string) $redemption->billable_id !== (string) $b->getKey()) {
             $this->error = __('billing::admin.billables.subscription.flash.grant_foreign');
+            return null;
+        }
+
+        return $redemption;
+    }
+
+    public function openRevoke(int $redemptionId): void
+    {
+        $this->error = $this->flash = null;
+        $this->revokingId = $redemptionId;
+        $this->revokeNote = '';
+
+        // Validate before the modal opens so a foreign or stale id surfaces as an
+        // error on the page instead of a form the operator can fill in for nothing.
+        if ($this->revokeTarget() === null) {
+            $this->revokingId = null;
+            return;
+        }
+
+        $this->showRevokeModal = true;
+    }
+
+    /**
+     * The modal's close button and ESC only flip `showRevokeModal`, so the reset
+     * has to hang off that property — a `closeRevoke()` action would never run.
+     */
+    public function updatedShowRevokeModal(bool $value): void
+    {
+        if (! $value) {
+            $this->reset(['revokingId', 'revokeNote']);
+        }
+    }
+
+    public function revokeGrant(CouponService $service): void
+    {
+        $this->error = $this->flash = null;
+
+        $redemption = $this->revokeTarget();
+        if (! $redemption) { return; }
+
+        $note = trim($this->revokeNote);
+        if ($note === '') { $this->error = __('billing::admin.billables.subscription.flash.revoke_note_required'); return; }
+        if (mb_strlen($note) > self::MAX_REVOKE_NOTE_LENGTH) {
+            $this->error = __('billing::admin.billables.subscription.flash.revoke_note_too_long', ['max' => self::MAX_REVOKE_NOTE_LENGTH]);
             return;
         }
 
         try {
-            $service->revokeGrant($redemption, self::REVOKE_REASON);
+            // Stable marker first, operator note appended: `revoked_reason` stays
+            // greppable as `admin_revoke%` across locales while carrying the why.
+            $service->revokeGrant($redemption, self::REVOKE_REASON.': '.$note);
             $this->flash = __('billing::admin.billables.subscription.flash.grant_revoked', [
                 'reason' => __('billing::admin.billables.subscription.revoke_reason.'.self::REVOKE_REASON),
             ]);
+            $this->showRevokeModal = false;
+            $this->reset(['revokingId', 'revokeNote']);
         } catch (\Throwable $e) {
             report($e);
             $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
@@ -311,8 +380,7 @@ new class extends Component {
                                         size="xs"
                                         variant="danger"
                                         icon="x-mark"
-                                        wire:click="revokeGrant({{ $g->id }})"
-                                        wire:confirm="{{ __('billing::admin.billables.subscription.revoke_confirm') }}"
+                                        wire:click="openRevoke({{ $g->id }})"
                                     >{{ __('billing::admin.billables.subscription.revoke') }}</flux:button>
                                 </flux:table.cell>
                             </flux:table.row>
@@ -322,4 +390,37 @@ new class extends Component {
             @endif
         </x-mollie-billing::admin.section>
     @endif
+
+    <flux:modal wire:model.self="showRevokeModal" name="revoke-grant" class="md:w-[480px]">
+        <form wire:submit="revokeGrant" class="space-y-5">
+            <div>
+                <flux:heading size="lg">{{ __('billing::admin.billables.subscription.revoke_modal.title') }}</flux:heading>
+                <flux:text class="text-zinc-500 dark:text-zinc-400">
+                    {{ __('billing::admin.billables.subscription.revoke_confirm') }}
+                </flux:text>
+            </div>
+
+            <flux:field>
+                <flux:label :badge="__('billing::admin.common.required')">{{ __('billing::admin.billables.subscription.revoke_modal.note_label') }}</flux:label>
+                <flux:textarea
+                    wire:model="revokeNote"
+                    :placeholder="__('billing::admin.billables.subscription.revoke_modal.note_placeholder')"
+                    rows="3"
+                    :maxlength="$maxRevokeNoteLength"
+                />
+                <flux:description>
+                    {{ __('billing::admin.billables.subscription.revoke_modal.note_description') }}
+                </flux:description>
+            </flux:field>
+
+            <div class="flex justify-end gap-2">
+                <flux:modal.close>
+                    <flux:button type="button" size="sm" variant="ghost">{{ __('billing::admin.common.cancel') }}</flux:button>
+                </flux:modal.close>
+                <flux:button type="submit" size="sm" variant="danger" icon="x-mark" wire:loading.attr="disabled">
+                    {{ __('billing::admin.billables.subscription.revoke') }}
+                </flux:button>
+            </div>
+        </form>
+    </flux:modal>
 </div>

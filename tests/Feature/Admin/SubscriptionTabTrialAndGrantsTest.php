@@ -125,10 +125,15 @@ it('persists a stable revoke reason, not a localized string', function (): void 
         app()->setLocale($locale);
 
         Livewire::test('mollie-billing::admin.billables.subscription-tab', ['billableId' => $b->getKey()])
-            ->call('revokeGrant', $redemption->id)
+            ->call('openRevoke', $redemption->id)
+            ->set('revokeNote', 'granted to the wrong org')
+            ->call('revokeGrant')
             ->assertSet('error', null);
 
-        expect(CouponRedemption::find($redemption->id)->revoked_reason)->toBe('admin_revoke');
+        // The operator note is appended to the stable marker, never replaces it:
+        // `revoked_reason` stays queryable as `admin_revoke%` in every locale.
+        expect(CouponRedemption::find($redemption->id)->revoked_reason)
+            ->toBe('admin_revoke: granted to the wrong org');
 
         // Reset for the second locale pass.
         CouponRedemption::whereKey($redemption->id)->update(['revoked_at' => null, 'revoked_reason' => null]);
@@ -144,8 +149,15 @@ it('refuses to revoke a grant belonging to another billable', function (): void 
     $coupon = $service->addonGrantCoupon('GRANT-FOREIGN-1', ['extra']);
     $redemption = $service->redeem($coupon, $other, []);
 
+    // The foreign id is rejected before the modal even opens, and again if the
+    // revoke is called anyway.
     Livewire::test('mollie-billing::admin.billables.subscription-tab', ['billableId' => $mine->getKey()])
-        ->call('revokeGrant', $redemption->id)
+        ->call('openRevoke', $redemption->id)
+        ->assertSet('error', fn (?string $e) => $e !== null)
+        ->assertSet('showRevokeModal', false)
+        ->assertSet('revokingId', null)
+        ->set('revokeNote', 'trying anyway')
+        ->call('revokeGrant')
         ->assertSet('error', fn (?string $e) => $e !== null);
 
     expect(CouponRedemption::find($redemption->id)->revoked_at)->toBeNull();

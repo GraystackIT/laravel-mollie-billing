@@ -36,7 +36,7 @@ new class extends Component {
         return $class ? $class::find($this->billableId) : null;
     }
 
-    public function credit(WalletUsageService $service): void
+    public function credit(WalletUsageService $service, SubscriptionCatalogInterface $catalog): void
     {
         $this->flash = $this->error = null;
         $b = $this->billable();
@@ -45,6 +45,15 @@ new class extends Component {
             $this->error = __('billing::admin.billables.wallet.flash.pick_usage_type');
             return;
         }
+
+        // An unknown usage type is not a no-op: resolveWallet() creates a wallet for
+        // whatever slug it is handed, and nothing in the catalog will ever charge,
+        // recharge or reset that wallet again.
+        if (! in_array($this->creditType, $catalog->allUsageTypes(), true)) {
+            $this->error = __('billing::admin.billables.wallet.flash.unknown_usage_type', ['type' => $this->creditType]);
+            return;
+        }
+
         if ($this->creditUnits <= 0) {
             $this->error = __('billing::admin.billables.wallet.flash.units_positive');
             return;

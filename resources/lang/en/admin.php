@@ -156,6 +156,13 @@ return [
                 'admin_revoke' => 'revoked by admin',
             ],
 
+            'revoke_modal' => [
+                'title' => 'Revoke access grant',
+                'note_label' => 'Reason',
+                'note_placeholder' => 'e.g. Granted for the wrong organisation (ticket #1234).',
+                'note_description' => 'Recorded on the revoked grant and in the billable\'s audit trail.',
+            ],
+
             'flash' => [
                 'pick_trial_date' => 'Please pick a trial end date.',
                 'trial_date_invalid' => 'That is not a valid date.',
@@ -167,6 +174,8 @@ return [
                 'grant_not_found' => 'Grant not found.',
                 'grant_foreign' => 'Grant does not belong to this billable.',
                 'grant_revoked' => 'Grant revoked (:reason).',
+                'revoke_note_required' => 'Please record why this grant is being revoked.',
+                'revoke_note_too_long' => 'The reason may be at most :max characters long.',
             ],
         ],
 
@@ -241,6 +250,7 @@ return [
             'default_reason' => 'admin credit',
             'flash' => [
                 'pick_usage_type' => 'Pick a usage type.',
+                'unknown_usage_type' => 'Unknown usage type :type — it is not in the plan catalog, so nothing would ever charge or reset that wallet.',
                 'units_positive' => 'Units must be greater than zero.',
                 'credited' => 'Credited :units :type.',
             ],
@@ -472,6 +482,7 @@ return [
             'last_failure' => 'Last failure',
         ],
         'retry_dispatched' => 'Retry dispatched for :name.',
+        'not_past_due' => ':name is not past due — only the billables listed here can be retried.',
     ],
 
     'mismatches' => [
@@ -530,6 +541,7 @@ return [
         'search' => 'Search by name, email, billable id or serial',
         'empty_title' => 'No refunds yet',
         'empty_description' => 'Credit notes issued from the invoices tab will appear here.',
+        'not_a_credit_note' => 'That invoice is not a credit note — this screen only shows refunds.',
         'column' => [
             'date' => 'Date',
             'serial' => 'Serial',
@@ -587,6 +599,9 @@ return [
         'usage_type_description' => 'Which wallet to credit.',
         'units' => 'Units per billable',
         'units_description' => 'Whole units to add. Example: 100',
+        'reason' => 'Reason',
+        'reason_description' => 'Recorded on every credited wallet and in each audit trail.',
+        'reason_placeholder' => 'e.g. Goodwill after the March outage (ticket #1234)',
         'credit_all' => 'Credit all',
         'credit_all_confirm' => 'Credit all billables on this plan?',
 
@@ -599,7 +614,13 @@ return [
 
         'no_model' => 'No billable model configured.',
         'units_positive' => 'Units must be greater than zero.',
+        'units_too_large' => 'At most :max units per billable in one batch.',
         'select_usage_type' => 'Select a usage type.',
+        'unknown_usage_type' => 'Unknown usage type :type — it is not in the plan catalog, so nothing would ever charge or reset those wallets.',
+        'reason_required' => 'Please record why this batch is being credited.',
+        'reason_too_long' => 'The reason may be at most :max characters long.',
+        'trial_days_positive' => 'Days must be greater than zero.',
+        'trial_days_too_large' => 'At most :max days in one batch.',
         'credited' => 'Credited :count billables.',
         'credited_partial' => 'Credited :count billables, :failed failed. Check the application log; re-running only tops up the ones that succeeded again.',
         'extended' => 'Extended trials for :count billables.',
