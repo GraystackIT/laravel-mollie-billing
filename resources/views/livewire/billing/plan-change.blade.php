@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\Coupon;
@@ -21,7 +22,22 @@ use Livewire\Component;
 new class extends Component {
     use ValidatesVatNumber;
 
+    /**
+     * Bound with wire:model.live by the interval toggle, so it cannot be locked — it is
+     * validated instead, in every mutating action. An unknown value is not harmless:
+     * the catalog resolves an absent (plan, interval) pair to a free one, because
+     * `basePriceNet() ?? 0` plus `seatPriceNet() ?? null` makes `isFreePlan()` true.
+     * `ValidateSubscriptionChange` only rejects *hidden* plans, not absent ones.
+     */
     public string $selectedInterval = 'monthly';
+
+    /**
+     * Deliberately NOT #[Locked]: a locked property is restored from its declared
+     * default on every update round-trip, so even the server-side assignment in
+     * `previewFor()` would be gone by the time the customer clicks apply — the lock
+     * silently breaks the flow it was meant to protect. `assertSelectionIsValid()`
+     * carries the protection instead, and must run in every action that acts on it.
+     */
     public ?string $selectedPlan = null;
 
     /**
@@ -89,6 +105,43 @@ new class extends Component {
             $catalog->allPlans(),
             fn (string $code): bool => ! $catalog->planIsHidden($code) || $code === $ownPlan,
         ));
+    }
+
+    /**
+     * Guard for every action that reaches UpdateSubscription. The plan must be one this
+     * billable may actually select, and the interval must be one the catalog knows —
+     * otherwise the (plan, interval) lookup silently prices as free and the change is
+     * executed as a downgrade, complete with a Mollie refund.
+     */
+    protected function assertSelectionIsValid(?Billable $billable = null): bool
+    {
+        $intervals = array_map(fn (SubscriptionInterval $i): string => $i->value, SubscriptionInterval::cases());
+
+        if (! in_array($this->selectedInterval, $intervals, true)) {
+            $this->rejectSelection();
+
+            return false;
+        }
+
+        if ($this->selectedPlan !== null && ! in_array($this->selectedPlan, $this->selectablePlans($billable), true)) {
+            $this->rejectSelection();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Flux Pro is a hard runtime dependency but ships under `suggest`, so it is absent
+     * from this package's own test environment — and a guard that cannot run under test
+     * is a guard nobody can prove works.
+     */
+    private function rejectSelection(): void
+    {
+        if (class_exists(\Flux::class)) {
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+        }
     }
 
     public function previewFor(string $planCode, PreviewService $service): void
@@ -360,6 +413,10 @@ new class extends Component {
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
+        if (! $this->assertSelectionIsValid($billable)) {
+            return;
+        }
+
         // Local → paid: divert to the dedicated UpgradeLocalToMollie path.
         // The regular UpdateSubscription would (correctly) refuse this transition
         // via LocalSubscriptionUpgradeRequiresMolliePathException — instead we
@@ -446,6 +503,10 @@ new class extends Component {
         }
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
+        if (! $this->assertSelectionIsValid($billable)) {
+            return null;
+        }
 
         // Re-price from the catalog right before charging. UpgradeLocalToMollie
         // hands `amount_gross` to Mollie verbatim, and the webhook treats whatever

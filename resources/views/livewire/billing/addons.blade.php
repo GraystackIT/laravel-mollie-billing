@@ -204,6 +204,21 @@ new class extends Component {
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
+        // The view only offers addons the plan allows, but the code arrives from the
+        // client and nothing downstream re-checks it: ValidateSubscriptionChange skips
+        // its addon validation unless the *plan* changed, so an addon reserved for a
+        // higher tier was written into active_addon_codes — and FeatureAccess then
+        // granted its features. An unknown code was accepted too and stayed forever as
+        // a junk entry priced at 0.
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $planCode = $billable->getBillingSubscriptionPlanCode();
+
+        if ($planCode === null || ! $catalog->planAllowsAddon($planCode, $addonCode)) {
+            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+
+            return;
+        }
+
         $codes = $this->appliedCouponCodes[$addonCode] ?? [];
 
         try {

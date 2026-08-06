@@ -152,3 +152,42 @@ it('prices the seats it actually orders when extra seats are dropped', function 
     expect($metadata->getValue($captured)['extra_seats'])->toBe(0)
         ->and(capturedAmountValue($captured))->toBe('34.80');
 });
+
+it('refuses to act on a plan code the client substituted', function (): void {
+    // Not solvable with #[Locked]: a locked property reverts to its default on every
+    // round-trip, so previewFor()'s own assignment would be lost too. Validation is the
+    // guard. Without it the catalog resolved an unknown code to a free plan —
+    // basePriceNet() ?? 0 plus seatPriceNet() ?? null makes isFreePlan() true — and the
+    // change ran as a downgrade: a real Mollie refund of the unused period, the
+    // subscription cancelled, and hasAccessibleBillingSubscription() left true forever.
+    Mollie::shouldReceive('send')->never();
+
+    Livewire::test('mollie-billing::plan-change')
+        ->set('selectedPlan', 'does-not-exist')
+        ->call('applyChange');
+
+    $this->billable->refresh();
+
+    expect($this->billable->subscription_plan_code)->toBe('free')
+        ->and($this->billable->subscription_source)->toBe(SubscriptionSource::Local);
+});
+
+it('refuses to act on an interval the catalog does not know', function (): void {
+    // The interval toggle is wire:model-bound, so it cannot be locked — it is
+    // validated instead. An unknown value makes every (plan, interval) lookup fall
+    // through to 0/null, which is the same free-plan downgrade path.
+    Mollie::shouldReceive('send')->never();
+
+    // The interval toggle's updated hook clears the plan, so the vector is two-step:
+    // set the bogus interval, then re-select a real plan (previewFor validates the plan
+    // against selectablePlans(), never the interval) and apply.
+    Livewire::test('mollie-billing::plan-change')
+        ->set('selectedInterval', 'weekly')
+        ->call('previewFor', 'pro')
+        ->call('applyChange');
+
+    $this->billable->refresh();
+
+    expect($this->billable->subscription_plan_code)->toBe('free')
+        ->and($this->billable->subscription_interval)->toBe(SubscriptionInterval::Monthly);
+});
