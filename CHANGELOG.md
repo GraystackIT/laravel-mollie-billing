@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Negative amounts render as `-€5.00` instead of `€-5.00` — `BillingMoney::format()` resolves the sign itself and formats the magnitude, so the minus precedes the currency symbol.
+- `mollie-billing.currency_symbol` no longer defaults to `€`, which made the built-in symbol map unreachable for the configured currency: `BILLING_CURRENCY=GBP` alone rendered `€` everywhere. Unset it and the symbol is derived from `currency` (`GBP` → `£`, `CHF` → `CHF `); set it only to override.
 - Admin money output honors `mollie-billing.currency_symbol` and the active locale's digit grouping. New `Support\BillingMoney::format()` backs the `<x-mollie-billing::admin.money>` component, the refund detail's net/VAT line and the billable invoices tab (refund modal plus the "exceeds remaining" errors, which previously rendered a bare number with no currency symbol at all). Amounts follow the invoice's own currency where one is stored. Falls back to `number_format()` when ext-intl is absent.
 - Admin layout title now falls back to `config('app.name')` when `mollie-billing.company_name` is null or empty (the config key always exists, so `config()`'s default argument never applied).
 - Aborted `mandate_only` payments (portal payment-method change, trial / 100%-coupon checkout) no longer flip an active or trialing subscription to `past_due`: the webhook failure path now short-circuits them instead of falling through to the subscription-payment-failure handler. Without an accessible subscription the abort still runs the after-checkout callback with `success = false`.

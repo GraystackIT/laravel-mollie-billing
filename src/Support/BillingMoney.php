@@ -12,20 +12,31 @@ namespace GraystackIT\MollieBilling\Support;
  * call {@see format()} directly where a plain string is needed — e.g. inside a
  * translation placeholder, which cannot contain a Blade component.
  *
- * The currency symbol comes from `mollie-billing.currency_symbol` for the
- * package currency, so a non-EUR setup renders its own symbol everywhere.
+ * The currency symbol comes from `mollie-billing.currency_symbol` when that is
+ * set, otherwise from the built-in map for the configured currency — leave the
+ * config key empty and a non-EUR setup renders its own symbol everywhere.
  * Digit grouping follows the active locale when ext-intl is available; without
  * it the helper falls back to `number_format()` rather than throwing, since
  * ext-intl is not a package requirement.
+ *
+ * Negative amounts render as "-€5.00": the sign precedes the symbol.
  */
 class BillingMoney
 {
     public static function format(?int $cents, ?string $currency = null, bool $signed = false): string
     {
         $amount = (int) ($cents ?? 0);
-        $sign = $signed && $amount > 0 ? '+' : '';
 
-        return $sign.self::symbol($currency).self::number($amount / 100);
+        // The sign belongs in front of the symbol ("-€5.00"), so it is resolved here
+        // and the magnitude is handed to number() — otherwise the formatter emits its
+        // own minus behind the symbol.
+        $sign = match (true) {
+            $amount < 0 => '-',
+            $signed && $amount > 0 => '+',
+            default => '',
+        };
+
+        return $sign.self::symbol($currency).self::number(abs($amount) / 100);
     }
 
     public static function symbol(?string $currency = null): string

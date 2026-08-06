@@ -39,8 +39,29 @@ it('prefixes a plus sign only for positive signed amounts', function (): void {
     config()->set('mollie-billing.currency_symbol', '€');
 
     expect(BillingMoney::format(500, signed: true))->toBe('+€5.00')
-        ->and(BillingMoney::format(-500, signed: true))->toBe('€-5.00')
         ->and(BillingMoney::format(0, signed: true))->toBe('€0.00');
+});
+
+it('puts the minus sign in front of the currency symbol', function (): void {
+    config()->set('mollie-billing.currency', 'EUR');
+    config()->set('mollie-billing.currency_symbol', '€');
+
+    expect(BillingMoney::format(-500))->toBe('-€5.00')
+        ->and(BillingMoney::format(-500, signed: true))->toBe('-€5.00')
+        ->and(BillingMoney::format(-123456))->toBe('-€1,234.56');
+});
+
+it('derives the symbol from the currency when no symbol is configured', function (): void {
+    config()->set('mollie-billing.currency_symbol', null);
+
+    config()->set('mollie-billing.currency', 'GBP');
+    expect(BillingMoney::format(1000))->toBe('£10.00');
+
+    config()->set('mollie-billing.currency', 'USD');
+    expect(BillingMoney::format(1000))->toBe('$10.00');
+
+    config()->set('mollie-billing.currency', 'CHF');
+    expect(BillingMoney::format(1000))->toBe('CHF 10.00');
 });
 
 it('groups digits according to the active locale', function (): void {

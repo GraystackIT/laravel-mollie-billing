@@ -57,7 +57,11 @@ return [
     // persist this code. The EU VAT/OSS system (mpociot/vat-calculator, VIES, OSS export)
     // is EU-only but the currency itself is independent of it.
     'currency' => env('BILLING_CURRENCY', 'EUR'),
-    'currency_symbol' => env('BILLING_CURRENCY_SYMBOL', '€'),
+    // Leave unset to let BillingMoney derive the symbol from `currency` (EUR → €,
+    // USD → $, GBP → £, anything else → the ISO code). Only set this to override
+    // that, e.g. 'CHF ' or 'Fr.' — a hardcoded value here would otherwise be used
+    // for every currency.
+    'currency_symbol' => env('BILLING_CURRENCY_SYMBOL'),
 
     // Invoice PDF generation and storage. PDFs are generated locally via elegantly/laravel-invoices
     // and stored on the configured Laravel filesystem disk.
