@@ -431,7 +431,7 @@ Highlights of `config/mollie-billing.php`:
 
 | Key | Purpose |
 | --- | --- |
-| `currency` | Default currency for prices and invoices (e.g. `EUR`). |
+| `currency` | Default currency for prices and invoices (e.g. `EUR`). Every amount in the package is an integer in this currency's **smallest unit**, and how many of those make up one major unit is read off the currency itself — so `2900` is €29.00 under `EUR` but ¥2900 under `JPY`. |
 | `logo_url` | Logo displayed in checkout and portal headers. |
 | `primary_color` | Accent color for checkout UI (hex, e.g. `#6366f1`). |
 | `dashboard_url` | URL the portal logo links to (e.g. your app's main dashboard). Supports `route:` prefix. |

@@ -51,10 +51,10 @@ runtime spies, not faked — the simulated side-effects still happen.
 | `trial-ending-soon` | Schedules a trial to end tomorrow. | `trial_ends_at = tomorrow + 6h` | `ProcessTrialLifecycleJob` |
 | `trial-expired` | Forces a trial past its expiry date. | `trial_ends_at = yesterday` | `ProcessTrialLifecycleJob` |
 | `renewal` | Creates a real recurring payment in the Mollie sandbox, polls until paid, then invokes our webhook controller with the resulting payment id. Requires the billable to already have `mollie_customer_id` + `mollie_mandate_id` from a completed checkout. | — | — |
-| `apply-scheduled-change` | Puts a scheduled plan change into the past so `ApplyScheduledChangesJob` picks it up. Pass `--plan=<code>` to schedule one inline, or leave empty to reuse an existing `scheduled_change`. | `scheduled_change_at = now - 1m` | `PrepareUsageOverageJob` (Pass 4) |
-| `overage-charge` | Withdraws units from a wallet to force a negative balance, then triggers the overage payment pass. Pass `--usage-type=tokens --withdraw=100`. | wallet balance negative + `subscription_period_starts_at` ≈ 1 month ago | `PrepareUsageOverageJob` (Pass 1) |
-| `past-due-auto-cancel` | Puts a billable in `PastDue` with `past_due_since` older than `past_due_max_days`, then runs the auto-cancel pass. | `status=PastDue`, `meta.past_due_since = now - (max_days + 1)` | `PrepareUsageOverageJob` (Pass 3a) |
-| `cancelled-to-expired` | Sets `subscription_ends_at` into the past so the expiry pass flips the billable to `Expired`. | `status=Cancelled`, `subscription_ends_at = now - 1m` | `PrepareUsageOverageJob` (Pass 3b) |
+| `apply-scheduled-change` | Puts a scheduled plan change into the past so `ApplyScheduledChangesJob` picks it up. Pass `--plan=<code>` to schedule one inline, or leave empty to reuse an existing `scheduled_change`. | `scheduled_change_at = now - 1m` | `PrepareUsageOverageJob` (Pass 5) |
+| `overage-charge` | Withdraws units from a wallet to force a negative balance, then triggers the overage payment pass. Pass `--usage-type=tokens --withdraw=100`. | wallet balance negative + `subscription_period_starts_at` ≈ 1 month ago | `PrepareUsageOverageJob` (Pass 2) |
+| `past-due-auto-cancel` | Puts a billable in `PastDue` with `past_due_since` older than `past_due_max_days`, then runs the auto-cancel pass. | `status=PastDue`, `meta.past_due_since = now - (max_days + 1)` | `PrepareUsageOverageJob` (Pass 4) |
+| `cancelled-to-expired` | Sets `subscription_ends_at` into the past so the expiry pass flips the billable to `Expired`. | `status=Cancelled`, `subscription_ends_at = now - 1m` | `PrepareUsageOverageJob` (Pass 1) |
 
 ### Options
 
