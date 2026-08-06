@@ -10,14 +10,18 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\CheckoutAbandoned;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
@@ -27,9 +31,14 @@ use Mollie\Laravel\Facades\Mollie;
  * mandates that were captured but never converted into a paid first charge.
  *
  * Detection (hybrid):
+ *   - A billable with any BillingInvoice is never touched: an invoice means money
+ *     was booked, whatever the subscription columns say.
  *   - When `pending_first_payment_id` is set in subscription_meta we poll
  *     Mollie and only clean up when the payment is in a terminal failure
  *     state (failed/canceled/expired).
+ *   - Without that marker, a billable that has a Mollie customer is checked
+ *     against Mollie's payment list for that customer, and kept if any payment is
+ *     `paid` or if Mollie cannot be reached.
  *   - Otherwise we clean up purely based on age + the absence of any
  *     accessible subscription (so freshly-started checkouts within the
  *     threshold window are never touched).
@@ -85,20 +94,7 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             return;
         }
 
-        $cutoff = BillingTime::nowUtc()->subMinutes($thresholdMinutes);
-
-        $query = $billableClass::query()
-            ->where(function ($q): void {
-                $q->whereNull('subscription_source')
-                    ->orWhere('subscription_source', SubscriptionSource::None->value);
-            })
-            ->where(function ($q): void {
-                $q->whereNull('subscription_status')
-                    ->orWhere('subscription_status', SubscriptionStatus::New->value);
-            })
-            ->where('created_at', '<', $cutoff);
-
-        $query->chunkById(200, function ($billables): void {
+        self::candidateQuery()?->chunkById(200, function ($billables): void {
             foreach ($billables as $billable) {
                 try {
                     $this->processBillable($billable);
@@ -110,6 +106,42 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
                 }
             }
         });
+    }
+
+    /**
+     * The age + no-subscription pre-filter. Exposed so `billing:cleanup-orphans` can
+     * report and confirm a candidate count before anything is deleted; the per-row
+     * money guards in processBillable() still decide the actual outcome.
+     *
+     * Null when the billable model is not configured.
+     */
+    public static function candidateQuery(): ?Builder
+    {
+        $billableClass = config('mollie-billing.billable_model');
+        if (! is_string($billableClass) || ! class_exists($billableClass)) {
+            return null;
+        }
+
+        $thresholdMinutes = (int) config('mollie-billing.cleanup.threshold_minutes', 60);
+        if ($thresholdMinutes <= 0) {
+            return null;
+        }
+
+        return $billableClass::withoutGlobalScope(BillingScope::class)
+            ->where(function ($q): void {
+                $q->whereNull('subscription_source')
+                    ->orWhere('subscription_source', SubscriptionSource::None->value);
+            })
+            ->where(function ($q): void {
+                $q->whereNull('subscription_status')
+                    ->orWhere('subscription_status', SubscriptionStatus::New->value);
+            })
+            ->where('created_at', '<', BillingTime::nowUtc()->subMinutes($thresholdMinutes));
+    }
+
+    public static function candidateCount(): int
+    {
+        return (int) (self::candidateQuery()?->count() ?? 0);
     }
 
     private function processBillable(Billable $billable): void
@@ -138,12 +170,29 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             return;
         }
 
+        // Hard guard #1 — collected money is never deleted and its mandate never
+        // revoked. The pending-first-payment poll below cannot carry this on its own:
+        // MollieWebhookController clears that marker for *every* terminal status,
+        // `paid` included, before the paid handler runs. If subscription activation
+        // then throws, the billable is left at status New / source null with a paid
+        // invoice, collected money and a live mandate — and the next run of this job
+        // found no marker to poll at all.
+        if ($this->hasInvoices($billable)) {
+            return;
+        }
+
         $pendingPaymentId = $billable->getPendingFirstPaymentId();
 
         if ($pendingPaymentId !== null) {
+            // A terminal failure on the tracked payment is a definitive "nothing was
+            // collected", so no further Mollie lookup is needed.
             if (! $this->mollieReportsTerminalFailure($pendingPaymentId)) {
                 return;
             }
+        } elseif ($this->mollieMayHavePaid($billable)) {
+            // Hard guard #2 — no marker to poll, so ask Mollie directly. Covers the
+            // window where the payment settled but the invoice write itself failed.
+            return;
         }
 
         // Snapshot the Mollie identifiers before running the cleanup closure —
@@ -171,6 +220,67 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             'billable_id' => $billableKey,
             'payment_id' => $pendingPaymentId,
         ]);
+    }
+
+    /**
+     * Any persisted invoice means money was booked for this billable — the local,
+     * authoritative record, and the exact state the reported deletion bug produced.
+     */
+    private function hasInvoices(Model $billable): bool
+    {
+        $exists = BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->exists();
+
+        if ($exists) {
+            Log::info('CleanupOrphanedBillablesJob: billable has invoices, refusing cleanup', [
+                'billable_id' => $billable->getKey(),
+            ]);
+        }
+
+        return $exists;
+    }
+
+    /**
+     * Whether Mollie holds a paid payment for this billable's customer.
+     *
+     * Only consulted when there is no pending-payment marker to poll. Returns true
+     * when Mollie is unreachable as well: "unknown" must never authorise a delete,
+     * and the next run (every 15 minutes) retries.
+     */
+    private function mollieMayHavePaid(Model $billable): bool
+    {
+        $customerId = (string) ($billable->mollie_customer_id ?? '');
+
+        if ($customerId === '') {
+            return false;
+        }
+
+        try {
+            $payments = Mollie::send(new GetPaginatedCustomerPaymentsRequest($customerId, limit: 50));
+        } catch (\Throwable $e) {
+            Log::warning('CleanupOrphanedBillablesJob: Mollie unreachable for customer, skipping cleanup', [
+                'billable_id' => $billable->getKey(),
+                'customer_id' => $customerId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return true;
+        }
+
+        foreach ($payments ?? [] as $payment) {
+            if ((string) ($payment->status ?? '') === 'paid') {
+                Log::info('CleanupOrphanedBillablesJob: Mollie reports a paid payment, refusing cleanup', [
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $payment->id ?? null,
+                ]);
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function mollieReportsTerminalFailure(string $paymentId): bool

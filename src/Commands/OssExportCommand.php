@@ -19,12 +19,30 @@ class OssExportCommand extends Command
 
     public function handle(OssProtocolService $service): int
     {
-        $year = (int) $this->argument('year');
+        $raw = (string) $this->argument('year');
 
-        $export = BillingOssExport::create([
-            'year' => $year,
-            'status' => OssExportStatus::Processing,
-        ]);
+        // Same bounds the admin UI enforces. Without them `(int) 'foo'` produced a
+        // year=0 row with an empty CSV reported as SUCCESS, and a negative year threw
+        // an unhandled QueryException against the unsignedSmallInteger column —
+        // outside the try/catch, so no Failed row was recorded either.
+        if (! preg_match('/^\d{4}$/', $raw) || (int) $raw < 2000 || (int) $raw > 2999) {
+            $this->error("Invalid year [{$raw}] — expected a four-digit year between 2000 and 2999.");
+
+            return self::FAILURE;
+        }
+
+        $year = (int) $raw;
+
+        try {
+            $export = BillingOssExport::create([
+                'year' => $year,
+                'status' => OssExportStatus::Processing,
+            ]);
+        } catch (Throwable $e) {
+            $this->error("Could not record the export run: {$e->getMessage()}");
+
+            return self::FAILURE;
+        }
 
         try {
             $result = $service->export($year);

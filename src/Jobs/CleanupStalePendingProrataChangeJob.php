@@ -57,7 +57,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
         // Find billables with a stuck pending state.
         // (JSON query — works in MySQL/Postgres/SQLite.)
-        $billables = $billableClass::query()
+        $billables = $billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
             ->whereNotNull('subscription_meta')
             ->get()
             ->filter(function ($b) use ($threshold) {

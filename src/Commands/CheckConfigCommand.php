@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Commands;
 
+use Cron\CronExpression;
 use GraystackIT\MollieBilling\Concerns\HasBilling;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\AuditCategory;
@@ -129,7 +130,8 @@ class CheckConfigCommand extends Command
         $this->validateCheckoutCountries($scope);
         $this->validateAdditionalCountries($scope);
         $this->validateBillingTimezone($scope);
-        $this->validateOverageJobTime($scope);
+        $this->validateScheduleTimes($scope);
+        $this->validateCurrencySymbol($scope, $currency);
         $this->validateUsageThreshold($scope);
         $this->validateIpBlock($scope, $driver);
         $this->validateLegacyRolloverKeys($scope);
@@ -368,11 +370,47 @@ class CheckConfigCommand extends Command
         }
     }
 
-    private function validateOverageJobTime(string $scope): void
+    /**
+     * Every value that feeds the scheduler, not just overage_job_time. An invalid
+     * `trial_lifecycle_job_time` or `cleanup.cron_expression` makes `schedule:run`
+     * throw for the *entire application's* schedule, so reporting the config valid is
+     * the worst possible outcome.
+     */
+    private function validateScheduleTimes(string $scope): void
     {
-        $time = (string) config('mollie-billing.overage_job_time', '02:00');
-        if (! preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $time)) {
-            $this->addError($scope, "overage_job_time [{$time}] must be in HH:MM (24-hour) format.");
+        foreach (['overage_job_time' => '02:00', 'trial_lifecycle_job_time' => '02:05'] as $key => $default) {
+            $time = (string) config("mollie-billing.{$key}", $default);
+
+            if (! preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $time)) {
+                $this->addError($scope, "{$key} [{$time}] must be in HH:MM (24-hour) format.");
+            }
+        }
+
+        $cron = (string) config('mollie-billing.cleanup.cron_expression', '*/15 * * * *');
+
+        if (! CronExpression::isValidExpression($cron)) {
+            $this->addError($scope, "cleanup.cron_expression [{$cron}] is not a valid cron expression.");
+        }
+    }
+
+    /**
+     * `currency_symbol` overrides the symbol for *every* currency, so a leftover
+     * value from an earlier currency renders the wrong symbol on every price and
+     * every invoice.
+     */
+    private function validateCurrencySymbol(string $scope, string $currency): void
+    {
+        $symbol = config('mollie-billing.currency_symbol');
+
+        if (! is_string($symbol) || $symbol === '') {
+            return;
+        }
+
+        $expected = ['EUR' => '€', 'USD' => '$', 'GBP' => '£'];
+        $known = $expected[strtoupper($currency)] ?? null;
+
+        if ($known !== null && trim($symbol) !== $known) {
+            $this->addWarning($scope, "currency_symbol [{$symbol}] does not match currency [{$currency}] (expected [{$known}]). Leave BILLING_CURRENCY_SYMBOL unset to derive it from `currency`.");
         }
     }
 
@@ -498,6 +536,16 @@ class CheckConfigCommand extends Command
 
             if (array_key_exists('usage_rollover', $plan)) {
                 $this->addError($scope, "{$where}.usage_rollover is no longer supported. Use `usage_rollover_fallback` (env: BILLING_USAGE_ROLLOVER_FALLBACK) and per-type overrides in `mollie-billing-plans.usage_types`.");
+            }
+
+            // ConfigSubscriptionCatalog reads both of these only from
+            // intervals.{monthly|yearly} and has no plan-level fallback, so a map put
+            // here resolves every quota to 0 and makes no overage chargeable — while
+            // the config still looked valid.
+            foreach (['included_usages', 'usage_overage_prices'] as $intervalOnlyKey) {
+                if (array_key_exists($intervalOnlyKey, $plan)) {
+                    $this->addError($scope, "{$where}.{$intervalOnlyKey} is not read at plan level. Move it into each interval (e.g. {$where}.intervals.monthly.{$intervalOnlyKey}) — the catalog resolves it per (plan, interval) with no plan-level fallback.");
+                }
             }
 
             if (isset($plan['included_seats']) && (! is_int($plan['included_seats']) || $plan['included_seats'] < 1)) {

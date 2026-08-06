@@ -64,7 +64,7 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
         // Resolve any billable that has at least one country_corrections entry.
         // Filtering by age happens per-entry inside processBillable() because a
         // billable can hold multiple entries with different ages.
-        $billables = $billableClass::query()
+        $billables = $billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
             ->whereNotNull('subscription_meta')
             ->get()
             ->filter(static function ($b): bool {

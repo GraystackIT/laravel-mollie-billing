@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "4cdad2517c59b2184980dad6f7202167",
+    "content-hash": "05b519113eab48e9c3b912df1b274c73",
     "packages": [
         {
             "name": "bavix/laravel-wallet",

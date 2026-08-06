@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Testing;
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
@@ -13,6 +14,8 @@ use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
+use GraystackIT\MollieBilling\Services\Webhook\SubscriptionPaymentHandler;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -29,7 +32,9 @@ use RuntimeException;
  * Most flows mutate DB fields so that the matching daily job (PrepareUsageOverageJob or
  * ProcessTrialLifecycleJob) picks the billable up on a synchronous dispatch. The renewal
  * flow is the exception: it creates a real recurring payment in the Mollie sandbox and
- * then invokes our webhook controller with that payment id.
+ * then runs it through SubscriptionPaymentHandler, the handler a real renewal webhook
+ * would reach (see renewal() for why the controller cannot route a standalone payment
+ * there). `replayWebhook()` is the flow that does go through the controller.
  *
  * Not for production: callers must gate on app environment before using.
  */
@@ -49,7 +54,9 @@ class LifecycleSimulator
     {
         $class = $this->billableClass();
 
-        $billable = $class::query()->find($id);
+        // Scope-free like the scheduled jobs this simulator drives: the CLI has no
+        // request or tenant context for an app-defined applyBillingScope() to key off.
+        $billable = $class::withoutGlobalScope(BillingScope::class)->find($id);
         if ($billable === null) {
             throw new RuntimeException("Billable [{$class}] with id [{$id}] not found.");
         }
@@ -72,7 +79,7 @@ class LifecycleSimulator
         $class = $this->billableClass();
         $term = trim($term);
 
-        $query = $class::query()->limit(20)->orderBy('id', 'desc');
+        $query = $class::withoutGlobalScope(BillingScope::class)->limit(20)->orderBy('id', 'desc');
 
         if ($term !== '') {
             $query->where(function ($q) use ($term): void {
@@ -157,12 +164,17 @@ class LifecycleSimulator
 
         $billable->recordBillingUsage($usageType, $units, 'lifecycle_simulator');
 
-        // Pass 1 only charges billables whose next billing date is tomorrow.
+        // Pass 1 Case A requires nextBillingDate() to fall inside tomorrow's window,
+        // and nextBillingDate() is period_starts_at + one interval. Backing up by a
+        // full interval and adding a day therefore lands it on tomorrow. Yearly
+        // billables need subYear(), not subMonth() — otherwise the pass never fires.
+        $interval = $billable->getBillingSubscriptionInterval();
+        $periodStart = $interval === SubscriptionInterval::Yearly->value
+            ? BillingTime::nowUtc()->subYear()->addDay()
+            : BillingTime::nowUtc()->subMonth()->addDay();
+
         $this->force($billable, [
-            'subscription_period_starts_at' => BillingTime::nowUtc()
-                ->subMonth()
-                ->addDay()
-                ->subDay(), // period started ~1 month ago, so next billing ≈ tomorrow
+            'subscription_period_starts_at' => $periodStart,
         ]);
 
         PrepareUsageOverageJob::dispatchSync();
@@ -197,7 +209,16 @@ class LifecycleSimulator
 
     /**
      * Create a real recurring payment in the Mollie sandbox, wait until it's paid,
-     * then invoke our webhook controller with that payment id.
+     * then run it through the renewal handler.
+     *
+     * The payment is created standalone, so Mollie does not attach a `subscriptionId`
+     * to it — and `MollieWebhookController::route()` only reaches
+     * SubscriptionPaymentHandler when that field is non-empty. Handing the payment to
+     * the controller therefore routed it to FirstPaymentHandler, which returned
+     * immediately for lack of `plan_code`: the sandbox customer was charged and
+     * nothing was booked. We instead attach the billable's own
+     * `mollie_subscription_id` (exactly what a real renewal webhook carries) and
+     * invoke the renewal handler directly.
      *
      * @return array{payment_id:string, status:string, invoice_id:int|null}
      */
@@ -212,6 +233,14 @@ class LifecycleSimulator
             );
         }
 
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+        if ($subscriptionId === '') {
+            throw new RuntimeException(
+                'Billable has no mollie_subscription_id — the renewal path only exists for '
+                .'Mollie-backed subscriptions. Complete a paid checkout first.'
+            );
+        }
+
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $gross = $amountGrossOverride
             ?? $this->estimateRenewalGross($billable);
@@ -221,14 +250,12 @@ class LifecycleSimulator
             description: 'Simulated subscription renewal',
             amount: new Money($currency, $amountValue),
             metadata: [
-                'type' => 'subscription_renewal_sim',
                 'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
                 'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             ],
             sequenceType: 'recurring',
             mandateId: $mandateId,
             customerId: $customerId,
-            webhookUrl: route(BillingRoute::webhook()),
         ));
 
         $paymentId = (string) ($created->id ?? '');
@@ -237,8 +264,16 @@ class LifecycleSimulator
         }
 
         $payment = $this->waitForPaid($paymentId);
+        $status = (string) ($payment->status ?? 'unknown');
 
-        $this->invokeWebhook($paymentId);
+        if ($status === 'paid') {
+            $payment->subscriptionId = $subscriptionId;
+
+            app(SubscriptionPaymentHandler::class)->paid($payment, $billable, [
+                'plan_code' => $billable->getBillingSubscriptionPlanCode(),
+                'interval' => $billable->getBillingSubscriptionInterval(),
+            ]);
+        }
 
         $invoice = BillingInvoice::query()
             ->where('mollie_payment_id', $paymentId)
@@ -246,7 +281,7 @@ class LifecycleSimulator
 
         return [
             'payment_id' => $paymentId,
-            'status' => (string) ($payment->status ?? 'unknown'),
+            'status' => $status,
             'invoice_id' => $invoice?->id !== null ? (int) $invoice->id : null,
         ];
     }

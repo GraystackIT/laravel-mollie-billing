@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -33,8 +34,11 @@ class ApplyScheduledChangesJob implements ShouldQueue
         /** @var class-string $class */
         $class = $this->billableClass;
 
+        // Scope-free: a queue worker has no request or tenant context for an
+        // app-defined applyBillingScope() to key off, so a scoped lookup would find
+        // nothing and the scheduled change would silently never be applied.
         /** @var Billable|null $billable */
-        $billable = $class::find($this->billableId);
+        $billable = $class::withoutGlobalScope(BillingScope::class)->find($this->billableId);
 
         if ($billable === null) {
             return;

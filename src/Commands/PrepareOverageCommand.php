@@ -15,7 +15,19 @@ class PrepareOverageCommand extends Command
 
     public function handle(): int
     {
+        // The job returns immediately when no billable model is configured, so a bare
+        // dispatchSync() + SUCCESS reported a run that never touched a single row.
+        $billableClass = (string) config('mollie-billing.billable_model');
+
+        if ($billableClass === '' || ! class_exists($billableClass)) {
+            $this->error('mollie-billing.billable_model is not set to an existing class — nothing to prepare.');
+
+            return self::FAILURE;
+        }
+
         PrepareUsageOverageJob::dispatchSync();
+
+        $this->info("Overage preparation finished for [{$billableClass}].");
 
         return self::SUCCESS;
     }

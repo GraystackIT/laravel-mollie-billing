@@ -57,6 +57,9 @@ class MollieBilling
 
     protected static ?MollieBillingFake $fake = null;
 
+    /** The application instance `$fake` was built for — see fake(). */
+    protected static ?object $fakeApp = null;
+
     public static function authUsing(Closure $callback): void
     {
         self::$authCallback = $callback;
@@ -124,12 +127,29 @@ class MollieBilling
             return null;
         }
 
-        // Route parameters first — a route-bound model takes precedence and
-        // is already an instance.
-        foreach ($request->route()?->parameters() ?? [] as $value) {
-            if ($value instanceof Billable) {
-                return $value;
+        // Route parameters first — a route-bound model came from the router's own
+        // binding, so it is safe on any route and takes precedence.
+        // hasParameters() guard: Route::parameters() throws when the route object was
+        // never bound to a request, which happens for synthetically built requests.
+        $route = $request->route();
+
+        if ($route !== null && $route->hasParameters()) {
+            foreach ($route->parameters() as $value) {
+                if ($value instanceof Billable) {
+                    return $value;
+                }
             }
+        }
+
+        // The query-parameter scan below is confined to the package's own routes.
+        // It cannot know which parameter names the host app uses, so on an app route
+        // it would iterate arbitrary request input: `?x=<slug-of-a-foreign-org>` used
+        // to satisfy the `billing.feature` gate in RequirePlanFeature, and an
+        // innocent `?utm_campaign=spring` gated the visitor against whichever billable
+        // happened to be named "spring". No reserved list can cover that, because the
+        // parameters belong to the app, not to us.
+        if (! self::requestTargetsPackageRoute($request)) {
+            return null;
         }
 
         $key = $model->getRouteKeyName();
@@ -152,6 +172,28 @@ class MollieBilling
         }
 
         return null;
+    }
+
+    /**
+     * Whether this request is for one of the package's own routes — checkout,
+     * portal, return, admin, promotion — the only contexts the query-parameter
+     * fallback was built for.
+     *
+     * Route names are the primary signal. Synthetic requests built with
+     * Request::create() carry no bound route, so the package's URI prefix is used
+     * as a secondary signal for them.
+     */
+    private static function requestTargetsPackageRoute(Request $request): bool
+    {
+        $route = $request->route();
+
+        if ($route !== null) {
+            $name = $route->getName();
+
+            return is_string($name) && str_contains($name, 'billing.');
+        }
+
+        return str_contains('/'.trim($request->path(), '/').'/', '/billing/');
     }
 
     /** @return iterable<int, mixed> */
@@ -376,14 +418,52 @@ class MollieBilling
         return app(StartOneTimeOrderCheckout::class);
     }
 
+    /**
+     * The fake binds Event/Notification fakes and container singletons into the
+     * *current* application, so it is memoised per application instance rather than
+     * for the whole process — otherwise the second test in a run received a fake
+     * wired to the previous test's already-torn-down container.
+     */
     public static function fake(): MollieBillingFake
     {
-        return self::$fake ??= new MollieBillingFake;
+        $app = app();
+
+        if (self::$fake === null || self::$fakeApp !== $app) {
+            self::$fakeApp = $app;
+            self::$fake = new MollieBillingFake;
+        }
+
+        return self::$fake;
     }
 
     public static function resetFake(): void
     {
         self::$fake = null;
+        self::$fakeApp = null;
+    }
+
+    /**
+     * Locale for Mollie's hosted checkout pages (`mollie-billing.mollie_locale`),
+     * or null to let Mollie auto-detect from the customer's browser. Passed as the
+     * `locale:` argument of CreatePaymentRequest by the checkout services.
+     */
+    public static function mollieLocale(): ?string
+    {
+        $locale = config('mollie-billing.mollie_locale');
+
+        return is_string($locale) && $locale !== '' ? $locale : null;
+    }
+
+    /**
+     * Tenant-scoped portal routes (dashboard, plan, invoices, return). Mount inside the
+     * route group that carries auth + tenant resolution middleware.
+     *
+     * `routes()` is the documented name for this in the README; `dashboardRoutes()`
+     * is the descriptive alias. They mount the same route file.
+     */
+    public static function routes(): void
+    {
+        self::dashboardRoutes();
     }
 
     /**

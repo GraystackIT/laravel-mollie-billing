@@ -5,16 +5,22 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use Carbon\CarbonInterface;
+use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Events\SubscriptionCancelled;
+use GraystackIT\MollieBilling\Events\SubscriptionExpired;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
+use GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -61,15 +67,23 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $tomorrowStart = BillingTime::nowUtc()->addDay()->startOfDay();
         $tomorrowEnd = BillingTime::nowUtc()->addDay()->endOfDay();
 
+        // Every pass bypasses BillingScope: a queue worker has no request or tenant
+        // context for an app-defined applyBillingScope() to key off, so a scoped
+        // model would silently reduce the sweep to zero rows.
+        //
+        // Every pass paginates with chunkById, never chunk(): passes 3 and 4 filter
+        // on the very column they mutate, and OFFSET pagination would skip a whole
+        // page of rows each time the previous page dropped out of the result set.
+
         // ── Pass 1: per-billable lifecycle work ──
-        $billableClass::query()
+        $this->billables($billableClass)
             ->whereIn('subscription_status', [
                 SubscriptionStatus::Active->value,
                 SubscriptionStatus::Trial->value,
                 SubscriptionStatus::PastDue->value,
                 SubscriptionStatus::Cancelled->value,
             ])
-            ->chunk(200, function ($billables) use (
+            ->chunkById(200, function ($billables) use (
                 $chargeService,
                 $walletService,
                 $tomorrowStart,
@@ -94,27 +108,78 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                 }
             });
 
-        // ── Pass 2: retry pending overage charges ──
-        $billableClass::query()
+        // ── Pass 2: retry overage charges whose creation never reached Mollie ──
+        // A snapshot that already carries a `payment_id` is skipped: the payment
+        // exists and its outcome belongs to the webhook (paid → invoice + markers
+        // cleared, failed → SingleChargeHandler dispatches the retry itself).
+        // Dispatching here on the strength of the `pending` marker alone meant Pass 1's
+        // own successful charges were retried seconds later in this same invocation,
+        // producing a second Mollie payment for the same overage.
+        $this->billables($billableClass)
             ->whereNotNull('subscription_meta')
-            ->chunk(200, function ($billables) use ($billableClass): void {
+            ->chunkById(200, function ($billables) use ($billableClass, $chargeService): void {
                 foreach ($billables as $billable) {
                     $meta = $billable->getBillingSubscriptionMeta();
-                    $status = $meta['usage_overage_status'] ?? null;
 
-                    if ($status === 'pending') {
-                        RetryUsageOverageChargeJob::dispatch(
-                            $billableClass,
-                            $billable->getKey(),
-                        );
+                    if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
+                        continue;
+                    }
+
+                    $paymentId = (string) ($chargeService->pendingCharge($billable)['payment_id'] ?? '');
+
+                    if ($paymentId !== '') {
+                        continue;
+                    }
+
+                    RetryUsageOverageChargeJob::dispatch(
+                        $billableClass,
+                        $billable->getKey(),
+                    );
+                }
+            });
+
+        // ── Pass 3: expire ended subscriptions ──
+        // Runs BEFORE the auto-cancel below so a billable cancelled by this very
+        // invocation is never expired by it as well: `subscription_ends_at` has
+        // second resolution, so with the reverse order `PastDue → Cancelled →
+        // Expired` collapsed into one run whenever the two passes fell into the
+        // same second, and `Cancelled` was never observable.
+        //
+        // Active and Trial are swept too, not just Cancelled: a coupon access grant
+        // sets `subscription_ends_at` while leaving the status Active, so once it
+        // lapses `hasAccessibleBillingSubscription()` closes the gate but nothing
+        // transitioned the row — it kept its plan code (which is all FeatureAccess
+        // looks at) and kept being picked up by Pass 1's wallet recharge.
+        $this->billables($billableClass)
+            ->whereIn('subscription_status', [
+                SubscriptionStatus::Cancelled->value,
+                SubscriptionStatus::Active->value,
+                SubscriptionStatus::Trial->value,
+            ])
+            ->whereNotNull('subscription_ends_at')
+            ->where('subscription_ends_at', '<', BillingTime::nowUtc())
+            ->chunkById(200, function ($billables): void {
+                foreach ($billables as $billable) {
+                    try {
+                        $billable->forceFill([
+                            'subscription_status' => SubscriptionStatus::Expired,
+                            'subscription_source' => SubscriptionSource::None,
+                        ])->save();
+
+                        SubscriptionExpired::dispatch($billable);
+                    } catch (Throwable $e) {
+                        Log::error('PrepareUsageOverageJob: failed expiring billable', [
+                            'billable_id' => $billable->getKey(),
+                            'exception' => $e->getMessage(),
+                        ]);
                     }
                 }
             });
 
-        // ── Pass 3a: auto-cancel long-stuck past_due subscriptions ──
+        // ── Pass 4: auto-cancel long-stuck past_due subscriptions ──
         // After `past_due_max_days` without a successful recovery payment we
-        // transition the billable to `cancelled` with `subscription_ends_at = now`.
-        // The next run's Pass 3b then flips `cancelled → expired`. Recovery
+        // transition the billable to `cancelled` with `subscription_ends_at = now`,
+        // and the NEXT run's Pass 3 flips `cancelled → expired`. Recovery
         // (PastDue → Active) still works until this cut-off — Mollie retries
         // the recurring charge on its own schedule and a successful webhook
         // clears `past_due_since`. Set `past_due_max_days` to 0 to disable.
@@ -122,10 +187,10 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         if ($maxDays > 0) {
             $cutoff = BillingTime::nowUtc()->subDays($maxDays)->toIso8601String();
 
-            $billableClass::query()
+            $this->billables($billableClass)
                 ->where('subscription_status', SubscriptionStatus::PastDue->value)
                 ->whereNotNull('subscription_meta')
-                ->chunk(200, function ($billables) use ($cutoff): void {
+                ->chunkById(200, function ($billables) use ($cutoff): void {
                     foreach ($billables as $billable) {
                         $meta = $billable->getBillingSubscriptionMeta();
                         $since = $meta['past_due_since'] ?? null;
@@ -135,15 +200,7 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                         }
 
                         try {
-                            $billable->forceFill([
-                                'subscription_status' => SubscriptionStatus::Cancelled,
-                                'subscription_ends_at' => BillingTime::nowUtc(),
-                            ])->save();
-
-                            Log::info('PrepareUsageOverageJob: auto-cancelled past_due billable', [
-                                'billable_id' => $billable->getKey(),
-                                'past_due_since' => $since,
-                            ]);
+                            $this->autoCancel($billable, $since);
                         } catch (Throwable $e) {
                             Log::error('PrepareUsageOverageJob: failed auto-cancelling past_due billable', [
                                 'billable_id' => $billable->getKey(),
@@ -154,36 +211,49 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                 });
         }
 
-        // ── Pass 3b: expire ended subscriptions ──
-        $billableClass::query()
-            ->where('subscription_status', SubscriptionStatus::Cancelled->value)
-            ->whereNotNull('subscription_ends_at')
-            ->where('subscription_ends_at', '<', BillingTime::nowUtc())
-            ->chunk(200, function ($billables): void {
-                foreach ($billables as $billable) {
-                    try {
-                        $billable->forceFill([
-                            'subscription_status' => SubscriptionStatus::Expired,
-                            'subscription_source' => SubscriptionSource::None,
-                        ])->save();
-                    } catch (Throwable $e) {
-                        Log::error('PrepareUsageOverageJob: failed expiring billable', [
-                            'billable_id' => $billable->getKey(),
-                            'exception' => $e->getMessage(),
-                        ]);
-                    }
-                }
-            });
-
-        // ── Pass 4: apply scheduled changes ──
-        $billableClass::query()
+        // ── Pass 5: apply scheduled changes ──
+        $this->billables($billableClass)
             ->whereNotNull('scheduled_change_at')
             ->where('scheduled_change_at', '<=', BillingTime::nowUtc())
-            ->chunk(200, function ($billables) use ($billableClass): void {
+            ->chunkById(200, function ($billables) use ($billableClass): void {
                 foreach ($billables as $billable) {
                     ApplyScheduledChangesJob::dispatch($billableClass, $billable->getKey());
                 }
             });
+    }
+
+    /**
+     * @param  class-string  $billableClass
+     */
+    private function billables(string $billableClass): Builder
+    {
+        return $billableClass::withoutGlobalScope(BillingScope::class);
+    }
+
+    /**
+     * Ends the subscription the same way CancelSubscription does — same status,
+     * same event, same customer notification. A silent forceFill() left the
+     * customer without any notice and the audit trail without a row.
+     */
+    private function autoCancel(Model $billable, string $pastDueSince): void
+    {
+        /** @var Model&Billable $billable */
+        $billable->forceFill([
+            'subscription_status' => SubscriptionStatus::Cancelled,
+            'subscription_ends_at' => BillingTime::nowUtc(),
+        ])->save();
+
+        SubscriptionCancelled::dispatch($billable, true);
+
+        $this->notifyBillable(
+            $billable,
+            MollieBilling::resolveNotification(SubscriptionCancelledNotification::class, $billable),
+        );
+
+        Log::info('PrepareUsageOverageJob: auto-cancelled past_due billable', [
+            'billable_id' => $billable->getKey(),
+            'past_due_since' => $pastDueSince,
+        ]);
     }
 
     private function processBillable(
@@ -249,14 +319,13 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         }
 
         try {
+            // The service persists the snapshot and the `pending` marker itself; on
+            // success the snapshot carries the payment id, which is what keeps Pass 2
+            // from charging the same overage a second time.
             $chargeService->handle($billable);
-
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['usage_overage_status'] = 'pending';
-            $billable->forceFill(['subscription_meta' => $meta])->save();
         } catch (Throwable $e) {
             $meta = $billable->getBillingSubscriptionMeta();
-            $meta['usage_overage_status'] = 'pending';
+            $meta['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_PENDING;
             $meta['usage_overage_attempts'] = (int) ($meta['usage_overage_attempts'] ?? 0);
             $billable->forceFill(['subscription_meta' => $meta])->save();
 

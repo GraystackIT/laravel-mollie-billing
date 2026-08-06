@@ -11,24 +11,32 @@ use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
+use RuntimeException;
 use Throwable;
 
 /**
- * Wiederholt fehlgeschlagene Refund-Lines aus subscription_meta.pending_refund_retries.
+ * Retries a failed refund line from subscription_meta.pending_refund_retries.
  *
- * Backoff: 1min, 5min, 30min, 2h, dann jede 2h.
- * Hard-Limit: 7 Tage. Danach Admin-Notification + Eintrag in dead_letter.
+ * Backoff: 1min, 5min, 30min, 2h, then every 2h.
+ * Hard limit: 7 days, or an exhausted `tries` budget — whichever comes first.
+ * Either way the line moves to `pending_refund_retries_dead_letter` and an admin
+ * notification goes out.
  *
- * Bei Erfolg: separate Refund-Invoice mit nur dieser einen Line via createRefund().
- * Bei Mollie-409: als erfolgreich verbucht (Idempotenz).
+ * On success a separate refund invoice carrying only this one line is created via
+ * createRefund().
+ *
+ * ShouldBeUnique per (billable, line): the hourly SweepPendingRetriesJob keeps
+ * finding the marker for as long as a retry chain is backing off, and a refund is
+ * real money — a second concurrent chain would refund the customer twice.
  */
-class RetryRefundLineJob implements ShouldQueue
+class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable;
     use InteractsWithQueue;
@@ -36,7 +44,10 @@ class RetryRefundLineJob implements ShouldQueue
     use SerializesModels;
     use UsesBillingQueue;
 
-    public int $tries = 50; // ~7 Tage mit Backoff
+    /** Lock TTL only — the lock is released as soon as the chain ends. */
+    public int $uniqueFor = 604800;
+
+    public int $tries = 50;
 
     public function __construct(
         public readonly string $billableClass,
@@ -45,6 +56,11 @@ class RetryRefundLineJob implements ShouldQueue
         public readonly string $firstAttemptAt,
     ) {
         $this->initializeBillingQueue();
+    }
+
+    public function uniqueId(): string
+    {
+        return $this->billableClass.':'.$this->billableId.':refund:'.$this->lineSignature($this->lineData);
     }
 
     /**
@@ -57,10 +73,10 @@ class RetryRefundLineJob implements ShouldQueue
 
     public function handle(InvoiceService $invoices): void
     {
-        // Hard-Limit 7 Tage.
         $firstAttempt = \Carbon\Carbon::parse((string) $this->firstAttemptAt)->setTimezone('UTC');
         if ($firstAttempt->diffInDays(BillingTime::nowUtc()) >= 7) {
             $this->moveToDeadLetter();
+
             return;
         }
 
@@ -74,15 +90,50 @@ class RetryRefundLineJob implements ShouldQueue
             return;
         }
 
-        try {
-            $line = ProrataLine::fromArray($this->lineData);
-            $invoices->createRefund($billable, [$line], 'Refund retry');
+        $line = ProrataLine::fromArray($this->lineData);
 
-            // On success: delete the pending_refund_retries entry
-            $this->removeFromPendingRetries($billable);
-        } catch (Throwable $e) {
-            throw $e; // job retry with backoff
+        // createRefund() does NOT throw on a rejected line: it catches the Mollie
+        // error, re-appends the line to pending_refund_retries and returns null.
+        // Clearing the stale entry up front makes a re-append unambiguously this
+        // attempt's failure — and stops removeFromPendingRetries() from deleting
+        // the fresh entry a naive success path would have written off.
+        $this->removeFromPendingRetries($billable);
+
+        $invoices->createRefund($billable, [$line], 'Refund retry');
+
+        if ($this->stillPending($billable)) {
+            // Throw so the queue applies the backoff ladder; the re-appended entry
+            // carries the Mollie error for the next attempt and for the dead letter.
+            throw new RuntimeException(sprintf(
+                'Refund line retry rejected for billable [%s]: see subscription_meta.pending_refund_retries for the Mollie error.',
+                (string) $this->billableId,
+            ));
         }
+    }
+
+    /**
+     * Reached when `tries` runs out before the 7-day window does (the ladder
+     * exhausts after ~4 days). Without this the dead-letter branch in handle()
+     * would never be entered and no admin would ever learn about the line.
+     */
+    public function failed(?Throwable $exception): void
+    {
+        $this->moveToDeadLetter();
+    }
+
+    private function stillPending(\GraystackIT\MollieBilling\Contracts\Billable $billable): bool
+    {
+        $signature = $this->lineSignature($this->lineData);
+
+        foreach ((array) ($billable->getBillingSubscriptionMeta()['pending_refund_retries'] ?? []) as $entry) {
+            $line = is_array($entry) ? ($entry['line'] ?? $entry) : [];
+
+            if (is_array($line) && $this->lineSignature($line) === $signature) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function moveToDeadLetter(): void
@@ -95,6 +146,11 @@ class RetryRefundLineJob implements ShouldQueue
         if ($billable === null) {
             return;
         }
+
+        // Drop the live entry as part of the same write: it now lives in the dead
+        // letter, and leaving it behind would make SweepPendingRetriesJob start a
+        // fresh chain on its next run — re-notifying an admin every hour forever.
+        $this->removeFromPendingRetries($billable);
 
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['pending_refund_retries_dead_letter'] = array_merge(
@@ -110,7 +166,7 @@ class RetryRefundLineJob implements ShouldQueue
                 $admins,
                 MollieBilling::resolveNotification(
                     AdminPlanChangeFailedNotification::class,
-                    'Refund-Line dauerhaft fehlgeschlagen (>7 Tage Retries)',
+                    'Refund line permanently failed (retry budget exhausted)',
                     $this->lineData,
                 ),
             );

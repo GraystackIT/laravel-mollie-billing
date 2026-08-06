@@ -23,10 +23,12 @@ use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\CleanupOrphanedBillablesJob;
 use GraystackIT\MollieBilling\Jobs\CleanupStalePendingCountryCorrectionJob;
+use GraystackIT\MollieBilling\Jobs\CleanupStalePendingProrataChangeJob;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
-use GraystackIT\MollieBilling\Jobs\PruneBillingAuditJob;
 use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
+use GraystackIT\MollieBilling\Jobs\PruneBillingAuditJob;
 use GraystackIT\MollieBilling\Jobs\PruneProcessedWebhooksJob;
+use GraystackIT\MollieBilling\Jobs\SweepPendingRetriesJob;
 use GraystackIT\MollieBilling\Listeners\RecordBillingAudit;
 use GraystackIT\MollieBilling\Listeners\RevokePreviousMandate;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
@@ -37,10 +39,8 @@ use GraystackIT\MollieBilling\Support\ConfigSubscriptionCatalog;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Livewire\Livewire;
-use Livewire\Volt\Volt;
 
 class MollieBillingServiceProvider extends ServiceProvider
 {
@@ -65,6 +65,7 @@ class MollieBillingServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->propagateMollieApiKey();
+        $this->registerMigrations();
         $this->registerPublishing();
         $this->registerRoutes();
         $this->registerMiddleware();
@@ -95,6 +96,17 @@ class MollieBillingServiceProvider extends ServiceProvider
         }
     }
 
+    /**
+     * Load the package migrations. Deliberately outside `registerPublishing()`
+     * (which is console-only): multi-tenant provisioning runs
+     * `Artisan::call('migrate')` from an HTTP request, and a console-gated
+     * registration would build the tenant schema without any billing table.
+     */
+    private function registerMigrations(): void
+    {
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+    }
+
     private function registerPublishing(): void
     {
         if (! $this->app->runningInConsole()) {
@@ -110,16 +122,25 @@ class MollieBillingServiceProvider extends ServiceProvider
             __DIR__.'/../resources/views' => resource_path('views/vendor/mollie-billing'),
         ], 'mollie-billing-views');
 
+        // lang_path(), not resource_path('lang'): Laravel resolves the lang path
+        // as `is_dir(resource_path('lang')) ? resources/lang : base_path('lang')`.
+        // Publishing into resources/lang on an app whose translations live in
+        // base_path('lang') would flip that resolution on the next boot and stop
+        // every one of the app's own root-level lang files from loading.
         $this->publishes([
-            __DIR__.'/../resources/lang' => resource_path('lang/vendor/billing'),
+            __DIR__.'/../resources/lang' => lang_path('vendor/billing'),
         ], 'billing-lang');
 
-        $this->publishes([
-            __DIR__.'/../database/migrations' => database_path('migrations'),
-            __DIR__.'/../database/migrations/add_billing_columns_to_billable_table.php.stub' => database_path('migrations/'.date('Y_m_d_His').'_add_billing_columns_to_billable_table.php'),
-        ], 'mollie-billing-migrations');
+        // Enumerated per file rather than as a directory so the billable-table
+        // stub is not copied verbatim alongside its timestamped rename.
+        $migrations = [];
+        foreach (glob(__DIR__.'/../database/migrations/*.php') ?: [] as $migration) {
+            $migrations[$migration] = database_path('migrations/'.basename($migration));
+        }
+        $migrations[__DIR__.'/../database/migrations/add_billing_columns_to_billable_table.php.stub']
+            = database_path('migrations/'.date('Y_m_d_His').'_add_billing_columns_to_billable_table.php');
 
-        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        $this->publishes($migrations, 'mollie-billing-migrations');
     }
 
     private function registerRoutes(): void
@@ -149,17 +170,21 @@ class MollieBillingServiceProvider extends ServiceProvider
         $router->aliasMiddleware('billing.admin', AuthorizeBillingAdmin::class);
         $router->aliasMiddleware('billing.ip-block', BlockRestrictedCountries::class);
 
+        // Livewire re-applies only the middleware listed here on `/livewire/update`
+        // requests. AuthorizeBillingAdmin must be among them: no admin component
+        // re-checks canAccessBillingAdmin() internally, so without it a revoked
+        // operator keeps invoking admin actions from an already-loaded tab, and the
+        // `admin_locale` pinning would not survive a single component interaction.
         if (class_exists(Livewire::class)) {
             Livewire::addPersistentMiddleware([
                 RequireActiveSubscription::class,
+                AuthorizeBillingAdmin::class,
             ]);
         }
     }
 
     private function registerBlade(): void
     {
-        Blade::componentNamespace('GraystackIT\\MollieBilling\\View\\Components', 'billing');
-
         Blade::if('planFeature', function (string $feature): bool {
             $billable = MollieBilling::resolveBillable(request());
 
@@ -182,16 +207,15 @@ class MollieBillingServiceProvider extends ServiceProvider
 
     private function doRegisterLivewireComponents(): void
     {
-        $viewPath = __DIR__.'/../resources/views/livewire/billing';
-
+        // Every view below this path is a Livewire 4 native single-file component
+        // addressed through the `mollie-billing::` namespace — none of them is a
+        // Volt component. Mounting the directory in Volt as well would register 34
+        // additional *unprefixed* global names (`dashboard`, `checkout`, `invoices`,
+        // `admin.dashboard`, …) that collide with the host app's own components.
         Livewire::addNamespace(
             namespace: 'mollie-billing',
-            viewPath: $viewPath,
+            viewPath: __DIR__.'/../resources/views/livewire/billing',
         );
-
-        if (class_exists(Volt::class)) {
-            Volt::mount([$viewPath]);
-        }
     }
 
     private function registerTranslations(): void
@@ -243,6 +267,20 @@ class MollieBillingServiceProvider extends ServiceProvider
             }
 
             $schedule->job(CleanupStalePendingCountryCorrectionJob::class)
+                ->hourly()
+                ->timezone('UTC');
+
+            // Without this, a prorata charge whose webhook never arrives leaves
+            // `pending_prorata_change` set forever and ValidateSubscriptionChange
+            // rejects every later plan change for that billable.
+            $schedule->job(CleanupStalePendingProrataChangeJob::class)
+                ->dailyAt('03:45')
+                ->timezone('UTC');
+
+            // Safety net for the two write-only retry markers: the services that
+            // persist `pending_subscription_patch` / `pending_refund_retries` log
+            // "queued for retry" but do not enqueue anything themselves.
+            $schedule->job(SweepPendingRetriesJob::class)
                 ->hourly()
                 ->timezone('UTC');
 
