@@ -10,8 +10,10 @@ use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Notifications\SubscriptionPaymentFailedNotification;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Notification;
 
 /**
  * A payment without a Mollie subscriptionId is a checkout payment — a first
@@ -171,6 +173,9 @@ it('does not past_due an already-activated subscription when a stale first-check
 
 it('still marks the billable past_due when a genuine recurring charge fails', function (): void {
     Event::fake([PaymentFailed::class]);
+    Notification::fake();
+
+    MollieBilling::notifyBillingAdminsUsing(fn ($billable): array => [$billable]);
 
     $billable = abortedCheckoutBillable();
     $billable->forceFill([
@@ -206,6 +211,14 @@ it('still marks the billable past_due when a genuine recurring charge fails', fu
         ->and($meta['past_due_since'] ?? null)->not->toBeNull();
 
     Event::assertDispatched(PaymentFailed::class);
+
+    // The amount has to come from the payment: a failed charge writes no invoice,
+    // so anything the notification looks up itself is a different document.
+    Notification::assertSentTo(
+        $billable,
+        SubscriptionPaymentFailedNotification::class,
+        fn (SubscriptionPaymentFailedNotification $n) => $n->amountGross === 2261 && $n->currency === 'EUR',
+    );
 });
 
 it('does not clobber a cancelled subscription inside its grace period', function (): void {

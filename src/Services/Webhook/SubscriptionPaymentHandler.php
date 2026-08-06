@@ -272,7 +272,16 @@ class SubscriptionPaymentHandler
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);
         if (! empty($recipients)) {
-            Notification::send($recipients, MollieBilling::resolveNotification(SubscriptionPaymentFailedNotification::class, $billable, (string) $payment->id));
+            // The amount comes from the payment: a failed charge produces no invoice,
+            // so the notification has nothing to look up and would say "an unknown
+            // amount" (it used to quote an unrelated invoice instead).
+            Notification::send($recipients, MollieBilling::resolveNotification(
+                SubscriptionPaymentFailedNotification::class,
+                $billable,
+                (string) $payment->id,
+                $this->support->amountFromMolliePayment($payment),
+                (string) ($payment->amount->currency ?? config('mollie-billing.currency')),
+            ));
         }
     }
 
