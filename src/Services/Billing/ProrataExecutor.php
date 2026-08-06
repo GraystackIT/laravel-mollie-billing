@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 use Illuminate\Database\Eloquent\Model;
@@ -30,16 +31,21 @@ class ProrataExecutor
     /**
      * @param  list<ProrataLine>  $lines  from the ProrataComposer
      * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
-     *         path ∈ {'noop', 'sidegrade', 'deferred_charge', 'refund'}.
+     *         path ∈ {'noop', 'in_flight', 'sidegrade', 'deferred_charge', 'refund'}.
      *         invoice is filled for sidegrade and refund (immediate redemption with that invoice id).
      *         For deferred_charge the invoice is null — redemption happens in
      *         UpdateSubscription::applyPendingPlanChange() once the Mollie charge clears.
+     *
+     *         'noop' and 'in_flight' both mean "no money moved here", but they are not
+     *         interchangeable to the caller: 'noop' means Mollie was not touched at all and
+     *         still has to be patched, whereas 'in_flight' means another change is already
+     *         waiting on a Mollie charge and must not be patched over.
      */
     public function execute(Billable $billable, PlanChangeIntent $intent, array $lines): array
     {
-        // Idempotency: plan change already in flight → no-op.
+        // Idempotency: plan change already in flight → do nothing.
         if ($this->hasPendingProrataChange($billable)) {
-            return ['path' => 'noop', 'invoice' => null];
+            return ['path' => 'in_flight', 'invoice' => null];
         }
 
         [$chargeLines, $refundLines] = $this->partition($lines);
@@ -86,13 +92,31 @@ class ProrataExecutor
             ]);
 
             if ($billable instanceof Model) {
+                // `billable_type` is normalised to the configured billable FQCN:
+                // PlanChangeIntent::fromArray() and RetrySubscriptionPatchJob both resolve
+                // the row by class name, which a morph-map alias from getMorphClass()
+                // would not satisfy.
+                $intentData = [
+                    ...$intent->toArray(),
+                    'billable_type' => (string) config('mollie-billing.billable_model'),
+                    'billable_id' => $billable->getKey(),
+                ];
+                $firstAttemptAt = BillingTime::nowUtc()->toIso8601String();
+
                 $meta = $billable->getBillingSubscriptionMeta();
                 $meta['pending_subscription_patch'] = [
-                    'intent' => $intent->toArray(),
-                    'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                    'intent' => $intentData,
+                    'first_attempt_at' => $firstAttemptAt,
                     'last_error' => $e->getMessage(),
                 ];
                 $billable->forceFill(['subscription_meta' => $meta])->save();
+
+                // Actually queue the retry. The marker alone is only read by the hourly
+                // SweepPendingRetriesJob; without a dispatch here Mollie keeps charging
+                // the old amount for up to an hour longer than necessary. The job is
+                // ShouldBeUnique per (billable, patch), so the sweep finding the same
+                // marker later is a no-op while this chain is in flight.
+                RetrySubscriptionPatchJob::dispatch($intentData, $firstAttemptAt);
             }
         }
     }

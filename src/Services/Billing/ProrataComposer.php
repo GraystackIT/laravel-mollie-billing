@@ -22,6 +22,11 @@ use GraystackIT\MollieBilling\Support\ProrataLine;
  * Free-plan origin (currentPlan = Free): empty list — Free→Mollie runs through UpgradeLocalToMollie.
  * Mollie→Free: refunds only, no charge.
  * Mollie→Mollie: plan switch = refund of the old + charge of the new plan, separately.
+ *
+ * Pricing follows BillingPolicy::computeProrata(): within one interval both sides are
+ * scaled by the remaining fraction of the current window; across an interval change the
+ * new lines are charged in full (a full new period is granted) and the unused remainder
+ * of the old period is credited.
  */
 class ProrataComposer
 {
@@ -95,15 +100,32 @@ class ProrataComposer
                 $refunds = array_merge($refunds, $this->addonRefundLines($billable, (string) $code, $qty));
             }
 
+            // An interval change grants a FULL new period — ProrataChargeHandler opens a
+            // window of `paidAt → paidAt + 1 new interval` and MollieSubscriptionPatcher
+            // resets Mollie's startDate to `now + 1 new interval`. So the new lines are
+            // charged in full and the unused remainder of the old period is credited via
+            // the refund lines above: exactly BillingPolicy::computeProrata()'s
+            // interval-change rule ("full new price − unused credit"), which is the single
+            // pricing rule the `$hasProrata` gate, the returned `prorataChargeNet` and the
+            // PlanChangePending payload already use. Pricing the new interval with the OLD
+            // window's remaining fraction instead collected ~7% of a year's price on day
+            // 28 of a month while granting all twelve months.
+            //
+            // A plain plan change inside the same interval keeps the remaining-window
+            // factor: there the period boundary does not move.
+            [$chargeStart, $chargeEnd] = $intervalChanged
+                ? $this->newIntervalWindow($intent)
+                : [$periodStart, $periodEnd];
+
             if (! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
-                $chargeLine = $this->planChargeLine($intent, $periodStart, $periodEnd);
+                $chargeLine = $this->planChargeLine($intent, $chargeStart, $chargeEnd);
                 if ($chargeLine !== null) {
                     $charges[] = $chargeLine;
                 }
 
                 $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
                 if ($newExtraSeats > 0) {
-                    $chargeLine = $this->seatsChargeLine($intent, $newExtraSeats, $periodStart, $periodEnd);
+                    $chargeLine = $this->seatsChargeLine($intent, $newExtraSeats, $chargeStart, $chargeEnd);
                     if ($chargeLine !== null) {
                         $charges[] = $chargeLine;
                     }
@@ -114,7 +136,7 @@ class ProrataComposer
                     if ($qty <= 0) {
                         continue;
                     }
-                    $chargeLine = $this->addonChargeLine($intent, (string) $code, $qty, $periodStart, $periodEnd);
+                    $chargeLine = $this->addonChargeLine($intent, (string) $code, $qty, $chargeStart, $chargeEnd);
                     if ($chargeLine !== null) {
                         $charges[] = $chargeLine;
                     }
@@ -444,6 +466,24 @@ class ProrataComposer
     }
 
     /**
+     * The window a full new interval covers: `now → now + 1 new interval`, which makes
+     * the charge-line helpers compute factor = 1.0 and emit list prices. Same trick as
+     * composePastDueReset(), and the same window ProrataChargeHandler persists as the
+     * invoice period once the charge clears.
+     *
+     * @return array{0: CarbonInterface, 1: CarbonInterface}
+     */
+    private function newIntervalWindow(PlanChangeIntent $intent): array
+    {
+        $start = BillingTime::nowUtc();
+
+        return [
+            $start,
+            $intent->newInterval === 'yearly' ? $start->copy()->addYear() : $start->copy()->addMonth(),
+        ];
+    }
+
+    /**
      * Single source of truth for pro-rata day math.
      *
      * @return array{days: array{total: int, remaining: int}, factor: float}
@@ -633,8 +673,6 @@ class ProrataComposer
         $billableEnd = $billable?->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
         [$lineStart, $lineEnd] = $this->resolveLinePeriod($line, $invoice, $billableStart, $billableEnd);
 
-        // Pro-rata-Faktor auf Line-Item-Periode.
-        $perItemNet = (int) round($originalCashNet / $originalQty);
         ['days' => $days, 'factor' => $factor] = $this->periodMath($lineStart, $lineEnd);
         $itemDaysActive = $days['total'];
         $itemDaysRemaining = $days['remaining'];
@@ -664,7 +702,18 @@ class ProrataComposer
             );
         }
 
-        $refundNet = (int) round($perItemNet * $quantity * $factor);
+        // Refund a `quantity/originalQty` share of the cash actually booked on the line —
+        // never a rounded per-unit price times quantity. For an original whose amount_net
+        // is not divisible by its quantity (the normal case for a prorated mid-cycle seat
+        // invoice) rounding the unit up first refunds more than was ever paid: 1001 over
+        // 2 seats becomes 501 per seat, and a full-quantity refund at factor 1 sends
+        // 1002. The per-invoice pool cap bounds the invoice total, not the single line,
+        // so on a multi-line invoice those cents really do leave for Mollie and inflate
+        // `refunded_net`.
+        $refundNet = min(
+            (int) round($originalCashNet * $quantity / $originalQty * $factor),
+            $originalCashNet,
+        );
         if ($refundNet <= 0) {
             return null;
         }

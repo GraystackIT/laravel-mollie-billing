@@ -136,12 +136,34 @@ class UpdateSubscription
                 && $context->isMollie;
 
             $prorataResult = null;
+            // Whether Mollie has been dealt with by the pro-rata pipeline. `$hasProrata`
+            // only says the *context* computed a pro-rata amount; the composer can still
+            // produce no effective line (everything rounds to 0, refund candidates missing
+            // or exhausted) and the executor then returns 'noop' without touching Mollie
+            // at all. Reading the branch off `$hasProrata` reported a PATCH that never ran
+            // — a monthly→yearly switch on the renewal day flipped the local interval
+            // while Mollie kept billing monthly — and on a free downgrade it dropped
+            // `mollie_subscription_id` for a subscription still live at Mollie, which then
+            // could never be cancelled again.
+            $prorataHandledByExecutor = false;
             if ($hasProrata) {
                 $prorataResult = $this->applyProrata($billable, $context, $resolvedCoupons);
                 $billable->refresh();
 
                 // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
                 $hasPendingCharge = ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
+
+                $prorataHandledByExecutor = match ($prorataResult['path']) {
+                    // The executor PATCHed Mollie itself.
+                    'sidegrade', 'refund' => true,
+                    // Phase 2 PATCHes once the charge clears — but only if a charge was
+                    // really created; a fully coupon-covered line set creates none.
+                    'deferred_charge' => $hasPendingCharge,
+                    // 'in_flight': another change is already waiting on a Mollie charge and
+                    // must not be patched over. 'noop': Mollie was not touched.
+                    'in_flight' => true,
+                    default => false,
+                };
 
                 // Only real plan switches (plan or interval) defer the local switch and surface
                 // the legacy `pending_plan_change` marker that the plan-change-modal cancel-button
@@ -226,7 +248,7 @@ class UpdateSubscription
                 $meta = $billable->getBillingSubscriptionMeta();
 
                 if ($downgradeToLocal) {
-                    if (! $hasProrata) {
+                    if (! $prorataHandledByExecutor) {
                         $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
                     }
                     // Free downgrade tears down the Mollie subscription — any active
@@ -237,7 +259,7 @@ class UpdateSubscription
                         $meta['pending_amount_recorded_at'],
                         $meta['active_recurring_coupon'],
                     );
-                } elseif ($context->isMollie && ! $hasProrata && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
+                } elseif ($context->isMollie && ! $prorataHandledByExecutor && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
                     // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
                     // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
                     $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
@@ -249,17 +271,14 @@ class UpdateSubscription
                             'billable' => $billable->getKey(),
                             'error' => $e->getMessage(),
                         ]);
-                        $meta['pending_subscription_patch'] = [
-                            'intent' => $intent->toArray(),
-                            'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
-                            'last_error' => $e->getMessage(),
-                        ];
+                        $meta['pending_subscription_patch'] = $this->queuePatchRetry($billable, $intent, $e);
                     }
 
                     $meta['pending_amount_net'] = $newNet;
                     $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
-                } elseif ($context->isMollie && $hasProrata) {
-                    $mollieSubscriptionPatched = true;
+                } elseif ($context->isMollie && $prorataHandledByExecutor) {
+                    $mollieSubscriptionPatched = $prorataResult['path'] === 'sidegrade'
+                        || $prorataResult['path'] === 'refund';
                     $meta['pending_amount_net'] = $newNet;
                     $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
                 }
@@ -557,11 +576,7 @@ class UpdateSubscription
                         'error' => $e->getMessage(),
                     ]);
                     $meta = $billable->getBillingSubscriptionMeta();
-                    $meta['pending_subscription_patch'] = [
-                        'intent' => $intent->toArray(),
-                        'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
-                        'last_error' => $e->getMessage(),
-                    ];
+                    $meta['pending_subscription_patch'] = $this->queuePatchRetry($billable, $intent, $e);
                     $billable->forceFill(['subscription_meta' => $meta])->save();
                 }
             }
@@ -711,14 +726,24 @@ class UpdateSubscription
     }
 
     /**
-     * User-initiated cancel of a pending plan change. Cancels the open Mollie
-     * payment if Mollie still allows it (some methods like paypal report
-     * isCancelable=false — those expire on their own), then clears the local
-     * pending state.
+     * User-initiated cancel of a pending plan change. Cancels the open Mollie payment if
+     * Mollie still allows it (some methods like PayPal report isCancelable=false — those
+     * expire on their own), then clears the local pending state.
      *
-     * Returns true if the Mollie payment was cancelled via API, false if it
-     * could not be cancelled (already final, not cancelable, or not found).
-     * Local state is cleared in either case.
+     * Returns true if the Mollie payment was cancelled via API, false otherwise.
+     *
+     * Three outcomes, because "we cleared the local state" is only safe for one of them:
+     *
+     *  - Cancelled, or already dead at Mollie (canceled/expired/failed): clear, done.
+     *  - Already **paid or authorized**: the local state is left untouched and false is
+     *    returned. The money is in; the webhook still has to apply the change, and
+     *    clearing `pending_plan_change` here would make ProrataChargeHandler::paid()
+     *    return early — the customer charged for a plan change that never happens, with
+     *    no invoice, no refund and no alert.
+     *  - Still open but not cancelable, or the lookup/cancel threw: the local state is
+     *    cleared (the customer asked for that) but the payment is recorded under
+     *    `subscription_meta['orphaned_prorata_payment']` together with the plan-change
+     *    payload, and the admins are notified. The paid path reconciles from that marker.
      */
     public function cancelPendingPlanChange(Billable $billable): bool
     {
@@ -730,17 +755,33 @@ class UpdateSubscription
         $paymentId = (string) ($meta['prorata_pending_payment_id'] ?? '');
 
         $cancelled = false;
+        $orphanReason = null;
+
         if ($paymentId !== '') {
             try {
                 $payment = \Mollie\Laravel\Facades\Mollie::send(
                     new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId),
                 );
 
+                $status = (string) ($payment->status ?? '');
+
+                if (in_array($status, ['paid', 'authorized'], true)) {
+                    Log::warning('Pending plan change cancel refused — the prorata payment has already settled', [
+                        'billable' => $billable->getKey(),
+                        'payment_id' => $paymentId,
+                        'status' => $status,
+                    ]);
+
+                    return false;
+                }
+
                 if (($payment->isCancelable ?? false) === true) {
                     \Mollie\Laravel\Facades\Mollie::send(
                         new \Mollie\Api\Http\Requests\CancelPaymentRequest($paymentId),
                     );
                     $cancelled = true;
+                } elseif (! in_array($status, ['canceled', 'expired', 'failed'], true)) {
+                    $orphanReason = 'not_cancelable';
                 }
             } catch (\Throwable $e) {
                 Log::warning('Pending plan change cancel: Mollie payment lookup/cancel failed — clearing local state anyway', [
@@ -748,12 +789,102 @@ class UpdateSubscription
                     'payment_id' => $paymentId,
                     'error' => $e->getMessage(),
                 ]);
+
+                $orphanReason = 'lookup_failed';
             }
+        }
+
+        if ($orphanReason !== null) {
+            $this->recordOrphanedProrataPayment($billable, $paymentId, $orphanReason);
         }
 
         $this->clearPendingPlanChange($billable);
 
         return $cancelled;
+    }
+
+    /**
+     * Remember a prorata payment that may still settle after the local pending state was
+     * cleared, so the paid path has something to reconcile against instead of returning
+     * early on an empty pending state.
+     *
+     * Contract for the webhook side (ProrataChargeHandler::paid()): when
+     * `pending_prorata_change` is empty but `orphaned_prorata_payment.payment_id` matches
+     * the incoming payment, the change was cancelled locally after the payment went out —
+     * refund it (or apply the recorded `pending_plan_change`) and alert, never silently
+     * return. The marker is the only record that the money belongs to nothing.
+     */
+    private function recordOrphanedProrataPayment(Billable $billable, string $paymentId, string $reason): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        // At most one prorata payment can be pending at a time (there is a single
+        // `prorata_pending_payment_id`), so this replaces rather than accumulates.
+        $meta['orphaned_prorata_payment'] = [
+            'payment_id' => $paymentId,
+            'reason' => $reason,
+            'cancelled_at' => BillingTime::nowUtc()->toIso8601String(),
+            'pending_plan_change' => $meta['pending_plan_change'] ?? null,
+            'prorata_charge_lines' => $meta['pending_prorata_change']['charge_lines'] ?? null,
+        ];
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        Log::error('Prorata payment orphaned by a user-initiated plan-change cancel — may still settle', [
+            'billable' => $billable->getKey(),
+            'payment_id' => $paymentId,
+            'reason' => $reason,
+        ]);
+
+        $admins = \GraystackIT\MollieBilling\MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins !== []) {
+            \Illuminate\Support\Facades\Notification::send($admins, \GraystackIT\MollieBilling\MollieBilling::resolveNotification(
+                \GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification::class,
+                'Plan change cancelled locally while its Mollie payment could still settle',
+                [
+                    'billable_type' => $billable->getMorphClass(),
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $paymentId,
+                    'reason' => $reason,
+                ],
+            ));
+        }
+    }
+
+    /**
+     * Persist the retry marker for a failed Mollie PATCH *and* queue the retry.
+     *
+     * The marker alone is only read by the hourly SweepPendingRetriesJob; dispatching here
+     * drains it promptly instead. The job is ShouldBeUnique per (billable, patch), so the
+     * sweep finding the same marker later is a no-op while this chain is in flight.
+     *
+     * `billable_type` is normalised to the configured billable FQCN: both
+     * PlanChangeIntent::fromArray() and RetrySubscriptionPatchJob resolve the row by class
+     * name, which a morph-map alias from getMorphClass() would not satisfy.
+     *
+     * @return array<string, mixed>  the marker to store under `pending_subscription_patch`
+     */
+    private function queuePatchRetry(Billable $billable, PlanChangeIntent $intent, \Throwable $e): array
+    {
+        $intentData = [
+            ...$intent->toArray(),
+            'billable_type' => (string) config('mollie-billing.billable_model'),
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+        ];
+        $firstAttemptAt = BillingTime::nowUtc()->toIso8601String();
+
+        \GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob::dispatch($intentData, $firstAttemptAt);
+
+        return [
+            'intent' => $intentData,
+            'first_attempt_at' => $firstAttemptAt,
+            'last_error' => $e->getMessage(),
+        ];
     }
 
     /**

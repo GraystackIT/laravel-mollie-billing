@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Session;
 use Mollie\Api\Http\Data\Money;
@@ -82,7 +83,10 @@ class StartSubscriptionCheckout
                     'interval' => $request['interval'],
                     'addonCodes' => $request['addon_codes'] ?? [],
                     'extraSeats' => (int) ($request['extra_seats'] ?? 0),
-                    'orderAmountNet' => $amountGross,
+                    // Net, not the gross the caller handed us: validate() compares this
+                    // against `minimum_order_amount_net`, so a VAT-inflated gross would
+                    // admit every order within the VAT rate below the configured floor.
+                    'orderAmountNet' => $this->orderAmountNet($billable, $request),
                     'allowed_types' => [CouponType::AccessGrant],
                 ]);
 
@@ -179,5 +183,27 @@ class StartSubscriptionCheckout
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
             'payment_id' => $payment->id,
         ];
+    }
+
+    /**
+     * The requested subscription's recurring net (plan + seats + addons), which is the
+     * basis every `orderAmountNet` consumer in CouponService expects.
+     *
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int}  $request
+     */
+    private function orderAmountNet(Billable $billable, array $request): int
+    {
+        $planCode = (string) $request['plan_code'];
+        $interval = (string) $request['interval'];
+        $totalSeats = $this->catalog->includedSeats($planCode) + max(0, (int) ($request['extra_seats'] ?? 0));
+
+        return SubscriptionAmount::net(
+            $this->catalog,
+            $billable,
+            $planCode,
+            $interval,
+            $totalSeats,
+            $request['addon_codes'] ?? [],
+        );
     }
 }

@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeApplyFailed;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeCancelled;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeRescheduled;
@@ -55,9 +56,14 @@ class ScheduleSubscriptionChange
                 $this->validator->assertPlanSelectable($billable, $newPlan);
             }
 
-            // Auto-derive seats from the new plan.
+            // Auto-derive seats from the new plan. `getBillingSeatCount()` has to be in the
+            // max, exactly as in UpdateSubscription::buildContext() and
+            // ValidateSubscriptionChange::validateSeats() — without it a billable on 14
+            // seats with 10 used would have the change applied with 10, silently losing
+            // four paid seats and dropping the renewal amount.
             $usedSeats = $billable->getUsedBillingSeats();
-            $newSeats = $dto->seats ?? max($usedSeats, $this->catalog->includedSeats($newPlan));
+            $seatsExplicit = $dto->seats !== null;
+            $newSeats = $dto->seats ?? max($usedSeats, $currentSeats, $this->catalog->includedSeats($newPlan));
 
             // Auto-filter incompatible addons.
             $newAddons = $dto->addons !== null
@@ -89,6 +95,16 @@ class ScheduleSubscriptionChange
             // hidden plan would be rejected at period end.
             if ($dto->allowHiddenPlan) {
                 $scheduledChange['allow_hidden_plan'] = true;
+            }
+
+            // `seats` is stored either way so the admin/portal listings can render the
+            // resulting count, but a derived value must not reach apply() as an explicit
+            // one: `seatsExplicit` bypasses the validator's auto-derive, which is what
+            // clamps a preserved seat count down for a target plan that sells no extra
+            // seats. Without the flag such a change would be accepted at schedule time
+            // and throw SeatDowngradeRequiredException at period end.
+            if (! $seatsExplicit) {
+                $scheduledChange['seats_auto_derived'] = true;
             }
 
             $meta = $billable->getBillingSubscriptionMeta();
@@ -150,11 +166,31 @@ class ScheduleSubscriptionChange
             return;
         }
 
+        // A change scheduled for a subscription that no longer runs must be dropped, not
+        // applied. `update()` is entered with `internal = true`, which waives the
+        // lapsed-period guard, so nothing else stops it from rewriting plan/addon codes,
+        // rebalancing wallets and charging overage against a customer who cancelled.
+        // Dropping it also unsticks the daily dispatcher: `scheduled_change_at` is only
+        // cleared on success, so an Expired billable (whose validator throws) would
+        // otherwise re-fail this job every single day.
+        if (! $this->isApplicable($billable)) {
+            $this->cancel($billable);
+
+            return;
+        }
+
         $payload = (array) $scheduledChange;
         $allowHiddenPlan = ($payload['allow_hidden_plan'] ?? false) === true;
         $payload['apply_at'] = 'immediate';
         $payload['internal'] = true;
         unset($payload['scheduled_at'], $payload['allow_hidden_plan']);
+
+        // Seats that were auto-derived at schedule time must be re-derived against live
+        // state, not replayed as an explicit count — see schedule().
+        if (($payload['seats_auto_derived'] ?? false) === true) {
+            unset($payload['seats']);
+        }
+        unset($payload['seats_auto_derived']);
 
         // Trusted re-entry: the override was approved when the change was scheduled,
         // so it is re-applied through the typed API here. `from()` ignores the array
@@ -195,4 +231,20 @@ class ScheduleSubscriptionChange
         }
     }
 
+    /**
+     * Whether a stored change may still be applied to this billable.
+     *
+     * Only a subscription that is actually running can receive one. PastDue is included:
+     * a plan change there is handled by the dedicated past-due reset path, which charges
+     * a full first period. Cancelled, Expired and New are not — there is nothing to
+     * change, and for Cancelled the customer explicitly asked to stop.
+     */
+    private function isApplicable(Billable $billable): bool
+    {
+        return in_array($billable->getBillingSubscriptionStatus(), [
+            SubscriptionStatus::Active,
+            SubscriptionStatus::Trial,
+            SubscriptionStatus::PastDue,
+        ], true);
+    }
 }

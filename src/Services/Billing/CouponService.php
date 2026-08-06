@@ -80,9 +80,48 @@ class CouponService
             $attributes['code'] = strtoupper(trim((string) $attributes['code']));
         }
 
+        // Same shape rules as create(). Without this an admin could raise a Percentage
+        // coupon above 100% after creation, and for a Recurring coupon that value flows
+        // uncapped into the `active_recurring_coupon` marker — computeMarkerDiscount()'s
+        // percentage branch has no cap at the net amount, so the renewal invoice would
+        // carry a discount line larger than the plan line it discounts.
+        //
+        // Validation runs against the *post-update* shape: the coupon's current values for
+        // every field the type rules read, with the patch merged on top.
+        $type = array_key_exists('type', $attributes) && $attributes['type'] !== null
+            ? ($attributes['type'] instanceof CouponType ? $attributes['type'] : CouponType::from((string) $attributes['type']))
+            : $coupon->type;
+
+        $this->validateRequiredFieldsForType($type, array_merge($this->typeRuleFields($coupon), $attributes));
+
         $coupon->update($attributes);
 
         return $coupon->refresh();
+    }
+
+    /**
+     * The coupon's current values for exactly the fields validateRequiredFieldsForType()
+     * inspects, read through the casts so JSON columns arrive as arrays.
+     *
+     * Deliberately narrow rather than `attributesToArray()`: that would round-trip every
+     * attribute through its cast, and the UtcDatetime cast cannot re-read its own output.
+     *
+     * @return array<string, mixed>
+     */
+    private function typeRuleFields(Coupon $coupon): array
+    {
+        return [
+            'discount_type' => $coupon->discount_type,
+            'discount_value' => $coupon->discount_value,
+            'max_redemptions_per_billable' => $coupon->max_redemptions_per_billable,
+            'valid_until' => $coupon->valid_until,
+            'credits_payload' => $coupon->credits_payload,
+            'trial_extension_days' => $coupon->trial_extension_days,
+            'grant_plan_code' => $coupon->grant_plan_code,
+            'grant_interval' => $coupon->grant_interval,
+            'grant_duration_days' => $coupon->grant_duration_days,
+            'grant_addon_codes' => $coupon->grant_addon_codes,
+        ];
     }
 
     public function deactivate(Coupon $coupon): void
@@ -437,24 +476,56 @@ class CouponService
         return $coupon;
     }
 
+    /**
+     * Write the redemption row and apply the coupon's effect.
+     *
+     * Both redemption limits are (re-)checked here, under `Coupon::lockForUpdate()`:
+     * `validate()` checks them too, but outside any transaction, so a double-clicked
+     * Credits coupon would credit the wallet twice and write two redemption rows before
+     * either request saw the other.
+     *
+     * `$context['renewal'] = true` marks a periodic re-application of an
+     * already-granted Recurring coupon (see redeemRecurringCouponForRenewal). Those are
+     * exempt from *both* global rules:
+     *
+     *  - the per-billable cap, because for a Recurring coupon
+     *    `max_redemptions_per_billable` means "how many billing periods the discount
+     *    applies" — enforcing it here would abort the very renewals it authorises;
+     *  - `max_redemptions` and its counter, because that cap sizes the campaign in
+     *    *customers*. Charging renewals against it exhausted a 50-redemption coupon with
+     *    20 monthly subscribers within months, after which new customers were rejected
+     *    while the existing ones kept their discount anyway — `computeMarkerDiscount()`
+     *    reads only `active` + `valid_until`, so the invoice still carried the discount
+     *    line, `redeem()` threw `globally_exhausted`, the caller logged it, and the
+     *    redemption rows silently stopped being written.
+     *
+     * So `redemptions_count` counts grants, and the redemption rows count applications;
+     * a recurring coupon has more of the latter by design.
+     */
     public function redeem(Coupon $coupon, Billable $billable, array $context): CouponRedemption
     {
         return DB::transaction(function () use ($coupon, $billable, $context): CouponRedemption {
             $coupon = Coupon::query()->lockForUpdate()->findOrFail($coupon->id);
 
-            if (
-                $coupon->max_redemptions !== null
-                && $coupon->redemptions_count >= $coupon->max_redemptions
-            ) {
-                throw new InvalidCouponException(
-                    $billable,
-                    (string) $coupon->code,
-                    'globally_exhausted',
-                );
-            }
+            $isRenewal = ($context['renewal'] ?? false) === true;
 
-            $coupon->increment('redemptions_count');
-            $coupon->refresh();
+            if (! $isRenewal) {
+                if (
+                    $coupon->max_redemptions !== null
+                    && $coupon->redemptions_count >= $coupon->max_redemptions
+                ) {
+                    throw new InvalidCouponException(
+                        $billable,
+                        (string) $coupon->code,
+                        'globally_exhausted',
+                    );
+                }
+
+                $this->assertPerBillableLimitLeft($coupon, $billable);
+
+                $coupon->increment('redemptions_count');
+                $coupon->refresh();
+            }
 
             /** @var Model $billableModel */
             $billableModel = $billable;
@@ -553,6 +624,31 @@ class CouponService
 
             return $redemption;
         });
+    }
+
+    /**
+     * Mirror of the per-billable check in validate(), but inside redeem()'s transaction
+     * and against the locked coupon row. Counts only live redemptions — a revoked grant
+     * frees its slot, which is what revokeGrant()'s counter decrement already implies.
+     *
+     * @throws InvalidCouponException
+     */
+    private function assertPerBillableLimitLeft(Coupon $coupon, Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $perBillable = CouponRedemption::query()
+            ->where('coupon_id', $coupon->id)
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->whereNull('revoked_at')
+            ->count();
+
+        if ($perBillable >= (int) ($coupon->max_redemptions_per_billable ?? 1)) {
+            throw new InvalidCouponException($billable, (string) $coupon->code, 'per_billable_limit_reached');
+        }
     }
 
     public function computeRecurringDiscount(Coupon $coupon, int $netAmount): int
@@ -723,6 +819,23 @@ class CouponService
 
     private function revokeFullGrant(Billable $billable, CouponRedemption $redemption): void
     {
+        // The grant has been superseded by a paid Mollie subscription — a Local→Mollie
+        // upgrade leaves `subscription_ends_at` null, so subtracting the grant days below
+        // yields null, hits the wipe branch and force-fills source = None, plan_code =
+        // null, status = Expired. The customer would lose all access while Mollie keeps
+        // charging them, and the next renewal webhook would arrive at a billable with no
+        // plan code. Nothing about a paid subscription is the grant's to unwind: the
+        // caller still marks the redemption revoked and frees the coupon slot, which is
+        // what stops the admin UI from listing it as active.
+        if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
+            \Illuminate\Support\Facades\Log::info('Access grant revoked as a record only — a paid Mollie subscription has superseded it', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'redemption' => $redemption->id,
+            ]);
+
+            return;
+        }
+
         $days = (int) ($redemption->grant_days_added ?? 0);
         $currentEnd = $billable->getBillingSubscriptionEndsAt();
         $now = BillingTime::nowUtc();
@@ -1083,6 +1196,8 @@ class CouponService
             'discount_amount_net' => $discount,
             'invoice_id' => $invoiceId,
             'skip_marker' => true,
+            // Renewals re-apply a grant that was already counted; see redeem().
+            'renewal' => true,
         ]);
     }
 

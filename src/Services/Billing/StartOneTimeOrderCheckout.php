@@ -253,12 +253,21 @@ class StartOneTimeOrderCheckout
             'period_end' => $now->toIso8601String(),
         ]];
 
+        // VAT is allocated from the *cumulative* discount rather than per line, so the
+        // per-line roundings always add up to the product's own VAT. Rounding each
+        // discount independently makes a fully-covered order book ±1 cent — an invoice
+        // with amount_gross = -1 for something that cost the customer nothing.
+        $discountTotal = 0;
+        $vatAllocated = 0;
+
         foreach ($resolvedCoupons as $entry) {
             if ($entry['discount'] <= 0) {
                 continue;
             }
             $discount = (int) $entry['discount'];
-            $couponVat = (int) round($discount * $rate / 100);
+            $discountTotal += $discount;
+            $couponVat = (int) round($discountTotal * $rate / 100) - $vatAllocated;
+            $vatAllocated += $couponVat;
             $lineItems[] = [
                 'kind' => 'coupon',
                 'code' => (string) $entry['coupon']->code,
