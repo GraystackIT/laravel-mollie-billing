@@ -21,14 +21,16 @@ use Illuminate\Support\Facades\Log;
  *
  * `pending_subscription_patch`, `pending_subscription_cancel` and
  * `pending_refund_retries` are persisted by UpdateSubscription, ProrataExecutor,
- * SubscriptionPaymentHandler, CancelSubscription and InvoiceService, which log
- * "queued for retry" but enqueue nothing. Without a reader, a failed Mollie PATCH
- * leaves Mollie charging the old amount every period, a failed cancel leaves it
- * charging a customer whose access ended, and a rejected refund line never reaches
- * the customer.
+ * SubscriptionPaymentHandler, CancelSubscription and InvoiceService. Two of those —
+ * UpdateSubscription::queuePatchRetry() and ProrataExecutor::safelyPatch() — dispatch
+ * the patch retry themselves; the cancel, the coupon-expiry patch and every refund line
+ * only get their marker written and rely entirely on this sweep. Without a reader, a
+ * failed Mollie PATCH leaves Mollie charging the old amount every period, a failed
+ * cancel leaves it charging a customer whose access ended, and a rejected refund line
+ * never reaches the customer.
  *
- * The sweep is deliberately independent of whether those call sites dispatch: both
- * retry jobs are ShouldBeUnique per (billable, target), so a marker that already has a
+ * The sweep is deliberately independent of whether those call sites dispatch: every
+ * retry job is ShouldBeUnique per (billable, target), so a marker that already has a
  * chain in flight is not queued twice — which matters most for refunds, where a second
  * chain would be a second payout.
  */
@@ -40,9 +42,29 @@ class SweepPendingRetriesJob implements ShouldQueue, ShouldBeUnique
     use SerializesModels;
     use UsesBillingQueue;
 
-    public int $uniqueFor = 3600;
+    /**
+     * Above the worst-case runtime (`timeout` × `tries` plus the backoff) and still below
+     * the hourly schedule. At exactly 3600 there was zero headroom: a slow sweep was
+     * still walking the table when its lock expired and the scheduler dispatched the
+     * next one on top of it.
+     */
+    public int $uniqueFor = 1800;
 
-    public int $tries = 1;
+    /**
+     * A second run is harmless — it only re-dispatches jobs whose own uniqueness drops
+     * the duplicate — and it is what keeps a timeout kill from skipping the markers past
+     * the point where the worker died.
+     */
+    public int $tries = 2;
+
+    /**
+     * Dispatch-only work, but across the whole billable table. Bounded so a stalled
+     * query cannot outlast the queue's visibility window and get the run re-delivered
+     * into an immediate MaxAttemptsExceededException.
+     */
+    public int $timeout = 600;
+
+    public int $backoff = 60;
 
     public function __construct()
     {

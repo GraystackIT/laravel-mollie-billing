@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
-use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 
 return [
     'billable_model' => env('BILLING_BILLABLE_MODEL'),
@@ -286,12 +285,15 @@ return [
     ],
 
     // Auto-cancel of subscriptions stuck in `past_due`. After this many days
-    // without a successful recovery payment, PrepareUsageOverageJob Pass 3
+    // without a successful recovery payment, PrepareUsageOverageJob's Pass 4
     // transitions the billable to `cancelled` with `subscription_ends_at = now`.
-    // The next Pass 3 run then flips `cancelled → expired`, releasing access
-    // permanently. Recovery (PastDue → Active) still works as long as Mollie
-    // succeeds within this window. Set BILLING_PAST_DUE_MAX_DAYS=0 to disable
-    // the auto-cancel (PastDue then lives forever until manual action).
+    // Pass 1 of the *next* run then flips `cancelled → expired` and clears the
+    // plan-scoped fields, releasing access permanently — the expiry pass runs
+    // before the auto-cancel precisely so both never happen in one invocation,
+    // which used to make `cancelled` unobservable. Recovery (PastDue → Active)
+    // still works as long as Mollie succeeds within this window. Set
+    // BILLING_PAST_DUE_MAX_DAYS=0 to disable the auto-cancel (PastDue then lives
+    // forever until manual action).
     'past_due_max_days' => (int) env('BILLING_PAST_DUE_MAX_DAYS', 30),
 
     'usage_threshold_percent' => env('BILLING_USAGE_THRESHOLD', 80),
@@ -335,6 +337,12 @@ return [
     // RetryUsageOverageChargeJob, RevokeMollieMandateJob, …).
     // null on either key falls back to the framework default
     // (queue.default connection / "default" queue name).
+    //
+    // Everything routed here is also dispatched after-commit. Almost all of it is
+    // enqueued from inside a DB::transaction, and a worker that dequeues first loses
+    // the race twice over: a notification whose invoice row does not exist yet fails
+    // its model lookup and is dropped into failed_jobs with no retry, and a Mollie
+    // PATCH can land for a change the transaction then rolls back.
     'queue' => [
         'connection' => env('BILLING_QUEUE_CONNECTION'),
         'name' => env('BILLING_QUEUE_NAME'),

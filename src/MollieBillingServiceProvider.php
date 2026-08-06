@@ -17,6 +17,7 @@ use GraystackIT\MollieBilling\Features\FeatureAccess;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingPortal;
 use GraystackIT\MollieBilling\Http\Middleware\BlockRestrictedCountries;
+use GraystackIT\MollieBilling\Http\Middleware\PropagateRouteDefaults;
 use GraystackIT\MollieBilling\Http\Middleware\RequireActiveSubscription;
 use GraystackIT\MollieBilling\Http\Middleware\RequirePlanFeature;
 use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
@@ -180,13 +181,27 @@ class MollieBillingServiceProvider extends ServiceProvider
         $router->aliasMiddleware('billing.ip-block', BlockRestrictedCountries::class);
 
         // Livewire re-applies only the middleware listed here on `/livewire/update`
-        // requests. AuthorizeBillingAdmin must be among them: no admin component
-        // re-checks canAccessBillingAdmin() internally, so without it a revoked
-        // operator keeps invoking admin actions from an already-loaded tab, and the
-        // `admin_locale` pinning would not survive a single component interaction.
+        // requests — it rewrites REQUEST_URI to the original component URL and
+        // re-resolves that route first, so a listed middleware sees the original route
+        // and its parameters, not `/livewire/update`.
+        //
+        // AuthorizeBillingAdmin and AuthorizeBillingPortal must both be among them:
+        // neither an admin nor a portal component re-checks authorization internally,
+        // and these two middleware are the only place MollieBilling::authorizes() /
+        // canAccessBillingAdmin() is consulted at all. Without them a revoked operator
+        // keeps invoking admin actions from an already-loaded tab, and the `admin_locale`
+        // pinning would not survive a single component interaction.
+        //
+        // PropagateRouteDefaults belongs here for the same reason: it is what repopulates
+        // URL::defaults with the tenant parameters. Portal views render
+        // `route(BillingRoute::checkout())` without explicit parameters and rely purely on
+        // those defaults, so on a multi-tenant mount the first Livewire interaction threw
+        // UrlGenerationException — a 500 on the first click.
         if (class_exists(Livewire::class)) {
             Livewire::addPersistentMiddleware([
+                PropagateRouteDefaults::class,
                 RequireActiveSubscription::class,
+                AuthorizeBillingPortal::class,
                 AuthorizeBillingAdmin::class,
             ]);
         }
@@ -286,9 +301,12 @@ class MollieBillingServiceProvider extends ServiceProvider
                 ->dailyAt('03:45')
                 ->timezone('UTC');
 
-            // Safety net for the two write-only retry markers: the services that
-            // persist `pending_subscription_patch` / `pending_refund_retries` log
-            // "queued for retry" but do not enqueue anything themselves.
+            // Safety net for the retry markers. UpdateSubscription and ProrataExecutor
+            // do dispatch their `pending_subscription_patch` retry, but the coupon-expiry
+            // patch, `pending_subscription_cancel` and every `pending_refund_retries`
+            // line are written by services that only log "queued for retry" — this sweep
+            // is the sole reader for those. It also restarts a chain that was lost with
+            // its worker, whatever wrote the marker.
             $schedule->job(SweepPendingRetriesJob::class)
                 ->hourly()
                 ->timezone('UTC');

@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Notifications\TrialExpiredNotification;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -51,13 +52,28 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable;
     use InteractsWithQueue;
+    use MutatesBillingMeta;
     use Queueable;
     use SerializesModels;
     use UsesBillingQueue;
 
     public int $uniqueFor = 3600;
 
+    /**
+     * Pass A sends mail, so a retry is not free the way the sweeps' re-dispatches
+     * are. `trial_ending_notified_for` makes it safe anyway (see runEndingSoonPass),
+     * but there is still nothing to gain from re-running a pass that logs and
+     * continues past every per-billable failure of its own accord.
+     */
     public int $tries = 1;
+
+    /**
+     * Two table walks plus a notification per hit. Bounded so a slow run cannot
+     * outlast the queue's visibility window and get itself re-delivered — with
+     * `tries = 1` that re-delivery dies on MaxAttemptsExceededException, silently
+     * dropping the rest of the day's expiries.
+     */
+    public int $timeout = 900;
 
     public function __construct()
     {
@@ -88,6 +104,18 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
         $this->runExpiryPass($billableClass, $now);
     }
 
+    /**
+     * `trial_ending_notified_for` holds the `trial_ends_at` date this billable was
+     * already warned about, so the pass can only ever send one mail per trial.
+     * Without it, anything that runs the pass twice against the same window — a
+     * queue re-delivery after `retry_after`, a second scheduler, a manual
+     * `queue:work --once`, or simply widening the notice window in config —
+     * mails the customer again.
+     *
+     * The date, not a boolean: a billable that trials a second time has a different
+     * `trial_ends_at` and must be warned again. The marker is written after the send
+     * so a failure leaves the next run free to retry it.
+     */
     private function runEndingSoonPass(string $billableClass, \Carbon\CarbonInterface $windowStart, \Carbon\CarbonInterface $windowEnd): void
     {
         $this->billables($billableClass)
@@ -96,7 +124,23 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
             ->chunkById(200, function ($billables): void {
                 foreach ($billables as $billable) {
                     try {
+                        $stamp = $billable->trial_ends_at?->toDateString();
+
+                        if ($stamp === null) {
+                            continue;
+                        }
+
+                        if (($billable->getBillingSubscriptionMeta()['trial_ending_notified_for'] ?? null) === $stamp) {
+                            continue;
+                        }
+
                         $this->notify($billable, MollieBilling::resolveNotification(TrialEndingSoonNotification::class, $billable));
+
+                        $this->mutateBillingMeta($billable, function (array $meta) use ($stamp): array {
+                            $meta['trial_ending_notified_for'] = $stamp;
+
+                            return $meta;
+                        });
                     } catch (Throwable $e) {
                         Log::error('ProcessTrialLifecycleJob: trial-ending notify failed', [
                             'billable_id' => $billable->getKey(),

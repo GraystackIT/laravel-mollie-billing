@@ -48,7 +48,9 @@ use Mollie\Laravel\Facades\Mollie;
  * have no other relations. When no closure is registered we fall back to
  * `$billable->delete()`. The closure may also return `false` to veto cleanup
  * for billables that legitimately exist without a subscription (e.g. admins);
- * in that case no event, mandate revocation, or log entry is produced.
+ * in that case no event, mandate revocation, or log entry is produced — only a
+ * `cleanup_vetoed_at` marker, which takes the row out of the candidate query so
+ * the veto is not re-evaluated (at one or two Mollie calls a go) every 15 minutes.
  *
  * Captured-but-orphaned Mollie mandates are revoked best-effort after the
  * cleanup closure runs (using a pre-snapshotted ID pair, since the closure
@@ -61,6 +63,9 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
     use UsesBillingQueue;
+
+    /** Marks a billable the app's cleanup closure refused to delete. */
+    public const VETOED_KEY = 'cleanup_vetoed_at';
 
     public int $tries = 1;
 
@@ -136,6 +141,15 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
                 $q->whereNull('subscription_status')
                     ->orWhere('subscription_status', SubscriptionStatus::New->value);
             })
+            // Rows the app has already vetoed are gone for good — see
+            // markVetoed(). Without this exclusion they stayed candidates
+            // forever: a veto leaves no trace, they keep their
+            // `mollie_customer_id`, and each run spends one or two synchronous
+            // Mollie calls on them again. Since chunkById always restarts from
+            // the lowest id and `timeout`/`tries` cut the run off after a few
+            // hundred rows, a backlog of vetoed rows meant newer orphans were
+            // never reached at all. Deleting the key re-admits a row.
+            ->whereJsonDoesntContainKey('subscription_meta->'.self::VETOED_KEY)
             ->where('created_at', '<', BillingTime::nowUtc()->subMinutes($thresholdMinutes));
     }
 
@@ -210,6 +224,8 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
         $cleaned = MollieBilling::runCleanupOrphanedBillable($billable);
 
         if (! $cleaned) {
+            $this->markVetoed($billable);
+
             return;
         }
 
@@ -221,6 +237,28 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             'billable_id' => $billableKey,
             'payment_id' => $pendingPaymentId,
         ]);
+    }
+
+    /**
+     * Record the app's veto so the candidate query can skip this row from now on.
+     *
+     * The only side-effect a veto is allowed to have: no event, no mandate revocation,
+     * no deletion. Written outside the veto's own "leave the row untouched" contract
+     * because the alternative is re-polling Mollie for it every 15 minutes forever and
+     * starving the newer rows behind it.
+     */
+    private function markVetoed(Model $billable): void
+    {
+        try {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta[self::VETOED_KEY] = BillingTime::nowUtc()->toIso8601String();
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        } catch (\Throwable $e) {
+            Log::warning('CleanupOrphanedBillablesJob: failed to record the cleanup veto', [
+                'billable_id' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

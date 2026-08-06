@@ -11,10 +11,18 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Mollie\Api\Exceptions\ApiException;
+use Mollie\Api\Http\Requests\RevokeMandateRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 /**
  * Revokes a previously valid Mollie mandate after the customer set up a new one.
+ *
+ * A 404/410 counts as success: the mandate is already gone, which is the goal. Both
+ * CleanupOrphanedBillablesJob::revokeMandate() and the RevokePreviousMandate listener
+ * can dispatch for the same (customer, mandate) pair, so the second one arriving to
+ * find nothing left is expected — re-throwing burned all three tries and filed a
+ * failed_jobs row for work that was already done.
  */
 class RevokeMollieMandateJob implements ShouldQueue
 {
@@ -36,15 +44,32 @@ class RevokeMollieMandateJob implements ShouldQueue
     public function handle(): void
     {
         try {
-            Mollie::api()->mandates->revokeForId($this->mollieCustomerId, $this->mandateId);
-        } catch (\Throwable $e) {
-            Log::warning('Failed to revoke Mollie mandate', [
+            Mollie::send(new RevokeMandateRequest($this->mollieCustomerId, $this->mandateId));
+        } catch (ApiException $e) {
+            if (! in_array($e->getCode(), [404, 410], true)) {
+                $this->logFailure($e);
+
+                throw $e;
+            }
+
+            Log::info('Mollie mandate was already revoked', [
                 'customer_id' => $this->mollieCustomerId,
                 'mandate_id' => $this->mandateId,
-                'error' => $e->getMessage(),
+                'status' => $e->getCode(),
             ]);
+        } catch (\Throwable $e) {
+            $this->logFailure($e);
 
             throw $e;
         }
+    }
+
+    private function logFailure(\Throwable $e): void
+    {
+        Log::warning('Failed to revoke Mollie mandate', [
+            'customer_id' => $this->mollieCustomerId,
+            'mandate_id' => $this->mandateId,
+            'error' => $e->getMessage(),
+        ]);
     }
 }

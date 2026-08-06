@@ -130,6 +130,7 @@ class CheckConfigCommand extends Command
         $this->validateCheckoutCountries($scope);
         $this->validateAdditionalCountries($scope);
         $this->validateBillingTimezone($scope);
+        $this->validateQueue($scope);
         $this->validateScheduleTimes($scope);
         $this->validateCurrencySymbol($scope, $currency);
         $this->validateUsageThreshold($scope);
@@ -359,6 +360,32 @@ class CheckConfigCommand extends Command
             if (empty($data['name'])) {
                 $this->addWarning($scope, "additional_countries.{$iso}.name is empty — the ISO code will be shown as label.");
             }
+        }
+    }
+
+    /**
+     * Every queued job and notification in the package is routed onto this connection.
+     * A typo in BILLING_QUEUE_CONNECTION is invisible until the first dispatch, which
+     * then throws `InvalidArgumentException: The [xyz] queue connection has not been
+     * configured` — so nothing gets retried, nothing gets charged, nothing gets swept.
+     */
+    private function validateQueue(string $scope): void
+    {
+        $connection = config('mollie-billing.queue.connection');
+
+        // null / '' is the documented "fall back to the framework default".
+        if ($connection !== null && $connection !== '') {
+            if (! is_string($connection)) {
+                $this->addError($scope, 'queue.connection must be a string connection name, or null to use the framework default; got ['.var_export($connection, true).'].');
+            } elseif (! array_key_exists($connection, (array) config('queue.connections', []))) {
+                $this->addError($scope, "queue.connection [{$connection}] is not defined in config/queue.php connections — every queued billing job would throw on dispatch. Set BILLING_QUEUE_CONNECTION to a configured connection or leave it unset.");
+            }
+        }
+
+        $queue = config('mollie-billing.queue.name');
+
+        if ($queue !== null && $queue !== '' && ! is_string($queue)) {
+            $this->addError($scope, 'queue.name must be a string queue name, or null to use the framework default; got ['.var_export($queue, true).'].');
         }
     }
 

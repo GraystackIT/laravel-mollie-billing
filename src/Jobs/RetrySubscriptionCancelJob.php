@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
@@ -42,12 +43,19 @@ class RetrySubscriptionCancelJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable;
     use InteractsWithQueue;
+    use MutatesBillingMeta;
     use Queueable;
     use SerializesModels;
     use UsesBillingQueue;
 
-    /** Matches the 24h hard limit so the hourly sweep cannot stack a second chain. */
-    public int $uniqueFor = 86400;
+    /**
+     * Must outlive the whole ladder, not just the 24h hard limit: the limit only fires
+     * on the first attempt *after* 24h, and with `tries = 30` the backoff below spans
+     * ~52h. A `uniqueFor` equal to the limit expired mid-ladder, so the hourly sweep
+     * started a second chain that gave up at once — clearing the marker and mailing the
+     * admins, with the original chain mailing them a second time later.
+     */
+    public int $uniqueFor = 259200;
 
     public int $tries = 30;
 
@@ -151,13 +159,14 @@ class RetrySubscriptionCancelJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $meta = $billable->getBillingSubscriptionMeta();
+        $this->mutateBillingMeta($billable, static function (array $meta): ?array {
+            if (! array_key_exists('pending_subscription_cancel', $meta)) {
+                return null;
+            }
 
-        if (! array_key_exists('pending_subscription_cancel', $meta)) {
-            return;
-        }
+            unset($meta['pending_subscription_cancel']);
 
-        unset($meta['pending_subscription_cancel']);
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+            return $meta;
+        });
     }
 }

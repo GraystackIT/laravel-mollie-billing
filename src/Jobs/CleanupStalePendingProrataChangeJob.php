@@ -57,6 +57,14 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
     public int $tries = 1;
 
+    /**
+     * One synchronous Mollie call per stuck entry, so the run scales with the backlog.
+     * Capped like CleanupOrphanedBillablesJob: a hung HTTP call must not outlast the
+     * queue's visibility window, or the re-delivery fails at once with
+     * MaxAttemptsExceededException because `attempts() >= tries`.
+     */
+    public int $timeout = 600;
+
     public function __construct()
     {
         $this->initializeBillingQueue();
@@ -71,23 +79,32 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
         $threshold = BillingTime::nowUtc()->subHours(24);
 
-        // Find billables with a stuck pending state.
-        // (JSON query — works in MySQL/Postgres/SQLite.)
-        $billables = $billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
+        // chunkById, not get(): loading every billable that carries a `subscription_meta`
+        // into memory exhausted the worker on a large table, and with `tries = 1` the run
+        // then died before resolving a single stuck change — leaving every affected
+        // customer unable to change plan at all. chunkById and not chunk() because
+        // processBillable() mutates the column the filter below reads.
+        $billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
             ->whereNotNull('subscription_meta')
-            ->get()
-            ->filter(function ($b) use ($threshold) {
-                $pending = $b->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
-                if (empty($pending)) {
-                    return false;
-                }
-                $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse((string) $pending["created_at"])->setTimezone("UTC") : BillingTime::nowUtc();
-                return $createdAt->lessThan($threshold);
-            });
+            ->chunkById(200, function ($billables) use ($threshold): void {
+                foreach ($billables as $billable) {
+                    $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
 
-        foreach ($billables as $billable) {
-            $this->processBillable($billable);
-        }
+                    if (empty($pending)) {
+                        continue;
+                    }
+
+                    $createdAt = isset($pending['created_at'])
+                        ? \Carbon\Carbon::parse((string) $pending['created_at'])->setTimezone('UTC')
+                        : BillingTime::nowUtc();
+
+                    if (! $createdAt->lessThan($threshold)) {
+                        continue;
+                    }
+
+                    $this->processBillable($billable);
+                }
+            });
     }
 
     private function processBillable($billable): void

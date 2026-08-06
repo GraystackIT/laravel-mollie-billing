@@ -49,6 +49,14 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
 
     public int $tries = 1;
 
+    /**
+     * One synchronous Mollie call per pending entry, so the run scales with the backlog.
+     * Capped like CleanupOrphanedBillablesJob: a hung HTTP call must not outlast the
+     * queue's visibility window, or the re-delivery fails at once with
+     * MaxAttemptsExceededException because `attempts() >= tries`.
+     */
+    public int $timeout = 600;
+
     public function __construct()
     {
         $this->initializeBillingQueue();
@@ -64,17 +72,23 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
         // Resolve any billable that has at least one country_corrections entry.
         // Filtering by age happens per-entry inside processBillable() because a
         // billable can hold multiple entries with different ages.
-        $billables = $billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
+        //
+        // chunkById, not get(): loading every billable carrying a `subscription_meta`
+        // into memory exhausted the worker on a large table, and with `tries = 1` the
+        // hourly pass then died before resolving a single correction — the customer's
+        // banner never cleared. chunkById and not chunk() because the handlers below
+        // mutate `subscription_meta`, which is the column the filter reads.
+        $billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
             ->whereNotNull('subscription_meta')
-            ->get()
-            ->filter(static function ($b): bool {
-                $pending = $b->getBillingSubscriptionMeta()['country_corrections'] ?? [];
-                return ! empty($pending);
-            });
+            ->chunkById(200, function ($billables): void {
+                foreach ($billables as $billable) {
+                    if (empty($billable->getBillingSubscriptionMeta()['country_corrections'] ?? [])) {
+                        continue;
+                    }
 
-        foreach ($billables as $billable) {
-            $this->processBillable($billable);
-        }
+                    $this->processBillable($billable);
+                }
+            });
     }
 
     private function processBillable(Billable $billable): void

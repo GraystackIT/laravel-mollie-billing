@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
@@ -15,6 +16,7 @@ use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -35,11 +37,19 @@ use Throwable;
  * ShouldBeUnique per (billable, line): the hourly SweepPendingRetriesJob keeps
  * finding the marker for as long as a retry chain is backing off, and a refund is
  * real money — a second concurrent chain would refund the customer twice.
+ *
+ * Runs one at a time *per billable* on top of that (see middleware()): the sweep
+ * dispatches one job per failed line, and those siblings all read-modify-write the
+ * same `subscription_meta` JSON — including inside InvoiceService::createRefund(),
+ * which appends its own failures without a lock. Interleaved, one sibling's write
+ * resurrects a line the other had already refunded, the next sweep dispatches it
+ * again, and the customer is paid out twice.
  */
 class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable;
     use InteractsWithQueue;
+    use MutatesBillingMeta;
     use Queueable;
     use SerializesModels;
     use UsesBillingQueue;
@@ -61,6 +71,25 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
     public function uniqueId(): string
     {
         return $this->billableClass.':'.$this->billableId.':refund:'.$this->lineSignature($this->lineData);
+    }
+
+    /**
+     * Serialises every refund retry for one billable, whichever line it carries.
+     *
+     * uniqueId() keeps a *second chain for the same line* from starting; this keeps
+     * the concurrent chains for *different lines* of the same billable from
+     * interleaving their `pending_refund_retries` writes. A blocked sibling is put
+     * back on the queue rather than dropped — the entry it owns must not be forgotten.
+     *
+     * @return array<int, object>
+     */
+    public function middleware(): array
+    {
+        return [
+            (new WithoutOverlapping($this->billableClass.':'.$this->billableId))
+                ->releaseAfter(30)
+                ->expireAfter(600),
+        ];
     }
 
     /**
@@ -125,6 +154,13 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
     {
         $signature = $this->lineSignature($this->lineData);
 
+        // Read the committed row, not the in-memory instance: createRefund() re-appends
+        // through its own save, and a stale snapshot here would report "refunded" for a
+        // line Mollie had in fact rejected — the queue would then never back off.
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $billable->refresh();
+        }
+
         foreach ((array) ($billable->getBillingSubscriptionMeta()['pending_refund_retries'] ?? []) as $entry) {
             $line = is_array($entry) ? ($entry['line'] ?? $entry) : [];
 
@@ -147,17 +183,28 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
+        if (! $billable instanceof \Illuminate\Database\Eloquent\Model) {
+            return;
+        }
+
+        $signature = $this->lineSignature($this->lineData);
+
         // Drop the live entry as part of the same write: it now lives in the dead
         // letter, and leaving it behind would make SweepPendingRetriesJob start a
         // fresh chain on its next run — re-notifying an admin every hour forever.
-        $this->removeFromPendingRetries($billable);
+        $this->mutateBillingMeta($billable, function (array $meta) use ($signature): array {
+            $meta['pending_refund_retries'] = $this->withoutSignature(
+                (array) ($meta['pending_refund_retries'] ?? []),
+                $signature,
+            );
 
-        $meta = $billable->getBillingSubscriptionMeta();
-        $meta['pending_refund_retries_dead_letter'] = array_merge(
-            (array) ($meta['pending_refund_retries_dead_letter'] ?? []),
-            [$this->lineData],
-        );
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+            $meta['pending_refund_retries_dead_letter'] = array_merge(
+                (array) ($meta['pending_refund_retries_dead_letter'] ?? []),
+                [$this->lineData],
+            );
+
+            return $meta;
+        });
 
         $admins = MollieBilling::notifyAdmin();
         $admins = is_array($admins) ? $admins : iterator_to_array($admins);
@@ -175,15 +222,33 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
 
     private function removeFromPendingRetries(\GraystackIT\MollieBilling\Contracts\Billable $billable): void
     {
-        $meta = $billable->getBillingSubscriptionMeta();
-        $existing = (array) ($meta['pending_refund_retries'] ?? []);
+        if (! $billable instanceof \Illuminate\Database\Eloquent\Model) {
+            return;
+        }
+
         $signature = $this->lineSignature($this->lineData);
-        $filtered = array_values(array_filter($existing, function ($entry) use ($signature) {
-            $line = $entry['line'] ?? $entry;
-            return $this->lineSignature($line) !== $signature;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($signature): array {
+            $meta['pending_refund_retries'] = $this->withoutSignature(
+                (array) ($meta['pending_refund_retries'] ?? []),
+                $signature,
+            );
+
+            return $meta;
+        });
+    }
+
+    /**
+     * @param  array<int|string, mixed>  $entries
+     * @return list<mixed>
+     */
+    private function withoutSignature(array $entries, string $signature): array
+    {
+        return array_values(array_filter($entries, function ($entry) use ($signature): bool {
+            $line = is_array($entry) ? ($entry['line'] ?? $entry) : $entry;
+
+            return ! is_array($line) || $this->lineSignature($line) !== $signature;
         }));
-        $meta['pending_refund_retries'] = $filtered;
-        $billable->forceFill(['subscription_meta' => $meta])->save();
     }
 
     private function lineSignature(array $line): string
