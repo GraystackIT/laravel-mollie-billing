@@ -16,7 +16,10 @@ new class extends Component {
     public ?string $flash = null;
     public ?string $error = null;
 
-    public function mount(mixed $billableId = null, SubscriptionCatalogInterface $catalog): void
+    // Container-injected parameter first: an optional parameter ahead of a required
+    // one is deprecated in PHP 8.3. Livewire resolves mount arguments by name and
+    // type, so the order is free.
+    public function mount(SubscriptionCatalogInterface $catalog, mixed $billableId = null): void
     {
         $this->billableId = $billableId;
         $this->creditType = $catalog->allUsageTypes()[0] ?? '';
