@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -214,6 +215,18 @@ class ChargeUsageOverageDirectly
 
         $vat = $this->vatService->calculate($country, $totalNet, $billable);
 
+        // The invoice the webhook writes for this payment derives its VAT from the
+        // line items, one wallet at a time, so the amount we collect has to be built
+        // the same way — see BillingMoney::grossWithLineVat(). With one line per
+        // metered usage type the rounding residuals add up fast enough to trip
+        // reconcileWithPaidAmount() on an otherwise perfectly ordinary charge. The
+        // snapshot carries the same numbers, so a retry re-charges what was booked.
+        $gross = BillingMoney::grossWithLineVat(
+            array_map(static fn (array $line): int => (int) ($line['total_net'] ?? 0), $lineItems),
+            (float) $vat['rate'],
+        );
+        $vat = [...$vat, 'vat' => $gross - $totalNet, 'gross' => $gross];
+
         // Persist the snapshot BEFORE talking to Mollie and mark the charge
         // pending. If the API call fails the amount owed is still on record, so
         // the daily sweep can pick it up instead of the charge evaporating with
@@ -287,7 +300,7 @@ class ChargeUsageOverageDirectly
     private function createMolliePayment(Billable $billable, array $vat, array $lineItems): object
     {
         $currency = (string) config('mollie-billing.currency', 'EUR');
-        $amountValue = number_format($vat['gross'] / 100, 2, '.', '');
+        $amountValue = BillingMoney::mollieAmount((int) $vat['gross'], $currency);
 
         return Mollie::send(new CreatePaymentRequest(
             description: 'Usage overage',

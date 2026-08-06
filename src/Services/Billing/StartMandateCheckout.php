@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
@@ -63,7 +64,9 @@ class StartMandateCheckout
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: 'Payment method authorisation',
-            amount: new Money($currency, '0.00'),
+            // Zero still has to be spelled with the currency's own number of
+            // decimals — Mollie rejects "0.00" for a 0-decimal currency like JPY.
+            amount: new Money($currency, BillingMoney::mollieAmount(0, $currency)),
             redirectUrl: $redirectUrl ?? route(BillingRoute::name('return'), $urlParams),
             locale: MollieBilling::mollieLocale(),
             cancelUrl: route(BillingRoute::checkout(), $urlParams),

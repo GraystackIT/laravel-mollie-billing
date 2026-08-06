@@ -424,9 +424,12 @@ class UpdateSubscription
     private function applyCouponDiscountsToProrataLines(array $lines, array $resolvedCoupons, SubscriptionChangeContext $context): array
     {
         // Net prorata charge: charge-direction lines minus refund-direction lines.
-        // The Mollie charge that will actually fire is the SUM of all charge-direction
-        // line amounts (positive and negative); refunds are netted there. Coupons can
-        // only meaningfully reduce that final net charge.
+        // The Mollie charge that fires collects the charge-direction lines *only* —
+        // ProrataExecutor::partition() routes the refund-direction lines to separate
+        // Mollie refunds (InvoiceService::createCharge() vs createRefund()), they are
+        // not netted into the payment. Netting them here is nevertheless the right
+        // bound for a coupon: what the change costs the customer is charge minus
+        // refunds, and a discount larger than that would hand out money.
         $chargeNet = 0;
         $vatRate = 0.0;
         $periodStart = null;
@@ -435,13 +438,10 @@ class UpdateSubscription
         $daysRemaining = 0;
 
         foreach ($lines as $line) {
-            if ($line->direction === 'charge') {
-                $chargeNet += $line->amountNet;
-            } else {
-                // Refund-direction lines are negative against the customer's invoice
-                // already; for the purposes of "what is being charged now" we net them.
-                $chargeNet += $line->amountNet;
-            }
+            // Direction-agnostic: refund lines already carry a negative amountNet, so
+            // adding every line is the netting described above.
+            $chargeNet += $line->amountNet;
+
             if ($line->kind === 'plan' && $line->vatRate > 0 && $vatRate === 0.0) {
                 $vatRate = (float) $line->vatRate;
             }

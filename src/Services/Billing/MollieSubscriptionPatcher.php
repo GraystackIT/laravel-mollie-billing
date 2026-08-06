@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
@@ -191,8 +192,17 @@ class MollieSubscriptionPatcher
             $billable,
         );
 
+        // The renewal this PATCH prices is invoiced per line (SubscriptionPaymentHandler
+        // → InvoiceService::createForPayment), and that header VAT is the sum of the
+        // per-line VAT. The recurring amount therefore has to be built from the same
+        // lines — see BillingMoney::grossWithLineVat() for what the two roundings cost.
+        $amountGross = BillingMoney::grossWithLineVat(
+            self::recurringLineNets($this->catalog, $billable, $planCode, $interval, $addons, $extraSeats, $amountNet),
+            (float) $vat['rate'],
+        );
+
         $currency = (string) config('mollie-billing.currency', 'EUR');
-        $value = number_format(((int) $vat['gross']) / 100, 2, '.', '');
+        $value = BillingMoney::mollieAmount($amountGross, $currency);
 
         $metadata = [
             'billable_type' => $billable->getMorphClass(),
@@ -229,6 +239,53 @@ class MollieSubscriptionPatcher
             startDate: $startDate,
             metadata: $metadata,
         ));
+    }
+
+    /**
+     * Net amount per invoice line for a recurring charge of this configuration.
+     *
+     * Mirrors what SubscriptionPaymentHandler will put on the renewal invoice —
+     * one line per plan / seat block / addon, plus a negative coupon line for
+     * whatever the discount takes off — so the amount Mollie collects and the
+     * amount the invoice books round identically. Shared with CreateSubscription:
+     * a subscription created at Σ round(line) and later patched to
+     * round(Σ line), or the other way round, would change price by a cent for no
+     * reason the customer can see.
+     *
+     * @param  array<int, string>  $addons
+     * @param  int  $chargedNet  the net the subscription is actually billed at
+     * @return list<int>
+     */
+    public static function recurringLineNets(
+        SubscriptionCatalogInterface $catalog,
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        int $chargedNet,
+    ): array {
+        /** @var list<int> $lineNets */
+        $lineNets = array_map(
+            static fn (array $line): int => (int) $line['total_net'],
+            SubscriptionAmount::lineItems($catalog, $billable, $planCode, $interval, $extraSeats, $addons),
+        );
+
+        $catalogNet = array_sum($lineNets);
+
+        if ($catalogNet === $chargedNet) {
+            return $lineNets;
+        }
+
+        if ($catalogNet > $chargedNet) {
+            $lineNets[] = $chargedNet - $catalogNet;
+
+            return $lineNets;
+        }
+
+        // Nothing in the catalog lines accounts for a charge *above* their total, so
+        // there is no breakdown to round per line — the total is all we know.
+        return [$chargedNet];
     }
 
     /**

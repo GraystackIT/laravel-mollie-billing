@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -167,7 +168,20 @@ class StartOneTimeOrderCheckout
 
         $country = $billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
         $vatResult = $this->vatService->calculate($country, $netForCharge, $billable);
-        $amountGross = $vatResult['gross'];
+
+        // OneTimeOrderHandler books this payment as a product line plus one negative
+        // line per coupon, and the invoice header sums their VAT — so the amount we
+        // collect is assembled from the same lines. See
+        // BillingMoney::grossWithLineVat(); rounding the discounted total instead
+        // leaves the customer paying a cent more or less than the invoice states.
+        $lineNets = [$priceNet];
+        foreach ($resolvedCoupons as $entry) {
+            if ((int) $entry['discount'] > 0) {
+                $lineNets[] = -(int) $entry['discount'];
+            }
+        }
+
+        $amountGross = BillingMoney::grossWithLineVat($lineNets, (float) $vatResult['rate']);
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $urlParams = MollieBilling::resolveUrlParameters($billable);
@@ -181,7 +195,7 @@ class StartOneTimeOrderCheckout
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: $this->catalog->productName($productCode) ?? $productCode,
-            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), array_merge($urlParams, [
                 'origin' => 'products',
                 self::ORDER_TOKEN_PARAM => $orderToken,

@@ -80,3 +80,72 @@ it('groups digits according to the active locale', function (): void {
     app()->setLocale('de');
     expect(BillingMoney::format(123456789))->toBe('€1.234.567,89');
 });
+
+// ── Minor-unit scale ──────────────────────────────────────────────────────────
+
+it('reads the minor-unit scale off the currency', function (): void {
+    expect(BillingMoney::fractionDigits('EUR'))->toBe(2)
+        ->and(BillingMoney::fractionDigits('JPY'))->toBe(0)
+        ->and(BillingMoney::fractionDigits('KWD'))->toBe(3)
+        ->and(BillingMoney::minorUnitFactor('EUR'))->toBe(100)
+        ->and(BillingMoney::minorUnitFactor('JPY'))->toBe(1)
+        ->and(BillingMoney::minorUnitFactor('KWD'))->toBe(1000);
+});
+
+it('treats an unknown currency code as two decimals instead of throwing', function (): void {
+    expect(BillingMoney::fractionDigits('XX'))->toBe(2)
+        ->and(BillingMoney::minorUnitFactor('XX'))->toBe(100)
+        ->and(BillingMoney::mollieAmount(2900, 'XX'))->toBe('29.00');
+});
+
+it('spells an outbound Mollie amount with the currency’s own decimals', function (): void {
+    // The defect: 2900 minor units of JPY are ¥2900, not ¥29.00 — a hardcoded
+    // number_format(…, 2) charged a hundredth of the intended amount.
+    expect(BillingMoney::mollieAmount(2900, 'EUR'))->toBe('29.00')
+        ->and(BillingMoney::mollieAmount(2900, 'JPY'))->toBe('2900')
+        ->and(BillingMoney::mollieAmount(2900, 'jpy'))->toBe('2900')
+        ->and(BillingMoney::mollieAmount(0, 'EUR'))->toBe('0.00')
+        ->and(BillingMoney::mollieAmount(0, 'JPY'))->toBe('0')
+        ->and(BillingMoney::mollieAmount(2900, 'KWD'))->toBe('2.900');
+});
+
+it('falls back to the configured currency for an outbound amount', function (): void {
+    config()->set('mollie-billing.currency', 'JPY');
+
+    expect(BillingMoney::mollieAmount(2900))->toBe('2900');
+});
+
+it('renders a 0-decimal currency without inventing a fractional part', function (): void {
+    config()->set('mollie-billing.currency', 'JPY');
+    config()->set('mollie-billing.currency_symbol', null);
+    app()->setLocale('en');
+
+    // Used to render "JPY 29.00" for a ¥2900 plan.
+    expect(BillingMoney::format(2900))->toBe('JPY 2,900')
+        ->and(BillingMoney::numberFromMinor(2900))->toBe('2,900')
+        ->and(BillingMoney::format(-2900))->toBe('-JPY 2,900');
+});
+
+// ── VAT per line vs VAT on the total ──────────────────────────────────────────
+
+it('sums VAT per line so the charge matches the invoice header', function (): void {
+    // 550 + 550 at 19%: per line 105 + 105 = 210 → 1310. VAT on the summed 1100
+    // is 209 → 1309, which is what the invoice would NOT book.
+    expect(BillingMoney::grossWithLineVat([550, 550], 19.0))->toBe(1310)
+        ->and(BillingMoney::grossWithLineVat([1100], 19.0))->toBe(1309)
+        // plan 1999 + two 999 addons: 380 + 190 + 190 = 760 → 4757 (vs 4756).
+        ->and(BillingMoney::grossWithLineVat([1999, 999, 999], 19.0))->toBe(4757)
+        ->and(BillingMoney::grossWithLineVat([3997], 19.0))->toBe(4756);
+});
+
+it('rounds a negative discount line on its own', function (): void {
+    // 1000 charged, 550 discounted: 1190 - 655 = 535. Rounding the netted 450
+    // gives 536 — one cent the customer would pay but no line accounts for.
+    expect(BillingMoney::grossWithLineVat([1000, -550], 19.0))->toBe(535)
+        ->and(BillingMoney::grossWithLineVat([450], 19.0))->toBe(536);
+});
+
+it('collapses to the plain sum at a zero rate', function (): void {
+    expect(BillingMoney::grossWithLineVat([550, 550], 0.0))->toBe(1100)
+        ->and(BillingMoney::grossWithLineVat([], 19.0))->toBe(0);
+});

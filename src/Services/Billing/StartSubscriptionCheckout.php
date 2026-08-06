@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
@@ -161,7 +162,7 @@ class StartSubscriptionCheckout
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: "Subscription {$request['plan_code']}",
-            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
             locale: MollieBilling::mollieLocale(),
             cancelUrl: route(BillingRoute::checkout(), $urlParams),

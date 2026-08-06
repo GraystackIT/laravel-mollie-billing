@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
@@ -111,7 +112,24 @@ class CreateSubscription
             $netForCharge,
             $billable,
         );
-        $amountGross = (int) $vat['gross'];
+
+        // VAT per invoice line, not on the total: each renewal this amount pays for
+        // is booked line by line (SubscriptionPaymentHandler → InvoiceService), and
+        // the two roundings disagree by the per-line residuals. See
+        // MollieSubscriptionPatcher::recurringLineNets(), which must stay the
+        // authority here so a later PATCH does not shift the price by a cent.
+        $amountGross = BillingMoney::grossWithLineVat(
+            MollieSubscriptionPatcher::recurringLineNets(
+                $this->catalog,
+                $billable,
+                $planCode,
+                $interval,
+                $addonCodes,
+                max(0, $extraSeats),
+                $netForCharge,
+            ),
+            (float) $vat['rate'],
+        );
 
         // Mollie schedules the first recurring charge at $startDate. Default cadence:
         // the first billing period is already paid via the checkout's first-payment,
@@ -129,7 +147,7 @@ class CreateSubscription
 
         $subscription = Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
-            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             interval: $interval === 'yearly' ? '12 months' : '1 month',
             description: "{$planCode} subscription",
             startDate: new Date($startDate),

@@ -330,7 +330,13 @@ class ProrataComposer
             );
         }
 
-        $refundNet = (int) round($cashNet * $factor);
+        // Capped at the line's own net, like buildRefundLine(). periodMath() clamps
+        // `remaining` at >= 0 but never at <= total, so a period whose start lies in
+        // the future yields a factor > 1 and refunds more than the line was ever
+        // paid. The per-invoice pool below bounds the invoice total, not the single
+        // line: on a plan 2900 + seats 1000 invoice a factor of 1.033 sends 2997 for
+        // a plan line worth 2900 and the pool never notices.
+        $refundNet = min((int) round($cashNet * $factor), $cashNet);
         if ($refundNet <= 0) {
             return null;
         }
@@ -338,10 +344,10 @@ class ProrataComposer
         $refundVat = (int) round($refundNet * $vatRate / 100);
         $refundGross = $refundNet + $refundVat;
 
-        // No per-line cap here. The composer applies a per-invoice remaining-pool
-        // cap at the end (see applyRemainingRefundablePool()) so multiple refund
-        // lines on the same original invoice (plan + seats + addons) share a
-        // single budget instead of each independently reading the full remainder.
+        // Beyond that cap the composer applies a per-invoice remaining-pool cap at
+        // the end (see applyRemainingRefundablePool()) so multiple refund lines on
+        // the same original invoice (plan + seats + addons) share a single budget
+        // instead of each independently reading the full remainder.
         return new ProrataLine(
             originalInvoice: $invoice,
             originalLineItemIndex: $idx,
