@@ -319,6 +319,11 @@ class PreviewService
         // Falls back to the live billable VAT only when no period invoice exists
         // yet (e.g. local→Mollie upgrade where no payment has been made).
         $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $vat['rate']];
+        // The charge side wins the probe when both are positive — an interval change
+        // produces a charge *and* a credit — so the resulting figures describe the
+        // charge only. `prorataCreditGross` is therefore derived from the resolved rate
+        // further down rather than reusing this gross, which would report the charge's
+        // amount as the credit.
         $prorataNet = $prorataChargeNet > 0 ? $prorataChargeNet : ($prorataCreditNet > 0 ? $prorataCreditNet : 0);
         if ($prorataNet > 0) {
             // VAT-Rate aus dem Plan-Line-Item der laufenden Periode (Per-Item-VAT).
@@ -447,7 +452,10 @@ class PreviewService
             'prorataChargeGross' => $prorataChargeNet > 0 ? (int) $prorataVat['gross'] : 0,
             'prorataChargeVat' => $prorataChargeNet > 0 ? (int) $prorataVat['vat'] : 0,
             'prorataCreditNet' => $prorataCreditNet,
-            'prorataCreditGross' => $prorataCreditNet > 0 ? (int) $prorataVat['gross'] : 0,
+            'prorataCreditVat' => $prorataCreditNet > 0 ? (int) round($prorataCreditNet * (float) $prorataVat['rate'] / 100) : 0,
+            'prorataCreditGross' => $prorataCreditNet > 0
+                ? $prorataCreditNet + (int) round($prorataCreditNet * (float) $prorataVat['rate'] / 100)
+                : 0,
             'isPastDueReset' => $isPastDueReset,
             'currentPeriodCredit' => $periodStart !== null && $periodEnd !== null
                 ? (int) round($currentNet * $prorataFactor)
