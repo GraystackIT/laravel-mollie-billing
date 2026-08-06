@@ -28,6 +28,7 @@ return [
     'prorata_partial_coupon_cash_basis' => 'anteilig vom Cash',
     'prorata_addon_auto_removed' => 'auto-entfernt',
     'prorata_sidegrade_no_charge' => 'Plan gewechselt, keine Verrechnung',
+    'prorata_refund_separate' => 'Die Gutschrift von :amount wird separat erstattet, sobald diese Zahlung eingezogen ist.',
     'prorata_total' => 'Gesamt',
     'prorata_seats_added_count' => '{1} :count Sitz hinzugefügt|[2,*] :count Sitze hinzugefügt',
     'seats_added_count' => '{1} :count Sitz|[2,*] :count Sitze',
@@ -240,6 +241,7 @@ return [
         'back_to_products' => 'Zurück zu Produkte',
         'error' => 'Ein Fehler ist aufgetreten. Bitte versuche es erneut.',
         'success' => 'Kauf abgeschlossen.',
+        'unavailable' => 'Dieses Produkt kann nicht mehr gekauft werden.',
         'confirm' => [
             'title' => 'Kauf bestätigen',
             'body' => 'Du bist dabei, :product für :price (exkl. USt.) zu kaufen. Du wirst zur Zahlungsabwicklung weitergeleitet.',
@@ -282,6 +284,7 @@ return [
         'city' => 'Stadt',
         'country' => 'Land',
         'country_locked_by_mismatch' => 'Das Land kann nur über die Länderverifikation auf dem Dashboard geändert werden, solange ein Mismatch offen ist.',
+        'vat_locked_by_mismatch' => 'Die UID-Nummer ist gesperrt, solange ein Country-Mismatch offen ist — sie entscheidet über dieselbe Umsatzsteuer-Behandlung, die die Verifikation auf dem Dashboard gerade prüft.',
     ],
     'country_mismatch' => [
         'banner_heading' => 'Wir konnten dein Rechnungsland nicht bestätigen',

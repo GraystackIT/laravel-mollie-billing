@@ -27,7 +27,7 @@ new class extends Component {
 
     public function mount(): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if ($billable) {
             $this->seatCount = $billable->getBillingSeatCount();
         }
@@ -36,6 +36,25 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the tenant's seat count, or probe
+     * coupon validity against it. Withholding the billable falls through to the same empty
+     * state as "none resolved"; `syncSeats()` keeps resolving it unguarded so it can still
+     * answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     private function ensureMinSeats(): void
@@ -87,7 +106,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -217,7 +236,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -273,7 +292,7 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
         $planCode = $billable?->getBillingSubscriptionPlanCode();
         $interval = $billable?->getBillingSubscriptionInterval() ?? 'monthly';

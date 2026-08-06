@@ -18,9 +18,27 @@ new class extends Component {
         return MollieBilling::resolveBillable(request());
     }
 
-    public function with(): array
+    /**
+     * Read gate for everything this page renders.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the tenant's invoice history and
+     * coupon redemptions. Withholding the billable falls through to the same empty state
+     * as "none resolved".
+     */
+    private function readableBillable(): ?Billable
     {
         $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
+    }
+
+    public function with(): array
+    {
+        $billable = $this->readableBillable();
 
         if (! $billable) {
             return ['invoices' => null, 'stats' => null, 'billable' => null, 'redemptions' => collect()];
@@ -30,23 +48,32 @@ new class extends Component {
 
         $query = $billable->billingInvoices();
 
+        // The headline figures are rendered with a single currency symbol, so they may
+        // only add up rows that carry that currency. A billable charged in more than one
+        // (a BILLING_CURRENCY change mid-life) otherwise had 20.00 GBP and 10.00 EUR
+        // reported as "€30.00". Scoping to the configured currency rather than grouping
+        // per currency keeps one set of numbers on the card row — the customer is billed
+        // in the current currency from here on, and every historical row is still shown
+        // with its own symbol in the table below.
+        $currency = BillingMoney::normalizeCurrency(null);
+        $inCurrency = fn () => $query->clone()->where('currency', $currency);
+
         // Brutto-Summen: Charge-Invoices (paid) tragen positives amount_gross,
         // Refund-Invoices (refunded) tragen negatives amount_gross.
-        $paidGross = (int) $query->clone()
+        $paidGross = (int) $inCurrency()
             ->where('status', InvoiceStatus::Paid)
             ->where('amount_gross', '>', 0)
             ->sum('amount_gross');
-        $refundGross = (int) $query->clone()
+        $refundGross = (int) $inCurrency()
             ->where('status', InvoiceStatus::Refunded)
             ->where('amount_gross', '<', 0)
             ->sum('amount_gross'); // negativ
         $spentGross = $paidGross + $refundGross; // Saldo = bezahlt − gutschriften
 
-        // The stats add up every invoice, so they can only be shown in one currency:
-        // the configured one. Per-row amounts below use each invoice's own currency.
-        $fmt = fn (int $cents): string => BillingMoney::format($cents);
+        $fmt = fn (int $cents): string => BillingMoney::format($cents, $currency);
 
         $stats = [
+            // Counts every invoice regardless of currency — the table below lists them all.
             'total' => $query->count(),
             'spent' => $fmt($spentGross),
             'paid' => $fmt($paidGross),

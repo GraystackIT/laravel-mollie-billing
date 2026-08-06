@@ -21,9 +21,26 @@ new class extends Component {
         return MollieBilling::resolveBillable(request());
     }
 
-    public function mount(): void
+    /**
+     * Read gate for everything this page renders.
+     *
+     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
+     * update request never re-enters a route's middleware stack anyway — so nothing
+     * outside this component decides who gets to read the tenant's wallet transactions.
+     * Withholding the billable falls through to the same empty state as "none resolved".
+     */
+    private function readableBillable(): ?Billable
     {
         $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
+    }
+
+    public function mount(): void
+    {
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -50,7 +67,7 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
 
         if (! $billable) {
             return ['transactions' => null, 'usageTypes' => [], 'stats' => null, 'billable' => null, 'meters' => []];

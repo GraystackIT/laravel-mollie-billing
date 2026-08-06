@@ -28,6 +28,7 @@ return [
     'prorata_partial_coupon_cash_basis' => 'pro-rata of cash share',
     'prorata_addon_auto_removed' => 'auto-removed',
     'prorata_sidegrade_no_charge' => 'Plan switched, no settlement',
+    'prorata_refund_separate' => 'The credit of :amount is refunded separately once this payment has been captured.',
     'prorata_total' => 'Total',
     'prorata_seats_added_count' => '{1} :count seat added|[2,*] :count seats added',
     'seats_added_count' => '{1} :count seat|[2,*] :count seats',
@@ -240,6 +241,7 @@ return [
         'back_to_products' => 'Back to products',
         'error' => 'Something went wrong. Please try again.',
         'success' => 'Purchase completed.',
+        'unavailable' => 'This product is no longer available for purchase.',
         'confirm' => [
             'title' => 'Confirm purchase',
             'body' => 'You are about to purchase :product for :price (excl. VAT). You will be redirected to complete the payment.',
@@ -282,6 +284,7 @@ return [
         'city' => 'City',
         'country' => 'Country',
         'country_locked_by_mismatch' => 'Country can only be changed via the country verification on your dashboard while a mismatch is open.',
+        'vat_locked_by_mismatch' => 'The VAT number is frozen while a country mismatch is open — it decides the same VAT treatment the verification on your dashboard is reviewing.',
     ],
     'country_mismatch' => [
         'banner_heading' => 'We could not verify your billing country',

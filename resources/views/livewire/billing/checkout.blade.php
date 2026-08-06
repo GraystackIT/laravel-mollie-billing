@@ -529,6 +529,83 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     }
 
     /**
+     * Net amount per invoice line, in the order the first payment will be booked.
+     *
+     * Mirrors `SubscriptionAmount::lineItems()` plus the negative coupon line
+     * `FirstPaymentArtifacts::couponLineItems()` appends, because that is what the
+     * webhook writes onto the invoice for this very payment. VAT is rounded per line
+     * there, so the total has to be assembled the same way — see
+     * {@see BillingMoney::grossWithLineVat()}.
+     *
+     * @return list<int>
+     */
+    public function lineNets(): array
+    {
+        $plan = $this->selectedPlan();
+        if ($plan === null) {
+            return [];
+        }
+
+        $lines = [(int) ($plan['intervals'][$this->interval]['base_price_net'] ?? 0)];
+
+        $seatPrice = (int) ($plan['intervals'][$this->interval]['seat_price_net'] ?? 0);
+        if ($this->extra_seats > 0 && $seatPrice > 0) {
+            $lines[] = $seatPrice * $this->extra_seats;
+        }
+
+        $addons = $this->addons();
+        foreach ($this->addon_codes as $code) {
+            if (! isset($addons[$code])) {
+                continue;
+            }
+            $lines[] = (int) ($addons[$code]['intervals'][$this->interval]['price_net'] ?? 0);
+        }
+
+        // Capped at the subtotal: a discount larger than the order would otherwise
+        // push the assembled gross below zero, while totalNet() clamps at 0.
+        $discount = min($this->subtotalNet(), (int) ($this->applied_coupon['discount_net'] ?? 0));
+        if ($discount > 0) {
+            $lines[] = -$discount;
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Tax country the payment is priced from.
+     *
+     * With `billing_locked` the address belongs to a pre-existing billable: it is
+     * rendered read-only and `submit()` deliberately never writes it back. The
+     * property stays `wire:model`-bound for the unlocked case though, and
+     * `totals()` feeds `amount_gross` straight into the Mollie payment — so a
+     * locked checkout that priced from the form value could be re-pointed at a
+     * 0%-VAT country and pay net while the invoice books the persisted country's
+     * gross.
+     */
+    private function taxCountry(): string
+    {
+        if (! $this->billing_locked) {
+            return $this->billing_country;
+        }
+
+        $persisted = (string) ($this->resolveBillable()?->getBillingCountry() ?? '');
+
+        return $persisted !== '' ? $persisted : $this->billing_country;
+    }
+
+    /** The VAT number reverse charge is decided by — the persisted one while locked. See {@see taxCountry()}. */
+    private function taxVatNumber(): ?string
+    {
+        if (! $this->billing_locked) {
+            return $this->vat_number;
+        }
+
+        $billable = $this->resolveBillable();
+
+        return $billable instanceof Model ? ($billable->vat_number ?? null) : $this->vat_number;
+    }
+
+    /**
      * Reverse charge — net prices, no VAT — requires BOTH a VAT number in the form
      * and a server-side VIES confirmation for it. The `filled()` half is not
      * cosmetic: without it a blank VAT number combined with a stale `true` flag
@@ -536,31 +613,32 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
      */
     public function showsNetPrices(): bool
     {
-        if ($this->vatNumberValid !== true || ! filled($this->vat_number)) {
+        if ($this->vatNumberValid !== true || ! filled($this->taxVatNumber())) {
             return false;
         }
 
         // Cannot delegate wholesale to reverseChargeApplies(): it reads the *persisted*
         // validation, and during checkout the number being entered is not saved until
         // submit() — so a legitimate B2B customer would be shown and charged gross.
-        // What is mirrored from it is the seller-country policy, which was missing here:
-        // without it an unset seller country plus `require_seller_country` displayed
-        // "reverse charge" and charged net while the service refused it, and the first
-        // payment collected no VAT at all.
-        $seller = app(VatCalculationService::class)->sellerCountry();
+        // The seller-country policy is asked of the service rather than reimplemented:
+        // a local copy of it read a malformed `vat.seller_country` (`AUT`, `Austria`) as
+        // "no seller country" and granted reverse charge, while the service refuses it —
+        // net displayed and collected against an invoice that owes VAT.
+        $vatService = app(VatCalculationService::class);
+        $seller = $vatService->sellerCountry();
 
         if ($seller === null) {
-            return ! (bool) config('mollie-billing.vat.require_seller_country', false);
+            return $vatService->reverseChargePolicyWithoutSellerCountry();
         }
 
         // A valid VAT number is not enough — a domestic B2B supply carries domestic VAT.
-        return ! CountryResolver::sameCountry($this->billing_country, $seller);
+        return ! CountryResolver::sameCountry($this->taxCountry(), $seller);
     }
 
     public function vatRate(VatCalculationService $vat): float
     {
         try {
-            return $vat->vatRateFor($this->billing_country);
+            return $vat->vatRateFor($this->taxCountry());
         } catch (\Throwable) {
             return 0.0;
         }
@@ -599,13 +677,23 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         }
 
         try {
-            $calc = $vat->calculate($this->billing_country, $net, null);
+            $rate = (float) $vat->calculate($this->taxCountry(), $net, null)['rate'];
         } catch (\Throwable) {
-            $calc = ['net' => $net, 'vat' => 0, 'gross' => $net, 'rate' => 0.0];
+            $rate = 0.0;
         }
 
+        // VAT per invoice line, not over the summed net: the webhook books this
+        // payment line by line and the invoice header sums the per-line VAT
+        // (InvoiceService::createForPayment), so `round(Σnet × rate)` shows — and
+        // collects, via `amount_gross` in submit() — a different cent than the
+        // document the customer receives. See BillingMoney::grossWithLineVat().
+        $gross = BillingMoney::grossWithLineVat($this->lineNets(), $rate);
+
         return [
-            ...$calc,
+            'net' => $net,
+            'vat' => $gross - $net,
+            'gross' => $gross,
+            'rate' => $rate,
             'reverseCharge' => false,
         ];
     }
@@ -632,7 +720,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             // money-rendering strategy for the whole checkout; `currencySymbol` is
             // only for the lang strings that place the symbol themselves.
             'money' => fn (?int $cents): string => BillingMoney::format($cents),
-            'moneyNumber' => fn (?int $cents): string => BillingMoney::number((int) ($cents ?? 0) / 100),
+            'moneyNumber' => fn (?int $cents): string => BillingMoney::numberFromMinor($cents),
             'currencySymbol' => BillingMoney::symbol(),
             'totals' => $this->totals($vat),
             'customStepCount' => count($customSteps),
