@@ -48,6 +48,12 @@ return [
     // billable country is persisted yet and the IP-based lookup yields no result.
     'default_billing_country' => env('BILLING_DEFAULT_COUNTRY', 'AT'),
 
+    // VAT country used when a billable has none persisted at the moment we have to
+    // price something. Deliberately separate from `default_billing_country`, which
+    // only pre-selects a dropdown: this one decides the rate actually charged, and
+    // checkout and webhook MUST agree on it or a paid order cannot be invoiced.
+    'checkout_country_fallback' => env('BILLING_CHECKOUT_COUNTRY_FALLBACK', 'DE'),
+
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN'),
 
     'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),
@@ -68,6 +74,12 @@ return [
     'invoices' => [
         // Laravel filesystem disk for storing generated PDF invoices.
         'disk' => env('BILLING_INVOICE_DISK', 'local'),
+
+        // Locale the PDF is rendered in. Pinned per invoice so a regenerated
+        // document matches the archived one — without it the PDF would follow
+        // whatever locale the request that triggered the (re)generation ran in.
+        // Falls back to app.fallback_locale.
+        'locale' => env('BILLING_INVOICE_LOCALE'),
 
         // Base path within the disk. Invoices are stored as {path}/{YYYY/MM}/{serial}.pdf.
         'path' => 'billing/invoices',

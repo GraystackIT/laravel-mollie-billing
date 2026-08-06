@@ -54,11 +54,16 @@ final class ProrataLine
      * Serialized for preview output AND persistence in the line_items JSON field.
      * For charge lines the parent_* fields are null, for refund lines they are set.
      *
+     * `amount_net` is authoritative — it is the pro-rated total that was charged.
+     * `unit_price_net` is a display value derived from it and rounded to the
+     * nearest cent, so quantity × unit_price_net can be off by a cent or two;
+     * consumers that need the line total must read `amount_net`.
+     *
      * @return array<string, mixed>
      */
     public function toArray(): array
     {
-        $unitPriceNet = $this->quantity > 0 ? intdiv($this->amountNet, $this->quantity) : $this->amountNet;
+        $unitPriceNet = $this->quantity > 0 ? (int) round($this->amountNet / $this->quantity) : $this->amountNet;
 
         return [
             'kind' => $this->kind,
@@ -87,31 +92,51 @@ final class ProrataLine
      * Creates a ProrataLine from serialized pending state.
      * The original invoice is resolved via find($id).
      *
+     * Everything {@see toArray()} writes is read back verbatim. Payloads that
+     * predate a field — or that a retry job hand-assembled from a stored refund
+     * marker — get it derived instead of crashing on an undefined key: a
+     * RetryRefundLineJob must be able to retry the refund, not die on a missing
+     * display label. `amount_net` is the one exception: money cannot be guessed,
+     * so a payload without it is rejected outright.
+     *
      * @param  array<string, mixed>  $data
      */
     public static function fromArray(array $data): self
     {
+        if (! array_key_exists('amount_net', $data)) {
+            throw new \InvalidArgumentException('ProrataLine::fromArray() requires an amount_net key.');
+        }
+
         $originalInvoice = isset($data['parent_invoice_id'])
             ? BillingInvoice::find($data['parent_invoice_id'])
             : null;
 
+        $kind = (string) ($data['kind'] ?? 'plan');
+        $amountNet = (int) $data['amount_net'];
+        $amountVat = (int) ($data['vat_amount'] ?? 0);
+        $now = BillingTime::nowUtc();
+
         $line = new self(
             originalInvoice: $originalInvoice,
             originalLineItemIndex: $data['parent_line_item_index'] ?? null,
-            kind: $data['kind'],
+            kind: $kind,
             code: $data['code'] ?? null,
-            label: $data['label'],
-            quantity: (int) $data['quantity'],
-            amountNet: (int) $data['amount_net'],
-            vatRate: (float) $data['vat_rate'],
-            amountVat: (int) $data['vat_amount'],
-            amountGross: (int) $data['amount_gross'],
-            periodStart: \Carbon\Carbon::parse((string) $data['period_start'])->setTimezone('UTC'),
-            periodEnd: \Carbon\Carbon::parse((string) $data['period_end'])->setTimezone('UTC'),
+            label: (string) ($data['label'] ?? $kind),
+            quantity: (int) ($data['quantity'] ?? 1),
+            amountNet: $amountNet,
+            vatRate: (float) ($data['vat_rate'] ?? 0.0),
+            amountVat: $amountVat,
+            amountGross: (int) ($data['amount_gross'] ?? $amountNet + $amountVat),
+            periodStart: isset($data['period_start'])
+                ? \Carbon\Carbon::parse((string) $data['period_start'])->setTimezone('UTC')
+                : ($originalInvoice?->period_start ?? $now),
+            periodEnd: isset($data['period_end'])
+                ? \Carbon\Carbon::parse((string) $data['period_end'])->setTimezone('UTC')
+                : ($originalInvoice?->period_end ?? $now),
             daysActive: (int) ($data['days_active'] ?? 0),
             daysRemaining: (int) ($data['days_remaining'] ?? 0),
             isCouponCovered: (bool) ($data['is_coupon_covered'] ?? false),
-            direction: $data['direction'],
+            direction: (string) ($data['direction'] ?? ($amountNet < 0 ? 'refund' : 'charge')),
         );
 
         if (isset($data['mollie_refund_id'])) {

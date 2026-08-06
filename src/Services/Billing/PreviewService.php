@@ -273,7 +273,7 @@ class PreviewService
         // The actual VIES check happens at checkout / billing-data save — by the
         // time we render the plan-change preview, that decision is already made
         // and persisted as a BillingVatValidation. calculate() reads it directly.
-        $country = $billable->getBillingCountry() ?? 'DE';
+        $country = $billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
 
         // Apply an existing active recurring coupon marker to the preview as well —
         // the user keeps seeing the discount they signed up for across plan/seat

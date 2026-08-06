@@ -375,6 +375,7 @@ return [
     'invoice_type' => 'Rechnung',
     'credit_note_type' => 'Gutschrift',
     'credit_note_label' => 'Gutschrift zu Rechnung #:serial',
+    'credit_note_line_label' => 'Gutschrift zu Rechnung #:serial — :label',
     'country_correction_credit_note_reason' => "Korrektur des Steuerlandes: Die Rechnung #:original_serial wurde mit dem Land :old_country (:old_rate% USt.) ausgestellt. Nach unserer Prüfung (:strategy) ist das tatsächlich korrekte Leistungsland :new_country (:new_rate% USt.). Diese Gutschrift storniert die Originalrechnung vollständig. Eine korrigierte Rechnung wurde mit dem Land :new_country ausgestellt und über Ihre hinterlegte Zahlungsmethode eingezogen — Ihr Kontostand bleibt damit unverändert. Sollte etwas nicht stimmen, kontaktieren Sie bitte :support_email.",
     'country_correction_reissue_reason' => "Korrektur des Steuerlandes: Diese Rechnung ersetzt die Originalrechnung #:original_serial, die mit dem korrekten Leistungsland :new_country (:new_rate% USt.) statt mit dem ursprünglich verrechneten :old_country (:old_rate% USt.) neu ausgestellt wurde. Die Originalrechnung wurde vollständig gutgeschrieben (Gutschrift #:credit_note_serial). Ihr Kontostand bleibt unverändert. Sollte etwas nicht stimmen, kontaktieren Sie bitte :support_email.",
     'country_correction_strategy_auto_vies' => 'automatisch, basierend auf Ihrer verifizierten UID-Nummer',
@@ -383,6 +384,7 @@ return [
     'invoice_state_paid' => 'Bezahlt',
     'invoice_state_refunded' => 'Erstattet',
     'invoice_state_pending' => 'Ausstehend',
+    'invoice_state_failed' => 'Fehlgeschlagen',
     'invoice_state_draft' => 'Entwurf',
     'no_billable' => 'Dein Abrechnungskonto konnte nicht geladen werden. Bitte melde dich an und versuche es erneut.',
     'cancel_confirm' => [

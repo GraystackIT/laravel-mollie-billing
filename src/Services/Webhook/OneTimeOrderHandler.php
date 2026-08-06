@@ -19,13 +19,15 @@ use Illuminate\Support\Facades\Log;
 class OneTimeOrderHandler
 {
     /**
-     * Country the checkout falls back to when the billable has none —
-     * StartOneTimeOrderCheckout charges VAT for `getBillingCountry() ?? 'DE'`.
-     * Kept in sync manually: the invoice has to state the VAT that was actually
-     * charged, while InvoiceService resolves the country as
-     * `getBillingCountry() ?? ''`, which VatCalculationService rejects.
+     * Country the checkout fell back to when the billable had none. The invoice
+     * has to state the VAT that was actually charged, so both sides read the same
+     * config key — InvoiceService resolves the country as `getBillingCountry() ?? ''`,
+     * which VatCalculationService rejects, hence we persist it here first.
      */
-    protected const CHECKOUT_COUNTRY_FALLBACK = 'DE';
+    protected function checkoutCountryFallback(): string
+    {
+        return (string) config('mollie-billing.checkout_country_fallback', 'DE');
+    }
 
     public function __construct(
         protected readonly WebhookSupport $support,
@@ -217,10 +219,10 @@ class OneTimeOrderHandler
 
         Log::warning('One-time order: billable has no billing country — falling back to the country the checkout charged', [
             'billable_id' => $billable->getKey(),
-            'country' => self::CHECKOUT_COUNTRY_FALLBACK,
+            'country' => $this->checkoutCountryFallback(),
         ]);
 
-        $billable->forceFill(['billing_country' => self::CHECKOUT_COUNTRY_FALLBACK])->save();
+        $billable->forceFill(['billing_country' => $this->checkoutCountryFallback()])->save();
     }
 
     /**

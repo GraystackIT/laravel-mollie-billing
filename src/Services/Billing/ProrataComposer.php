@@ -789,7 +789,7 @@ class ProrataComposer
      */
     private function liveVat(Billable $billable, int $netAmount): array
     {
-        $country = (string) ($billable->getBillingCountry() ?? 'DE');
+        $country = (string) ($billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE'));
 
         $vat = $this->vatService->calculate($country, $netAmount, $billable);
 

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Services\Billing;
 
+use Brick\Money\Currency;
+use Brick\Money\Exception\UnknownCurrencyException;
 use Brick\Money\Money;
 use Elegantly\Invoices\Pdf\PdfInvoice;
 use Elegantly\Invoices\Pdf\PdfInvoiceItem;
@@ -29,12 +31,21 @@ use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class InvoiceService
 {
+    /**
+     * Whether billing_invoices carries the optional `locale` column, resolved
+     * once per process so the check does not run on every invoice.
+     */
+    private static ?bool $hasLocaleColumn = null;
+
     public function __construct(
         private readonly VatCalculationService $vat,
         private readonly InvoiceNumberGenerator $numberGenerator,
@@ -58,9 +69,13 @@ class InvoiceService
 
     /**
      * Build a BillingInvoice from a Mollie payment + line items. VAT is recomputed
-     * from the billable's billing country (authoritative). If the sum of line items'
-     * `total_net` disagrees with the expected net derived from the items, a
+     * from the billable's billing country (authoritative). If the net summed over
+     * the line items disagrees with the expected net derived from the items, a
      * LineItemTotalsMismatchException is thrown.
+     *
+     * The stored `amount_vat` is the sum of the per-line VAT, not VAT on the
+     * summed net: the PDF taxes every line separately, so only a per-line sum
+     * keeps the persisted header identical to the rendered document.
      *
      * @param  array<int, array<string, mixed>>  $lineItems
      */
@@ -76,24 +91,6 @@ class InvoiceService
 
         $country = (string) ($billable->getBillingCountry() ?? '');
         $vat = $this->vat->calculate($country, $summedNet, $billable);
-
-        $invoice = new BillingInvoice();
-        $invoice->billable_type = $billable->getMorphClass();
-        $invoice->billable_id = $billable->getKey();
-        $invoice->mollie_payment_id = (string) $payment->id;
-        $invoice->mollie_subscription_id = $payment->subscriptionId ?? null;
-        // Map the Mollie metadata-type string onto an InvoiceKind. Today's values (`'prorata'`,
-        // `'addon'`, `'seats'`) are all classified as Subscription bookings. The subtype is
-        // readable from line_items[*].kind.
-        $invoiceKindEnum = self::mapTypeToInvoiceKind($invoiceKind);
-        $invoice->serial_number = $this->numberGenerator->generate($invoiceKindEnum->value);
-        $invoice->invoice_kind = $invoiceKindEnum;
-        $invoice->status = InvoiceStatus::Paid;
-        $invoice->country = strtoupper($country);
-        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
-        $invoice->amount_net = (int) $vat['net'];
-        $invoice->amount_vat = (int) $vat['vat'];
-        $invoice->amount_gross = (int) $vat['gross'];
         $rate = (float) $vat['rate'];
 
         // Period for line items: prefer the billable's current subscription period
@@ -102,16 +99,13 @@ class InvoiceService
         $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
         $linePeriodEnd = $billable->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
 
-        $invoice->period_start = $linePeriodStart;
-        $invoice->period_end = $linePeriodEnd;
-
-        $invoice->line_items = array_map(function (array $line) use ($rate, $linePeriodStart, $linePeriodEnd): array {
+        $normalizedLines = array_map(function (array $line) use ($rate, $linePeriodStart, $linePeriodEnd): array {
             // Normalize legacy kind alias.
             if (($line['kind'] ?? null) === 'seat') {
                 $line['kind'] = 'seats';
             }
 
-            $netLine = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+            $netLine = self::lineNet($line);
             $lineRate = (float) ($line['vat_rate'] ?? $rate);
             $vatLine = (int) round($netLine * $lineRate / 100);
 
@@ -124,11 +118,36 @@ class InvoiceService
 
             return $line;
         }, $lineItems);
+
+        $summedLineVat = 0;
+        foreach ($normalizedLines as $line) {
+            $summedLineVat += (int) $line['vat_amount'];
+        }
+
+        $invoice = new BillingInvoice();
+        $invoice->billable_type = $billable->getMorphClass();
+        $invoice->billable_id = $billable->getKey();
+        $invoice->mollie_payment_id = (string) $payment->id;
+        $invoice->mollie_subscription_id = $payment->subscriptionId ?? null;
+        // Map the Mollie metadata-type string onto an InvoiceKind. Today's values (`'prorata'`,
+        // `'addon'`, `'seats'`) are all classified as Subscription bookings. The subtype is
+        // readable from line_items[*].kind.
+        $invoiceKindEnum = self::mapTypeToInvoiceKind($invoiceKind);
+        $invoice->invoice_kind = $invoiceKindEnum;
+        $invoice->status = InvoiceStatus::Paid;
+        $invoice->country = strtoupper($country);
+        $invoice->currency = self::configuredCurrency();
+        $invoice->amount_net = (int) $vat['net'];
+        $invoice->amount_vat = $summedLineVat;
+        $invoice->amount_gross = (int) $vat['net'] + $summedLineVat;
+        $invoice->period_start = $linePeriodStart;
+        $invoice->period_end = $linePeriodEnd;
+        $invoice->line_items = $normalizedLines;
         $invoice->payment_method_details = self::extractPaymentMethodDetails($payment);
         $invoice->refunded_net = 0;
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $invoice->mismatch_id = $billable->latestOpenCountryMismatch()?->id;
-        $invoice->save();
+        $this->persistWithSerial($invoice, $invoiceKindEnum->value);
 
         $this->generateAndStorePdf($invoice, $billable);
 
@@ -139,12 +158,15 @@ class InvoiceService
 
     /**
      * Create a credit-note BillingInvoice (negative amounts) that references the
-     * original invoice. The credit note re-uses the ORIGINAL invoice's VAT rate
-     * so that refunds computed at today's rate do not drift from the rate used
-     * at the time the invoice was issued.
-     */
-    /**
-     * @param  array<int, array<string, mixed>>|null  $lineItems  Custom line items; if null, a generic single-line credit note is created.
+     * original invoice. The credit note re-uses the ORIGINAL invoice's per-line
+     * VAT rates so that refunds computed at today's rate do not drift from the
+     * rates used at the time the invoice was issued.
+     *
+     * VAT is credited per original line (see {@see creditNoteVat()}), so an
+     * invoice that mixes rates — plan at 20%, addon at 10% — credits exactly the
+     * VAT it charged and the credit note's header matches its own line items.
+     *
+     * @param  array<int, array<string, mixed>>|null  $lineItems  Custom line items; if null, one credit line per credited original line is created.
      */
     public function createCreditNote(BillingInvoice $original, int $amountNet, ?array $lineItems = null, ?string $description = null): BillingInvoice
     {
@@ -152,34 +174,41 @@ class InvoiceService
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
         }
 
-        // Read VAT rate from the first original line item (per-item VAT as source of truth).
-        $originalLines = (array) ($original->line_items ?? []);
-        $firstLine = $originalLines[0] ?? null;
-        $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
-        $creditVat = (int) round($amountNet * $rate / 100);
+        $creditVat = $this->creditNoteVat($original, $amountNet, $lineItems);
         $creditGross = $amountNet + $creditVat;
 
         // For custom line_items: caller passes complete lines (with their own vat_rate fields).
-        // When null: a generic refund line entry referencing original line[0].
+        // When null: one refund line per credited original line, so the rendered
+        // per-line VAT adds up to the header VAT even across mixed rates.
         if ($lineItems !== null) {
             $resolvedLineItems = $lineItems;
         } else {
-            $resolvedLineItems = [[
-                'kind' => 'refund',
-                'code' => null,
-                'label' => __('billing::portal.credit_note_label', ['serial' => $original->serial_number]),
-                'quantity' => 1,
-                'unit_price_net' => -$amountNet,
-                'amount_net' => -$amountNet,
-                'vat_rate' => $rate,
-                'vat_amount' => -$creditVat,
-                'amount_gross' => -$creditGross,
-                'period_start' => ($original->period_start ?? BillingTime::nowUtc())->toIso8601String(),
-                'period_end' => ($original->period_end ?? BillingTime::nowUtc())->toIso8601String(),
-                'parent_invoice_id' => $original->id,
-                'parent_line_item_index' => 0,
-                'mollie_refund_id' => null, // set by the caller if the Mollie refund ID is known
-            ]];
+            $periodStart = ($original->period_start ?? BillingTime::nowUtc())->toIso8601String();
+            $periodEnd = ($original->period_end ?? BillingTime::nowUtc())->toIso8601String();
+            $parts = $this->allocateCredit($original, $amountNet);
+            $labelPerLine = count($parts) > 1;
+
+            $resolvedLineItems = [];
+            foreach ($parts as $part) {
+                $resolvedLineItems[] = [
+                    'kind' => 'refund',
+                    'code' => null,
+                    'label' => $labelPerLine && $part['label'] !== null
+                        ? __('billing::portal.credit_note_line_label', ['serial' => $original->serial_number, 'label' => $part['label']])
+                        : __('billing::portal.credit_note_label', ['serial' => $original->serial_number]),
+                    'quantity' => 1,
+                    'unit_price_net' => -$part['net'],
+                    'amount_net' => -$part['net'],
+                    'vat_rate' => $part['rate'],
+                    'vat_amount' => -$part['vat'],
+                    'amount_gross' => -($part['net'] + $part['vat']),
+                    'period_start' => $periodStart,
+                    'period_end' => $periodEnd,
+                    'parent_invoice_id' => $original->id,
+                    'parent_line_item_index' => $part['index'],
+                    'mollie_refund_id' => null, // set by the caller if the Mollie refund ID is known
+                ];
+            }
         }
 
         $creditNote = new BillingInvoice;
@@ -187,11 +216,10 @@ class InvoiceService
         $creditNote->billable_id = $original->billable_id;
         $creditNote->mollie_payment_id = null;
         $creditNote->mollie_subscription_id = $original->mollie_subscription_id;
-        $creditNote->serial_number = $this->numberGenerator->generate('refund');
         $creditNote->invoice_kind = InvoiceKind::Refund;
         $creditNote->status = InvoiceStatus::Refunded;
         $creditNote->country = $original->country;
-        $creditNote->currency = $original->currency ?: (string) config('mollie-billing.currency', 'EUR');
+        $creditNote->currency = self::normalizeCurrency($original->currency);
         $creditNote->amount_net = -$amountNet;
         $creditNote->amount_vat = -$creditVat;
         $creditNote->amount_gross = -$creditGross;
@@ -202,7 +230,7 @@ class InvoiceService
         // Credit notes anchor on the same VAT validation as the original invoice —
         // they are a correction of that specific tax event, not a fresh decision.
         $creditNote->vat_validation_id = $original->vat_validation_id;
-        $creditNote->save();
+        $this->persistWithSerial($creditNote, 'refund');
 
         /** @var Billable $billable */
         $billable = $original->billable()->first();
@@ -216,14 +244,213 @@ class InvoiceService
     }
 
     /**
+     * VAT to credit when `$amountNet` of `$original` is refunded.
+     *
+     * Every original line is taxed at its own rate, so the credit VAT is the sum
+     * of the per-line VAT — never one line's rate applied to the whole net. For a
+     * full credit that reproduces the VAT actually charged; for a partial credit
+     * the net is allocated across the lines proportionally first.
+     *
+     * @param  array<int, array<string, mixed>>|null  $lineItems  Custom credit lines; when they carry `vat_amount`, they are authoritative.
+     */
+    public function creditNoteVat(BillingInvoice $original, int $amountNet, ?array $lineItems = null): int
+    {
+        if ($lineItems !== null) {
+            $customVat = 0;
+            $hasVat = false;
+            foreach ($lineItems as $line) {
+                if (array_key_exists('vat_amount', $line)) {
+                    $hasVat = true;
+                    $customVat += (int) $line['vat_amount'];
+                }
+            }
+
+            if ($hasVat) {
+                return abs($customVat);
+            }
+        }
+
+        $vat = 0;
+        foreach ($this->allocateCredit($original, $amountNet) as $part) {
+            $vat += $part['vat'];
+        }
+
+        return $vat;
+    }
+
+    /**
+     * Split a credited net amount across the original invoice's line items.
+     *
+     * Discount lines (negative net) are folded into the positive line that
+     * carries the same VAT rate: keeping them as separate credit lines would
+     * make `BillingInvoice::derivedRefundedNet()` — which sums the absolute net
+     * per refund line — count the discount twice. Degenerate input (no lines,
+     * a non-positive total, or a fold that cannot produce positive parts) falls
+     * back to a single part at the dominant line's rate.
+     *
+     * @return list<array{index: int, net: int, vat: int, rate: float, label: ?string}>
+     */
+    private function allocateCredit(BillingInvoice $original, int $amountNet): array
+    {
+        $parts = [];
+        foreach ((array) ($original->line_items ?? []) as $index => $line) {
+            if (! is_array($line)) {
+                continue;
+            }
+
+            $parts[] = [
+                'index' => (int) $index,
+                'net' => self::lineNet($line),
+                'rate' => (float) ($line['vat_rate'] ?? 0.0),
+                'label' => isset($line['label']) ? (string) $line['label'] : (isset($line['description']) ? (string) $line['description'] : null),
+            ];
+        }
+
+        $totalNet = 0;
+        foreach ($parts as $part) {
+            $totalNet += $part['net'];
+        }
+
+        $folded = $this->foldNegativeParts($parts, $totalNet);
+
+        if ($folded === []) {
+            $fallback = $this->dominantPart($parts);
+
+            return [[
+                'index' => $fallback['index'],
+                'net' => $amountNet,
+                'vat' => (int) round($amountNet * $fallback['rate'] / 100),
+                'rate' => $fallback['rate'],
+                'label' => $fallback['label'],
+            ]];
+        }
+
+        // Proportional allocation. The residual left by per-part rounding goes to
+        // the largest part so the allocated nets add up to $amountNet exactly.
+        $allocated = [];
+        $sum = 0;
+        foreach ($folded as $part) {
+            $net = $amountNet === $totalNet
+                ? $part['net']
+                : (int) round($amountNet * $part['net'] / $totalNet);
+            $sum += $net;
+            $part['net'] = $net;
+            $allocated[] = $part;
+        }
+
+        if ($sum !== $amountNet) {
+            $largest = 0;
+            foreach ($allocated as $i => $part) {
+                if (abs($part['net']) > abs($allocated[$largest]['net'])) {
+                    $largest = $i;
+                }
+            }
+            $allocated[$largest]['net'] += $amountNet - $sum;
+        }
+
+        $result = [];
+        foreach ($allocated as $part) {
+            if ($part['net'] === 0) {
+                continue;
+            }
+
+            $part['vat'] = (int) round($part['net'] * $part['rate'] / 100);
+            $result[] = $part;
+        }
+
+        return $result !== [] ? $result : [[
+            'index' => $folded[0]['index'],
+            'net' => $amountNet,
+            'vat' => (int) round($amountNet * $folded[0]['rate'] / 100),
+            'rate' => $folded[0]['rate'],
+            'label' => $folded[0]['label'],
+        ]];
+    }
+
+    /**
+     * Merge negative-net parts into the positive part with the same VAT rate
+     * (or the largest positive one when no rate matches). Returns an empty list
+     * when the merge cannot leave every remaining part positive — the caller
+     * then falls back to a single blended part.
+     *
+     * @param  list<array{index: int, net: int, rate: float, label: ?string}>  $parts
+     * @return list<array{index: int, net: int, rate: float, label: ?string}>
+     */
+    private function foldNegativeParts(array $parts, int $totalNet): array
+    {
+        $positives = array_values(array_filter($parts, fn (array $p): bool => $p['net'] > 0));
+        $negatives = array_values(array_filter($parts, fn (array $p): bool => $p['net'] < 0));
+
+        if ($positives === [] || $totalNet <= 0) {
+            return [];
+        }
+
+        foreach ($negatives as $negative) {
+            $target = null;
+            foreach ($positives as $i => $positive) {
+                if (abs($positive['rate'] - $negative['rate']) > 0.0001) {
+                    continue;
+                }
+                if ($target === null || $positives[$i]['net'] > $positives[$target]['net']) {
+                    $target = $i;
+                }
+            }
+
+            if ($target === null) {
+                $target = 0;
+                foreach ($positives as $i => $positive) {
+                    if ($positive['net'] > $positives[$target]['net']) {
+                        $target = $i;
+                    }
+                }
+            }
+
+            $positives[$target]['net'] += $negative['net'];
+        }
+
+        foreach ($positives as $positive) {
+            if ($positive['net'] <= 0) {
+                return [];
+            }
+        }
+
+        return $positives;
+    }
+
+    /**
+     * The line that should carry a blended single-part credit: the one with the
+     * largest absolute net, so its VAT rate dominates the result.
+     *
+     * @param  list<array{index: int, net: int, rate: float, label: ?string}>  $parts
+     * @return array{index: int, net: int, rate: float, label: ?string}
+     */
+    private function dominantPart(array $parts): array
+    {
+        $dominant = ['index' => 0, 'net' => 0, 'rate' => 0.0, 'label' => null];
+
+        foreach ($parts as $part) {
+            if (abs($part['net']) > abs($dominant['net'])) {
+                $dominant = $part;
+            }
+        }
+
+        return $dominant;
+    }
+
+    /**
      * Generate a PDF from the BillingInvoice data and store it on the configured disk.
      * Failures are logged but do not prevent the invoice from being persisted.
+     *
+     * Rendering happens under a pinned locale (see {@see pdfLocale()}) so that a
+     * document regenerated later — e.g. by InvoiceDownloadController when the blob
+     * went missing — comes back in the language and number format of the original.
      */
     protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): void
     {
+        $locale = $this->pdfLocale($invoice);
+
         try {
-            $pdfInvoice = $this->buildPdfInvoice($invoice, $billable);
-            $pdfContent = $pdfInvoice->getPdfOutput();
+            $pdfContent = $this->withLocale($locale, fn (): ?string => $this->buildPdfInvoice($invoice, $billable)->getPdfOutput());
 
             if ($pdfContent === null) {
                 Log::warning('PDF invoice generation returned null', ['invoice_id' => $invoice->id]);
@@ -240,12 +467,81 @@ class InvoiceService
 
             $invoice->pdf_disk = $disk;
             $invoice->pdf_path = $path;
+            $this->rememberPdfLocale($invoice, $locale);
             $invoice->save();
         } catch (\Throwable $e) {
-            Log::warning('PDF invoice generation failed', [
+            // An invoice without a document is a compliance problem, not a hiccup:
+            // log at error level with everything needed to reproduce it (a
+            // misspelled currency code is the most common cause).
+            Log::error('PDF invoice generation failed', [
                 'invoice_id' => $invoice->id,
+                'serial_number' => $invoice->serial_number,
+                'currency' => $invoice->currency,
+                'locale' => $locale,
+                'exception' => $e::class,
                 'error' => $e->getMessage(),
             ]);
+        }
+    }
+
+    /**
+     * Locale the invoice PDF is rendered in: the locale stored on the invoice
+     * when the (optional) `locale` column exists, else the configured invoice
+     * locale, else the application's base locale.
+     *
+     * Never the *active* locale: that is whatever request happens to trigger a
+     * (re)generation, so a regenerated document would not match the original.
+     * `app.locale` is no anchor either — App::setLocale() writes it — hence the
+     * fall back to `app.fallback_locale`, which stays put. Set
+     * `mollie-billing.invoices.locale` to choose the invoice language explicitly.
+     */
+    protected function pdfLocale(BillingInvoice $invoice): string
+    {
+        $candidates = [
+            $invoice->getAttribute('locale'),
+            config('mollie-billing.invoices.locale'),
+            config('app.fallback_locale'),
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (is_string($candidate) && $candidate !== '') {
+                return $candidate;
+            }
+        }
+
+        return 'en';
+    }
+
+    /**
+     * Persist the rendering locale when the billing_invoices table has a `locale`
+     * column. Without the column the configured locale keeps regenerations stable.
+     */
+    private function rememberPdfLocale(BillingInvoice $invoice, string $locale): void
+    {
+        self::$hasLocaleColumn ??= Schema::hasColumn($invoice->getTable(), 'locale');
+
+        if (self::$hasLocaleColumn) {
+            $invoice->locale = $locale;
+        }
+    }
+
+    /**
+     * Run $callback with the given locale active, restoring the previous one.
+     */
+    private function withLocale(string $locale, \Closure $callback): mixed
+    {
+        $previous = app()->getLocale();
+
+        if ($locale === $previous) {
+            return $callback();
+        }
+
+        app()->setLocale($locale);
+
+        try {
+            return $callback();
+        } finally {
+            app()->setLocale($previous);
         }
     }
 
@@ -297,7 +593,7 @@ class InvoiceService
      */
     protected function buildPdfInvoice(BillingInvoice $invoice, Billable $billable): PdfInvoice
     {
-        $currency = $invoice->currency ?: (string) config('mollie-billing.currency', 'EUR');
+        $currency = self::assertKnownCurrency(self::normalizeCurrency($invoice->currency));
         $sellerConfig = (array) config('mollie-billing.invoices.seller', []);
         $addressConfig = (array) ($sellerConfig['address'] ?? []);
 
@@ -332,8 +628,19 @@ class InvoiceService
 
         $items = [];
         foreach ((array) $invoice->line_items as $item) {
-            $qty = (int) ($item['quantity'] ?? 1);
+            $qty = (int) ($item['quantity'] ?? $item['qty'] ?? 1);
             $netUnit = (int) ($item['unit_price_net'] ?? $item['unit_price'] ?? 0);
+            $lineNet = self::lineNet($item, $qty * $netUnit);
+
+            // The renderer builds its subtotal from quantity × unit_price, while the
+            // stored net is what was actually charged. Pro-rata lines legitimately
+            // have quantity > 1 with a rounded total (3 seats × 283 ≠ 850), so
+            // collapse those to a single unit carrying the true total — otherwise
+            // the document total drifts a few cents from amount_net/amount_gross.
+            if ($qty !== 1 && $qty * $netUnit !== $lineNet) {
+                $qty = 1;
+                $netUnit = $lineNet;
+            }
 
             // Per-item billing_period or description only — no fallback to global period.
             $description = $item['description'] ?? $item['billing_period'] ?? null;
@@ -374,7 +681,12 @@ class InvoiceService
         }
         $taxLabel = $hasAnyTaxedLine ? 'invoices::invoice.tax_label' : null;
 
-        return new PdfInvoice(
+        // PdfInvoice derives its currency from the first line item and falls back to
+        // `invoices.default_currency` — vendor default 'USD' — when there is none.
+        // This package never publishes an `invoices` config, so an invoice with an
+        // empty line_items array would render as dollars. Pin the invoice's own
+        // currency instead of relying on the items.
+        $pdfInvoice = new class(
             type: $isCredit ? __('billing::portal.credit_note_type') : __('billing::portal.invoice_type'),
             state: $this->mapInvoiceState($invoice->status),
             serial_number: $invoice->serial_number,
@@ -386,7 +698,19 @@ class InvoiceService
             tax_label: $taxLabel,
             paymentInstructions: $paymentInstruction !== null ? [$paymentInstruction] : [],
             logo: $logo,
-        );
+        ) extends PdfInvoice
+        {
+            public string $pinnedCurrency = 'EUR';
+
+            public function getCurrency(): string
+            {
+                return $this->pinnedCurrency;
+            }
+        };
+
+        $pdfInvoice->pinnedCurrency = $currency;
+
+        return $pdfInvoice;
     }
 
     /**
@@ -600,7 +924,28 @@ class InvoiceService
     }
 
     /**
-     * Sum the line items' total_net values.
+     * Net of a single line item. `total_net` and `amount_net` are equivalent
+     * spellings — emitters use both (SubscriptionAmount writes `total_net`,
+     * webhook coupon lines write `amount_net`) — and a line that carries neither
+     * contributes $fallback.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private static function lineNet(array $item, int $fallback = 0): int
+    {
+        if (array_key_exists('total_net', $item)) {
+            return (int) $item['total_net'];
+        }
+
+        if (array_key_exists('amount_net', $item)) {
+            return (int) $item['amount_net'];
+        }
+
+        return $fallback;
+    }
+
+    /**
+     * Sum the line items' net amounts.
      *
      * @param  array<int, array<string, mixed>>  $lineItems
      */
@@ -608,14 +953,20 @@ class InvoiceService
     {
         $sum = 0;
         foreach ($lineItems as $item) {
-            $sum += (int) ($item['total_net'] ?? 0);
+            $sum += self::lineNet($item);
         }
 
         return $sum;
     }
 
     /**
-     * Expected net = quantity * unit_price, summed across items.
+     * Expected net = quantity * unit_price, summed across items, falling back to
+     * the line's own net where the item does not spell out both factors.
+     *
+     * `qty` is accepted as an alias for `quantity`. Both this and sumTotalNet()
+     * must recognise the same line shapes: a shape that only one of them
+     * understands makes the LineItemTotalsMismatchException guard blind to a
+     * genuine divergence.
      *
      * @param  array<int, array<string, mixed>>  $lineItems
      */
@@ -623,14 +974,109 @@ class InvoiceService
     {
         $sum = 0;
         foreach ($lineItems as $item) {
-            if (array_key_exists('quantity', $item) && array_key_exists('unit_price', $item)) {
-                $sum += (int) $item['quantity'] * (int) $item['unit_price'];
+            $quantity = $item['quantity'] ?? $item['qty'] ?? null;
+
+            if ($quantity !== null && array_key_exists('unit_price', $item)) {
+                $sum += (int) $quantity * (int) $item['unit_price'];
             } else {
-                $sum += (int) ($item['total_net'] ?? 0);
+                $sum += self::lineNet($item);
             }
         }
 
         return $sum;
+    }
+
+    /**
+     * The package-wide currency, normalised. Correct for a fresh charge; derived
+     * documents (credit notes, corrections, refunds) must inherit their parent's
+     * currency instead.
+     */
+    private static function configuredCurrency(): string
+    {
+        return self::normalizeCurrency(null);
+    }
+
+    /**
+     * Normalise a currency code to the uppercase ISO-4217 form brick/money and
+     * Mollie expect, falling back to the configured currency when empty. A
+     * lowercase `BILLING_CURRENCY` would otherwise blow up PDF generation.
+     */
+    public static function normalizeCurrency(?string $currency): string
+    {
+        $code = strtoupper(trim((string) $currency));
+
+        if ($code === '') {
+            $code = strtoupper(trim((string) config('mollie-billing.currency', 'EUR')));
+        }
+
+        return $code !== '' ? $code : 'EUR';
+    }
+
+    /**
+     * @throws \InvalidArgumentException  when the code is not an ISO-4217 currency.
+     */
+    private static function assertKnownCurrency(string $currency): string
+    {
+        try {
+            Currency::of($currency);
+        } catch (UnknownCurrencyException $e) {
+            throw new \InvalidArgumentException("Unknown invoice currency '{$currency}'.", 0, $e);
+        }
+
+        return $currency;
+    }
+
+    /**
+     * Format integer minor units as the decimal string Mollie's Money expects.
+     * The number of decimals is a property of the currency — JPY has none, so a
+     * hardcoded 2 would send 1/100th of the intended amount.
+     */
+    public static function molliePrice(int $minor, ?string $currency = null): string
+    {
+        $code = self::normalizeCurrency($currency);
+
+        try {
+            return (string) Money::ofMinor($minor, $code)->getAmount();
+        } catch (UnknownCurrencyException) {
+            return number_format($minor / 100, 2, '.', '');
+        }
+    }
+
+    /**
+     * Allocate the serial number and INSERT the row in one transaction.
+     *
+     * The generator's row lock only holds until the transaction that read the
+     * highest serial commits, so allocating in a transaction of its own lets a
+     * concurrent generator hand out the same number and the serial_number unique
+     * index rejects one of the two at save time — after the Mollie side effects
+     * have already happened.
+     */
+    private function persistWithSerial(BillingInvoice $invoice, string $kindForSerial): void
+    {
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                DB::transaction(function () use ($invoice, $kindForSerial): void {
+                    $invoice->serial_number = $this->numberGenerator->generate($kindForSerial);
+                    $invoice->save();
+                });
+
+                return;
+            } catch (QueryException $e) {
+                // Engines that do not lock the not-yet-existing serial range can
+                // still collide; the unique index catches it, so re-read the
+                // counter instead of losing an invoice whose money already moved.
+                if ($attempt >= 3 || ! self::isSerialCollision($e)) {
+                    throw $e;
+                }
+
+                $invoice->serial_number = null;
+            }
+        }
+    }
+
+    private static function isSerialCollision(QueryException $e): bool
+    {
+        return str_contains($e->getMessage(), 'serial_number');
     }
 
     // ========================================================================
@@ -667,12 +1113,14 @@ class InvoiceService
         }
 
         $vat = $this->vat->calculate($newCountry, $sumNet, $billable);
-        $currency = (string) config('mollie-billing.currency', 'EUR');
-        $value = number_format($vat['gross'] / 100, 2, '.', '');
+        // Charge in the currency the original invoice was booked in — the reissue
+        // invoice inherits it too (see createCorrectionInvoice()), so bank, ledger
+        // and PDF must not disagree after a BILLING_CURRENCY change.
+        $currency = self::normalizeCurrency($original->currency);
 
         $payment = Mollie::send(new CreatePaymentRequest(
             description: 'Country correction for invoice '.($original->serial_number ?? $original->id),
-            amount: new MollieMoney($currency, $value),
+            amount: new MollieMoney($currency, self::molliePrice((int) $vat['gross'], $currency)),
             metadata: [
                 'type' => 'country_correction',
                 'mismatch_id' => $mismatchId,
@@ -749,11 +1197,10 @@ class InvoiceService
         $invoice->billable_id = $billable->getKey();
         $invoice->mollie_payment_id = $paymentId;
         $invoice->mollie_subscription_id = $original->mollie_subscription_id;
-        $invoice->serial_number = $this->numberGenerator->generate(InvoiceKind::Subscription->value);
         $invoice->invoice_kind = InvoiceKind::Subscription;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = $newCountry;
-        $invoice->currency = $original->currency ?: (string) config('mollie-billing.currency', 'EUR');
+        $invoice->currency = self::normalizeCurrency($original->currency);
         $invoice->amount_net = $sumNet;
         $invoice->amount_vat = $sumVat;
         $invoice->amount_gross = $sumGross;
@@ -779,7 +1226,7 @@ class InvoiceService
         // Customer-facing explanation rendered on the PDF (same template as the
         // matching credit note).
         $invoice->refund_reason_text = $this->correctionReissueReason($original, $pending);
-        $invoice->save();
+        $this->persistWithSerial($invoice, InvoiceKind::Subscription->value);
 
         $this->generateAndStorePdf($invoice, $billable);
 
@@ -927,11 +1374,10 @@ class InvoiceService
         $invoice->billable_id = $billable->getKey();
         $invoice->mollie_payment_id = $molliePaymentId;
         $invoice->mollie_subscription_id = $mollieSubscriptionId;
-        $invoice->serial_number = $this->numberGenerator->generate($kind->value);
         $invoice->invoice_kind = $kind;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper($country);
-        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
+        $invoice->currency = self::configuredCurrency();
         $invoice->amount_net = $sumNet;
         $invoice->amount_vat = $sumVat;
         $invoice->amount_gross = $sumGross;
@@ -941,7 +1387,7 @@ class InvoiceService
         $invoice->refunded_net = 0;
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $invoice->mismatch_id = $billable->latestOpenCountryMismatch()?->id;
-        $invoice->save();
+        $this->persistWithSerial($invoice, $kind->value);
 
         $this->generateAndStorePdf($invoice, $billable);
         event(new InvoiceCreated($billable, $invoice));
@@ -974,15 +1420,14 @@ class InvoiceService
             return; // Coupon-covered or zero — no Mollie charge
         }
 
-        $currency = (string) config('mollie-billing.currency', 'EUR');
-        $value = number_format($grossTotal / 100, 2, '.', '');
+        $currency = self::configuredCurrency();
 
         // Mollie metadata is hard-capped at 1024 bytes — keep it to a minimal correlation
         // payload. The full charge/refund line list lives in subscription_meta.pending_prorata_change
         // and is read back by the Phase-2 webhook.
         $payment = Mollie::send(new CreatePaymentRequest(
             description: "Plan change for {$intent->newPlan}",
-            amount: new MollieMoney($currency, $value),
+            amount: new MollieMoney($currency, self::molliePrice($grossTotal, $currency)),
             metadata: [
                 'type' => 'prorata_charge',
                 'billable_type' => $billable->getMorphClass(),
@@ -1009,6 +1454,9 @@ class InvoiceService
      * Internally makes N Mollie refund calls (against originalInvoice.mollie_payment_id per line)
      * and persists the result as a BillingInvoice with invoice_kind=Refund.
      *
+     * Each call is posted in the currency of the invoice it refunds — Mollie
+     * rejects any other — and the credit note inherits that currency.
+     *
      * Mollie 409 idempotency per line: if a refund line_item already exists with
      * (parent_invoice_id, parent_line_item_index, amount_net) → skipped.
      *
@@ -1030,9 +1478,13 @@ class InvoiceService
             return null;
         }
 
-        $currency = (string) config('mollie-billing.currency', 'EUR');
         $persistedLines = [];
         $failedLines = [];
+        // Each refund is posted against a specific original payment, so the
+        // currency comes from that invoice — Mollie rejects a refund whose
+        // currency differs from the payment's, which after a BILLING_CURRENCY
+        // change is every refund of a historical invoice.
+        $batchCurrency = null;
 
         // Multiple refund lines can target the same original invoice (e.g. plan + seats + addon
         // on a plan change). They are independent ProrataLine instances loaded via separate
@@ -1076,15 +1528,27 @@ class InvoiceService
             //      (refunded_net is a net counter, consistent with
             //      remainingRefundableNet() and the CountryMatch /
             //      CountryMismatchResolution services) and converted back to
-            //      gross via the original VAT rate before comparing to Mollie.
+            //      gross via the original's per-line VAT before comparing to
+            //      Mollie — one line's rate applied to the whole rest would
+            //      misprice every mixed-VAT invoice.
             $originalKey = $original->getKey();
+            $lineCurrency = self::normalizeCurrency($original->currency);
+            $batchCurrency ??= $lineCurrency;
+
+            if ($lineCurrency !== $batchCurrency) {
+                // One credit note can only carry one currency — flag it so the
+                // split is investigable instead of silently mis-booked.
+                Log::warning('Refund batch spans multiple currencies', [
+                    'billable' => $billable->getKey(),
+                    'original_invoice_id' => $originalKey,
+                    'batch_currency' => $batchCurrency,
+                    'line_currency' => $lineCurrency,
+                ]);
+            }
+
             $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? (int) $original->refunded_net;
             $restRefundableNet = max(0, (int) $original->amount_net - $alreadyRefundedNet);
-
-            $originalLines = (array) ($original->line_items ?? []);
-            $firstLine = $originalLines[0] ?? null;
-            $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
-            $restRefundableGross = $restRefundableNet + (int) round($restRefundableNet * $rate / 100);
+            $restRefundableGross = $restRefundableNet + ($restRefundableNet > 0 ? $this->creditNoteVat($original, $restRefundableNet) : 0);
 
             $restRefundable = min((int) $original->amount_gross, $restRefundableGross);
             $refundAmount = min($absGross, $restRefundable);
@@ -1104,8 +1568,6 @@ class InvoiceService
                 $failedLines[] = ['line' => $line->toArray(), 'error' => 'Nothing left to refund on the original payment', 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
                 continue;
             }
-
-            $value = number_format($refundAmount / 100, 2, '.', '');
 
             // Without an explicit idempotency key, Mollie deduplicates
             // refund requests against (payment_id, amount) — so two legitimate
@@ -1132,7 +1594,7 @@ class InvoiceService
                 $refund = Mollie::send(new CreatePaymentRefundRequest(
                     paymentId: $original->mollie_payment_id,
                     description: $description ?? "Plan change refund: {$line->label}",
-                    amount: new MollieMoney($currency, $value),
+                    amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
                 ));
                 $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
                 $persistedLines[] = $line;
@@ -1174,14 +1636,16 @@ class InvoiceService
         $sumGross = 0;
         $lineItemsForPersist = [];
         $countryFromOriginal = null;
+        $currencyFromOriginal = null;
 
         foreach ($persistedLines as $line) {
             $sumNet += $line->amountNet;
             $sumVat += $line->amountVat;
             $sumGross += $line->amountGross;
             $lineItemsForPersist[] = $line->toArray();
-            if ($countryFromOriginal === null && $line->originalInvoice !== null) {
-                $countryFromOriginal = (string) $line->originalInvoice->country;
+            if ($line->originalInvoice !== null) {
+                $countryFromOriginal ??= (string) $line->originalInvoice->country;
+                $currencyFromOriginal ??= (string) $line->originalInvoice->currency;
             }
         }
 
@@ -1190,11 +1654,11 @@ class InvoiceService
         $invoice->billable_id = $billable->getKey();
         $invoice->mollie_payment_id = null;
         $invoice->mollie_subscription_id = null;
-        $invoice->serial_number = $this->numberGenerator->generate('refund');
         $invoice->invoice_kind = InvoiceKind::Refund;
         $invoice->status = InvoiceStatus::Refunded;
         $invoice->country = strtoupper($countryFromOriginal ?? (string) ($billable->getBillingCountry() ?? ''));
-        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
+        // Derived document: inherit the refunded invoice's currency, like country above.
+        $invoice->currency = self::normalizeCurrency($currencyFromOriginal);
         $invoice->amount_net = $sumNet;
         $invoice->amount_vat = $sumVat;
         $invoice->amount_gross = $sumGross;
@@ -1202,7 +1666,7 @@ class InvoiceService
         $invoice->refund_reason_text = $description;
         $invoice->refunded_net = 0;
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
-        $invoice->save();
+        $this->persistWithSerial($invoice, 'refund');
 
         $this->generateAndStorePdf($invoice, $billable);
         event(new CreditNoteIssued($billable, $invoice, null));
@@ -1242,18 +1706,17 @@ class InvoiceService
         $invoice->billable_id = $billable->getKey();
         $invoice->mollie_payment_id = null;
         $invoice->mollie_subscription_id = null;
-        $invoice->serial_number = $this->numberGenerator->generate('subscription');
         $invoice->invoice_kind = InvoiceKind::Subscription;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper((string) ($billable->getBillingCountry() ?? ''));
-        $invoice->currency = (string) config('mollie-billing.currency', 'EUR');
+        $invoice->currency = self::configuredCurrency();
         $invoice->amount_net = $sumNet;
         $invoice->amount_vat = $sumVat;
         $invoice->amount_gross = $sumGross;
         $invoice->line_items = $lineItemsForPersist;
         $invoice->refunded_net = 0;
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
-        $invoice->save();
+        $this->persistWithSerial($invoice, 'subscription');
 
         $this->generateAndStorePdf($invoice, $billable);
         event(new InvoiceCreated($billable, $invoice));

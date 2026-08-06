@@ -89,11 +89,11 @@ class RefundInvoiceService
                 );
             }
 
-            // VAT-Rate aus dem ersten line_item der Original-Invoice (Per-Item-VAT als Source of Truth).
-            $originalLines = (array) ($invoice->line_items ?? []);
-            $firstLine = $originalLines[0] ?? null;
-            $rate = $firstLine !== null && isset($firstLine['vat_rate']) ? (float) $firstLine['vat_rate'] : 0.0;
-            $refundVat = (int) round($refundAmountNet * $rate / 100);
+            // Per-item VAT is the source of truth: the credit note taxes every
+            // original line at its own rate, so the gross we refund at Mollie has
+            // to be built the same way or bank and credit note drift apart on
+            // mixed-VAT invoices.
+            $refundVat = $this->invoices->creditNoteVat($invoice, $refundAmountNet, $lineItems);
             $refundGross = $refundAmountNet + $refundVat;
 
             /** @var Billable|null $billable */
@@ -105,7 +105,12 @@ class RefundInvoiceService
             }
 
             try {
-                $this->callMollieRefund($invoice->mollie_payment_id, $refundGross, $description);
+                $mollieRefundId = $this->callMollieRefund(
+                    $invoice->mollie_payment_id,
+                    $refundGross,
+                    $description,
+                    InvoiceService::normalizeCurrency($invoice->currency),
+                );
             } catch (\Throwable $e) {
                 Log::warning('Mollie refund failed for invoice '.$invoice->id, ['exception' => $e->getMessage()]);
 
@@ -127,6 +132,13 @@ class RefundInvoiceService
 
             $creditNote = $this->invoices->createCreditNote($invoice, $refundAmountNet, $lineItems, $reasonText);
             $creditNote->refund_reason_code = $reasonCode;
+            // mollie_refund_id is the only key RefundHandler dedups on. Without it
+            // a webhook re-delivery (or replay tooling) treats this refund as
+            // unseen and books a second credit note for the same money.
+            $creditNote->line_items = self::stampRefundId((array) $creditNote->line_items, $mollieRefundId);
+            // Remember which wallet units this refund already credited so a later
+            // refundFully() does not hand them out a second time.
+            $creditNote->line_items = self::stampWalletCredits((array) $creditNote->line_items, $walletCredits);
             $creditNote->save();
 
             $invoice->refunded_net = $reconciledBaseNet + $refundAmountNet;
@@ -152,8 +164,11 @@ class RefundInvoiceService
     }
 
     /**
-     * Refund the full remaining amount of an invoice. For overage invoices,
-     * wallet units are automatically credited back based on the line items.
+     * Refund the full remaining amount of an invoice. For overage invoices, the
+     * wallet units that have not been credited back by an earlier partial refund
+     * are credited automatically — the money is capped by
+     * {@see BillingInvoice::remainingRefundableNet()}, the units by what previous
+     * refunds already returned.
      */
     public function refundFully(BillingInvoice $invoice, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
@@ -166,6 +181,18 @@ class RefundInvoiceService
 
                 if ($type !== null && $qty > 0) {
                     $walletCredits[$type] = ($walletCredits[$type] ?? 0) + $qty;
+                }
+            }
+
+            $alreadyCredited = $this->alreadyCreditedUnits($invoice);
+
+            foreach ($walletCredits as $type => $units) {
+                $remaining = $units - (int) ($alreadyCredited[$type] ?? 0);
+
+                if ($remaining > 0) {
+                    $walletCredits[$type] = $remaining;
+                } else {
+                    unset($walletCredits[$type]);
                 }
             }
         }
@@ -259,15 +286,95 @@ class RefundInvoiceService
         throw new InvalidRefundTargetException("Usage type {$usageType} not found in invoice line items.");
     }
 
-    protected function callMollieRefund(string $paymentId, int $grossCents, string $description): void
+    /**
+     * Wallet units already credited back by earlier refunds of this invoice,
+     * read from the `wallet_credits` snapshot the refund path writes onto the
+     * credit note's line items.
+     *
+     * @return array<string, int>
+     */
+    private function alreadyCreditedUnits(BillingInvoice $invoice): array
     {
-        Mollie::send(new CreatePaymentRefundRequest(
+        $credited = [];
+
+        $creditNotes = BillingInvoice::query()
+            ->where('billable_type', $invoice->billable_type)
+            ->where('billable_id', $invoice->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($creditNotes as $creditNote) {
+            foreach ((array) ($creditNote->line_items ?? []) as $line) {
+                if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $invoice->getKey()) {
+                    continue;
+                }
+
+                foreach ((array) ($line['wallet_credits'] ?? []) as $type => $units) {
+                    $credited[(string) $type] = ($credited[(string) $type] ?? 0) + (int) $units;
+                }
+            }
+        }
+
+        return $credited;
+    }
+
+    /**
+     * Write the Mollie refund id onto every credit-note line that does not carry
+     * one yet.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     * @return array<int, array<string, mixed>>
+     */
+    private static function stampRefundId(array $lineItems, ?string $refundId): array
+    {
+        if ($refundId === null) {
+            return $lineItems;
+        }
+
+        foreach ($lineItems as $index => $line) {
+            if (($line['mollie_refund_id'] ?? null) === null) {
+                $lineItems[$index]['mollie_refund_id'] = $refundId;
+            }
+        }
+
+        return $lineItems;
+    }
+
+    /**
+     * Record the credited wallet units on the first credit-note line. They are
+     * an attribute of the refund as a whole, so one line carries them.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     * @param  array<string, int>  $walletCredits
+     * @return array<int, array<string, mixed>>
+     */
+    private static function stampWalletCredits(array $lineItems, array $walletCredits): array
+    {
+        if ($walletCredits === [] || $lineItems === []) {
+            return $lineItems;
+        }
+
+        $first = array_key_first($lineItems);
+        $lineItems[$first]['wallet_credits'] = array_map('intval', $walletCredits);
+
+        return $lineItems;
+    }
+
+    /**
+     * Post the refund at Mollie and return its refund id.
+     *
+     * `$currency` must be the currency of the ORIGINAL payment — Mollie rejects
+     * anything else, so it cannot be read from the config: that value changes
+     * over time while historical payments keep the currency they were made in.
+     */
+    protected function callMollieRefund(string $paymentId, int $grossCents, string $description, string $currency): ?string
+    {
+        $refund = Mollie::send(new CreatePaymentRefundRequest(
             paymentId: $paymentId,
             description: $description,
-            amount: new Money(
-                (string) config('mollie-billing.currency', 'EUR'),
-                number_format($grossCents / 100, 2, '.', ''),
-            ),
+            amount: new Money($currency, InvoiceService::molliePrice($grossCents, $currency)),
         ));
+
+        return is_object($refund) ? ($refund->id ?? null) : null;
     }
 }

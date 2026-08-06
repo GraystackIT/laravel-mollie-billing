@@ -23,9 +23,10 @@ beforeEach(function (): void {
     // Replace the real binding with a subclass that skips the real Mollie HTTP call.
     $this->app->bind(RefundInvoiceService::class, function ($app): RefundInvoiceService {
         return new class ($app->make(InvoiceService::class), $app->make(WalletUsageService::class)) extends RefundInvoiceService {
-            protected function callMollieRefund(string $paymentId, int $grossCents, string $description): void
+            protected function callMollieRefund(string $paymentId, int $grossCents, string $description, string $currency): ?string
             {
-                // no-op for tests
+                // No Mollie HTTP call in tests; hand back a deterministic refund id.
+                return 'rf_test_'.$paymentId.'_'.$grossCents;
             }
         };
     });

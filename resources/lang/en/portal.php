@@ -375,6 +375,7 @@ return [
     'invoice_type' => 'Invoice',
     'credit_note_type' => 'Credit Note',
     'credit_note_label' => 'Credit note for invoice #:serial',
+    'credit_note_line_label' => 'Credit note for invoice #:serial — :label',
     'country_correction_credit_note_reason' => "VAT country correction: invoice #:original_serial was issued under :old_country (:old_rate% VAT). Following our review (:strategy), the correct supply country is :new_country (:new_rate% VAT). This credit note fully reverses the original invoice. A corrected invoice has been issued under :new_country and charged to your existing payment method, so your account balance is unchanged. If anything looks wrong, please contact :support_email.",
     'country_correction_reissue_reason' => "VAT country correction: this invoice replaces the original invoice #:original_serial, which was reissued under the correct supply country :new_country (:new_rate% VAT) instead of the previously billed :old_country (:old_rate% VAT). The original invoice has been fully credited (credit note #:credit_note_serial). Your account balance is unchanged. If anything looks wrong, please contact :support_email.",
     'country_correction_strategy_auto_vies' => 'automatic, based on your verified VAT number',
@@ -383,6 +384,7 @@ return [
     'invoice_state_paid' => 'Paid',
     'invoice_state_refunded' => 'Refunded',
     'invoice_state_pending' => 'Pending',
+    'invoice_state_failed' => 'Failed',
     'invoice_state_draft' => 'Draft',
     'no_billable' => 'Unable to load your billing account. Please sign in and try again.',
     'cancel_confirm' => [

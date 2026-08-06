@@ -17,7 +17,13 @@ class InvoiceNumberGenerator
      *   Y = year digit (padded to slot length)
      *   C = counter digit (padded to slot length)
      *
-     * Counter resets per year. Atomic via DB transaction + lock.
+     * Counter resets per year.
+     *
+     * The number is only unique if the row that consumes it is inserted inside
+     * the same transaction: the lock taken while reading the highest serial is
+     * released on commit. Callers therefore open a transaction around
+     * generate() + save() (see InvoiceService::persistWithSerial()) and this
+     * method joins it rather than committing a nested transaction of its own.
      */
     public function generate(string $invoiceKind): string
     {
@@ -35,7 +41,7 @@ class InvoiceNumberGenerator
         };
         $year = (int) date('y'); // 2-digit year
 
-        return DB::transaction(function () use ($format, $prefix, $year): string {
+        $allocate = function () use ($format, $prefix, $year): string {
             $prefixLen = substr_count($format, 'P');
             $yearLen = substr_count($format, 'Y');
             $counterLen = substr_count($format, 'C');
@@ -61,7 +67,9 @@ class InvoiceNumberGenerator
             $counterStr = str_pad((string) $nextCount, $counterLen, '0', STR_PAD_LEFT);
 
             return $this->buildSerialNumber($format, $prefixStr, $yearStr, $counterStr);
-        });
+        };
+
+        return DB::transactionLevel() > 0 ? $allocate() : DB::transaction($allocate);
     }
 
     private function buildSearchPattern(string $format, string $prefix, string $year): string

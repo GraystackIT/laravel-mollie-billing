@@ -165,7 +165,7 @@ class StartOneTimeOrderCheckout
             return $this->completeInline($billable, $productCode, $priceNet, $resolvedCoupons);
         }
 
-        $country = $billable->getBillingCountry() ?? 'DE';
+        $country = $billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
         $vatResult = $this->vatService->calculate($country, $netForCharge, $billable);
         $amountGross = $vatResult['gross'];
 
