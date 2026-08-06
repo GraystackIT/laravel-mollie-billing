@@ -89,7 +89,11 @@ class RefundInvoiceService
             return $this->performRefund($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems, $mollieFailure);
         } catch (\Throwable $e) {
             if ($mollieFailure !== null) {
-                $this->notifyAdminsOfFailedRefund($mollieFailure['billable'], $mollieFailure['exception']);
+                $this->notifyAdminsOfFailedRefund(
+                    $mollieFailure['billable'],
+                    $mollieFailure['exception'],
+                    $mollieFailure['invoice'],
+                );
             }
 
             throw $e;
@@ -100,12 +104,14 @@ class RefundInvoiceService
      * The transactional body of {@see refund()}.
      *
      * `$mollieFailure` is an out-parameter: when the Mollie refund call fails it
-     * receives the billable and the exception so the caller can alert the admins
-     * after the rollback.
+     * receives the billable, the exception and the invoice the refund was posted
+     * against, so the caller can alert the admins after the rollback. The invoice
+     * has to travel with it — an operator diagnosing the failure needs the refund
+     * target, and the alert's own fallback can only guess at it.
      *
      * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
      * @param  array<string,int>  $walletCredits
-     * @param  array{billable: Billable, exception: \Throwable}|null  $mollieFailure
+     * @param  array{billable: Billable, exception: \Throwable, invoice: BillingInvoice}|null  $mollieFailure
      */
     private function performRefund(
         BillingInvoice $invoice,
@@ -158,7 +164,7 @@ class RefundInvoiceService
                 Log::warning('Mollie refund failed for invoice '.$invoice->id, ['exception' => $e->getMessage()]);
 
                 if ($billable !== null) {
-                    $mollieFailure = ['billable' => $billable, 'exception' => $e];
+                    $mollieFailure = ['billable' => $billable, 'exception' => $e, 'invoice' => $invoice];
                 }
 
                 throw $e;
@@ -217,7 +223,7 @@ class RefundInvoiceService
      * job row written inside the transaction the failure rolls back would vanish
      * together with it.
      */
-    private function notifyAdminsOfFailedRefund(Billable $billable, \Throwable $exception): void
+    private function notifyAdminsOfFailedRefund(Billable $billable, \Throwable $exception, ?BillingInvoice $invoice = null): void
     {
         $recipients = MollieBilling::notifyAdmin();
 
@@ -225,7 +231,12 @@ class RefundInvoiceService
             return;
         }
 
-        Notification::send($recipients, MollieBilling::resolveNotification(AdminRefundFailedNotification::class, $billable, $exception));
+        Notification::send($recipients, MollieBilling::resolveNotification(
+            AdminRefundFailedNotification::class,
+            $billable,
+            $exception,
+            $invoice,
+        ));
     }
 
     /**

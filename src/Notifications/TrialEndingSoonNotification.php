@@ -18,8 +18,24 @@ class TrialEndingSoonNotification extends Notification implements ShouldQueue
     use Queueable;
     use UsesBillingQueue;
 
+    public readonly ?CarbonInterface $trialEndsAt;
+
+    public readonly bool $hasMandate;
+
+    public readonly int $days;
+
     public function __construct(public readonly Billable $billable)
     {
+        // All three are frozen here rather than read in toMail(): the mail is queued,
+        // so it renders against a billable reloaded minutes or hours later. A mandate
+        // that arrives in between (or a trial that already converted) flips the copy
+        // to the exact opposite of what the sending pass decided — "we will charge
+        // your card" for someone who never added one, or vice versa. The day count is
+        // frozen with them so subject and body keep describing the same moment.
+        $this->trialEndsAt = $billable->getBillingTrialEndsAt();
+        $this->hasMandate = $billable->hasMollieMandate();
+        $this->days = $this->trialEndsAt !== null ? $this->daysUntil($this->trialEndsAt) : 0;
+
         $this->initializeBillingQueue();
     }
 
@@ -34,21 +50,20 @@ class TrialEndingSoonNotification extends Notification implements ShouldQueue
     public function toMail(object $notifiable): MailMessage
     {
         $app = config('mollie-billing.company_name', config('app.name'));
-        $trialEndsAt = $this->billable->getBillingTrialEndsAt() ?? BillingTime::nowUtc();
-        $days = $this->daysUntil($trialEndsAt);
-        $date = $trialEndsAt->format('Y-m-d');
-        $hasMandate = $this->billable->hasMollieMandate();
 
-        $bodyKey = $hasMandate
+        $bodyKey = $this->hasMandate
             ? 'billing::notifications.trial_ending_soon.body_with_mandate'
             : 'billing::notifications.trial_ending_soon.body_without_mandate';
 
         $message = (new MailMessage())
-            ->subject(__('billing::notifications.trial_ending_soon.subject', ['days' => $days]))
+            ->subject(__('billing::notifications.trial_ending_soon.subject', ['days' => $this->days]))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
-            ->line(__($bodyKey, ['app' => $app, 'date' => $date]));
+            ->line(__($bodyKey, [
+                'app' => $app,
+                'date' => $this->trialEndsAt?->format('Y-m-d') ?? '-',
+            ]));
 
-        $action = $hasMandate
+        $action = $this->hasMandate
             ? __('billing::emails.open_portal')
             : __('billing::emails.update_payment_method');
 
@@ -61,13 +76,11 @@ class TrialEndingSoonNotification extends Notification implements ShouldQueue
      */
     public function toArray(object $notifiable): array
     {
-        $trialEndsAt = $this->billable->getBillingTrialEndsAt();
-
         return [
             'type' => 'trial_ending_soon',
-            'days' => $trialEndsAt ? $this->daysUntil($trialEndsAt) : null,
-            'trial_ends_at' => $trialEndsAt?->toIso8601String(),
-            'has_mandate' => $this->billable->hasMollieMandate(),
+            'days' => $this->trialEndsAt !== null ? $this->days : null,
+            'trial_ends_at' => $this->trialEndsAt?->toIso8601String(),
+            'has_mandate' => $this->hasMandate,
         ];
     }
 

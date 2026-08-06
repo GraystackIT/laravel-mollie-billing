@@ -21,6 +21,8 @@ class TrialConvertedNotification extends Notification implements ShouldQueue
 
     public readonly ?string $planName;
 
+    public readonly ?string $planCode;
+
     public readonly ?int $amountGross;
 
     public readonly ?string $currency;
@@ -37,6 +39,9 @@ class TrialConvertedNotification extends Notification implements ShouldQueue
         $invoice ??= $this->latestSubscriptionInvoice($billable);
 
         $this->planName = $billable->getCurrentBillingPlanName();
+        // Captured next to the name so the database payload and the mail can never
+        // name two different plans.
+        $this->planCode = $billable->getBillingSubscriptionPlanCode();
         $this->amountGross = $invoice !== null ? (int) $invoice->amount_gross : null;
         $this->currency = $invoice?->currency ?: null;
 
@@ -76,7 +81,7 @@ class TrialConvertedNotification extends Notification implements ShouldQueue
         return [
             'type' => 'trial_converted',
             'plan' => $this->planName,
-            'plan_code' => $this->billable->getBillingSubscriptionPlanCode(),
+            'plan_code' => $this->planCode,
             'amount_gross' => $this->amountGross,
             'currency' => $this->currency,
         ];

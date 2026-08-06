@@ -16,11 +16,21 @@ class UsageThresholdNotification extends Notification implements ShouldQueue
     use Queueable;
     use UsesBillingQueue;
 
+    public readonly bool $overageAllowed;
+
     public function __construct(
         public readonly Billable $billable,
         public readonly string $usageType,
         public readonly int $percent,
     ) {
+        // Asks the same question the hard cap in WalletUsageService::debit() asks, so
+        // the mail never promises that overage will be charged when the booking would
+        // in fact be refused — e.g. because no overage price is configured for this
+        // usage type on the plan. Frozen at construction because the answer depends on
+        // plan, interval, mandate and the overage opt-out: any of them changing before
+        // the queued mail renders inverts the hint the debit was actually judged by.
+        $this->overageAllowed = $billable->canChargeBillingOverage($usageType);
+
         $this->initializeBillingQueue();
     }
 
@@ -34,11 +44,7 @@ class UsageThresholdNotification extends Notification implements ShouldQueue
 
     public function toMail(object $notifiable): MailMessage
     {
-        // Asks the same question the hard cap in WalletUsageService::debit() asks,
-        // so the mail never promises that overage will be charged when the booking
-        // would in fact be refused — e.g. because no overage price is configured
-        // for this usage type on the current plan.
-        $hint = $this->billable->canChargeBillingOverage($this->usageType)
+        $hint = $this->overageAllowed
             ? __('billing::notifications.usage_threshold.overage_allowed')
             : __('billing::notifications.usage_threshold.overage_blocked', ['type' => $this->usageType]);
 
@@ -65,7 +71,7 @@ class UsageThresholdNotification extends Notification implements ShouldQueue
             'type' => 'usage_threshold',
             'usage_type' => $this->usageType,
             'percent' => $this->percent,
-            'overage_allowed' => $this->billable->canChargeBillingOverage($this->usageType),
+            'overage_allowed' => $this->overageAllowed,
         ];
     }
 }
