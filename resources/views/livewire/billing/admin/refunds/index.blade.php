@@ -238,14 +238,12 @@ new class extends Component {
                                 <span class="tabular-nums">{{ BillingTime::displayUtc($detail->created_at)->format('Y-m-d · H:i') }} UTC</span>
                                 @if ($vatAbs > 0)
                                     <span class="text-amber-300 dark:text-amber-600/60">·</span>
-                                    @php
-                                        // Inline money strings — the <x-…money> component
-                                        // can't be nested inside a translation placeholder.
-                                        $refundMoney = fn (int $cents) => '€'.number_format($cents / 100, 2);
-                                    @endphp
+                                    {{-- Plain strings via the shared formatter — the
+                                         <x-…money> component can't be nested inside a
+                                         translation placeholder. --}}
                                     <span class="tabular-nums">{{ __('billing::admin.refunds.detail.net_vat', [
-                                        'net' => $refundMoney($netAbs),
-                                        'vat' => $refundMoney($vatAbs),
+                                        'net' => \GraystackIT\MollieBilling\Support\BillingMoney::format($netAbs),
+                                        'vat' => \GraystackIT\MollieBilling\Support\BillingMoney::format($vatAbs),
                                     ]) }}</span>
                                 @endif
                             </div>

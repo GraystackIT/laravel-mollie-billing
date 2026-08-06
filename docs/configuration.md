@@ -100,7 +100,7 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `redirect_after_return` | `BILLING_REDIRECT_AFTER_RETURN` | URL to redirect to after a successful Mollie return. |
 | `require_payment_method_for_zero_amount` | `BILLING_REQUIRE_PM_ZERO` | When `true`, a mandate is required even for 0 € plans (so later paid changes can charge it). Default: `true`. |
 | `currency` | `BILLING_CURRENCY` | ISO-4217 code. Amounts in `mollie-billing-plans.php` and coupons are interpreted in this currency. Default: `EUR`. |
-| `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Display symbol. Default: `€`. |
+| `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Display symbol, used by `Support\BillingMoney` (and therefore the admin panel) whenever an amount is rendered in the package currency. Leave empty to fall back to a symbol derived from `currency`. Default: `€`. |
 | `allow_overage_default` | `BILLING_ALLOW_OVERAGE` | Default for `Billable::allowsBillingOverage()`. Overridable per billable. |
 | `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `Immediate` / `EndOfPeriod` / `UserChoice`. Controls when plan changes are applied. Default: `UserChoice`. |
 | `mollie_api_key` | `BILLING_MOLLIE_KEY` | Mollie API key. Alias for `MOLLIE_KEY` from `mollie/laravel-mollie` — when set, the package propagates it into `mollie.key` at boot so you can keep all settings on the `BILLING_*` prefix. Leave empty to keep using `MOLLIE_KEY` directly. |

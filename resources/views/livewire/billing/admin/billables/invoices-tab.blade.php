@@ -5,6 +5,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
@@ -147,7 +148,7 @@ new class extends Component {
         $remaining = $invoice->remainingRefundableNet();
         if ($amountCents !== null && $amountCents > $remaining) {
             $this->error = __('billing::admin.billables.invoices.flash.exceeds_remaining', [
-                'amount' => number_format($remaining / 100, 2),
+                'amount' => BillingMoney::format($remaining, $invoice->currency),
             ]);
             return;
         }
@@ -164,7 +165,7 @@ new class extends Component {
         } catch (RefundExceedsInvoiceAmountException $e) {
             $remaining = $invoice->fresh()->remainingRefundableNet();
             $this->error = $remaining > 0
-                ? __('billing::admin.billables.invoices.flash.exceeds_remaining', ['amount' => number_format($remaining / 100, 2)])
+                ? __('billing::admin.billables.invoices.flash.exceeds_remaining', ['amount' => BillingMoney::format($remaining, $invoice->currency)])
                 : __('billing::admin.billables.invoices.flash.already_refunded');
         } catch (InvalidRefundTargetException $e) {
             $this->error = $e->getMessage();
@@ -322,13 +323,7 @@ new class extends Component {
 
                     // Money strings that go through :placeholders below — the
                     // <x-…money> component can't be nested inside a translation.
-                    $currencySymbol = match ($currencyCode) {
-                        'EUR' => '€',
-                        'USD' => '$',
-                        'GBP' => '£',
-                        default => $currencyCode.' ',
-                    };
-                    $moneyFormat = fn (int $cents) => $currencySymbol.number_format($cents / 100, 2);
+                    $moneyFormat = fn (int $cents) => BillingMoney::format($cents, $currencyCode);
                 @endphp
 
                 <div>
@@ -376,7 +371,7 @@ new class extends Component {
                     </div>
                     <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
                         {{ __('billing::admin.billables.invoices.modal.hint', [
-                            'example' => number_format(10.5, 2),
+                            'example' => BillingMoney::number(10.5),
                             'remaining' => $moneyFormat($remainingNet),
                         ]) }}
                     </flux:text>

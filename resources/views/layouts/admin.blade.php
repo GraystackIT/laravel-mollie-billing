@@ -4,7 +4,7 @@
     $logoUrl = config('mollie-billing.logo_url');
     $faviconUrl = config('mollie-billing.favicon_url', '/favicon.ico');
     $primaryColor = config('mollie-billing.primary_color', 'teal');
-    $portalTitle = __('billing::admin.title', ['app' => config('mollie-billing.company_name', config('app.name'))]);
+    $portalTitle = __('billing::admin.title', ['app' => config('mollie-billing.company_name') ?: config('app.name')]);
     $currentRoute = request()->route()?->getName();
 @endphp
 <!DOCTYPE html>
