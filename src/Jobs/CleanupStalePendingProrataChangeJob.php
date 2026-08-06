@@ -23,13 +23,21 @@ use Mollie\Laravel\Facades\Mollie;
  * Daily cron: polls Mollie for stuck pending_prorata_change states older than 24h.
  *
  * If the charge webhook never arrives (Mollie outage or webhook misconfiguration),
- * the pending state lingers. This job resolves the stuck entry:
+ * the pending state lingers — and `ValidateSubscriptionChange` then refuses every
+ * further plan change for that billable. This job resolves the stuck entry, always
+ * asking Mollie what actually happened before acting on the entry's age:
  *
- * - Mollie payment status `paid` → manually trigger Phase 2.
- * - Status `failed`/`canceled`/`expired` → delete the pending state.
- * - Mollie unreachable for > 7 days → delete pending + admin notification.
+ * - `paid` → clear the pending state so the customer is unblocked, record the payment
+ *   as an orphan under `orphaned_prorata_payment` and alert the admins. Phase 2 cannot
+ *   be replayed from here: the only replay path is a testing helper that refuses to run
+ *   in production, so the reconciliation is manual by design.
+ * - `failed`/`canceled`/`expired` → clear the pending state and record the reason.
+ * - still unsettled → keep waiting. SEPA direct debit legitimately takes several
+ *   business days; past the hard limit this is logged as stuck rather than slow.
+ * - Mollie unreachable past the hard limit → clear the pending state and alert, since
+ *   the outcome cannot be established.
  *
- * Should run daily via the scheduler.
+ * Scheduled daily by the service provider.
  */
 class CleanupStalePendingProrataChangeJob implements ShouldQueue
 {
@@ -38,6 +46,14 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
     use UsesBillingQueue;
+
+    /**
+     * How long a pending prorata change may sit unresolved before the job stops
+     * waiting. Only reached when Mollie cannot be asked, or when Mollie itself still
+     * reports the payment as unsettled — a paid or failed payment is acted on
+     * immediately, regardless of age.
+     */
+    private const HARD_LIMIT_DAYS = 7;
 
     public int $tries = 1;
 
@@ -90,55 +106,80 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             return;
         }
 
-        // Hard limit: 7 days.
         if (! isset($pending['created_at'])) {
-            // Missing due to data corruption or manual edit — InvoiceService always writes created_at.
-            // We treat the entry as old enough for cleanup, but log loudly because this indicates
-            // a bug at the write site.
-            Log::warning('CleanupStalePendingProrataChangeJob: pending_prorata_change ohne created_at — behandle als >7 Tage alt', [
+            // InvoiceService always writes created_at, so its absence means corruption
+            // or a manual edit. Treated as old enough to act on, but logged because it
+            // points at a bug on the write side.
+            Log::warning('CleanupStalePendingProrataChangeJob: pending_prorata_change without created_at — treating as older than the hard limit', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $paymentId,
             ]);
         }
-        $createdAt = isset($pending['created_at']) ? \Carbon\Carbon::parse((string) $pending["created_at"])->setTimezone("UTC") : BillingTime::nowUtc()->subDays(8);
-        if ($createdAt->diffInDays(BillingTime::nowUtc()) >= 7) {
-            unset($meta['pending_prorata_change']);
-            $billable->forceFill(['subscription_meta' => $meta])->save();
 
-            $admins = MollieBilling::notifyAdmin();
-            $admins = is_array($admins) ? $admins : iterator_to_array($admins);
-            if ($admins !== []) {
-                Notification::send($admins, MollieBilling::resolveNotification(
-                    AdminPlanChangeFailedNotification::class,
-                    'pending_prorata_change wurde nach 7 Tagen ohne Webhook gelöscht',
-                    ['payment_id' => $paymentId, 'billable_id' => $billable->getKey()],
-                ));
-            }
-            return;
-        }
+        $createdAt = isset($pending['created_at'])
+            ? \Carbon\Carbon::parse((string) $pending['created_at'])->setTimezone('UTC')
+            : BillingTime::nowUtc()->subDays(self::HARD_LIMIT_DAYS + 1);
 
+        $pastHardLimit = $createdAt->diffInDays(BillingTime::nowUtc()) >= self::HARD_LIMIT_DAYS;
+
+        // Mollie is asked FIRST. Deleting on age alone discarded the pending state of a
+        // payment that had in fact been collected: the plan change never happened, no
+        // invoice existed, and the admin alert said only "deleted after 7 days without
+        // webhook" — never that the money had arrived.
         try {
             $payment = Mollie::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('CleanupStalePendingProrataChangeJob: Mollie unreachable for payment '.$paymentId, ['error' => $e->getMessage()]);
-            return; // retry on the next run
+
+            // Only give up once Mollie has been unreachable past the hard limit — that
+            // is the case this limit exists for.
+            if ($pastHardLimit) {
+                unset($meta['pending_prorata_change']);
+                $billable->forceFill(['subscription_meta' => $meta])->save();
+
+                $this->notifyAdmins(
+                    'pending_prorata_change was dropped after '.self::HARD_LIMIT_DAYS.' days because Mollie stayed unreachable — the payment outcome is unknown and needs checking in the Mollie dashboard',
+                    ['payment_id' => $paymentId, 'billable_id' => $billable->getKey()],
+                );
+            }
+
+            return;
         }
 
         $status = (string) ($payment->status ?? '');
 
         if ($status === 'paid') {
-            // Manually trigger the Phase 2 logic (analogous to the webhook handler).
-            // We simulate the webhook by calling createInvoice directly.
-            // For completeness: ideally invoke the webhook endpoint manually,
-            // but for simplicity we do this inline here.
-            $controller = app(\GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController::class);
-            // Webhook needs request context; simpler: re-dispatch via a Mollie webhook call.
-            // Pragmatic approach: we log and leave it to a manual webhook resend, or
-            // implement a direct trigger (TODO for cleanup extension).
-            Log::info('CleanupStalePendingProrataChangeJob: payment is paid but webhook missing — manual webhook resend needed', [
+            // The charge was collected but its webhook never arrived, so Phase 2 never
+            // ran. Replaying the webhook from here is not possible in production (the
+            // only replay path is a testing helper), so the pending state is cleared to
+            // unblock the customer's future plan changes and the payment is recorded as
+            // an orphan for manual reconciliation — the same marker
+            // ProrataChargeHandler uses for a payment that outlived its plan change.
+            unset($meta['pending_prorata_change']);
+            $meta['orphaned_prorata_payment'] = [
+                'payment_id' => $paymentId,
+                'reason' => 'charge paid but its webhook never arrived',
+                'cancelled_at' => BillingTime::nowUtc()->toIso8601String(),
+                'pending_plan_change' => $meta['pending_plan_change'] ?? null,
+                'prorata_charge_lines' => $pending['charge_lines'] ?? null,
+            ];
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            Log::error('CleanupStalePendingProrataChangeJob: prorata charge was paid but no webhook ever arrived', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $paymentId,
             ]);
+
+            $this->notifyAdmins(
+                'A prorata charge was paid but its webhook never arrived, so the plan change was never applied and no invoice exists — reconcile this payment manually',
+                [
+                    'payment_id' => $paymentId,
+                    'billable_id' => $billable->getKey(),
+                    'intended_plan_change' => $meta['orphaned_prorata_payment']['pending_plan_change'],
+                    'charge_lines' => $meta['orphaned_prorata_payment']['prorata_charge_lines'],
+                ],
+            );
+
             return;
         }
 
@@ -150,6 +191,35 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             return;
         }
 
-        // Status pending/open/authorized: keep waiting.
+        // Still open/pending/authorized. SEPA direct debit legitimately sits here for
+        // several business days, so this is not an error — but past the hard limit it is
+        // stuck rather than slow, and an operator should look at it.
+        if ($pastHardLimit) {
+            Log::warning('CleanupStalePendingProrataChangeJob: prorata charge still not settled past the hard limit', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'status' => $status,
+                'created_at' => $createdAt->toIso8601String(),
+            ]);
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     */
+    private function notifyAdmins(string $reason, array $context): void
+    {
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send($admins, MollieBilling::resolveNotification(
+            AdminPlanChangeFailedNotification::class,
+            $reason,
+            $context,
+        ));
     }
 }
