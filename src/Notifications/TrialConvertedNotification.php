@@ -25,11 +25,16 @@ class TrialConvertedNotification extends Notification implements ShouldQueue
 
     public readonly ?string $currency;
 
-    public function __construct(public readonly Billable $billable)
-    {
+    public function __construct(
+        public readonly Billable $billable,
+        ?BillingInvoice $invoice = null,
+    ) {
         // Resolved at construction, not in toMail(): the queued mail runs against a
-        // freshly loaded billable that may already sit on a different plan.
-        $invoice = $this->latestSubscriptionInvoice($billable);
+        // freshly loaded billable that may already sit on a different plan. The caller
+        // passes the converting charge's invoice — it knows exactly which one it is,
+        // whereas looking up "the newest subscription invoice" can pick a later renewal
+        // by the time the job runs. PHP silently discarded that argument before.
+        $invoice ??= $this->latestSubscriptionInvoice($billable);
 
         $this->planName = $billable->getCurrentBillingPlanName();
         $this->amountGross = $invoice !== null ? (int) $invoice->amount_gross : null;

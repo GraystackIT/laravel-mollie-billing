@@ -172,26 +172,27 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
 
         // Hard guard #1 — collected money is never deleted and its mandate never
         // revoked. The pending-first-payment poll below cannot carry this on its own:
-        // MollieWebhookController clears that marker for *every* terminal status,
-        // `paid` included, before the paid handler runs. If subscription activation
-        // then throws, the billable is left at status New / source null with a paid
-        // invoice, collected money and a live mandate — and the next run of this job
-        // found no marker to poll at all.
+        // the marker only tracks the latest attempt, and the webhook now clears it on
+        // `paid` only once the handlers have run. A billable whose activation threw is
+        // therefore left at status New / source null with a paid invoice, collected
+        // money and a live mandate — which is exactly what this guard catches.
         if ($this->hasInvoices($billable)) {
             return;
         }
 
         $pendingPaymentId = $billable->getPendingFirstPaymentId();
 
-        if ($pendingPaymentId !== null) {
-            // A terminal failure on the tracked payment is a definitive "nothing was
-            // collected", so no further Mollie lookup is needed.
-            if (! $this->mollieReportsTerminalFailure($pendingPaymentId)) {
-                return;
-            }
-        } elseif ($this->mollieMayHavePaid($billable)) {
-            // Hard guard #2 — no marker to poll, so ask Mollie directly. Covers the
-            // window where the payment settled but the invoice write itself failed.
+        if ($pendingPaymentId !== null && ! $this->mollieReportsTerminalFailure($pendingPaymentId)) {
+            return;
+        }
+
+        // Asked unconditionally, not just when there is no marker. The marker only ever
+        // tracks the *latest* attempt — each checkout submit overwrites it — so a
+        // terminal failure on it does not prove nothing was collected earlier. Without
+        // this, a first payment that settled but whose invoice write then failed (the
+        // customer retries, the marker moves to the second, expiring attempt) got the
+        // billable deleted and the paying customer's live mandate revoked.
+        if ($this->mollieMayHavePaid($billable)) {
             return;
         }
 

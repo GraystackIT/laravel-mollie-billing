@@ -49,6 +49,15 @@ class MollieBillingServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__.'/../config/mollie-billing.php', 'mollie-billing');
         $this->mergeConfigFrom(__DIR__.'/../config/mollie-billing-plans.php', 'mollie-billing-plans');
 
+        // Must happen here, before anything resolves a VatCalculator: mpociot snapshots
+        // its whole config array in the constructor. Set later — as VatCalculationService
+        // used to — the flag never reaches the instance, so SoapFaults keep being
+        // swallowed into a bare `false` and "VIES is down" stays indistinguishable from
+        // "this number is invalid".
+        if (config('vat_calculator.forward_soap_faults') !== true) {
+            config(['vat_calculator.forward_soap_faults' => true]);
+        }
+
         $this->app->singleton(MollieBilling::class);
         $this->app->alias(MollieBilling::class, 'mollie-billing');
 

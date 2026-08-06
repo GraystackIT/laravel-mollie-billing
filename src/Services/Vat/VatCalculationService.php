@@ -36,14 +36,11 @@ class VatCalculationService
     public function __construct(
         private readonly VatCalculator $vatCalculator,
     ) {
-        // mpociot swallows VIES SoapFaults and returns `false` unless this flag is
-        // set, which makes "service down" indistinguishable from "number invalid".
-        // Turning it on here means every calculator resolved from the container
-        // afterwards reports outages as exceptions; `fetchViesDetails()` still
-        // treats a bare `false` as an outage for calculators built before this ran.
-        if (config('vat_calculator.forward_soap_faults') !== true) {
-            config(['vat_calculator.forward_soap_faults' => true]);
-        }
+        // `vat_calculator.forward_soap_faults` is set in the service provider's
+        // register(), not here: mpociot snapshots its config in its own constructor, and
+        // the injected instance is built before this body runs — so flipping the flag
+        // here never reached it. `fetchViesDetails()` still treats a bare `false` as an
+        // outage, which covers calculators an app resolved even earlier.
     }
 
     /**

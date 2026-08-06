@@ -264,6 +264,14 @@ class ChargeUsageOverageDirectly
         ];
         $meta['usage_overage_status'] = self::STATUS_PENDING;
 
+        // A new payment starts a new dunning cycle. The retry job leaves the counter at
+        // its maximum when it gives up, so without this reset the next period's first
+        // failure already exceeded the budget: PastDue plus customer and admin dunning
+        // after a single attempt, with no retry ladder ever again for that billable.
+        if ($paymentId !== null && $paymentId !== ($existing['payment_id'] ?? null)) {
+            unset($meta['usage_overage_attempts']);
+        }
+
         $billable->forceFill(['subscription_meta' => $meta])->save();
     }
 

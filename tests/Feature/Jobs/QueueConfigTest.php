@@ -70,3 +70,31 @@ it('routes the queued PlanChangeFailedNotification onto the configured queue', f
     expect($notification->connection)->toBe('sqs');
     expect($notification->queue)->toBe('billing-prio');
 });
+
+it('defers every queued job and notification until the transaction commits', function (): void {
+    // Nearly everything here is dispatched inside a DB::transaction. Without
+    // afterCommit a worker can dequeue before the commit: an InvoiceAvailableNotification
+    // whose invoice row does not exist yet fails firstOrFail() and lands in failed_jobs
+    // with no retry, and a RetrySubscriptionPatchJob PATCHes Mollie to a plan the
+    // transaction then rolls back.
+    $billable = TestBillable::create([
+        'name' => 'Commit Co',
+        'email' => 'commit@example.test',
+        'billing_country' => 'AT',
+    ]);
+
+    $queued = [
+        new PrepareUsageOverageJob(),
+        new PruneProcessedWebhooksJob(),
+        new ApplyScheduledChangesJob(TestBillable::class, (string) $billable->getKey()),
+        new SyncSeatsJob(TestBillable::class, (string) $billable->getKey(), 3),
+        new RevokeMollieMandateJob('cst_x', 'mdt_x'),
+        new RetryUsageOverageChargeJob(TestBillable::class, (string) $billable->getKey()),
+        new CleanupStalePendingProrataChangeJob(),
+        new PlanChangeFailedNotification($billable, 'tr_x'),
+    ];
+
+    foreach ($queued as $job) {
+        expect($job->afterCommit)->toBeTrue(get_class($job).' must be deferred until commit');
+    }
+});

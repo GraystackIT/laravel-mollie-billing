@@ -125,10 +125,12 @@ it('treats a false from the GB/HMRC branch as invalid', function (): void {
     expect(app(VatCalculationService::class)->validateVatNumber('GB123456789'))->toBeFalse();
 });
 
-it('turns forward_soap_faults on so real outages surface as exceptions', function (): void {
-    config()->set('vat_calculator.forward_soap_faults', false);
-
-    app(VatCalculationService::class);
-
+it('turns forward_soap_faults on before anything resolves a calculator', function (): void {
+    // Asserted on the booted application, not by resolving the service: mpociot
+    // snapshots its config in its own constructor, so the flag has to be set in the
+    // provider's register(). Flipping it from VatCalculationService' constructor — as
+    // this once did — happened after the injected calculator was already built, which
+    // left SoapFaults swallowed into a bare `false` and made "VIES is down"
+    // indistinguishable from "this number is invalid".
     expect(config('vat_calculator.forward_soap_faults'))->toBeTrue();
 });

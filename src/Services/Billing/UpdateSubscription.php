@@ -244,6 +244,13 @@ class UpdateSubscription
 
             $mollieSubscriptionPatched = false;
 
+            // Declared out here because the wallet adjuster below reads them outside the
+            // `instanceof Model` block that assigns them. Left unset they arrived as
+            // null, which silently turned off usage proration via
+            // WalletPlanChangeAdjuster's boundaries-explicit check.
+            $oldPeriodStart = null;
+            $oldPeriodEnd = null;
+
             if ($billable instanceof Model) {
                 $meta = $billable->getBillingSubscriptionMeta();
 

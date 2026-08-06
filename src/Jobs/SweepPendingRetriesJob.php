@@ -123,8 +123,12 @@ class SweepPendingRetriesJob implements ShouldQueue, ShouldBeUnique
         $payload = is_array($marker['intent'] ?? null) ? $marker['intent'] : $marker;
 
         // The flat shape carries no billable identity, which the job needs both for
-        // uniqueId() and to resolve the row.
-        $payload['billable_type'] ??= $billable->getMorphClass();
+        // uniqueId() and to resolve the row. It must be the configured FQCN, not
+        // getMorphClass(): under Relation::enforceMorphMap() the alias fails
+        // class_exists() in the job, resolveBillable() returns null, and both the PATCH
+        // and clearMarker() no-op — so the marker is never cleared, the sweep
+        // re-dispatches hourly forever, and Mollie keeps charging the stale amount.
+        $payload['billable_type'] ??= $billable::class;
         $payload['billable_id'] ??= $billable->getKey();
 
         RetrySubscriptionPatchJob::dispatch(

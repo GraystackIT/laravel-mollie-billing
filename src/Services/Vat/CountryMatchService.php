@@ -464,7 +464,14 @@ class CountryMatchService
     /**
      * A resolution may only pick a country the mismatch actually saw, unless the
      * operator states why. Anything else silently re-opens on the next payment
-     * because `check()` keeps comparing against the unchanged payment/IP signals.
+     * because `check()` keeps comparing against the unchanged signals.
+     *
+     * The user-declared country counts as a signal. It has to: a mismatch exists
+     * precisely because the signals disagree, so `tax_country_user` never equals
+     * payment or IP — and it is one of the two options both the portal modal and the
+     * admin screen offer. Omitting it made every choice the UI presents throw, leaving
+     * the mismatch Pending with no path to resolve it and the subscription cancelling
+     * at period end.
      */
     private function assertCountryIsResolvable(
         BillingCountryMismatch $mismatch,
@@ -472,6 +479,7 @@ class CountryMatchService
         ?string $justification,
     ): void {
         $signals = array_values(array_filter([
+            $this->normalize($mismatch->tax_country_user),
             $this->normalize($mismatch->tax_country_payment),
             $this->normalize($mismatch->tax_country_ip),
         ]));
