@@ -161,9 +161,21 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             ->chunkById(200, function ($billables): void {
                 foreach ($billables as $billable) {
                     try {
+                        // The plan-scoped fields go with the subscription. Leaving the
+                        // plan code behind kept FeatureAccess resolving its features
+                        // after access had ended — and FeatureAccess is a catalog
+                        // lookup, so this transition is the right place to end it.
+                        // Same wipe CouponService::revokeFullGrant() already performs.
+                        $meta = $billable->getBillingSubscriptionMeta();
+                        unset($meta['seat_count'], $meta['active_recurring_coupon']);
+
                         $billable->forceFill([
                             'subscription_status' => SubscriptionStatus::Expired,
                             'subscription_source' => SubscriptionSource::None,
+                            'subscription_plan_code' => null,
+                            'subscription_interval' => null,
+                            'active_addon_codes' => [],
+                            'subscription_meta' => $meta,
                         ])->save();
 
                         SubscriptionExpired::dispatch($billable);
