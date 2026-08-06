@@ -48,6 +48,19 @@ return [
     // billable country is persisted yet and the IP-based lookup yields no result.
     'default_billing_country' => env('BILLING_DEFAULT_COUNTRY', 'AT'),
 
+    'vat' => [
+        // Your own country (ISO-3166-1 alpha-2). Reverse charge under Art. 196 VAT
+        // Directive is cross-border only, so without this a customer in your own
+        // country holding a valid VAT ID is invoiced at 0% instead of domestic VAT.
+        // Falls back to invoices.seller.address.country; when neither is set the
+        // package logs a warning and grants reverse charge on VIES validity alone.
+        'seller_country' => env('BILLING_SELLER_COUNTRY'),
+
+        // Refuse reverse charge entirely while no seller country is known, instead
+        // of falling back to the pre-0.4 behaviour above.
+        'require_seller_country' => env('BILLING_REQUIRE_SELLER_COUNTRY', false),
+    ],
+
     // VAT country used when a billable has none persisted at the moment we have to
     // price something. Deliberately separate from `default_billing_country`, which
     // only pre-selects a dropdown: this one decides the rate actually charged, and

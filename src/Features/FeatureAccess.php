@@ -31,6 +31,13 @@ class FeatureAccess
     /** @return array<int, string> */
     public function resolveFeatures(Billable $billable): array
     {
+        // The plan code outlives the subscription — it survives expiry, a lapsed
+        // access grant and past_due — so gating on it alone kept @planFeature and
+        // the billing.feature middleware open long after access had ended.
+        if (! $billable->hasAccessibleBillingSubscription()) {
+            return [];
+        }
+
         $planCode = $billable->getBillingSubscriptionPlanCode();
 
         $features = $planCode ? $this->catalog->planFeatures($planCode) : [];

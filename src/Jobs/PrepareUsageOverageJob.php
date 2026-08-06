@@ -306,6 +306,19 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
 
     private function safeCharge(Model $billable, ChargeUsageOverageDirectly $chargeService): void
     {
+        // An open charge already covers these balances. Creating a second one would
+        // double-collect, because the wallets stay negative until the first payment
+        // settles — with SEPA that is days, not seconds.
+        $pending = $chargeService->pendingCharge($billable);
+        if ($pending !== null && ! $chargeService->pendingChargeIsSettled($billable)) {
+            Log::info('PrepareUsageOverageJob: overage charge already in flight, skipping', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $pending['payment_id'] ?? null,
+            ]);
+
+            return;
+        }
+
         $hasOverage = false;
         foreach ($billable->wallets()->get() as $wallet) {
             if ((int) $wallet->balanceInt < 0) {

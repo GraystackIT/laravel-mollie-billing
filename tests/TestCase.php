@@ -60,6 +60,8 @@ abstract class TestCase extends Orchestra
     {
         BillingRoute::flush();
         MollieBilling::flushNotificationMap();
+        MollieBilling::flushCallbacks();
+        MollieBilling::resetFake();
         parent::tearDown();
     }
 }

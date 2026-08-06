@@ -104,6 +104,11 @@ class MollieWebhookController extends Controller
         try {
             $this->route($payment, $billable);
 
+            // Only now is a paid first payment truly done. Clearing the marker
+            // earlier made a billable whose activation threw look abandoned to
+            // CleanupOrphanedBillablesJob.
+            $this->clearPendingFirstPaymentAfterSuccess($payment, $billable);
+
             $reservation->update([
                 'event_signature' => $outcome,
                 'processed_at' => BillingTime::nowUtc(),
@@ -119,6 +124,26 @@ class MollieWebhookController extends Controller
 
             $reservation->delete();
             return response('', 500);
+        }
+    }
+
+    /**
+     * Drop the "waiting for payment" marker the return page polls, once the paid
+     * handlers have actually run. Non-terminal states never reach here and the
+     * failed states are cleared in route(); this covers `paid`, where clearing
+     * too early is what let CleanupOrphanedBillablesJob delete a paying customer
+     * whose activation had thrown.
+     */
+    protected function clearPendingFirstPaymentAfterSuccess(object $payment, ?Billable $billable): void
+    {
+        if ($billable === null || ($payment->status ?? null) !== 'paid') {
+            return;
+        }
+
+        $pendingId = $billable->getPendingFirstPaymentId();
+
+        if ($pendingId !== null && $pendingId === (string) ($payment->id ?? '')) {
+            $billable->clearPendingFirstPayment();
         }
     }
 
@@ -225,12 +250,13 @@ class MollieWebhookController extends Controller
             'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
         ]);
 
-        // Clear the pending-first-payment marker as soon as Mollie reports a
-        // terminal state for that exact payment, regardless of branch. The
-        // "waiting for payment" return page reads this to decide whether to
-        // keep polling — leaving it set after a final state would extend the
-        // poll loop unnecessarily.
-        if ($billable !== null && in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
+        // Clear the marker for the states where nothing follows. Deliberately NOT
+        // for `paid`: the paid handlers still have to activate the subscription, and
+        // if that throws we return 200 anyway — a billable left at New/None with a
+        // paid invoice and a live mandate then looks abandoned to
+        // CleanupOrphanedBillablesJob, which used to delete it and revoke the
+        // mandate. On `paid` the handler clears it once activation succeeded.
+        if ($billable !== null && in_array($status, ['failed', 'canceled', 'expired'], true)) {
             $pendingId = $billable->getPendingFirstPaymentId();
             if ($pendingId !== null && $pendingId === (string) ($payment->id ?? '')) {
                 $billable->clearPendingFirstPayment();

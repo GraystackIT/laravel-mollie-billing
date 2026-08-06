@@ -27,6 +27,7 @@ use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Services\Billing\SyncSeats;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
@@ -748,16 +749,16 @@ trait HasBilling
     }
 
     /**
-     * Whether reverse-charge applies for this billable: a persisted VIES
-     * validation marked valid=true exists for the current VAT number.
+     * Whether reverse-charge applies for this billable.
      *
-     * Drives UI price display (B2B sees net, B2C sees gross). The actual
-     * VAT calculation in VatCalculationService::calculate() reads the same
-     * state independently.
+     * Drives UI price display (B2B sees net, B2C sees gross) and therefore
+     * delegates to the same decision the charge uses — a valid VIES row alone is
+     * not enough, since a domestic B2B supply carries domestic VAT. Deciding it
+     * here independently is how the label came to disagree with the amount.
      */
     public function usesReverseCharge(): bool
     {
-        return $this->currentVatValidation()?->valid === true;
+        return app(VatCalculationService::class)->reverseChargeApplies($this);
     }
 
     // ── Plan metadata ──

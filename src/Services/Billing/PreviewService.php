@@ -458,8 +458,7 @@ class PreviewService
             'vatRate' => $vat['rate'],
             'vatAmount' => $vat['vat'],
             'grossTotal' => $vat['gross'],
-            'reverseCharge' => abs((float) $vat['rate']) < 0.001
-                && $billable->currentVatValidation()?->valid === true,
+            'reverseCharge' => $this->vatService->reverseChargeApplies($billable, $country),
             'lineItems' => $lineItems,
             'warnings' => $warnings,
             'errors' => $errors,

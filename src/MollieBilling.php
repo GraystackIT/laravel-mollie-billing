@@ -365,6 +365,28 @@ class MollieBilling
         self::$notificationMap = [];
     }
 
+    /**
+     * Reset every app-supplied callback. These live in statics, so in a test run
+     * they outlive the application instance that registered them: a closure that
+     * still queries a rolled-back billable then decides authorization and billable
+     * resolution for unrelated later tests, which is why failures moved around as
+     * file order changed. Call from tearDown().
+     */
+    public static function flushCallbacks(): void
+    {
+        self::$authCallback = null;
+        self::$resolveBillableCallback = null;
+        self::$notifyBillingAdminsCallback = null;
+        self::$notifyAdminCallback = null;
+        self::$ipGeolocationCallback = null;
+        self::$createBillableCallback = null;
+        self::$beforeCheckoutCallback = null;
+        self::$afterCheckoutCallback = null;
+        self::$checkoutStepsCallback = null;
+        self::$urlParametersCallback = null;
+        self::$cleanupOrphanedBillableCallback = null;
+    }
+
     public static function checkoutUrl(?string $backUrl = null, ?string $plan = null, ?string $interval = null): string
     {
         $params = [];

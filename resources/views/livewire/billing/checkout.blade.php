@@ -536,7 +536,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
      */
     public function showsNetPrices(): bool
     {
-        return $this->vatNumberValid === true && filled($this->vat_number);
+        if ($this->vatNumberValid !== true || ! filled($this->vat_number)) {
+            return false;
+        }
+
+        // A valid VAT number is not enough — a domestic B2B supply carries domestic
+        // VAT, so showing net here would promise a price we then charge gross.
+        return ! CountryResolver::sameCountry(
+            $this->billing_country,
+            app(VatCalculationService::class)->sellerCountry(),
+        );
     }
 
     public function vatRate(VatCalculationService $vat): float
