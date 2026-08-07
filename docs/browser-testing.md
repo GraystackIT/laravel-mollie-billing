@@ -16,6 +16,20 @@ composer browser:gallery    # build screenshots/index.html
 open tests/Browser/screenshots/index.html
 ```
 
+> **`composer install` now needs Flux Pro credentials.** `livewire/flux-pro` is a
+> `require-dev` dependency (from the `composer.fluxui.dev` repository declared in
+> `composer.json`), because there is no way to render a portal screen without it.
+> Put your licence in an `auth.json` next to `composer.json` — it is gitignored:
+>
+> ```json
+> { "http-basic": { "composer.fluxui.dev": { "username": "you@example.com", "password": "YOUR-LICENCE-KEY" } } }
+> ```
+>
+> Without it, `composer install` fails on that package. `composer install --no-dev`
+> works but leaves you unable to run any test suite. CI that only needs the feature
+> suite still has to supply the credential, or install with `--no-dev` plus the
+> handful of test packages it actually uses.
+
 ## Why this exists alongside the feature suite
 
 The feature suite runs on Orchestra Testbench with an in-memory SQLite database and
