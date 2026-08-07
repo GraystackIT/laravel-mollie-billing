@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 
 class PreviewService
@@ -314,6 +315,34 @@ class PreviewService
             $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
         }
 
+        // The gross of the recurring total, with VAT per line — not one rounding over
+        // the summed net that `calculate()` returns.
+        //
+        // `grossTotal` is not only displayed: the Local→Mollie upgrade charges exactly
+        // this figure (`plan-change.blade.php::confirmAndPay()`). The webhook that
+        // books it rebuilds the same lines and sums their per-line VAT, so the two
+        // roundings disagreed — 4 lines at 5.50 € and 19 % charge 26.18 while the
+        // invoice books 26.20. That fired PaymentAmountMismatch on a legitimate
+        // payment and, worse, left `refundFully()` asking Mollie for more than the
+        // payment held, so the refund was rejected and the invoice could never be
+        // closed out. `recurringLineNets()` is the declared authority for this
+        // breakdown (see CreateSubscription), so the charge, the Mollie subscription
+        // amount and the invoice now all round the same way.
+        $recurringGross = BillingMoney::grossWithLineVat(
+            MollieSubscriptionPatcher::recurringLineNets(
+                $this->catalog,
+                $billable,
+                $newPlan,
+                $newInterval,
+                // Codes, not the code => quantity map: SubscriptionAmount::lineItems()
+                // iterates the values and reads each quantity off the billable.
+                array_keys($newAddons),
+                max(0, $newSeats - $newIncludedSeats),
+                $netForRecurring,
+            ),
+            (float) $vat['rate'],
+        );
+
         // VAT on prorata amount (due now). Always derived from the invoice that
         // paid for the current period — see UpdateSubscription::prorataVat().
         // Falls back to the live billable VAT only when no period invoice exists
@@ -464,8 +493,8 @@ class PreviewService
             'usageOverageChargeGross' => $usageOverageChargeGross,
             'couponDiscountNet' => $couponDiscountNet,
             'vatRate' => $vat['rate'],
-            'vatAmount' => $vat['vat'],
-            'grossTotal' => $vat['gross'],
+            'vatAmount' => $recurringGross - $netForRecurring,
+            'grossTotal' => $recurringGross,
             'reverseCharge' => $this->vatService->reverseChargeApplies($billable, $country),
             'lineItems' => $lineItems,
             'warnings' => $warnings,

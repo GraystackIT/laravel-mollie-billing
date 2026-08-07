@@ -198,6 +198,45 @@ class WebhookSupport
     }
 
     /**
+     * Take the billable's row lock for an activation gate, ignoring the app's
+     * BillingScope.
+     *
+     * `newQuery()` applies that scope, and the webhook controller deliberately
+     * resolves billables *without* it ("losing a payment webhook is worse than
+     * enforcing the filter"). For a billable the app's `applyBillingScope()`
+     * filters out, the locking `first()` therefore matched nothing and **no lock
+     * was taken at all** — silently, since nobody inspects the result. Two
+     * deliveries for different payments could then interleave through the gate,
+     * both find no claim, and create two Mollie subscriptions: exactly the race
+     * the gate exists to prevent, reopened for every multi-tenant app that
+     * defines a scope.
+     *
+     * Must run inside the caller's transaction.
+     *
+     * @throws \RuntimeException when the row is gone — a caller holding no lock
+     *                           must not proceed to activate.
+     */
+    public function lockBillableRow(Billable $billable): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $locked = $billable->newQueryWithoutScopes()
+            ->whereKey($billable->getKey())
+            ->lockForUpdate()
+            ->first();
+
+        if ($locked === null) {
+            throw new \RuntimeException(
+                'Cannot lock billable '.$billable->getKey().' for activation — row not found.'
+            );
+        }
+
+        $billable->refresh();
+    }
+
+    /**
      * Durably claim the right to activate a subscription for this billable.
      *
      * Must run inside the caller's row-lock transaction, after the invoice and

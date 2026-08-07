@@ -170,8 +170,7 @@ class MandateOnlyPaymentHandler
     {
         /** @var Model&Billable $billable */
         return DB::transaction(function () use ($payment, $billable, $paymentId): ActivationGate {
-            $billable->newQuery()->whereKey($billable->getKey())->lockForUpdate()->first();
-            $billable->refresh();
+            $this->support->lockBillableRow($billable);
 
             if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
                 return ActivationGate::AlreadyBooked;
