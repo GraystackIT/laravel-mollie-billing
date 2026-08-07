@@ -878,6 +878,25 @@ is memoised per application instance, and the package's callbacks
 (`resolveBillableUsing()`, `authUsing()`, …) live in statics that otherwise outlive the
 test that registered them.
 
+### Browser tests
+
+The package also ships a **Chrome end-to-end suite** that drives the real checkout,
+portal and admin UI against a fake Mollie — 31 scenarios from signup through renewals,
+plan changes, overage, VAT numbers and the country mismatch, each one screenshotted
+into a browsable gallery. It lives outside the default run because it needs Chrome and
+a Flux Pro licence:
+
+```bash
+composer browser:driver    # once: ChromeDriver for your Chrome
+composer browser:assets    # once (and after view changes): Vite build
+composer test:browser
+composer browser:gallery && open tests/Browser/screenshots/index.html
+```
+
+This is the only suite that can render a portal screen at all: Flux Pro ships under
+`suggest` (commercial licence), so the feature suite above runs without it. See
+[docs/browser-testing.md](docs/browser-testing.md).
+
 ## Commands
 
 ```bash
@@ -930,6 +949,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
 - [Audit Trail](docs/audit.md) — per-billable timeline, localizable storage format, categories, retention, adding new events
 - [Testing Lifecycle Flows](docs/testing-flows.md) — `billing:simulate` and `billing:webhook-replay` for reproducing every lifecycle transition on staging
+- [Browser Testing](docs/browser-testing.md) — the Chrome end-to-end suite: workbench app, fake Mollie, writing scenarios, screenshot gallery
 
 ## Architecture
 

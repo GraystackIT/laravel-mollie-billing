@@ -17,7 +17,20 @@ composer install
 ./vendor/bin/pest --compact                             # full suite
 ./vendor/bin/pest --compact --filter=WalletUsage        # one test file / pattern
 ./vendor/bin/pest tests/Feature/Subscription/UpdateSubscriptionTest.php
+
+composer test:browser                                   # Chrome end-to-end suite
+composer browser:assets                                 # rebuild Vite assets first
+composer browser:gallery                                # screenshots → index.html
 ```
+
+The browser suite (`tests/Browser/`) is separate on purpose: it needs Chrome and a
+Flux Pro licence, and `phpunit.xml.dist` deliberately does not list it. It is the only
+suite that renders a portal screen — Flux ships under `suggest`, so the feature suite
+runs without it. Browser tests are plain PHPUnit classes, never Pest closures: the Dusk
+server boots its app by instantiating the originating test class by name, and Pest's
+evaluated `P\Tests\…` classes do not exist in that second process. Mollie is faked at
+the SDK's own `HttpAdapterContract` seam against a shared SQLite file, so both processes
+see one world. See `docs/browser-testing.md`.
 
 Tests run on Orchestra Testbench against an in-memory SQLite DB. `tests/TestCase.php` boots the package providers (VAT calculator, bavix/laravel-wallet, MollieBilling) and registers `TestBillable` as the billable model. `RefreshDatabase` plus `tests/database/migrations` provide the schema. There is no separate lint/build step.
 

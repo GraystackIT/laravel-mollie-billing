@@ -49,7 +49,16 @@ class BillingDataTest extends BrowserTestCase
             $browser->waitFor('input[name="vat_number"]', 10)->pause(400);
 
             // DE129273398 is on the fake VIES allow-list.
-            $browser->type('vat_number', 'DE129273398')->pause(1500);
+            // Wait for the VERDICT, not for a stopwatch: the input is debounced by
+            // 500ms and then asks VIES, so a fixed pause raced the answer under load
+            // and the save went out with an unvalidated number.
+            // The page's verdict is an ICON, not a sentence: a green check for
+            // valid, a red cross for rejected. Waiting for it beats a stopwatch —
+            // the input is debounced 500ms and then asks VIES, and a fixed pause
+            // raced the answer under load, saving an unvalidated number.
+            $browser->type('vat_number', 'DE129273398');
+            $this->waitForPresence($browser, '.text-emerald-700, .dark\\:text-emerald-400', 15);
+            $browser->pause(400);
             $this->shot($browser, 'UID validiert — Reverse Charge');
 
             $this->clickWire($browser, '[wire\\:click="save"]');
@@ -81,7 +90,10 @@ class BillingDataTest extends BrowserTestCase
 
             // Not on the allow-list: the fake VIES answers `valid: false`, exactly
             // as the real service reports an unknown number.
-            $browser->type('vat_number', 'DE999999999')->pause(1500);
+            // Same reasoning: wait for the rejection to be on screen.
+            $browser->type('vat_number', 'DE999999999');
+            $this->waitForPresence($browser, '.text-red-600, .dark\\:text-red-400', 15);
+            $browser->pause(400);
             $this->shot($browser, 'UID abgelehnt');
 
             $this->clickWire($browser, '[wire\\:click="save"]');
