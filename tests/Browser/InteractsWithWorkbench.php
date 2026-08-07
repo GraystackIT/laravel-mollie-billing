@@ -187,6 +187,58 @@ trait InteractsWithWorkbench
         return $browser->pause(400);
     }
 
+    /**
+     * Open a Flux modal by name and click the action inside it.
+     *
+     * Confirm modals are the portal's pattern for anything that costs money
+     * (enable addon, buy product, cancel subscription): the button carrying the
+     * `wire:click` lives inside `<flux:modal>`, which is in the DOM from the
+     * start but hidden — clicking it directly gets an ElementNotInteractable.
+     * The trigger has to open the modal first.
+     */
+    protected function confirmInModal(Browser $browser, string $modal, string $action): Browser
+    {
+        // window.Flux.modal(name).show() rather than clicking the trigger: the
+        // trigger is a Flux wrapper whose click handler sits on a child, so
+        // targeting it by CSS is guesswork. This is Flux's own public API.
+        //
+        // Show FIRST, then wait: Dusk's waitFor() requires visibility, and the
+        // action button is hidden until the modal opens. Waiting for it before
+        // opening waits for something that is invisible by design.
+        $browser->script(sprintf('window.Flux.modal(%s).show()', json_encode($modal)));
+        $browser->waitFor($action, 10)->pause(400);
+
+        return $this->clickWire($browser, $action);
+    }
+
+    /** How many nodes match — counts hidden ones, unlike Dusk's assertions. */
+    protected function domCount(Browser $browser, string $css): int
+    {
+        return (int) $browser->script(
+            sprintf('return document.querySelectorAll(%s).length', json_encode($css))
+        )[0];
+    }
+
+    /**
+     * Wait for a node to EXIST, visible or not.
+     *
+     * Dusk's waitFor() requires visibility, which makes it useless for anything
+     * inside a Flux confirm modal: the markup is in the DOM from the start and
+     * only becomes visible when the modal opens. "Is the disable-addon action
+     * present?" is a question about the DOM, not about what is on screen.
+     */
+    protected function waitForPresence(Browser $browser, string $css, int $seconds = 10): Browser
+    {
+        return $browser->waitUsing($seconds, 100, fn (): bool => $this->domCount($browser, $css) > 0,
+            "Waited {$seconds}s for [{$css}] to appear in the DOM.");
+    }
+
+    protected function waitForAbsence(Browser $browser, string $css, int $seconds = 10): Browser
+    {
+        return $browser->waitUsing($seconds, 100, fn (): bool => $this->domCount($browser, $css) === 0,
+            "Waited {$seconds}s for [{$css}] to disappear from the DOM.");
+    }
+
     /** Wait until the browser's URL path contains the fragment. */
     protected function waitForPathContains(Browser $browser, string $fragment, int $seconds = 15): Browser
     {
