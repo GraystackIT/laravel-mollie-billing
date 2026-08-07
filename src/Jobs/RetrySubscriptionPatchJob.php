@@ -18,6 +18,7 @@ use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -156,6 +157,28 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
             $this->resetRecurringAmount($patcher, $coupons);
         } else {
             $intent = PlanChangeIntent::fromArray($this->intentData);
+
+            // The local state is authoritative, and this chain backs off for up to 52
+            // hours. A newer plan change can land in that window and PATCH Mollie
+            // successfully — nothing clears this marker or stops this chain — and
+            // `updateForIntent()` prices from the STORED intent, not from live state. So
+            // the retry PATCHed Mollie back to the superseded plan and then cleared its
+            // own marker because the signature still matched: local plan C, Mollie
+            // collecting B's price every period, nothing left for the sweep to find. The
+            // renewal handler reconciles each invoice down to whatever cleared, so it
+            // never self-healed either.
+            if (! $this->intentIsStillCurrent($intent)) {
+                Log::info('Skipping a superseded subscription PATCH retry — the billable has moved on', [
+                    'billable_id' => $intent->billable instanceof Model ? $intent->billable->getKey() : null,
+                    'intent_plan' => $intent->newPlan,
+                    'intent_interval' => $intent->newInterval,
+                ]);
+
+                $this->clearMarker();
+
+                return;
+            }
+
             $patcher->updateForIntent($intent->billable, $intent);
         }
 
@@ -171,6 +194,51 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
     public function failed(?Throwable $exception): void
     {
         $this->giveUp();
+    }
+
+    /**
+     * Whether the stored intent still describes where the billable actually is.
+     *
+     * Compared against the live row, because that is what the customer sees and pays
+     * for. Seats are read from the same accessor the patcher would use, and addons
+     * compared as sets — order is not meaningful.
+     */
+    private function intentIsStillCurrent(PlanChangeIntent $intent): bool
+    {
+        $billable = $intent->billable;
+
+        if (! ($billable instanceof Model)) {
+            return true;
+        }
+
+        $billable->refresh();
+
+        if ((string) ($billable->getBillingSubscriptionPlanCode() ?? '') !== $intent->newPlan) {
+            return false;
+        }
+
+        if ((string) ($billable->getBillingSubscriptionInterval() ?? '') !== $intent->newInterval) {
+            return false;
+        }
+
+        // Only when the row states a seat count explicitly. `getBillingSeatCount()`
+        // falls back to the plan's `included_seats`, so a billable that never bought an
+        // extra seat reports the plan default — which an intent built before a plan
+        // change legitimately does not carry. Treating that as "superseded" would skip a
+        // retry that should run, leaving Mollie on the OLD amount: the exact harm this
+        // guard exists to prevent, inverted.
+        $storedSeats = $billable->getBillingSubscriptionMeta()['seat_count'] ?? null;
+
+        if ($storedSeats !== null && (int) $storedSeats !== $intent->newSeats) {
+            return false;
+        }
+
+        $live = $billable->getActiveBillingAddonCodes();
+        $wanted = array_keys($intent->newAddons);
+        sort($live);
+        sort($wanted);
+
+        return $live === $wanted;
     }
 
     /**

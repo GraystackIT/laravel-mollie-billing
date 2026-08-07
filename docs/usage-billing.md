@@ -115,6 +115,19 @@ On each billing period renewal (Mollie webhook payment or local subscription res
 
 In both cases, purchased credits that were not consumed survive the renewal.
 
+### An unpaid overage debt survives the renewal
+
+A negative balance is unpaid debt, and the reset does **not** forgive it while the charge for exactly those units is still settling. It used to: the reset zeroed the debt, then the overage payment's webhook credited the charged quantity on top, so every overage cycle handed the customer that quantity as free units. With SEPA the renewal usually settles first, because Mollie creates the renewal about two days ahead while the overage charge is created the day before it.
+
+| Period | Action | Balance |
+|--------|--------|---------|
+| Month 1 | Quota 100, used 137 | −37 |
+| Month 1, day 29 | Overage charge created for 37 units (unsettled) | −37 |
+| Month 2 start | Reset **keeps the debt**, credits 100 | 63 |
+| Month 2, day 2 | Overage payment settles, credits 37 | 100 |
+
+Decided per usage type, from the pending-charge snapshot: a type the charge did not cover gets its ordinary reset, and a cycle that already gave up (status `failed`) is not "in flight" — that debt was written off with the past-due transition, so preserving it would strand the wallet negative forever.
+
 ### Examples
 
 **Without rollover, no purchased credits** (`usage_types.<type>.rollover = false`):

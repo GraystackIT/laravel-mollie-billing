@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
+use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -281,17 +282,35 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     private function autoCancel(Model $billable, string $pastDueSince): void
     {
         /** @var Model&Billable $billable */
-        $billable->forceFill([
-            'subscription_status' => SubscriptionStatus::Cancelled,
-            'subscription_ends_at' => BillingTime::nowUtc(),
-        ])->save();
 
-        SubscriptionCancelled::dispatch($billable, true);
+        // Through CancelSubscription, not by hand. This used to force-fill the status
+        // and dispatch the event, which the comment called "the same way
+        // CancelSubscription does" — but only the status, the event and the
+        // notification matched. The Mollie subscription was never cancelled, so it kept
+        // collecting: a yearly subscriber whose overage dunning gave up was cancelled
+        // locally, expired by the next pass, and then charged the full yearly price at
+        // the anniversary, booking an invoice for a billable with no access at all. The
+        // `pending_subscription_cancel` retry marker and the `scheduled_change` wipe
+        // were missing too.
+        //
+        // CancelSubscription sends the customer notification itself, so this no longer
+        // does. A failure to reach Mollie is recorded and retried in there, which is
+        // exactly the behaviour that was missing.
+        try {
+            app(CancelSubscription::class)->handle(
+                $billable,
+                immediately: true,
+                reason: 'past_due_auto_cancel',
+            );
+        } catch (\Throwable $e) {
+            Log::error('PrepareUsageOverageJob: auto-cancel failed', [
+                'billable_id' => $billable->getKey(),
+                'past_due_since' => $pastDueSince,
+                'error' => $e->getMessage(),
+            ]);
 
-        $this->notifyBillable(
-            $billable,
-            MollieBilling::resolveNotification(SubscriptionCancelledNotification::class, $billable),
-        );
+            return;
+        }
 
         Log::info('PrepareUsageOverageJob: auto-cancelled past_due billable', [
             'billable_id' => $billable->getKey(),

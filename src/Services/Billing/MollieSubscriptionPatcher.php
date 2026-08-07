@@ -52,8 +52,16 @@ class MollieSubscriptionPatcher
 
         // Preserve any active recurring coupon discount across plan/seat/addon
         // changes — otherwise the PATCH would silently undo the campaign price.
+        // Through CouponService, which is the only place that knows whether the marker
+        // is still redeemable. This mirror checked existence only, so a coupon an admin
+        // had deactivated — the documented way to resolve a `recurring_conflict` — or
+        // one whose window had closed but whose renewal had not run yet was re-applied
+        // to Mollie by any seat, addon or plan PATCH. Mollie then collected the
+        // discounted amount for at least one more period, the invoice reconciled down to
+        // it, and PaymentAmountMismatch fired on a payment nobody had asked to discount.
         $couponDiscountNet = 0;
         $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
         if (is_array($marker)) {
             $baseNet = SubscriptionAmount::net(
                 $this->catalog,
@@ -63,7 +71,7 @@ class MollieSubscriptionPatcher
                 $totalSeats,
                 $newAddons,
             );
-            $couponDiscountNet = $this->markerDiscount($marker, $baseNet);
+            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $baseNet);
         }
 
         $this->updateRecurringAmount(
@@ -107,30 +115,6 @@ class MollieSubscriptionPatcher
      *
      * @param  array<string,mixed>  $marker
      */
-    private function markerDiscount(array $marker, int $netAmount): int
-    {
-        if ($netAmount <= 0) {
-            return 0;
-        }
-
-        $type = (string) ($marker['discount_type'] ?? '');
-        $value = (int) ($marker['discount_value'] ?? 0);
-
-        $baseAmount = isset($marker['base_amount_net'])
-            ? min((int) $marker['base_amount_net'], $netAmount)
-            : $netAmount;
-
-        if ($type === 'percentage') {
-            return (int) round($baseAmount * $value / 100);
-        }
-
-        if ($type === 'fixed') {
-            return min($value, $baseAmount);
-        }
-
-        return 0;
-    }
-
     /**
      * PATCH the Mollie subscription with the new aggregated recurring amount.
      *

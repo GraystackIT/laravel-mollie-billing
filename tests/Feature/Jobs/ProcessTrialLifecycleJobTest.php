@@ -16,6 +16,14 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Notification;
 
 beforeEach(function (): void {
+    // Midday, fixed. The notice window is a whole calendar DAY
+    // (`now + noticeDays` from startOfDay to endOfDay), while the fixtures below express
+    // "ends tomorrow" as `now + 1 day + 2 hours`. Those two only agree when the clock is
+    // far enough from midnight: run after 22:00 UTC and `now + 26h` lands on the day
+    // after the window, so the notification legitimately does not fire and the
+    // assertions failed for reasons that had nothing to do with the code under test.
+    test()->travelTo(BillingTime::nowUtc()->startOfDay()->addHours(12));
+
     Notification::fake();
     Event::fake([TrialConverted::class, TrialExpired::class]);
 

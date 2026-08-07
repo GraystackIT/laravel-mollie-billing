@@ -20,6 +20,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Notification;
 use RuntimeException;
@@ -50,10 +51,11 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
     use UsesBillingQueue;
 
     /** Terminal marker: the dunning budget is spent, the billable is past_due. */
-    public const OVERAGE_FAILED = 'failed';
+    /** @deprecated Use ChargeUsageOverageDirectly::STATUS_FAILED — kept for app listeners. */
+    public const OVERAGE_FAILED = ChargeUsageOverageDirectly::STATUS_FAILED;
 
     /** Payment ids already charged against the dunning budget. */
-    private const COUNTED_PAYMENTS_KEY = 'usage_overage_counted_payments';
+    private const COUNTED_PAYMENTS_KEY = ChargeUsageOverageDirectly::COUNTED_PAYMENTS_KEY;
 
     private const MAX_PAYMENT_ATTEMPTS = 3;
 
@@ -61,12 +63,44 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
 
     public int $tries = 3;
 
+    /**
+     * Bounded because this job creates real auto-collected payments.
+     *
+     * `ShouldBeUnique` guards dispatches, not re-deliveries: with no timeout, a hung
+     * `CreatePaymentRequest` (the SDK's own default is very generous) outlived the
+     * queue's visibility window, the job was re-delivered to a second worker, and
+     * `pendingChargeIsSettled()` was still false — so both workers created a recurring
+     * payment against the mandate and both collected. Each `paid` webhook then passed
+     * the invoice guard on its own payment id, so two invoices were written and
+     * `settleOverageWallets()` credited the quantity twice. Every sibling job that walks
+     * tables got an explicit timeout for exactly this physics; the most
+     * money-dangerous one had none.
+     *
+     * Must stay below the queue connection's `retry_after`.
+     */
+    public int $timeout = 120;
+
     public function __construct(
         public readonly string $billableClass,
         public readonly string|int $billableId,
         public int $attempt = 1,
     ) {
         $this->initializeBillingQueue();
+    }
+
+    /**
+     * @return array<int, object>
+     */
+    public function middleware(): array
+    {
+        // Belt to the timeout's braces: a re-delivery that arrives anyway waits for the
+        // in-flight run instead of racing it to Mollie. Mirrors RetryRefundLineJob,
+        // which protects the same class of hazard on the refund side.
+        return [
+            (new WithoutOverlapping($this->billableClass.':'.$this->billableId.':overage'))
+                ->releaseAfter(30)
+                ->expireAfter(600),
+        ];
     }
 
     public function uniqueId(): string
@@ -270,7 +304,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
      */
     private function giveUp(Model $billable, array $meta, Throwable $reason): void
     {
-        $meta['usage_overage_status'] = self::OVERAGE_FAILED;
+        $meta['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_FAILED;
         $meta['past_due_since'] = $meta['past_due_since']
             ?? BillingTime::nowUtc()->toIso8601String();
         $billable->forceFill([

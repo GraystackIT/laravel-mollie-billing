@@ -150,11 +150,21 @@ class WalletUsageService
      * reset: the remaining purchased balance is computed and added on
      * top of the new plan quota.
      */
-    public function resetAndCredit(Billable $billable, string $type, int $quota, string $reason = 'renewal'): void
-    {
+    /**
+     * @param  bool  $preserveDebt  Keep a negative balance instead of forgiving it.
+     *                              Pass this when an overage charge for these units is
+     *                              still in flight — see below.
+     */
+    public function resetAndCredit(
+        Billable $billable,
+        string $type,
+        int $quota,
+        string $reason = 'renewal',
+        bool $preserveDebt = false,
+    ): void {
         $previousBalance = 0;
 
-        DB::transaction(function () use ($billable, $type, $quota, &$previousBalance): void {
+        DB::transaction(function () use ($billable, $type, $quota, $preserveDebt, &$previousBalance): void {
             $wallet = $this->resolveWallet($billable, $type);
             $wallet->newQuery()->whereKey($wallet->getKey())->lockForUpdate()->first();
             $wallet->refresh();
@@ -167,11 +177,22 @@ class WalletUsageService
 
             if ($previousBalance > 0) {
                 $wallet->forceWithdraw($previousBalance, ['type' => $type, 'reason' => 'period_reset']);
-            } elseif ($previousBalance < 0) {
+            } elseif ($previousBalance < 0 && ! $preserveDebt) {
                 $wallet->deposit(abs($previousBalance), ['type' => $type, 'reason' => 'period_reset']);
             }
 
+            // The quota goes on top of whatever is left. Normally that is zero, because
+            // the branch above just levelled the wallet — but when the debt is preserved
+            // it is still negative, so the deposit lands on it: −37 + 100 = 63.
+            //
+            // A negative balance means unpaid debt, and forgiving it while the charge for
+            // exactly those units is still settling paid the customer twice: the reset
+            // zeroed the debt, then `settleOverageWallets()` credited the charged quantity
+            // on top, so every overage cycle handed out that quantity as free units. With
+            // SEPA the renewal regularly settles first, because Mollie creates it about
+            // two days ahead while the overage charge is created the day before it.
             $newBalance = $quota + $purchasedRemaining;
+
             if ($newBalance > 0) {
                 $wallet->deposit($newBalance, ['type' => $type, 'reason' => 'credit']);
             }

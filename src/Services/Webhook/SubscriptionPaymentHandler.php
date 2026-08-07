@@ -19,6 +19,7 @@ use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
@@ -39,6 +40,36 @@ class SubscriptionPaymentHandler
         protected readonly FirstPaymentCouponPricing $firstPaymentCouponPricing,
         protected readonly MollieSubscriptionPatcher $patcher,
     ) {
+    }
+
+    /**
+     * Whether an overage charge covering this usage type is created but not settled.
+     *
+     * Read off the snapshot `ChargeUsageOverageDirectly` persists, which lists exactly
+     * the line items it charged for — so a type the charge did not cover still gets its
+     * ordinary reset. A snapshot whose cycle already gave up (`STATUS_FAILED`) is not
+     * "in flight": that debt was written off with a past-due transition, and preserving
+     * it forever would keep the customer at a negative balance no settlement will clear.
+     */
+    protected function hasUnsettledOverageFor(Billable $billable, string $usageType): bool
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
+            return false;
+        }
+
+        $lines = (array) ($meta[ChargeUsageOverageDirectly::META_KEY]['line_items'] ?? []);
+
+        foreach ($lines as $line) {
+            $type = (string) ($line['type'] ?? $line['code'] ?? '');
+
+            if (strcasecmp($type, $usageType) === 0 && (int) ($line['quantity'] ?? 0) > 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -192,7 +223,19 @@ class SubscriptionPaymentHandler
 
                     $this->walletService->credit($billable, (string) $type, (int) $units, 'subscription_renewal_rollover');
                 } else {
-                    $this->walletService->resetAndCredit($billable, (string) $type, (int) $units, 'subscription_renewal');
+                    // A charge for these units may still be settling — with SEPA it
+                    // usually is, since Mollie creates the renewal about two days ahead
+                    // while the overage charge is created the day before it. Forgiving
+                    // the debt here and then crediting the charged quantity when the
+                    // overage settles handed the customer that quantity for free, every
+                    // cycle. Rollover types are unaffected: they never zero the balance.
+                    $this->walletService->resetAndCredit(
+                        $billable,
+                        (string) $type,
+                        (int) $units,
+                        'subscription_renewal',
+                        preserveDebt: $this->hasUnsettledOverageFor($billable, (string) $type),
+                    );
                 }
             } catch (\Throwable $e) {
                 Log::warning('Wallet credit failed during webhook', ['type' => $type, 'error' => $e->getMessage()]);

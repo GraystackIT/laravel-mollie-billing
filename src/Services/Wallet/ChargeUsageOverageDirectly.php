@@ -26,8 +26,22 @@ class ChargeUsageOverageDirectly
      */
     public const STATUS_PENDING = 'pending';
 
+    /**
+     * `usage_overage_status` value meaning "the dunning budget for this charge is
+     * spent". Set by RetryUsageOverageChargeJob when it gives up; the snapshot is
+     * deliberately kept so the amount stays auditable, which is why the next cycle
+     * has to recognise it as finished rather than inherit it.
+     */
+    public const STATUS_FAILED = 'failed';
+
     /** `subscription_meta` key holding the snapshot of the charge in flight. */
     public const META_KEY = 'usage_overage';
+
+    /**
+     * `subscription_meta` key under which the dunning budget records which payments
+     * of the CURRENT cycle it has already counted.
+     */
+    public const COUNTED_PAYMENTS_KEY = 'usage_overage_counted_payments';
 
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
@@ -264,6 +278,24 @@ class ChargeUsageOverageDirectly
 
         $meta = $billable->getBillingSubscriptionMeta();
         $existing = (array) ($meta[self::META_KEY] ?? []);
+
+        // A snapshot left behind by a cycle that gave up is a spent cycle, not this
+        // one. Inheriting its `created_at` kept the cycle key identical, so
+        // `usage_overage_counted_payments` still listed the three payments that had
+        // already failed — and the new period's FIRST failure appended a fourth,
+        // exceeded the budget and went straight to past_due with customer and admin
+        // dunning mail, no retry ladder at all. Unsetting `usage_overage_attempts`
+        // (below) never helped: the budget is derived from that id list, and the list
+        // was still considered current.
+        //
+        // Within one cycle the inheritance is exactly right — p1 → p2 → p3 must keep
+        // accumulating — so this only fires when the previous cycle is finished.
+        $previousCycleSpent = ($meta['usage_overage_status'] ?? null) === self::STATUS_FAILED;
+
+        if ($previousCycleSpent) {
+            $existing = [];
+            unset($meta[self::COUNTED_PAYMENTS_KEY], $meta['usage_overage_attempts']);
+        }
 
         $meta[self::META_KEY] = [
             'payment_id' => $paymentId ?? ($existing['payment_id'] ?? null),
