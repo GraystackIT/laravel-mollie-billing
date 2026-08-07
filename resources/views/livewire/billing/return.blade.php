@@ -207,6 +207,13 @@ new class extends Component {
         if (in_array($status, ['failed', 'canceled', 'expired'], true)) {
             $this->failed = true;
             $this->failureReason = $status;
+
+            // The marker led this probe to the payment; the webhook leaves it in
+            // place for exactly that (see MollieWebhookController). Now that the
+            // failure has been surfaced, this page is its last consumer — clear
+            // it so a later checkout attempt starts from a clean slate.
+            $billable->clearPendingFirstPayment();
+
             return;
         }
 

@@ -37,7 +37,7 @@
                 <div class="min-w-0 flex-1">
                     <flux:heading size="sm">{{ __('billing::checkout.extra_seats') }}</flux:heading>
                     <flux:text class="text-sm">
-                        {{ __('billing::checkout.seats_included', ['count' => $plan['included_seats'] ?? 0]) }}
+                        {{ trans_choice('billing::checkout.seats_included', (int) ($plan['included_seats'] ?? 0), ['count' => $plan['included_seats'] ?? 0]) }}
                     </flux:text>
                     <flux:text class="text-sm">
                         {{ __('billing::checkout.extra_seat_price') }}

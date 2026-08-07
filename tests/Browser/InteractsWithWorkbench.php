@@ -97,6 +97,142 @@ trait InteractsWithWorkbench
     }
 
     /**
+     * A billable mid-life: active Mollie subscription, mandate, filled wallets —
+     * as if a checkout had happened long ago. Scenarios that test what comes
+     * AFTER subscribing start here instead of clicking through checkout again;
+     * the checkout itself has its own scenarios.
+     */
+    protected function makeActiveSubscriber(
+        string $plan = 'starter',
+        string $interval = 'monthly',
+        array $overrides = [],
+    ): TestBillable {
+        $customerId = WorkbenchSetting::nextId('cst');
+        DB::table('fake_mollie_customers')->insert([
+            'id' => $customerId, 'name' => 'Acme GmbH', 'email' => 'acme@workbench.test',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $mandateId = FakeMollie::createMandate($customerId);
+
+        $subscriptionId = WorkbenchSetting::nextId('sub');
+        $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
+        $net = (int) $catalog->basePriceNet($plan, $interval);
+        DB::table('fake_mollie_subscriptions')->insert([
+            'id' => $subscriptionId, 'customer_id' => $customerId, 'status' => 'active',
+            'amount_value' => number_format($net * 1.19 / 100, 2, '.', ''), 'amount_currency' => 'EUR',
+            'interval' => $interval === 'yearly' ? '12 months' : '1 month',
+            'description' => 'Workbench subscription', 'mandate_id' => $mandateId,
+            'metadata' => json_encode([]), 'start_date' => now()->toDateString(),
+            'next_payment_date' => now()->addMonth()->toDateString(),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $billable = $this->makeBillable(array_merge([
+            'billing_street' => 'Musterweg 12',
+            'billing_postal_code' => '10115',
+            'billing_city' => 'Berlin',
+            'billing_country' => 'DE',
+            'tax_country_user' => 'DE',
+            'tax_country_payment' => 'DE',
+            'mollie_customer_id' => $customerId,
+            'mollie_mandate_id' => $mandateId,
+            'subscription_plan_code' => $plan,
+            'subscription_interval' => $interval,
+            'subscription_source' => \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie,
+            'subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Active,
+            'subscription_period_starts_at' => now()->subDays(10),
+            'subscription_meta' => ['mollie_subscription_id' => $subscriptionId],
+        ], $overrides));
+
+        foreach ($catalog->includedUsages($plan, $interval) as $type => $quantity) {
+            if ((int) $quantity > 0) {
+                app(\GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::class)
+                    ->credit($billable, (string) $type, (int) $quantity, 'workbench_seed');
+            }
+        }
+
+        return $billable->refresh();
+    }
+
+    /**
+     * Click that survives a Livewire rerender between find and click. wire:poll
+     * and wire:model.live can swap the node out at exactly the wrong moment —
+     * the retry re-finds the (new) element instead of failing on the stale one.
+     */
+    protected function clickWire(Browser $browser, string $selector): Browser
+    {
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                return $browser->click($selector);
+            } catch (\Facebook\WebDriver\Exception\StaleElementReferenceException|\Facebook\WebDriver\Exception\ElementClickInterceptedException $e) {
+                if ($attempt >= 4) {
+                    throw $e;
+                }
+
+                $browser->pause(250);
+            }
+        }
+    }
+
+    /**
+     * Click via JS — for inputs Flux renders visually hidden behind its own
+     * control (checkboxes, radios), which WebDriver refuses to click natively.
+     */
+    protected function jsClick(Browser $browser, string $css): Browser
+    {
+        $browser->waitFor($css, 10);
+        $browser->script(sprintf('document.querySelector(%s).click()', json_encode($css)));
+
+        return $browser->pause(400);
+    }
+
+    /** Wait until the browser's URL path contains the fragment. */
+    protected function waitForPathContains(Browser $browser, string $fragment, int $seconds = 15): Browser
+    {
+        return $browser->waitUsing($seconds, 100, function () use ($browser, $fragment): bool {
+            return str_contains((string) parse_url($browser->driver->getCurrentURL(), PHP_URL_PATH), $fragment);
+        }, "Waited {$seconds}s for path to contain [{$fragment}].");
+    }
+
+    /**
+     * The checkout's billing-details step, filled the way the founding scenario
+     * established. Only useful while the step is actually visible.
+     */
+    protected function fillBillingStep(Browser $browser, string $country = 'DE', ?string $vatNumber = null): Browser
+    {
+        $browser->waitFor('input[name="company_name"]', 10)
+            ->type('company_name', 'Acme GmbH')
+            ->type('billing_street', 'Musterweg 12')
+            ->type('billing_postal_code', '10115')
+            ->type('billing_city', 'Berlin')
+            ->select('billing_country', $country);
+
+        if ($vatNumber !== null) {
+            $browser->type('vat_number', $vatNumber);
+        }
+
+        return $browser->pause(600);
+    }
+
+    /** Settle the fake-Mollie hosted page the browser is currently on. */
+    protected function settleAtFakeMollie(Browser $browser, string $outcome = 'paid', string $country = 'DE'): Browser
+    {
+        $this->waitForPathContains($browser, '/fake-mollie/checkout/');
+        $browser->waitFor('@fake-mollie-pay', 10)
+            ->select('country', $country);
+
+        $this->shot($browser, 'Fake-Mollie: '.$outcome);
+
+        return $browser->click('@fake-mollie-'.match ($outcome) {
+            'paid' => 'pay',
+            'failed' => 'fail',
+            'canceled' => 'cancel',
+            'expired' => 'expire',
+        });
+    }
+
+    /**
      * Full-height screenshot plus a manifest line for the HTML gallery. The
      * label reads as a step caption — write it for the human flipping through.
      */

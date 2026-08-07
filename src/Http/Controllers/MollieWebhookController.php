@@ -263,18 +263,20 @@ class MollieWebhookController extends Controller
             'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
         ]);
 
-        // Clear the marker for the states where nothing follows. Deliberately NOT
-        // for `paid`: the paid handlers still have to activate the subscription, and
-        // if that throws we return 200 anyway — a billable left at New/None with a
-        // paid invoice and a live mandate then looks abandoned to
-        // CleanupOrphanedBillablesJob, which used to delete it and revoke the
-        // mandate. On `paid` the handler clears it once activation succeeded.
-        if ($billable !== null && in_array($status, ['failed', 'canceled', 'expired'], true)) {
-            $pendingId = $billable->getPendingFirstPaymentId();
-            if ($pendingId !== null && $pendingId === (string) ($payment->id ?? '')) {
-                $billable->clearPendingFirstPayment();
-            }
-        }
+        // The pending-first-payment marker survives EVERY webhook outcome here.
+        // On `paid` deliberately: the paid handlers still have to activate the
+        // subscription, and if that throws we return 200 anyway — a billable left
+        // at New/None with a paid invoice and a live mandate then looks abandoned
+        // to CleanupOrphanedBillablesJob, which used to delete it and revoke the
+        // mandate; the handler clears it once activation succeeded. And on
+        // `failed`/`canceled`/`expired` too: the webhook nearly always beats the
+        // customer's redirect, and the return page's failure probe finds the
+        // payment through exactly this marker — clearing it here left the customer
+        // staring at the "activating…" spinner until the poll timeout instead of
+        // seeing "payment failed, try again". The return page clears the marker
+        // itself once it has shown the failure, and CleanupOrphanedBillablesJob
+        // treats a billable WITH the marker more carefully, not less: it polls
+        // Mollie and only cleans on a terminal failure status.
 
         if ($status === 'paid') {
             if ($billable === null) {
