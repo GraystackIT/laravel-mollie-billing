@@ -115,7 +115,36 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // billing-address fields and lock the billing step. The controller
         // already redirects away when an active subscription exists, so this
         // branch only runs for billables without an accessible subscription.
+        //
         $existing = MollieBilling::resolveBillable(request());
+
+        // Reads need the same authorization the writes have always had. On a package
+        // route `resolveBillable()` falls back to matching any unreserved query
+        // parameter against a billable's route key, so `?org=<victim-key>` resolved a
+        // stranger — and this branch then rendered their company name, street, city
+        // and VAT number read-only on the confirm step. That was the one half of this
+        // component which never asked `authorizes()`.
+        //
+        // Identity and data are separated deliberately. The ($billableId, $billableClass)
+        // pair says who this checkout is *for*, and `submit()` authorizes against it —
+        // so a team member who is not the billing manager still gets a 403 there rather
+        // than silently having a second billable created. What must not happen is
+        // copying the fields, because that is the disclosure. A query-parameter guess
+        // is dropped entirely: it was never a statement about this visitor.
+        $refused = $existing !== null && ! MollieBilling::authorizes(request(), $existing);
+
+        if ($refused && MollieBilling::resolveBillableFromCallback(request()) === null) {
+            $existing = null;
+            $refused = false;
+        }
+
+        if ($refused) {
+            /** @var Model&Billable $existing */
+            $this->billableId = (string) $existing->getKey();
+            $this->billableClass = $existing->getMorphClass();
+            $existing = null;
+        }
+
         if ($existing !== null && $this->hasPersistedBillingData($existing)) {
             $this->billableId = (string) $existing->getKey();
             $this->billableClass = $existing->getMorphClass();
@@ -356,7 +385,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return false;
         }
 
-        $billable = $this->resolveBillable() ?? MollieBilling::resolveBillable(request());
+        // The component's own persisted pair first; the request resolver only as a
+        // fallback for a not-yet-created billable, and only when authorized — the
+        // badge is derived from hasMollieMandate(), which is a fact about that
+        // account, not about this visitor.
+        $billable = $this->resolveBillable();
+
+        if ($billable === null) {
+            $resolved = MollieBilling::resolveBillable(request());
+            $billable = $resolved !== null && MollieBilling::authorizes(request(), $resolved)
+                ? $resolved
+                : null;
+        }
 
         return $billable === null || ! $billable->hasMollieMandate();
     }
@@ -1273,6 +1313,26 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         $this->errorMessage = null;
 
+        // Authorize FIRST — before validation, before anything mutates, and outside
+        // the try below so the 403 is not swallowed by its catchall. Livewire actions
+        // bypass the checkout route's middleware, and from here on we overwrite the
+        // billable's billing address, write a VIES audit row for it and open a Mollie
+        // payment on its customer. Anonymous signup is the one exemption: a billable
+        // this very component instance created has no owner to authorize against yet.
+        //
+        // Ahead of validation on purpose. With the field pre-fill now gated on
+        // authorization, an unauthorized requester's form is empty, so validation
+        // would refuse first and answer with field errors — telling someone who may
+        // not be here which fields a stranger's checkout wants. The answer must be
+        // 403 regardless of form state.
+        if (! $this->billableCreatedHere) {
+            $existing = $this->resolveBillable();
+
+            if ($existing !== null) {
+                abort_unless(MollieBilling::authorizes(request(), $existing), 403);
+            }
+        }
+
         // Validation runs BEFORE setting processing=true. ValidationException is
         // re-thrown so Livewire can render field errors; processing stays false
         // so the submit button doesn't lock up on a recoverable input error.
@@ -1280,20 +1340,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $this->validateStep2();
         if ($this->hasAddonsOrSeatsStep()) {
             $this->validateStep3();
-        }
-
-        // Authorize before anything mutates, and outside the try below so the 403
-        // is not swallowed by its catchall. Livewire actions bypass the checkout
-        // route's middleware, and from here on we overwrite the billable's billing
-        // address, write a VIES audit row for it and open a Mollie payment on its
-        // customer. Anonymous signup is the one exemption: a billable this very
-        // component instance created has no owner to authorize against yet.
-        if (! $this->billableCreatedHere) {
-            $existing = $this->resolveBillable();
-
-            if ($existing !== null) {
-                abort_unless(MollieBilling::authorizes(request(), $existing), 403);
-            }
         }
 
         $this->processing = true;

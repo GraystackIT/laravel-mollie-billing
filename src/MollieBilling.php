@@ -110,6 +110,29 @@ class MollieBilling
     }
 
     /**
+     * Only what the app's own `resolveBillableUsing()` callback returns — never the
+     * query-parameter fallback.
+     *
+     * The two answers mean different things, and an unauthorized requester has to be
+     * handled differently for each. When the app's resolver names a billable, the
+     * request genuinely belongs to it (tenant middleware ran, the URL says so), so a
+     * refused authorization is a 403: this user may not do billing here. The
+     * query-parameter fallback is a *guess* — it matches any unreserved parameter
+     * against a route key — so a refused authorization there means only "that guess
+     * was not yours", and the caller should carry on as if nothing was resolved.
+     *
+     * Conflating the two either leaked a stranger's data (ignoring the refusal) or
+     * silently created a second billable for a member who is simply not the billing
+     * manager (403-ing everything).
+     */
+    public static function resolveBillableFromCallback(Request $request): ?Billable
+    {
+        return self::$resolveBillableCallback !== null
+            ? (self::$resolveBillableCallback)($request)
+            : null;
+    }
+
+    /**
      * Reserved query parameters used by package routes that must NEVER be
      * interpreted as billable-model lookup values.
      */

@@ -34,7 +34,13 @@ new class extends Component {
             $balance = $this->propBalance ?? 0;
             $purchasedBalance = $this->propPurchasedBalance ?? 0;
         } else {
+            // Authorized: without props this renders real wallet balances, and
+            // `resolveBillable()` will match a query parameter against any billable's
+            // route key on a package route.
             $billable = MollieBilling::resolveBillable(request());
+            if ($billable !== null && ! MollieBilling::authorizes(request(), $billable)) {
+                $billable = null;
+            }
             $included = $billable ? $billable->includedBillingQuota($this->type) : 0;
             $wallet = ($billable instanceof \Illuminate\Database\Eloquent\Model)
                 ? $billable->getWallet($this->type)

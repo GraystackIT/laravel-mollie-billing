@@ -48,11 +48,29 @@ new class extends Component {
             return;
         }
 
-        $billable = MollieBilling::resolveBillable(request());
+        $billable = $this->authorizedBillable();
 
         if ($billable?->hasAccessibleBillingSubscription()) {
             $this->activated = true;
         }
+    }
+
+    /**
+     * The billable this requester may actually see.
+     *
+     * On a package route `resolveBillable()` falls back to matching any query
+     * parameter against a billable's route key, so `?org=<someone-else>` resolved a
+     * stranger. This page then reported *their* activation state and asked Mollie
+     * about *their* pending payment. Reads go through the same authorization the
+     * portal components apply.
+     */
+    private function authorizedBillable(): ?Billable
+    {
+        $billable = MollieBilling::resolveBillable(request());
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function checkStatus(): void
@@ -74,7 +92,7 @@ new class extends Component {
         }
 
         try {
-            $billable = MollieBilling::resolveBillable(request());
+            $billable = $this->authorizedBillable();
 
             if ($billable === null) {
                 if ($this->pollCount >= self::MAX_POLL_TICKS) {
@@ -242,7 +260,11 @@ new class extends Component {
         $billable = MollieBilling::resolveBillable(request());
         $params = $billable ? MollieBilling::resolveUrlParameters($billable) : [];
 
-        return route(BillingRoute::name('checkout'), $params);
+        // checkout() rather than name('checkout'): on a multi-tenant mount the portal
+        // sits under a tenant prefix while checkout is registered separately, so the
+        // prefixed name does not exist — this link 500'd on the one screen whose job
+        // is recovering a failed payment.
+        return route(BillingRoute::checkout(), $params);
     }
 
     public function pollInterval(): string
