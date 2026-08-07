@@ -454,6 +454,7 @@ class MandateOnlyPaymentHandler
                     $pricedCoupon['coupon'],
                     $billable,
                     (int) $pricedCoupon['order_amount_net'],
+                    $interval,
                 );
             }
         }
@@ -502,6 +503,7 @@ class MandateOnlyPaymentHandler
 
         if ($pricedCoupon !== null) {
             $this->stashTrialCoupon($billable, $pricedCoupon, $planCode, $interval, $addonCodes, $extraSeats);
+            $this->countRecurringGrant($billable, $pricedCoupon, $planCode, $interval);
         }
 
         $intervalDays = $interval === 'yearly' ? 365 : 30;
@@ -533,6 +535,58 @@ class MandateOnlyPaymentHandler
      * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
      * @param  array<int, string>  $addonCodes
      */
+    /**
+     * Count a Recurring coupon's grant on a trial signup.
+     *
+     * The trial path writes only the marker, and every charge afterwards goes through
+     * `redeemRecurringCouponForRenewal()` → `redeem(renewal: true)`, which by design
+     * skips the cap checks AND the counter. So no code path ever performed the
+     * grant-counting redeem for a trial signup: `redemptions_count` stayed 0 forever,
+     * `globally_exhausted` never tripped, and a 50-redemption campaign could be
+     * claimed by any number of trial signups. Per-billable limits still worked, since
+     * those count rows.
+     *
+     * Redeemed with a zero discount: the discount belongs to the charges, which book
+     * their own renewal redemptions. This row exists to occupy the campaign slot the
+     * customer has been promised, which is why it runs only after the Mollie
+     * subscription exists — a failed activation must not consume it.
+     *
+     * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
+     */
+    protected function countRecurringGrant(
+        Billable $billable,
+        array $pricedCoupon,
+        string $planCode,
+        string $interval,
+    ): void {
+        if ($pricedCoupon['coupon']->type !== CouponType::Recurring) {
+            return;
+        }
+
+        try {
+            $this->couponService->redeem($pricedCoupon['coupon'], $billable, [
+                'planCode' => $planCode,
+                'interval' => $interval,
+                'orderAmountNet' => (int) $pricedCoupon['order_amount_net'],
+                'discount_amount_net' => 0,
+                // The marker is already set — and set BEFORE CreateSubscription on
+                // purpose, so Mollie was created at the discounted amount. Re-writing it
+                // here would restart its lifetime from now, which is the same instant,
+                // but skipping is clearer about which write owns the marker.
+                'skip_marker' => true,
+            ]);
+        } catch (\Throwable $e) {
+            // The campaign filling up between price() and here is a legitimate race.
+            // The customer keeps the discount (Mollie is already created with it) and
+            // the marker keeps honouring it; only the audit row is missing.
+            Log::warning('Trial activation: recurring coupon grant could not be counted', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'coupon_code' => (string) $pricedCoupon['coupon']->code,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     protected function stashTrialCoupon(
         Billable $billable,
         array $pricedCoupon,

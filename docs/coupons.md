@@ -40,6 +40,7 @@ All types support a `stackable` flag (default: `true`). Stackability gates coupo
 
 - **Stackable coupons** can be applied next to other stackable coupons — discounts cumulate against the remaining net (each subsequent coupon sees a smaller `orderAmountNet`).
 - A **non-stackable** coupon (the new one OR any already-applied one) blocks any further coupon entry. The UI hides the input field once a non-stackable coupon is active.
+- **At most one `recurring` coupon per apply-set**, regardless of stackability. `active_recurring_coupon` is a single slot, so a second recurring code overwrote the first: the preview and the prorata charge honoured both discounts, then every renewal honoured only the last while both per-billable slots had been consumed. Rejected with `recurring_conflict`. Stacking several `single_payment` codes on a one-time order is unaffected and threads the remaining net correctly.
 
 Implementation: `CouponService::resolveAndValidateShared()` checks the new coupon's `stackable` against the `existingCouponIds` context; both the new coupon being non-stackable AND any existing coupon being non-stackable triggers `CouponNotStackableException`.
 
@@ -129,7 +130,7 @@ When a `recurring` coupon is redeemed, `CouponService::setActiveRecurringCouponM
 
 ### `valid_until` — the discount lifetime is computed once at apply time
 
-The marker's lifetime is locked at apply time as the earliest of two gates:
+The marker's lifetime is locked at apply time as the earliest of two gates, measured in the interval the discount will actually run at (the *target* interval — `UpdateSubscription` redeems before it persists a changed one, so reading it off the billable computed a yearly→monthly switch in years):
 
 ```
 marker.valid_until = min(
@@ -141,6 +142,12 @@ marker.valid_until = min(
 The `+ 1d` buffer ensures a charge that lands a few hours after the mathematical period end is still inside the discount window. `intervalDays` is `30` for monthly and `365` for yearly — calendar-month variation is irrelevant because the buffer absorbs it.
 
 The validator (`validateRequiredFieldsForType` for `Recurring`) requires that **at least one** of `valid_until` or `max_redemptions_per_billable` is set — so the marker is guaranteed to have a `valid_until`.
+
+### The count is enforced too, not only the date
+
+`valid_until` stays deliberately generous — `CreateSubscription` derives the 100 %-coverage deferral from it, so shortening it would make Mollie start charging while the coupon is still meant to cover the period. But `max × 30 (+1)` days is *shorter* than the calendar wherever February falls: a 3-period monthly coupon redeemed on 1 December ran to day 91 while Mollie's fourth charge landed 1 March — day 90, inside the window — so the customer received four discounted periods and a fourth redemption row that made the audit trail look deliberate.
+
+So the marker also stops once `max_redemptions_per_billable` **applications** have been recorded. Only redemptions carrying a positive `discount_amount_net` count: a zero-discount row exists to occupy the campaign slot (the trial path writes one, because its discount arrives with the later charges), and counting it would give trial signups one discounted period fewer than paying ones.
 
 ### `base_amount_net` — the discount basis is locked
 
@@ -281,7 +288,9 @@ $billable->enableBillingAddon('sso', couponCodes: ['STACK5']);
 
 ## Auto-apply tokens
 
-A coupon can carry an `auto_apply_token` (a short slug). When a checkout URL contains `?coupon=<token>`, `CouponService::resolveByAutoApplyToken()` looks the coupon up by token (case-insensitive) and the checkout pre-fills the field. This lets you build campaign URLs without exposing the actual code.
+A coupon can carry an `auto_apply_token` (a short slug). `PromotionController` resolves it via `CouponService::resolveByAutoApplyToken()` (case-insensitive), parks the **code** in `session('billing.auto_apply_coupon')` and redirects to checkout, where `mount()` validates it and pre-fills the applied-coupon box. This lets you build campaign URLs without exposing the actual code.
+
+The pre-fill is what makes the price reflect the coupon, and that matters: `StartSubscriptionCheckout` refuses a session coupon whose discount the submitted `amount_gross` does not account for, on any path that actually collects money. Without it, the code reached the payment metadata while the form submitted the full price — the customer paid in full, the webhook priced the coupon, `reconcileWithPaidAmount` cancelled the discount line back out, and the redemption consumed their per-billable slot plus the campaign counter for a discount they never received. Trial and other €0 checkouts keep the coupon regardless, because nothing is collected there for the amount to disagree with.
 
 ## Validation reasons (for UI translation)
 

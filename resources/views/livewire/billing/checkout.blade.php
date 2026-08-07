@@ -191,6 +191,59 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // which the pricing paths read as free. That applies to `?interval=` as much
         // as to the property default, so normalise instead of trusting either.
         $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+
+        $this->adoptAutoApplyCoupon();
+    }
+
+    /**
+     * Pre-fill the coupon a promotion link put in the session.
+     *
+     * Without this the code reached `StartSubscriptionCheckout` through the session
+     * while the form submitted a gross that knew nothing about it — the customer paid
+     * full price and the coupon was redeemed anyway. (The docs claimed this pre-fill
+     * existed; it did not.) The service now refuses a session coupon the amount does
+     * not reflect, so leaving this out would mean promotion links silently stopped
+     * working; doing it here is what makes them work *and* be priced.
+     *
+     * Validated like a typed code, so an expired or exhausted promotion is simply not
+     * applied rather than surfacing an error on a page the customer never asked about.
+     */
+    private function adoptAutoApplyCoupon(): void
+    {
+        $code = session('billing.auto_apply_coupon');
+
+        if (! is_string($code) || $code === '' || $this->applied_coupon !== null) {
+            return;
+        }
+
+        try {
+            $coupon = MollieBilling::coupons()->validateWithoutBillable($code, [
+                'planCode' => $this->plan_code,
+                'interval' => $this->interval,
+                'addonCodes' => $this->addon_codes,
+                'extraSeats' => $this->extra_seats,
+                'orderAmountNet' => $this->subtotalNet(),
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                    \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
+                    \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
+                ],
+            ]);
+        } catch (\Throwable) {
+            return;
+        }
+
+        if ($this->couponTrialDays($coupon) > 0 && ! $this->trialApplies($this->plan_code, $this->interval)) {
+            return;
+        }
+
+        $this->applied_coupon = [
+            'code' => (string) $coupon->code,
+            'name' => (string) $coupon->name,
+            'discount_net' => $this->calculateCouponDiscount($coupon),
+            'trial_days' => $this->couponTrialDays($coupon),
+        ];
     }
 
     /**

@@ -473,6 +473,28 @@ class CouponService
                     "Coupon {$nonStackableExisting->code} is not stackable with {$coupon->code}."
                 );
             }
+
+            // Only ONE recurring coupon per subscription, even within a single stacked
+            // apply-set. `active_recurring_coupon` is a single slot, so a second
+            // Recurring code simply overwrote the first: the preview and the prorata
+            // charge honoured both discounts, then every renewal honoured only the last
+            // one while both per-billable slots had been consumed. The stacking rules
+            // above cannot catch it — they run before any redeem, so the marker the
+            // `recurring_conflict` check reads does not exist yet.
+            if ($coupon->type === CouponType::Recurring) {
+                $otherRecurring = Coupon::query()
+                    ->whereIn('id', $existingCouponIds)
+                    ->where('type', CouponType::Recurring->value)
+                    ->first();
+
+                if ($otherRecurring !== null) {
+                    throw new InvalidCouponException(
+                        $billable,
+                        (string) $coupon->code,
+                        'recurring_conflict',
+                    );
+                }
+            }
         }
 
         return $coupon;
@@ -606,7 +628,15 @@ class CouponService
                         // coupon was applied against — seats/addons added later
                         // are billed at full price.
                         $baseAmount = (int) ($context['orderAmountNet'] ?? 0);
-                        $this->setActiveRecurringCouponMarker($coupon, $billable, $baseAmount);
+                        // The context's interval, not the billable's: `update()` redeems
+                        // before it persists a changed interval, so reading it off the
+                        // model computed the discount's lifetime in the wrong unit.
+                        $this->setActiveRecurringCouponMarker(
+                            $coupon,
+                            $billable,
+                            $baseAmount,
+                            isset($context['interval']) ? (string) $context['interval'] : null,
+                        );
                     }
                     break;
 
@@ -1082,20 +1112,49 @@ class CouponService
      * the trial. The redemption row is created on that first charge through the
      * existing renewal pipeline; setting the marker here does not redeem.
      */
-    public function applyRecurringMarker(Coupon $coupon, Billable $billable, int $baseAmountNet): void
-    {
-        $this->setActiveRecurringCouponMarker($coupon, $billable, $baseAmountNet);
+    public function applyRecurringMarker(
+        Coupon $coupon,
+        Billable $billable,
+        int $baseAmountNet,
+        ?string $interval = null,
+    ): void {
+        $this->setActiveRecurringCouponMarker($coupon, $billable, $baseAmountNet, $interval);
     }
 
-    private function setActiveRecurringCouponMarker(Coupon $coupon, Billable $billable, int $baseAmountNet): void
-    {
+    /**
+     * @param  ?string  $interval  The interval the discount will actually run at. Pass it
+     *                             whenever the billable's own interval is about to change
+     *                             — see the lifetime computation below.
+     */
+    private function setActiveRecurringCouponMarker(
+        Coupon $coupon,
+        Billable $billable,
+        int $baseAmountNet,
+        ?string $interval = null,
+    ): void {
         if (! $billable instanceof Model) {
             return;
         }
 
         $now = BillingTime::nowUtc();
-        $intervalDays = $billable->getBillingSubscriptionInterval() === 'yearly' ? 365 : 30;
         $maxRedemptions = (int) ($coupon->max_redemptions_per_billable ?? 0);
+
+        // The interval the coupon will be charged at, which is not always the one on
+        // the billable right now: `UpdateSubscription::update()` redeems before it
+        // saves the new interval, so a yearly→monthly switch computed the lifetime in
+        // YEARS. A "2 periods" coupon then covered 731 days of monthly renewals — 24
+        // discounted periods instead of 2. The reverse direction truncated it to 61
+        // days, so the first yearly renewal got nothing.
+        $interval ??= $billable->getBillingSubscriptionInterval();
+
+        // The window stays generous on purpose — `CreateSubscription` derives the
+        // 100%-coverage deferral from it, so shortening it would make Mollie start
+        // charging while the coupon is still meant to cover the period. What stops the
+        // discount at the promised number of applications is the count check in
+        // {@see isMarkerStillRedeemable()}, not this date: 30-day months are shorter
+        // than the calendar wherever February falls, so a 3-period coupon's fourth
+        // charge could land inside the window.
+        $intervalDays = $interval === 'yearly' ? 365 : 30;
 
         $durationValidUntil = $maxRedemptions > 0
             ? $now->copy()->addDays($maxRedemptions * $intervalDays + 1)
@@ -1154,7 +1213,7 @@ class CouponService
             return 0;
         }
 
-        if (! $this->isMarkerStillRedeemable($marker)) {
+        if (! $this->isMarkerStillRedeemable($marker, $billable)) {
             return 0;
         }
 
@@ -1183,7 +1242,7 @@ class CouponService
     /**
      * @param  array<string, mixed>  $marker
      */
-    private function isMarkerStillRedeemable(array $marker): bool
+    private function isMarkerStillRedeemable(array $marker, ?Billable $billable = null): bool
     {
         $couponId = (int) ($marker['coupon_id'] ?? 0);
         $coupon = $couponId > 0 ? Coupon::query()->find($couponId) : null;
@@ -1197,6 +1256,37 @@ class CouponService
             : null;
         if ($validUntil !== null && $validUntil->lessThanOrEqualTo($now)) {
             return false;
+        }
+
+        // Count as well as clock. The window is `max × 30 (+1)` days for a monthly
+        // coupon, and 30-day months are shorter than the calendar wherever February
+        // falls: a 3-period coupon redeemed on 1 December ran to day 91 while Mollie's
+        // FOURTH charge landed 1 March — day 90, inside the window — so the customer
+        // received four discounted periods and a fourth redemption row that made the
+        // audit trail look deliberate. The window cannot simply be shortened, because
+        // `CreateSubscription` derives the 100%-coverage deferral from it; the promise
+        // is a number of applications, so that is what is enforced.
+        //
+        // Only rows that carried a discount count. A zero-discount grant row exists
+        // solely to occupy the campaign slot (the trial path writes one, since its
+        // discount arrives with the later charges), and letting it eat an application
+        // would give trial signups one discounted period fewer than paid ones.
+        if ($billable instanceof Model) {
+            $max = (int) ($coupon->max_redemptions_per_billable ?? 0);
+
+            if ($max > 0) {
+                $applied = CouponRedemption::query()
+                    ->where('coupon_id', $coupon->id)
+                    ->where('billable_type', $billable->getMorphClass())
+                    ->where('billable_id', $billable->getKey())
+                    ->whereNull('revoked_at')
+                    ->where('discount_amount_net', '>', 0)
+                    ->count();
+
+                if ($applied >= $max) {
+                    return false;
+                }
+            }
         }
 
         return true;
@@ -1214,7 +1304,7 @@ class CouponService
         int $invoiceId,
     ): ?CouponRedemption {
         $marker = $this->getActiveRecurringCouponMarker($billable);
-        if ($marker === null || ! $this->isMarkerStillRedeemable($marker)) {
+        if ($marker === null || ! $this->isMarkerStillRedeemable($marker, $billable)) {
             return null;
         }
 
@@ -1250,7 +1340,7 @@ class CouponService
             return false;
         }
 
-        return ! $this->isMarkerStillRedeemable($marker);
+        return ! $this->isMarkerStillRedeemable($marker, $billable);
     }
 
     public function clearActiveRecurringCouponMarker(Billable $billable): void
