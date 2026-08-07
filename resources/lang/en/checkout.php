@@ -96,6 +96,8 @@ return [
 
     'coupon_trial_days_added' => '+:days days of trial (:code)',
 
+    'interval_not_offered' => 'This plan is not available on the selected billing interval.',
+
     // Coupon errors
     'coupon_empty' => 'Please enter a coupon code.',
     'coupon_already_applied' => 'Remove the current coupon before adding a new one.',

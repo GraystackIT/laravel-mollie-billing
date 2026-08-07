@@ -1,8 +1,19 @@
+@php
+    // Never offer an interval no selectable plan is sold in: an unpriced
+    // (plan, interval) pair costs 0, and the zero-amount checkout branch reads
+    // that as a free plan. With a plan already chosen the toggle narrows to that
+    // plan's own intervals; before then it shows any interval some plan offers.
+    $offeredIntervals = $this->offeredIntervals($plan_code);
+@endphp
+
 <div class="flex flex-col items-center gap-2 pt-4">
-    <flux:radio.group wire:model.live="interval" variant="segmented">
-        <flux:radio value="monthly" :label="__('billing::checkout.monthly')" />
-        <flux:radio value="yearly" :label="__('billing::checkout.yearly')" />
-    </flux:radio.group>
+    @if (count($offeredIntervals) > 1)
+        <flux:radio.group wire:model.live="interval" variant="segmented">
+            @foreach ($offeredIntervals as $offered)
+                <flux:radio :value="$offered" :label="__('billing::checkout.' . $offered)" />
+            @endforeach
+        </flux:radio.group>
+    @endif
     <flux:text class="text-xs mb-4">
         @if ($showsNet)
             {{ __('billing::checkout.prices_net') }}

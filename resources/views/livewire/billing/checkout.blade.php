@@ -156,6 +156,65 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 $this->plan_code = (string) array_key_first($plans);
             }
         }
+
+        // Last, because it depends on the plan being settled: a plan may be sold in
+        // only one interval, and an interval it does not sell carries no price —
+        // which the pricing paths read as free. That applies to `?interval=` as much
+        // as to the property default, so normalise instead of trusting either.
+        $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+    }
+
+    /**
+     * The intervals the customer may actually pick, in display order.
+     *
+     * With a plan chosen, that plan's own intervals. Before then, every interval
+     * at least one selectable plan is sold in — so a catalog of monthly-only plans
+     * shows no toggle at all instead of a yearly option that prices to 0.
+     *
+     * @return array<int, string>
+     */
+    public function offeredIntervals(string $planCode = ''): array
+    {
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $codes = $planCode !== '' ? [$planCode] : array_keys($this->plans());
+
+        $offered = [];
+        foreach (['monthly', 'yearly'] as $candidate) {
+            foreach ($codes as $code) {
+                if ($catalog->planOffersInterval((string) $code, $candidate)) {
+                    $offered[] = $candidate;
+                    continue 2;
+                }
+            }
+        }
+
+        return $offered;
+    }
+
+    /**
+     * The preferred interval if the plan sells it, otherwise the plan's own
+     * remaining interval. Falls back to the preference when nothing is known
+     * (no plan chosen yet, or a catalog that offers neither).
+     */
+    private function firstOfferedInterval(string $planCode, string $preferred): string
+    {
+        if ($planCode === '') {
+            return $preferred;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+
+        if ($catalog->planOffersInterval($planCode, $preferred)) {
+            return $preferred;
+        }
+
+        foreach (['monthly', 'yearly'] as $candidate) {
+            if ($catalog->planOffersInterval($planCode, $candidate)) {
+                return $candidate;
+            }
+        }
+
+        return $preferred;
     }
 
     private function hasPersistedBillingData(Billable $billable): bool
@@ -744,6 +803,43 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         }
     }
 
+    /**
+     * Both directions of the (plan, interval) pair have to stay on a pair the
+     * catalog actually prices. `interval` is a live-bound radio group and
+     * `plan_code` is set through `$set()`, so either can move independently — and
+     * an unpriced pair costs 0, which the zero-amount branch of
+     * StartSubscriptionCheckout used to activate as a free plan.
+     */
+    public function updatedInterval(): void
+    {
+        $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+        $this->refreshCouponAfterSelectionChange();
+    }
+
+    public function updatedPlanCode(): void
+    {
+        $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+        $this->refreshCouponAfterSelectionChange();
+    }
+
+    /**
+     * A coupon validated against the previous selection may no longer fit it.
+     * `refreshAppliedCoupon()` clears it and names the reason; surface that as a
+     * banner rather than silently dropping the discount the customer can see.
+     */
+    private function refreshCouponAfterSelectionChange(): void
+    {
+        if ($this->applied_coupon === null) {
+            return;
+        }
+
+        $reason = $this->refreshAppliedCoupon();
+
+        if ($reason !== null) {
+            $this->couponError = $this->couponErrorMessage($reason);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Coupon handling
     // -------------------------------------------------------------------------
@@ -1072,6 +1168,17 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'plan_code' => ['required', 'string', 'in:' . implode(',', array_keys($plans))],
             'interval' => ['required', 'in:monthly,yearly'],
         ]);
+
+        // `in:monthly,yearly` says the value is a known interval, not that this
+        // plan is sold in it. A plan may offer only one — and an interval it does
+        // not offer has no price, which every pricing path below reads as free.
+        // Unchecked, picking "Yearly" on a monthly-only paid plan activated that
+        // paid plan for 0 €.
+        if (! app(SubscriptionCatalogInterface::class)->planOffersInterval($this->plan_code, $this->interval)) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'interval' => __('billing::checkout.interval_not_offered'),
+            ]);
+        }
     }
 
     private function validateStep3(): void

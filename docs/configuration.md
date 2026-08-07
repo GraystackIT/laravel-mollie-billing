@@ -369,6 +369,14 @@ Each plan is keyed by its `planCode`.
 
 > **Important:** `included_usages`, `usage_overage_prices`, and `trial_days` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
 
+#### A plan does not have to offer both intervals
+
+Declaring only `monthly` (or only `yearly`) is valid — `billing:check-config` requires at least one. Every customer-facing surface narrows itself accordingly: the checkout's interval toggle only lists intervals the selected plan is sold in and disappears entirely when there is just one, `?interval=` is ignored when the plan does not offer it, and the plan-change screen rejects the pair.
+
+This matters because the price getters cannot express "not sold": `basePriceNet()` and `addonPriceNet()` return `0` for an interval that has no block, exactly as they do for a genuinely free plan. Ask `SubscriptionCatalogInterface::planOffersInterval()` / `addonOffersInterval()` whenever the interval comes from user input — `StartSubscriptionCheckout` throws `IntervalNotOfferedException` rather than trusting a zero, because an unpriced pair used to be activated as a free plan.
+
+The same applies to addons: an addon whose `intervals` block omits an interval is not enabled on that interval.
+
 #### Declaring a quota with no overage
 
 A quota whose usage type has no entry in `usage_overage_prices` cannot be charged for overuse. That is a legitimate setup (typical for internal and supplier plans) but indistinguishable from a forgotten price, so `billing:check-config` warns about it. Declare the intent explicitly instead:
@@ -415,7 +423,7 @@ app(UpdateSubscription::class)->update($billable, new SubscriptionUpdateRequest(
 
 The override exists **only** on the typed `SubscriptionUpdateRequest` — as the constructor argument above or via `->withAllowHiddenPlan()`. `SubscriptionUpdateRequest::from()` ignores an `allow_hidden_plan` key in array payloads on purpose: it overrides an authorization check, so an app that forwards `request()->all()` into `update()` must not be able to hand a caller a hidden plan. Once set, it is carried through scheduled and deferred changes so a move that was deliberately allowed is not rejected later when it is applied.
 
-> **Note for custom catalogs:** apps that implement `SubscriptionCatalogInterface` themselves (instead of extending `ConfigSubscriptionCatalog`) must add `visiblePlans()` and `planIsHidden()`.
+> **Note for custom catalogs:** apps that implement `SubscriptionCatalogInterface` themselves (instead of extending `ConfigSubscriptionCatalog`) must add `visiblePlans()`, `planIsHidden()`, `planOffersInterval()` and `addonOffersInterval()`. The two `*OffersInterval()` methods must answer whether the interval is *sold*, not whether its price is non-zero — a free plan is sold at 0.
 
 ### `usage_types`
 

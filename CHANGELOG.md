@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `SubscriptionCatalogInterface` requires two new methods: `planOffersInterval(string $planCode, string $interval): bool` and `addonOffersInterval(string $addonCode, string $interval): bool`. Apps with their own catalog implementation must add them — they answer whether the interval is *sold*, which the price getters cannot express (`0` means both "free" and "not offered"). Apps extending `ConfigSubscriptionCatalog` need no change.
 - `mollie-billing.header_components` now also render in the admin header, so a language switcher works there too.
 - **Breaking-ish:** the admin panel no longer forces English. Set `BILLING_ADMIN_LOCALE=en` to restore the previous behavior.
 - **Breaking (tax):** a B2B customer in your own country is now invoiced with domestic VAT instead of 0% reverse charge. Set `BILLING_SELLER_COUNTRY` so the package can tell domestic from cross-border; while it is unset the previous behaviour is kept and a warning is logged.
@@ -57,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Security:** a paid plan could be activated for **0 €** by selecting an interval the plan does not offer. A plan may legitimately be sold in one interval only, but `basePriceNet()` returns `0` for a missing interval — indistinguishable from a free plan — so the zero-amount checkout branch activated a Local subscription on the paid plan, with every feature, indefinitely, without a payment or a Mollie call. No tampering was needed beyond clicking the interval toggle. `SubscriptionCatalogInterface` gained `planOffersInterval()` / `addonOffersInterval()`; checkout, plan change, addon enable and `StartSubscriptionCheckout` all consult them, the interval toggle only lists intervals the plan is sold in, and the service throws `IntervalNotOfferedException` rather than trusting a zero.
 - A trial-extension coupon entered at checkout now actually extends the trial. It was accepted by the form, then dropped twice over: the trial gate read a plan-level `trial_days` the package no longer supports (so only a billable *already* on trial could pass it), and the activation stashed only `single_payment` and `recurring` codes — a customer saw the coupon applied and the trial ended on the plan's own day, with no redemption on record.
 - A recurring coupon applied to a **trial** signup reaches Mollie. The trial branch created the subscription at the full price while writing a marker that promised the discount, so Mollie collected full price from the trial's end onward and the renewal invoice reconciled down to it — the discount existed only on paper. The marker is now written before the Mollie call, as the non-trial path already did.
 - A trial and a fully covering recurring coupon on the same signup no longer charge during the free months: the Mollie start date is the later of the trial end and the coupon's lifetime, instead of always the trial end.

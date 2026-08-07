@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
+use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -36,6 +37,7 @@ class StartSubscriptionCheckout
      *
      * @throws \RuntimeException if the billable already has an accessible subscription
      * @throws HiddenPlanNotSelectableException if the requested plan is hidden
+     * @throws IntervalNotOfferedException if the plan or an addon is not sold in the requested interval
      */
     public function handle(Billable $billable, array $request): array
     {
@@ -50,6 +52,24 @@ class StartSubscriptionCheckout
         // (ActivateLocalSubscription) or by an admin issuing a grant directly.
         if ($this->catalog->planIsHidden((string) $request['plan_code'])) {
             throw new HiddenPlanNotSelectableException($billable, (string) $request['plan_code']);
+        }
+
+        // An interval the plan does not sell has no price, and "no price" reads as
+        // 0 all the way down — which the zero-amount branch below then treats as a
+        // free plan and activates locally. That handed out a paid plan, with every
+        // feature, for nothing. Checked here as well as in the UI because this is
+        // the seam an app calling the service directly also passes through.
+        if (! $this->catalog->planOffersInterval((string) $request['plan_code'], (string) $request['interval'])) {
+            throw new IntervalNotOfferedException(
+                (string) $request['plan_code'],
+                (string) $request['interval'],
+            );
+        }
+
+        foreach ((array) ($request['addon_codes'] ?? []) as $addonCode) {
+            if (! $this->catalog->addonOffersInterval((string) $addonCode, (string) $request['interval'])) {
+                throw new IntervalNotOfferedException((string) $addonCode, (string) $request['interval'], 'addon');
+            }
         }
 
         $couponCode = $request['coupon_code'] ?? null;

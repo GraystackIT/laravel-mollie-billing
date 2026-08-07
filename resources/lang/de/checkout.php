@@ -96,6 +96,8 @@ return [
 
     'coupon_trial_days_added' => '+:days Tage Testphase (:code)',
 
+    'interval_not_offered' => 'Dieser Plan ist im gewählten Abrechnungsintervall nicht verfügbar.',
+
     // Coupon errors
     'coupon_empty' => 'Bitte geben Sie einen Gutscheincode ein.',
     'coupon_already_applied' => 'Entfernen Sie den aktuellen Gutschein, bevor Sie einen neuen hinzufügen.',

@@ -29,6 +29,35 @@ interface SubscriptionCatalogInterface
 
     public function planAllowsAddon(string $planCode, string $addonCode): bool;
 
+    /**
+     * Whether the plan is actually sold in this interval.
+     *
+     * A plan may offer only one interval — that is valid configuration, and
+     * `billing:check-config` accepts it. This is the question the price getters
+     * cannot answer: `basePriceNet()` returns `0` for an interval that does not
+     * exist, which is indistinguishable from a genuinely free plan. Every surface
+     * that lets a customer pick an interval must ask here first, or a paid plan
+     * priced at 0 gets activated for free.
+     *
+     * @see addonOffersInterval() for the same question about an addon
+     */
+    public function planOffersInterval(string $planCode, string $interval): bool;
+
+    /**
+     * Whether the addon is actually sold in this interval.
+     *
+     * Same rationale as {@see planOffersInterval()}: `addonPriceNet()` answers 0
+     * for an interval the addon does not define, which would enable it for free.
+     */
+    public function addonOffersInterval(string $addonCode, string $interval): bool;
+
+    /**
+     * Base price for a (plan, interval), in minor units.
+     *
+     * Returns `0` both for a free plan and for an interval the plan does not
+     * offer. Call {@see planOffersInterval()} first whenever the interval comes
+     * from user input — this getter cannot tell you which of the two it is.
+     */
     public function basePriceNet(string $planCode, string $interval): int;
 
     public function seatPriceNet(string $planCode, string $interval): ?int;

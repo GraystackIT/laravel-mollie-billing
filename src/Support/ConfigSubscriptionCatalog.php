@@ -39,6 +39,25 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return in_array($addonCode, $this->plan($planCode)['allowed_addons'] ?? [], true);
     }
 
+    public function planOffersInterval(string $planCode, string $interval): bool
+    {
+        // `base_price_net` is the one key every priced interval must carry (a free
+        // plan sets it to 0 explicitly), so its presence is what separates
+        // "sold at 0" from "not sold at all".
+        return array_key_exists(
+            'base_price_net',
+            (array) ($this->plan($planCode)['intervals'][$interval] ?? []),
+        );
+    }
+
+    public function addonOffersInterval(string $addonCode, string $interval): bool
+    {
+        return array_key_exists(
+            'price_net',
+            (array) ($this->addon($addonCode)['intervals'][$interval] ?? []),
+        );
+    }
+
     public function basePriceNet(string $planCode, string $interval): int
     {
         return (int) ($this->plan($planCode)['intervals'][$interval]['base_price_net'] ?? 0);

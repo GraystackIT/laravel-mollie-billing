@@ -240,6 +240,17 @@ new class extends Component {
             return;
         }
 
+        // An addon may be sold in only one interval, and `addonPriceNet()` answers 0
+        // for an interval it does not define — so on the other interval the addon
+        // would be enabled, feature-granting, at no charge.
+        $interval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
+
+        if (! $catalog->addonOffersInterval($addonCode, $interval)) {
+            $this->toast(__('billing::portal.flash.error'), 'danger');
+
+            return;
+        }
+
         $codes = $this->appliedCouponCodes[$addonCode] ?? [];
 
         try {

@@ -156,6 +156,18 @@ new class extends Component {
             return false;
         }
 
+        // A known interval is not necessarily one this plan is sold in. An interval
+        // the plan does not offer carries no price, so the change would be priced as
+        // a downgrade to free — including a real Mollie refund of the current period.
+        $targetPlan = $this->selectedPlan ?? $billable?->getBillingSubscriptionPlanCode();
+        if ($targetPlan !== null && $targetPlan !== ''
+            && ! app(SubscriptionCatalogInterface::class)->planOffersInterval($targetPlan, $this->selectedInterval)
+        ) {
+            $this->rejectSelection();
+
+            return false;
+        }
+
         return true;
     }
 
