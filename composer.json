@@ -47,8 +47,10 @@
         "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license."
     },
     "require-dev": {
+        "livewire/flux-pro": "^2.0",
         "mockery/mockery": "^1.6",
         "orchestra/testbench": "^10.0|^11.0",
+        "orchestra/testbench-dusk": "^10.0|^11.0",
         "pestphp/pest": "^3.0|^4.0",
         "pestphp/pest-plugin-laravel": "^3.0|^4.0"
     },
@@ -59,11 +61,15 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "GraystackIT\\MollieBilling\\Tests\\": "tests/"
+            "GraystackIT\\MollieBilling\\Tests\\": "tests/",
+            "Workbench\\App\\": "workbench/app/"
         }
     },
     "scripts": {
-        "test": "./vendor/bin/pest --compact"
+        "test": "pest --compact",
+        "test:browser": "@php vendor/bin/pest --compact --configuration=phpunit.dusk.xml",
+        "browser:assets": "npm run build",
+        "browser:driver": "@php vendor/bin/dusk-updater detect --auto-update"
     },
     "extra": {
         "laravel": {
@@ -82,5 +88,12 @@
         }
     },
     "minimum-stability": "dev",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "repositories": [
+        {
+            "name": "flux-pro",
+            "type": "composer",
+            "url": "https://composer.fluxui.dev"
+        }
+    ]
 }

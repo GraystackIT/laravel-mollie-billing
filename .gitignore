@@ -34,3 +34,10 @@ auth.json
 .idea
 .claude
 .codex
+workbench/database/*.sqlite
+workbench/storage/
+workbench/public/build/
+tests/Browser/screenshots/
+tests/Browser/console/
+.phpunit.dusk.cache
+tests/Browser/source/
