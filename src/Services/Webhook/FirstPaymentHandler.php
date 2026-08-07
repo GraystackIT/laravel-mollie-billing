@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Webhook;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
@@ -182,6 +183,21 @@ class FirstPaymentHandler
             $this->support->notifyInvoiceAvailable($billable, $invoice);
 
             return;
+        }
+
+        // A TrialExtension coupon has no business here: this payment bought a paid
+        // period, so there is no trial for it to extend. Redeeming it anyway would
+        // put `trial_ends_at` days into the future on a paying subscriber AND — via
+        // extendBillingTrialUntil()'s Mollie PATCH — move the next charge to that
+        // date, charging them again within the week. It is priced (the pricing
+        // service serves the trial path too) but not applied.
+        if ($pricedCoupon !== null && $pricedCoupon['coupon']->type === CouponType::TrialExtension) {
+            Log::warning('First-payment coupon is a trial extension on a paid first payment — not redeemed', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'coupon_code' => (string) $pricedCoupon['coupon']->code,
+            ]);
+            $pricedCoupon = null;
         }
 
         if ($pricedCoupon !== null) {

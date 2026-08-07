@@ -137,7 +137,16 @@ class CreateSubscription
         // Trial override: first charge fires exactly at trial end.
         // Full-coverage override: skip past the discount lifetime.
         // Anchor override: the caller knows when the already-paid period ends.
+        // A trial and a fully-covering recurring coupon can both apply to the same
+        // signup, and then neither date alone is right: charging at trial end
+        // collects full price during months the coupon promised free, and charging at
+        // the coupon's end would bill nothing for a trial that ended earlier. The
+        // later of the two is the first moment money is actually owed.
         $startDate = match (true) {
+            $isTrial && $isFullCoverage => BillingTime::latest(
+                $trialEndsAt,
+                $this->fullCoverageStartDate($billable, $interval),
+            ),
             $isTrial => $trialEndsAt,
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
             $paidPeriodEndsAt !== null => $paidPeriodEndsAt,

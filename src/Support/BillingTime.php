@@ -60,6 +60,24 @@ class BillingTime
     }
 
     /**
+     * The later of two moments, compared in UTC.
+     *
+     * Both are normalised through toUtc() first, so a CarbonImmutable and an
+     * offset-carrying string compare on the same footing — `max()` on mixed
+     * datetime types compares whatever the objects cast to and would pick by
+     * wall-clock text rather than by instant.
+     */
+    public static function latest(
+        \DateTimeInterface|string $a,
+        \DateTimeInterface|string $b,
+    ): \Carbon\Carbon {
+        $first = self::toUtc($a);
+        $second = self::toUtc($b);
+
+        return $first->greaterThanOrEqualTo($second) ? $first : $second;
+    }
+
+    /**
      * Convert a heterogeneous datetime input to a UTC Carbon for internal use.
      *
      * Accepts a `CarbonInterface` (already-typed values from a UtcDatetime cast),

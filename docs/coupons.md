@@ -30,7 +30,7 @@ The system supports six coupon types. Each row in the table below answers: what 
 | **`single_payment`** | Reduces the first checkout charge OR a one-time-order purchase by a percentage or fixed amount | Checkout, One-time-order | Immediately on the charge it was applied to (first checkout payment, product purchase). Redemption record is written with `invoice_id` of that charge. With 100% coverage no money flows: Subscription Checkout uses the Mandate-Only path, One-Time-Order writes a local 0-EUR audit invoice with no Mollie roundtrip. | Never. The discount applies once. The Mollie subscription is configured with the **full** recurring amount so the next renewal charges the regular price. |
 | **`recurring`** | Reduces every recurring charge by a percentage or fixed amount, until the discount lifetime ends | Checkout, Plan change, Seat sync, Addon enable | First charge: same as `single_payment`. From then on, an `active_recurring_coupon` marker on `subscription_meta` is honoured by every Mollie renewal webhook. | **Yes — automatically** until `marker.valid_until`. Once that date is past, the marker is cleared and Mollie is PATCHed back to the full price. |
 | **`credits`** | Tops up the wallet(s) listed in `credits_payload` | Dashboard | Immediately on redemption — the wallet is credited and `purchasedBalance` is incremented so the credits survive period resets. | Never. The redemption is one-shot. |
-| **`trial_extension`** | Extends `trial_ends_at` by `trial_extension_days`. For Mollie-source subscriptions also PATCHes the Mollie `startDate` to the new trial end so the next charge follows the extended trial. | Checkout (with trial-gate), Dashboard (with trial-gate) | Immediately on redemption — `extendBillingTrialUntil()` shifts the trial end and, for Mollie subscriptions, calls `MollieSubscriptionPatcher::setNextChargeDate()` so the Mollie schedule stays aligned. The same is true for any direct admin-side call to `extendBillingTrialUntil()`. | Never. |
+| **`trial_extension`** | Extends `trial_ends_at` by `trial_extension_days`. For Mollie-source subscriptions also PATCHes the Mollie `startDate` to the new trial end so the next charge follows the extended trial. | Checkout (with trial-gate), Dashboard (with trial-gate) | On the dashboard: immediately on redemption. At checkout: when the trial is activated, i.e. inside the mandate-only webhook — the Mollie subscription must exist before its charge date can be PATCHed. Either way `extendBillingTrialUntil()` shifts the trial end and, for Mollie subscriptions, calls `MollieSubscriptionPatcher::setNextChargeDate()`. The same is true for any direct admin-side call to `extendBillingTrialUntil()`. | Never. |
 | **`access_grant`** (full or addon-only) | **Full**: activates a Local subscription with the listed plan and addons for `grant_duration_days`. **Addon-only**: merges the listed addons into the active subscription's `active_addon_codes`, also valid for Mollie subscriptions. | Checkout | Immediately. `applyAccessGrant()` either activates a Local subscription or extends `subscription_ends_at`/merges addon codes. The redemption snapshot is stored in `grant_applied_snapshot` for revoke. | Never. The grant is finite; once `subscription_ends_at` is reached the subscription expires (full grants only). Addon-only grants merge the addons permanently — admin can revoke via `revokeGrant()` to remove them. |
 | **`period_extension`** | Pushes the next billing date by `grant_duration_days`. For Mollie subscriptions: PATCHes `startDate`. For Local subscriptions: extends `subscription_ends_at`. | Dashboard | Immediately. The plan and all active addons keep running unchanged — only the next charge date is shifted. | Never. The next regular charge after the extension runs at full price. |
 
@@ -91,6 +91,25 @@ A discount coupon that reduces the charge to zero would normally crash at the pa
 - **Discount > 100 %** — always rejected, semantically nonsensical. A fixed-amount `single_payment` coupon whose value exceeds the order is also rejected at validate-time (defense in depth — `computeRecurringDiscount` already caps Fixed at `min(value, netAmount)`).
 
 For "30 days for free without a subscription" use cases, use `access_grant`. For "extend the current period by 14 days" use `period_extension`.
+
+## Coupons at signup, and what the first renewal then charges
+
+A signup coupon is priced by three different pieces of code — the checkout charge, the amount the Mollie subscription is created with, and every renewal invoice. They are only allowed to differ in the way the type intends:
+
+| Coupon at checkout | First charge | Mollie's recurring amount | First renewal |
+|---|---|---|---|
+| `single_payment` | discounted (0 € → mandate-only) | **full** price | full price |
+| `recurring` | discounted (0 € → mandate-only) | **discounted**, and the marker exists before the subscription is created | discounted, until `valid_until` |
+| `trial_extension` | nothing is charged — a trial starts | full price, first charge at the extended trial end | full price |
+| `access_grant` | nothing at all: no Mollie customer, no mandate, no payment | — (a Local subscription has no Mollie subscription) | never — the grant expires |
+
+Two consequences worth knowing:
+
+- **On a trial signup the coupon is applied at the charge that ends the trial, not at signup.** A `single_payment` coupon is parked in `subscription_meta.pending_first_charge_coupon` and discounts that one charge; a `recurring` coupon's marker is written straight away, so Mollie's subscription is created at the discounted amount and every charge from the trial's end on is discounted. Redemption records follow the same timing — during a trial nothing is charged, so nothing is redeemed yet.
+
+- **A trial and a fully covering `recurring` coupon can collide** (a promotion link auto-applies the code while the checkout form still submits the full gross). The Mollie start date is then the **later** of the trial end and the coupon's `valid_until + 1 day`: charging at trial end would collect money during months the coupon promised free.
+
+A `trial_extension` coupon is gated twice: the selected `(plan, interval)` must offer a trial **and** the trial must actually fire for this customer — a returning subscriber with a mandate on file checks out at full price, and an extension applied to a paid period would move the next charge date forward and bill them again within days. `FirstPaymentHandler` therefore refuses to redeem one on a paid first payment even if a request carries the code.
 
 ## Recurring marker — how renewals re-apply the discount
 
@@ -281,7 +300,8 @@ A coupon can carry an `auto_apply_token` (a short slug). When a checkout URL con
 | `addon_not_applicable` | Addon set not covered by `applicable_addons`. |
 | `product_not_applicable` | Product not in `applicable_products`. |
 | `min_order_not_met` | Below `minimum_order_amount_net`. |
-| `requires_billable` | Trial-extension on a checkout without a billable yet. |
+| `requires_billable` | Trial-extension validated without a billable AND without a plan in the context — neither half of the trial gate can be answered. |
+| `requires_trial` | Trial-extension on a `(plan, interval)` that offers no trial, or on a customer for whom no trial would start (mandate already on file). |
 | `requires_active_subscription` | Period-extension/addon-only-grant without an active subscription. |
 | `recurring_conflict` | Another recurring coupon already active. |
 | `recurring_already_active` | The same recurring coupon is already active on the subscription. |

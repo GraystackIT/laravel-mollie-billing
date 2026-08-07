@@ -408,7 +408,8 @@ class MandateOnlyPaymentHandler
         if ($couponCode !== '') {
             try {
                 $pricedCoupon = $this->firstPaymentCouponPricing->price(
-                    $billable, $couponCode, $planCode, $interval, $addonCodes, $extraSeats
+                    $billable, $couponCode, $planCode, $interval, $addonCodes, $extraSeats,
+                    trialStarting: true,
                 );
             } catch (\Throwable $e) {
                 Log::warning('Trial activation: coupon pricing failed, proceeding without coupon', [
@@ -425,13 +426,32 @@ class MandateOnlyPaymentHandler
             'subscription_period_starts_at' => BillingTime::nowUtc(),
         ])->save();
 
+        // The marker BEFORE the Mollie call, and the discount passed into it: Mollie
+        // collects every charge after the trial on its own, so a subscription created
+        // at full price charges full price forever — while our marker keeps promising
+        // the discount and the renewal invoice reconciles down to what actually
+        // cleared. The customer would pay full price for a coupon the checkout
+        // accepted. The non-trial mandate-only path already orders it this way.
+        $recurringDiscountNet = 0;
+        if ($pricedCoupon !== null && $pricedCoupon['coupon']->type === CouponType::Recurring) {
+            $recurringDiscountNet = (int) ($pricedCoupon['recurring_discount_net'] ?? 0);
+
+            if ($recurringDiscountNet > 0) {
+                $this->couponService->applyRecurringMarker(
+                    $pricedCoupon['coupon'],
+                    $billable,
+                    (int) $pricedCoupon['order_amount_net'],
+                );
+            }
+        }
+
         try {
             $this->createSubscription->handle($billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'recurring_discount_net' => 0,
+                'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
                 'trial_days' => $trialDays,
             ]);
@@ -484,6 +504,13 @@ class MandateOnlyPaymentHandler
     }
 
     /**
+     * Apply whatever a trial signup's coupon does at activation time.
+     *
+     * `$addonCodes` / `$extraSeats` are no longer read here — the Recurring branch
+     * that needed them moved ahead of CreateSubscription. They stay in the signature
+     * because this method is a protected override seam; dropping them would break an
+     * app that overrides it.
+     *
      * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
      * @param  array<int, string>  $addonCodes
      */
@@ -498,13 +525,10 @@ class MandateOnlyPaymentHandler
         /** @var Model&Billable $billable */
         $coupon = $pricedCoupon['coupon'];
 
+        // Recurring is already handled before CreateSubscription — its marker has to
+        // exist before Mollie is told the amount. Re-applying it here would be
+        // harmless but redundant.
         if ($coupon->type === CouponType::Recurring) {
-            $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
-            $baseRecurringNet = SubscriptionAmount::net(
-                $this->catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes
-            );
-            $this->couponService->applyRecurringMarker($coupon, $billable, $baseRecurringNet);
-
             return;
         }
 
@@ -514,6 +538,33 @@ class MandateOnlyPaymentHandler
                 'code' => (string) $coupon->code,
             ];
             $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            return;
+        }
+
+        // A TrialExtension buys days, not money, so there is nothing to stash for a
+        // later charge — it takes effect now, on the trial this activation just
+        // started. Redeemed here rather than at signup's start because
+        // extendBillingTrialUntil() also PATCHes the Mollie subscription's next
+        // charge date, which requires that subscription to exist.
+        //
+        // Falling through both branches above was the whole bug: the checkout
+        // accepted the code, the customer saw it applied, and the trial ended on the
+        // plan's own day with no redemption recorded anywhere.
+        if ($coupon->type === CouponType::TrialExtension) {
+            try {
+                $this->couponService->redeem($coupon, $billable, [
+                    'planCode' => $planCode,
+                    'interval' => $interval,
+                    'orderAmountNet' => (int) $pricedCoupon['order_amount_net'],
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('Trial activation: TrialExtension coupon redemption failed', [
+                    'billable_id' => $billable->getKey(),
+                    'coupon_code' => (string) $coupon->code,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 }

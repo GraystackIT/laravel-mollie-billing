@@ -195,11 +195,28 @@ class CouponService
         }
 
         if ($coupon->type === CouponType::TrialExtension) {
-            $planCode = $context['planCode'] ?? null;
-            $planTrialDays = (int) (config('mollie-billing-plans.plans.'.$planCode.'.trial_days') ?? 0);
-            $onTrial = $billable->isOnBillingTrial();
+            // An active trial always qualifies. A *planned* one only counts where a
+            // trial is genuinely about to start — the caller says so with
+            // `trial_starting`, and only the signup path does. Deciding it from the
+            // plan alone would let an active, paying subscriber on a trial-offering
+            // plan redeem an extension from the dashboard: extendBillingTrialUntil()
+            // would flip them back to Trial and PATCH Mollie's next charge to the new
+            // trial end, i.e. charge them again within days.
+            //
+            // When it does count, the length comes from the catalog keyed by
+            // (plan, interval). Trials are configured per interval, and plan-level
+            // `trial_days` is not supported at all (check-config rejects it) — reading
+            // the plan root meant the planned-trial branch could never be true, so a
+            // fresh checkout could never accept one of these codes.
+            $planCode = (string) ($context['planCode'] ?? '');
+            $interval = (string) ($context['interval'] ?? 'monthly');
+            $trialStarting = (bool) ($context['trial_starting'] ?? false);
 
-            if (! $onTrial && $planTrialDays <= 0) {
+            $plannedTrialDays = ($trialStarting && $planCode !== '')
+                ? $this->catalog->trialDays($planCode, $interval)
+                : 0;
+
+            if (! $billable->isOnBillingTrial() && $plannedTrialDays <= 0) {
                 throw new CouponRequiresTrialException(
                     "Coupon {$coupon->code} requires an active or planned trial."
                 );
@@ -277,15 +294,32 @@ class CouponService
     /**
      * Validate a coupon code without a Billable (e.g. during checkout for a
      * not-yet-created account). Applies all billable-independent checks.
-     * TrialExtension is rejected because it requires a billable; AccessGrant
-     * skips source-based checks since no subscription exists yet.
+     * AccessGrant skips source-based checks since no subscription exists yet.
      */
     public function validateWithoutBillable(string $code, array $context): Coupon
     {
         $coupon = $this->resolveAndValidateShared($code, null, $context);
 
         if ($coupon->type === CouponType::TrialExtension) {
-            throw new InvalidCouponException(null, (string) $coupon->code, 'requires_billable');
+            // The billable-dependent half of the trial check (is this account on a
+            // trial right now?) cannot be answered here, but the other half can:
+            // the chosen (plan, interval) either offers a trial or it does not, and
+            // that is the half that matters for a fresh signup. Rejecting the type
+            // outright meant a checkout could never accept one even though it lists
+            // TrialExtension among its allowed types — a promotion of the "14 + 7
+            // days free" kind was unusable at the moment it is meant to be used.
+            //
+            // A context without a plan cannot be judged at all, so it still refuses.
+            $planCode = (string) ($context['planCode'] ?? '');
+            $interval = (string) ($context['interval'] ?? 'monthly');
+
+            if ($planCode === '') {
+                throw new InvalidCouponException(null, (string) $coupon->code, 'requires_billable');
+            }
+
+            if ($this->catalog->trialDays($planCode, $interval) <= 0) {
+                throw new InvalidCouponException(null, (string) $coupon->code, 'requires_trial');
+            }
         }
 
         return $coupon;

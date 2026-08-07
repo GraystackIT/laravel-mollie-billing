@@ -41,3 +41,4 @@ tests/Browser/screenshots/
 tests/Browser/console/
 .phpunit.dusk.cache
 tests/Browser/source/
+.DS_Store

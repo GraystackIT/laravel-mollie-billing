@@ -94,6 +94,8 @@ return [
     'processing' => 'Wird verarbeitet…',
     'continue' => 'Weiter',
 
+    'coupon_trial_days_added' => '+:days Tage Testphase (:code)',
+
     // Coupon errors
     'coupon_empty' => 'Bitte geben Sie einen Gutscheincode ein.',
     'coupon_already_applied' => 'Entfernen Sie den aktuellen Gutschein, bevor Sie einen neuen hinzufügen.',
@@ -109,6 +111,7 @@ return [
     'coupon_product_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Produkt.',
     'coupon_min_order' => 'Die Bestellung erreicht nicht den Mindestbetrag für diesen Gutschein.',
     'coupon_requires_billable' => 'Dieser Gutschein kann beim Checkout nicht angewendet werden.',
+    'coupon_requires_trial' => 'Dieser Gutschein verlängert eine Testphase; der gewählte Plan bietet keine an.',
     'coupon_recurring_conflict' => 'Auf diesem Abonnement ist bereits ein anderer wiederkehrender Gutschein aktiv.',
     'coupon_requires_active_subscription' => 'Zum Einlösen dieses Gutscheins ist ein aktives Abonnement erforderlich.',
     'coupon_too_close_to_charge' => 'Die nächste Abrechnung steht zu kurz bevor, um diesen Gutschein noch sicher anzuwenden. Bitte versuchen Sie es nach der nächsten Abrechnung erneut.',

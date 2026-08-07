@@ -26,6 +26,21 @@ beforeEach(function (): void {
         ],
     ]);
 
+    // A plan whose trial sits where the catalog actually reads it: per interval,
+    // monthly only — so the gate can be checked against an interval that offers a
+    // trial and one that does not.
+    config()->set('mollie-billing-plans.plans.protrial', [
+        'name' => 'Pro Trial',
+        'tier' => 2,
+        'included_seats' => 1,
+        'feature_keys' => [],
+        'allowed_addons' => [],
+        'intervals' => [
+            'monthly' => ['base_price_net' => 1000, 'seat_price_net' => null, 'trial_days' => 14, 'included_usages' => []],
+            'yearly' => ['base_price_net' => 10000, 'seat_price_net' => null, 'included_usages' => []],
+        ],
+    ]);
+
     SpyMollieSubscriptionPatcher::$calls = [];
     app()->bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class);
 });
@@ -125,4 +140,69 @@ it('aligns the Mollie startDate with the new trial end even when the previous tr
 
     $target = \Carbon\Carbon::parse((string) $setCalls[0][3]['target']);
     expect($target->diffInSeconds($expected, false))->toBeBetween(-2, 2);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The trial gate: who may redeem one of these at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+it('refuses a trial extension for an active subscriber, even on a plan that offers trials', function (): void {
+    $service = app(CouponService::class);
+    $coupon = $service->trialExtensionCoupon('PLUS7', 7);
+
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'X', 'email' => 'active@y.test']);
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'protrial',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subDays(3),
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_test'],
+        'mollie_customer_id' => 'cust_test',
+    ])->save();
+
+    // The dashboard's context — no trial is starting here. Accepting it would flip a
+    // paying subscriber back to Trial and PATCH Mollie's next charge to the new trial
+    // end, i.e. charge them again within the week.
+    expect(fn () => $service->validate('PLUS7', $billable->fresh(), [
+        'planCode' => 'protrial',
+        'interval' => 'monthly',
+        'orderAmountNet' => 1000,
+        'allowed_types' => [CouponType::TrialExtension],
+    ]))->toThrow(\GraystackIT\MollieBilling\Exceptions\CouponRequiresTrialException::class);
+
+    expect($billable->fresh()->trial_ends_at)->toBeNull()
+        ->and(SpyMollieSubscriptionPatcher::$calls)->toBeEmpty();
+
+    expect($coupon->fresh()->redemptions_count)->toBe(0);
+});
+
+it('accepts a trial extension for the same billable when a signup is starting the trial', function (): void {
+    $service = app(CouponService::class);
+    $service->trialExtensionCoupon('PLUS7', 7);
+
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'X', 'email' => 'fresh@y.test']);
+
+    // The signup path declares it, and only the signup path: the trial the coupon
+    // extends is the one this activation is about to start.
+    $coupon = $service->validate('PLUS7', $billable->fresh(), [
+        'planCode' => 'protrial',
+        'interval' => 'monthly',
+        'orderAmountNet' => 1000,
+        'trial_starting' => true,
+        'allowed_types' => [CouponType::TrialExtension],
+    ]);
+
+    expect($coupon->code)->toBe('PLUS7');
+
+    // …and not for an interval that offers no trial.
+    expect(fn () => $service->validate('PLUS7', $billable->fresh(), [
+        'planCode' => 'protrial',
+        'interval' => 'yearly',
+        'orderAmountNet' => 10000,
+        'trial_starting' => true,
+        'allowed_types' => [CouponType::TrialExtension],
+    ]))->toThrow(\GraystackIT\MollieBilling\Exceptions\CouponRequiresTrialException::class);
 });

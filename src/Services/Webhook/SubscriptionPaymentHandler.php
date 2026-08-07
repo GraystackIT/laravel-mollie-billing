@@ -8,7 +8,6 @@ use Carbon\Carbon;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
-use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\TrialConverted;
@@ -219,6 +218,17 @@ class SubscriptionPaymentHandler
         if ($wasPastDue) {
             unset($meta['payment_failure'], $meta['past_due_since']);
         }
+
+        // The override exists to delay ONE charge — a TrialExtension coupon pushing
+        // the trial end, a PeriodExtension granting free days. That charge has now
+        // happened, so the override is spent: `subscription_period_starts_at` above
+        // is the new anchor. Left in place it outranks that anchor in
+        // `nextBillingDate()` for as long as it stays in the future, which made a
+        // converted trial report a next-billing date a month early — and everything
+        // reading that date got it wrong with it: the overage pass fires the day
+        // before it, and a prorata plan change measures its factor against it, so
+        // the customer was charged the wrong amount at the wrong time.
+        unset($meta['next_charge_date_override']);
 
         $updates = [
             'subscription_period_starts_at' => $periodStartsAt,

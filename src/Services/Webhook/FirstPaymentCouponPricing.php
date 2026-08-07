@@ -30,6 +30,10 @@ class FirstPaymentCouponPricing
      * could be permanently consumed against a subscription that never came
      * into existence.
      *
+     * `$trialStarting` says this activation is starting a trial, which is what makes
+     * a TrialExtension coupon admissible: outside that, an extension has no trial to
+     * extend and applying it would move a paying subscriber's next charge date.
+     *
      * @param  array<int, string>  $addonCodes
      * @return array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount_net: int, recurring_discount_net: int, order_amount_net: int}|null
      */
@@ -40,6 +44,7 @@ class FirstPaymentCouponPricing
         string $interval,
         array $addonCodes,
         int $extraSeats,
+        bool $trialStarting = false,
     ): ?array {
         $couponCode = trim($couponCode);
         if ($couponCode === '') {
@@ -55,6 +60,7 @@ class FirstPaymentCouponPricing
                 'interval' => $interval,
                 'addonCodes' => $addonCodes,
                 'orderAmountNet' => $orderAmountNet,
+                'trial_starting' => $trialStarting,
                 'allowed_types' => [
                     CouponType::SinglePayment,
                     CouponType::Recurring,

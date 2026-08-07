@@ -94,6 +94,8 @@ return [
     'processing' => 'Processing…',
     'continue' => 'Continue',
 
+    'coupon_trial_days_added' => '+:days days of trial (:code)',
+
     // Coupon errors
     'coupon_empty' => 'Please enter a coupon code.',
     'coupon_already_applied' => 'Remove the current coupon before adding a new one.',
@@ -109,6 +111,7 @@ return [
     'coupon_product_mismatch' => 'This coupon does not apply to the selected product.',
     'coupon_min_order' => 'The order does not meet the minimum amount for this coupon.',
     'coupon_requires_billable' => 'This coupon cannot be applied during checkout.',
+    'coupon_requires_trial' => 'This coupon extends a trial, and the selected plan does not offer one.',
     'coupon_recurring_conflict' => 'Another recurring coupon is already active on this subscription.',
     'coupon_requires_active_subscription' => 'An active subscription is required to redeem this coupon.',
     'coupon_too_close_to_charge' => 'The next charge is too close to safely apply this coupon. Please try again after the next billing date.',

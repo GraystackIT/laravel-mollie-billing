@@ -789,10 +789,21 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
+        // The service can only ask whether the PLAN offers a trial; whether one will
+        // actually start also depends on this customer — a returning subscriber with
+        // a mandate on file checks out at full price, gets no trial, and a trial
+        // extension applied to that has nothing to extend.
+        if ($this->couponTrialDays($coupon) > 0 && ! $this->trialApplies($this->plan_code, $this->interval)) {
+            $this->couponError = __('billing::checkout.coupon_requires_trial');
+
+            return;
+        }
+
         $this->applied_coupon = [
             'code' => (string) $coupon->code,
             'name' => (string) $coupon->name,
             'discount_net' => $this->calculateCouponDiscount($coupon),
+            'trial_days' => $this->couponTrialDays($coupon),
         ];
         $this->coupon_input = '';
     }
@@ -841,9 +852,31 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return 'failed';
         }
 
+        // Same customer-level check as applyCoupon(): switching to a plan whose trial
+        // this billable can no longer get must drop the extension, not carry it to a
+        // submit where it would be applied to a paid period.
+        if ($this->couponTrialDays($coupon) > 0 && ! $this->trialApplies($this->plan_code, $this->interval)) {
+            $this->applied_coupon = null;
+
+            return 'requires_trial';
+        }
+
         $this->applied_coupon['discount_net'] = $this->calculateCouponDiscount($coupon);
+        $this->applied_coupon['trial_days'] = $this->couponTrialDays($coupon);
 
         return null;
+    }
+
+    /**
+     * What a TrialExtension coupon buys. It carries no money discount, so without
+     * this the summary would advertise it as "−0.00" — a coupon that reads as worth
+     * nothing while it is in fact worth days.
+     */
+    private function couponTrialDays(Coupon $coupon): int
+    {
+        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension
+            ? max(0, (int) ($coupon->trial_extension_days ?? 0))
+            : 0;
     }
 
     private function calculateCouponDiscount(Coupon $coupon): int
@@ -900,6 +933,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'requires_trial' => __('billing::checkout.coupon_requires_trial'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
             'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
             'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),

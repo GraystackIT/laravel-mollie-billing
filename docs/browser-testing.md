@@ -152,13 +152,13 @@ the fastest way to see what the page was actually showing.
 
 ## Coverage
 
-32 scenarios across 10 files:
+34 scenarios across 10 files:
 
 | File | Covers |
 |---|---|
 | `CheckoutTest` | Anonymous signup through all four steps; existing customer with the locked billing step; failed payment. |
 | `TrialTest` | Trial checkout via the €0 mandate-only flow; trial expiry without a payment method. |
-| `CouponCheckoutTest` | Percentage coupon on the first payment; 100% coupon riding the mandate-only path. |
+| `CouponCheckoutTest` | Percentage coupon on the first payment; 100% coupon riding the mandate-only path; trial-extension coupon lengthening the trial it is applied to, and refused on a plan without one. |
 | `PortalDashboardTest` | Cancel into grace + resubscribe; credits coupon; discount coupons sent to the action that prices them. |
 | `PlanChangeTest` | Immediate upgrade with pro-rata; downgrade scheduled for the period end (and cancelled), including the extra-seats guard; interval switch. |
 | `AddonsSeatsProductsTest` | Addon enable/disable; extra seats; one-time product crediting a wallet; `onetimeonly` disappearing once paid. |

@@ -1,6 +1,10 @@
 @php($plan = $this->selectedPlan())
 @php($trialApplies = $this->trialApplies($plan_code, $interval))
-@php($trialDays = $trialApplies ? $this->planTrialDays($plan_code, $interval) : 0)
+{{-- Plan days plus whatever an applied TrialExtension coupon adds: the activation
+     redeems that coupon against the trial it just started, so the customer really
+     does get the sum. Advertising the plan's own length here promised less than
+     they get and, worse, named the wrong first-charge date. --}}
+@php($trialDays = $trialApplies ? $this->planTrialDays($plan_code, $interval) + (int) ($applied_coupon['trial_days'] ?? 0) : 0)
 @php($trialFirstChargeDate = $trialDays > 0 ? \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays($trialDays)->translatedFormat('d. M Y') : null)
 
 @if ($trialDays > 0)
@@ -134,14 +138,24 @@
                     <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.subtotal') }}</span>
                     <span class="tabular-nums">{{ $money($this->subtotalNet()) }}</span>
                 </div>
-                <div class="flex items-baseline justify-between text-sm">
-                    <span class="text-emerald-700 dark:text-emerald-400">
-                        {{ __('billing::checkout.discount', ['code' => $applied_coupon['code']]) }}
-                    </span>
-                    <span class="tabular-nums text-emerald-700 dark:text-emerald-400">
-                        −{{ $money($applied_coupon['discount_net'] ?? 0) }}
-                    </span>
-                </div>
+                {{-- A trial-extension coupon buys days, not money. Showing it as
+                     "−0.00" made a valid coupon look like it had done nothing. --}}
+                @if ((int) ($applied_coupon['trial_days'] ?? 0) > 0)
+                    <div class="flex items-baseline justify-between text-sm">
+                        <span class="text-emerald-700 dark:text-emerald-400">
+                            {{ __('billing::checkout.coupon_trial_days_added', ['days' => $applied_coupon['trial_days'], 'code' => $applied_coupon['code']]) }}
+                        </span>
+                    </div>
+                @else
+                    <div class="flex items-baseline justify-between text-sm">
+                        <span class="text-emerald-700 dark:text-emerald-400">
+                            {{ __('billing::checkout.discount', ['code' => $applied_coupon['code']]) }}
+                        </span>
+                        <span class="tabular-nums text-emerald-700 dark:text-emerald-400">
+                            −{{ $money($applied_coupon['discount_net'] ?? 0) }}
+                        </span>
+                    </div>
+                @endif
             @endif
             <div class="flex items-baseline justify-between text-sm">
                 <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.net') }}</span>
