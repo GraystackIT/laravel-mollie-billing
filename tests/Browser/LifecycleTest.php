@@ -51,6 +51,50 @@ class LifecycleTest extends BrowserTestCase
             ->and((int) BillingInvoice::query()->sole()->amount_gross)->toBe(1178);
     }
 
+    public function test_the_next_billing_date_on_the_dashboard_walks_forward_with_every_renewal(): void
+    {
+        // The visible face of the period advance. Everything downstream keys off
+        // nextBillingDate() — the overage pass fires the day before it, a plan
+        // change measures its prorata factor against it — so a renewal that booked
+        // the invoice but left the period behind would show a date in the past
+        // forever and keep charging for a period already paid for.
+        $billable = $this->makeActiveSubscriber('starter', 'monthly');
+
+        $this->browse(function (Browser $browser) use ($billable): void {
+            $this->actAs($browser, $billable);
+            $browser->waitForText('Starter', 10)->pause(400);
+
+            $shown = static fn (): string => (string) TestBillable::sole()
+                ->nextBillingDate()?->translatedFormat('d. M Y');
+
+            $first = $shown();
+            $browser->assertSee($first);
+            $this->shot($browser, 'Nächste Abrechnung: '.$first);
+
+            $this->renewSubscription($billable->refresh());
+
+            $browser->refresh()->waitForText('Starter', 10)->pause(600);
+            $second = $shown();
+
+            expect($second)->not->toBe($first);
+            $browser->assertSee($second)->assertDontSee($first);
+            $this->shot($browser, 'Nach Erneuerung: '.$second);
+
+            $this->renewSubscription(TestBillable::sole());
+
+            $browser->refresh()->waitForText('Starter', 10)->pause(600);
+            $third = $shown();
+
+            expect($third)->not->toBe($second);
+            $browser->assertSee($third);
+            $this->shot($browser, 'Nach zweiter Erneuerung: '.$third);
+        });
+
+        // Two renewals, two invoices, and the period sits roughly two months on.
+        expect(BillingInvoice::query()->count())->toBe(2)
+            ->and(TestBillable::sole()->nextBillingDate()->isAfter(now()->addDays(25)))->toBeTrue();
+    }
+
     public function test_a_failed_renewal_pushes_the_customer_to_past_due_and_a_paid_one_recovers_them(): void
     {
         $billable = $this->makeActiveSubscriber('starter', 'monthly');

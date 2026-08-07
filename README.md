@@ -881,7 +881,7 @@ test that registered them.
 ### Browser tests
 
 The package also ships a **Chrome end-to-end suite** that drives the real checkout,
-portal and admin UI against a fake Mollie — 31 scenarios from signup through renewals,
+portal and admin UI against a fake Mollie — 32 scenarios from signup through renewals,
 plan changes, overage, VAT numbers and the country mismatch, each one screenshotted
 into a browsable gallery. It lives outside the default run because it needs Chrome and
 a Flux Pro licence:

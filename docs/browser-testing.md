@@ -152,7 +152,7 @@ the fastest way to see what the page was actually showing.
 
 ## Coverage
 
-31 scenarios across 10 files:
+32 scenarios across 10 files:
 
 | File | Covers |
 |---|---|
@@ -162,7 +162,7 @@ the fastest way to see what the page was actually showing.
 | `PortalDashboardTest` | Cancel into grace + resubscribe; credits coupon; discount coupons sent to the action that prices them. |
 | `PlanChangeTest` | Immediate upgrade with pro-rata; downgrade scheduled for the period end (and cancelled), including the extra-seats guard; interval switch. |
 | `AddonsSeatsProductsTest` | Addon enable/disable; extra seats; one-time product crediting a wallet; `onetimeonly` disappearing once paid. |
-| `LifecycleTest` | Renewal booking an invoice and recharging wallets; failed renewal → past_due → recovery; overage charge; cancelled → expired. |
+| `LifecycleTest` | Renewal booking an invoice and recharging wallets; the next-billing date walking forward across two renewals; failed renewal → past_due → recovery; overage charge; cancelled → expired. |
 | `BillingDataTest` | Saving the address; valid EU VAT number → reverse charge on the next invoice; unknown number rejected; invoice archive with real PDFs. |
 | `CountryMismatchTest` | Foreign-card renewal flagging a mismatch; the customer's correction and the refund-and-reissue. |
 | `AdminPanelTest` | Every admin screen; operator cancel with a recorded reason; refund and its credit note in the customer's portal; mismatch queue. |

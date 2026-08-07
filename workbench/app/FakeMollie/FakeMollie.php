@@ -142,9 +142,27 @@ class FakeMollie
             'metadata' => json_decode((string) ($subscription->metadata ?? '[]'), true) ?: [],
         ]);
 
+        // Settled ON the scheduled date, and the schedule then moves one interval
+        // on — which is what Mollie's scheduler does, and what makes consecutive
+        // renewals produce distinct, forward-walking `paidAt` anchors. Settling
+        // every renewal at `now()` instead made the second one land on the same
+        // instant as the first, so the billing period appeared not to advance.
+        $scheduled = $subscription->next_payment_date !== null
+            ? \Illuminate\Support\Carbon::parse((string) $subscription->next_payment_date)->setTime(9, 0)
+            : now();
+
+        $isYearly = str_contains((string) $subscription->interval, 'year')
+            || str_contains((string) $subscription->interval, '12 month');
+
         DB::table('fake_mollie_payments')->where('id', $payment['id'])->update([
             'subscription_id' => $subscriptionId,
             'country_code' => 'DE',
+            'paid_at' => self::payment($payment['id'])['status'] === 'paid' ? $scheduled : null,
+            'updated_at' => now(),
+        ]);
+
+        DB::table('fake_mollie_subscriptions')->where('id', $subscriptionId)->update([
+            'next_payment_date' => ($isYearly ? $scheduled->copy()->addYear() : $scheduled->copy()->addMonth())->toDateString(),
             'updated_at' => now(),
         ]);
 
