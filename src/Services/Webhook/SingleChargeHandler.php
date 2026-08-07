@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\PlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -27,6 +28,7 @@ class SingleChargeHandler
         protected readonly InvoiceService $salesInvoiceService,
         protected readonly UpdateSubscription $updateSubscription,
         protected readonly WalletUsageService $walletService,
+        protected readonly VatCalculationService $vatService,
     ) {
     }
 
@@ -50,14 +52,26 @@ class SingleChargeHandler
 
         $lineItems = (array) ($metadata['line_items'] ?? []);
         if (empty($lineItems)) {
-            $actual = $this->support->amountFromMolliePayment($payment);
+            // No `line_items` metadata means a payment created before this package
+            // version — in flight across an upgrade. All it carries is Mollie's
+            // GROSS, and `createForPayment()` adds VAT on top of whatever net it is
+            // given, so booking the gross as net charged VAT twice: 11.90 collected
+            // at 19% became an invoice of net 1190 / VAT 226 / gross 1416.
+            $gross = $this->support->amountFromMolliePayment($payment);
+            $rate = (float) ($this->vatService->calculate(
+                (string) ($billable->getBillingCountry() ?? ''),
+                $gross,
+                $billable,
+            )['rate'] ?? 0.0);
+            $net = $this->support->netFromGross($gross, $rate);
+
             $lineItems = [[
                 'kind' => $type,
                 'label' => ucfirst($type).' charge',
                 'quantity' => 1,
-                'unit_price_net' => $actual,
-                'unit_price' => $actual,
-                'total_net' => $actual,
+                'unit_price_net' => $net,
+                'unit_price' => $net,
+                'total_net' => $net,
             ]];
         }
 
@@ -65,7 +79,16 @@ class SingleChargeHandler
 
         if ($type === 'overage') {
             $meta = $billable->getBillingSubscriptionMeta();
-            unset($meta['usage_overage'], $meta['usage_overage_status'], $meta['usage_overage_attempts']);
+            // `usage_overage_counted_payments` goes too: the dunning budget is now a
+            // list of payment ids rather than an integer, and while a stale list is
+            // ignored (it is scoped to its snapshot's created_at) leaving it behind
+            // accumulates dead meta on a long-lived billable.
+            unset(
+                $meta['usage_overage'],
+                $meta['usage_overage_status'],
+                $meta['usage_overage_attempts'],
+                $meta['usage_overage_counted_payments'],
+            );
             $billable->forceFill(['subscription_meta' => $meta])->save();
 
             $this->settleOverageWallets($billable, $lineItems);

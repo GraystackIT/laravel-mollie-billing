@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPaidWithoutBillableNotification;
+use GraystackIT\MollieBilling\Services\Webhook\ActivationClaimHeldException;
 use GraystackIT\MollieBilling\Services\Webhook\CountryCorrectionHandler;
 use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentArtifacts;
 use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentCouponPricing;
@@ -115,6 +116,18 @@ class MollieWebhookController extends Controller
             ]);
 
             return response('', 200);
+        } catch (ActivationClaimHeldException $e) {
+            // Benign back-off, not a failure: a competing payment's activation
+            // is in flight for this billable. Nothing is recorded as processed
+            // and 503 makes Mollie re-deliver once the holder has finished (the
+            // duplicate/invoice guards then apply) or its claim went stale.
+            Log::info('Webhook deferred — a competing activation holds the claim for this billable', [
+                'payment_id' => $paymentId,
+                'reason' => $e->getMessage(),
+            ]);
+
+            $reservation->delete();
+            return response('', 503);
         } catch (\Throwable $e) {
             Log::error('Billing webhook handler failed', [
                 'payment_id' => $paymentId,

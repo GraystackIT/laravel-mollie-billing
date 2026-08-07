@@ -189,7 +189,7 @@ it('reconciles the first-payment invoice to the amount actually paid and reports
     });
 });
 
-it('activates the first payment inside a transaction so two concurrent checkouts cannot both create a subscription', function (): void {
+it('creates the Mollie subscription outside the gate transaction and spends the activation claim', function (): void {
     $billable = invoiceAmountBillable();
 
     $levelInside = null;
@@ -217,8 +217,73 @@ it('activates the first payment inside a transaction so two concurrent checkouts
 
     $this->postJson(route('billing.webhook'), ['id' => 'tr_first_locked'])->assertStatus(200);
 
+    // Concurrent checkouts are serialized by the gate transaction (row lock +
+    // durable activation claim), but the Mollie call and everything after it
+    // must run at the caller's transaction level: a rollback there would erase
+    // mollie_subscription_id and the invoice while the subscription exists at
+    // Mollie, and the re-delivery would create a second one.
     expect($levelInside)->not->toBeNull()
-        ->and($levelInside)->toBeGreaterThan($levelOutside);
+        ->and($levelInside)->toBe($levelOutside);
+
+    // A successful activation spends the claim the gate took.
+    expect($billable->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('activation_claim');
+});
+
+it('reconciles the renewal invoice to the amount actually paid and reports the mismatch', function (): void {
+    Event::fake([PaymentAmountMismatch::class]);
+
+    $billable = invoiceAmountBillable();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subDays(30),
+        'mollie_mandate_id' => 'mdt_am',
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_drift'],
+    ])->save();
+
+    // The plan was raised 1000 → 1200 net between renewals while the Mollie
+    // subscription still charges the old 11.90 gross (the PATCH did not run):
+    // the invoice must book the 1190 that cleared, not the 1428 the catalog
+    // says — otherwise 2.38 of output VAT is over-declared per renewal and the
+    // refundable base exceeds what Mollie can refund.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.base_price_net', 1200);
+
+    InvoiceAmountFakeWebhookController::$nextPayment = (object) [
+        'id' => 'tr_renewal_drift',
+        'status' => 'paid',
+        'amount' => (object) ['value' => '11.90', 'currency' => 'EUR'],
+        'paidAt' => BillingTime::nowUtc()->toIso8601String(),
+        'subscriptionId' => 'sub_drift',
+        'countryCode' => 'DE',
+        'metadata' => [
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+        ],
+    ];
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_renewal_drift'])->assertStatus(200);
+
+    $invoice = BillingInvoice::query()->where('mollie_payment_id', 'tr_renewal_drift')->first();
+    expect($invoice)->not->toBeNull()
+        ->and((int) $invoice->amount_gross)->toBe(1190)
+        ->and((int) $invoice->amount_net)->toBe(1000)
+        ->and((int) $invoice->amount_vat)->toBe(190);
+
+    $adjustment = lineByKind($invoice, 'adjustment');
+    expect($adjustment)->not->toBeNull()
+        ->and((int) $adjustment['total_net'])->toBe(-200);
+
+    // The refundable base stays within what Mollie can actually refund.
+    expect($invoice->remainingRefundableNet())->toBe(1000);
+
+    Event::assertDispatchedTimes(PaymentAmountMismatch::class, 1);
+    Event::assertDispatched(PaymentAmountMismatch::class, function (PaymentAmountMismatch $e) {
+        return $e->paymentId === 'tr_renewal_drift'
+            && $e->expectedGross === 1428
+            && $e->actualGross === 1190;
+    });
 });
 
 it('books the recurring coupon discount on the renewal invoice with the canonical line keys', function (): void {

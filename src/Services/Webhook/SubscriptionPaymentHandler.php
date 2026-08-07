@@ -88,11 +88,6 @@ class SubscriptionPaymentHandler
         $couponDiscountNet = $this->couponService->computeMarkerDiscount($billable, $expectedNet);
         $netForCharge = max(0, $expectedNet - $couponDiscountNet - $pendingTrialDiscountNet);
         $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $netForCharge, $billable);
-        $actualGross = $this->support->amountFromMolliePayment($payment);
-
-        if (abs($actualGross - (int) $vat['gross']) > 1) {
-            event(new PaymentAmountMismatch($billable, (string) $payment->id, (int) $vat['gross'], $actualGross));
-        }
 
         $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
         if ($couponDiscountNet > 0) {
@@ -105,6 +100,26 @@ class SubscriptionPaymentHandler
                 (string) $pendingTrialCoupon['coupon']->code,
             );
         }
+
+        // Reconciled, not merely reported. The lines above are rebuilt from the
+        // catalog while Mollie charges whatever the subscription was last PATCHed
+        // to, so a price change whose PATCH never landed makes them disagree — and
+        // the money that cleared is the one fact. Booking the catalog amount instead
+        // over-declared output VAT on every renewal and left `refunded_net` headroom
+        // Mollie cannot honour, so a full refund would fail.
+        //
+        // The expected gross comes from the lines themselves: the recurring amount is
+        // built from these same lines (MollieSubscriptionPatcher) and the invoice
+        // header sums their per-line VAT, so `round(Σ net × rate)` was a third number
+        // matching neither — six lines drift past the 1-cent slack every time.
+        $lineItems = $this->support->reconcileWithPaidAmount(
+            $payment,
+            $billable,
+            $lineItems,
+            $this->support->netFromLineItems($lineItems),
+            (float) ($vat['rate'] ?? 0.0),
+        );
+
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
 
         if ($couponDiscountNet > 0) {

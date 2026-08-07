@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentCouponPricing;
+use GraystackIT\MollieBilling\Services\Webhook\WebhookSupport;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\DB;
@@ -189,7 +190,7 @@ it('activates a 100% coupon checkout for a billable in a recovery state', functi
     expect(CouponRedemption::query()->where('coupon_id', $coupon->id)->count())->toBe(1);
 })->with(['past_due', 'expired', 'cancelled']);
 
-it('activates under a row lock so two mandate-only payments cannot both create a subscription', function (): void {
+it('creates the Mollie subscription outside the gate transaction and spends the activation claim', function (): void {
     app(CouponService::class)->create([
         'code' => 'RESCUE',
         'name' => 'Full coverage once',
@@ -212,8 +213,17 @@ it('activates under a row lock so two mandate-only payments cannot both create a
 
     $this->postJson(route('billing.webhook'), ['id' => 'tr_locked'])->assertStatus(200);
 
+    // Two concurrent mandate-only payments are still serialized — by the short gate
+    // transaction (row lock + durable claim), not by wrapping the activation. The
+    // Mollie call must NOT run inside a transaction: a rollback after it erased the
+    // local subscription id while the subscription existed at Mollie, and the
+    // re-delivery then created a second one.
     expect($levelInside)->not->toBeNull()
-        ->and($levelInside)->toBeGreaterThan($levelOutside);
+        ->and($levelInside)->toBe($levelOutside);
+
+    // A successful activation spends the claim the gate took.
+    expect($billable->fresh()->getBillingSubscriptionMeta())
+        ->not->toHaveKey(WebhookSupport::ACTIVATION_CLAIM_META_KEY);
 });
 
 it('self-heals and reports when the coupon redemption fails after the subscription was created', function (): void {

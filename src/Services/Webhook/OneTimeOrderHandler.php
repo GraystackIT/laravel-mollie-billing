@@ -141,7 +141,6 @@ class OneTimeOrderHandler
             $billable,
             $lineItems,
             $expectedNet,
-            (int) $vat['gross'],
             (float) ($vat['rate'] ?? 0.0),
         );
 

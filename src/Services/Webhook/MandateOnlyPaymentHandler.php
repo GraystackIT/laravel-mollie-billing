@@ -37,7 +37,7 @@ class MandateOnlyPaymentHandler
      * admits all of them (it gates only on `! hasAccessibleBillingSubscription()`)
      * and routes 100%-coupon and trial checkouts through this handler, and
      * FirstPaymentHandler allows the same set. Anything still accessible was
-     * already caught in activateLocked() and never reaches the activation.
+     * already caught by openGate()'s duplicate branch and never reaches the activation.
      */
     protected const ACTIVATABLE_STATES = [
         SubscriptionStatus::New,
@@ -116,21 +116,81 @@ class MandateOnlyPaymentHandler
             return;
         }
 
-        // Row lock around duplicate check + activation: reserve() only serializes
-        // deliveries of the same payment id, so two mandate-only payments for the
-        // same billable (two checkout tabs) could otherwise both pass the
-        // duplicate check and each create a Mollie subscription.
-        DB::transaction(function () use ($payment, $billable, $metadata): void {
-            $billable->newQuery()->whereKey($billable->getKey())->lockForUpdate()->first();
+        if ((string) ($metadata['pending_subscription_plan_code'] ?? '') === '') {
+            return;
+        }
 
-            $this->activateLocked($payment, $billable, $metadata);
+        $paymentId = (string) ($payment->id ?? '');
+
+        // Same two-phase split as FirstPaymentHandler, for the same reason: the gate
+        // is short and transactional (row lock, guards, durable claim), the activation
+        // runs outside it. With the Mollie CreateSubscription call inside the
+        // transaction, anything throwing after it — an app listener, the
+        // after-checkout hook — rolled back the trial state and
+        // `mollie_subscription_id` while the subscription existed at Mollie, and the
+        // re-delivery created a second one.
+        $gate = $this->openGate($payment, $billable, $paymentId);
+
+        if ($gate === ActivationGate::AlreadyBooked) {
+            Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
+                'payment_id' => $paymentId,
+                'billable_id' => $billable->getKey(),
+            ]);
+
+            return;
+        }
+
+        if ($gate === ActivationGate::Duplicate) {
+            Log::warning('Mandate-only subscription activation skipped — billable already has an active subscription', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'current_status' => $billable->getBillingSubscriptionStatus()->value,
+            ]);
+            DuplicatePaymentReceived::dispatch($billable, $paymentId);
+
+            return;
+        }
+
+        try {
+            $this->activateAfterMandate($payment, $billable, $metadata);
+        } finally {
+            $this->support->releaseActivationClaim($billable, $paymentId);
+        }
+    }
+
+    /**
+     * Decide under the row lock whether this delivery may activate, and claim it.
+     *
+     * The invoice guard is kept even though the trial branch writes no invoice: a
+     * 100%-coupon activation does write one (the local zero-amount audit document),
+     * and for the trial branch it simply never matches — the accessible Trial
+     * subscription is what stops a re-run there, reported as the duplicate outcome.
+     */
+    protected function openGate(object $payment, Billable $billable, string $paymentId): ActivationGate
+    {
+        /** @var Model&Billable $billable */
+        return DB::transaction(function () use ($payment, $billable, $paymentId): ActivationGate {
+            $billable->newQuery()->whereKey($billable->getKey())->lockForUpdate()->first();
+            $billable->refresh();
+
+            if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
+                return ActivationGate::AlreadyBooked;
+            }
+
+            if ($billable->hasAccessibleBillingSubscription()) {
+                return ActivationGate::Duplicate;
+            }
+
+            $this->support->claimActivation($billable, $paymentId);
+
+            return ActivationGate::Proceed;
         });
     }
 
     /**
      * @param  array<string, mixed>  $metadata
      */
-    protected function activateLocked(object $payment, Billable $billable, array $metadata): void
+    protected function activateAfterMandate(object $payment, Billable $billable, array $metadata): void
     {
         /** @var Model&Billable $billable */
         $planCode = (string) ($metadata['pending_subscription_plan_code'] ?? '');
@@ -139,23 +199,6 @@ class MandateOnlyPaymentHandler
         $extraSeats = (int) ($metadata['pending_subscription_extra_seats'] ?? 0);
         $couponCode = (string) ($metadata['pending_subscription_coupon_code'] ?? '');
         $trialDays = (int) ($metadata['pending_subscription_trial_days'] ?? 0);
-
-        if ($planCode === '') {
-            return;
-        }
-
-        $billable->refresh();
-
-        if ($billable->hasAccessibleBillingSubscription()) {
-            Log::warning('Mandate-only subscription activation skipped — billable already has an active subscription', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-                'current_status' => $billable->getBillingSubscriptionStatus()->value,
-            ]);
-            DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? ''));
-
-            return;
-        }
 
         $billable->forceFill([
             'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),

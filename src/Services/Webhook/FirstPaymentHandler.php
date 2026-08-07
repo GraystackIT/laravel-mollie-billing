@@ -40,19 +40,89 @@ class FirstPaymentHandler
             return;
         }
 
-        // The duplicate guard, the invoice and CreateSubscription run under a row
-        // lock on the billable: reserve() only serializes deliveries of the SAME
-        // payment id, so two different first payments (two checkout tabs) would
-        // otherwise both pass hasAccessibleBillingSubscription(), both write an
-        // invoice (different mollie_payment_id — the unique index does not help)
-        // and both create a Mollie subscription, the second forceFill hiding the
-        // first one's id. The sequential case is already handled via
-        // DuplicatePaymentReceived; the lock closes the concurrent window.
-        DB::transaction(function () use ($payment, $billable, $metadata): void {
+        if ((string) ($metadata['plan_code'] ?? '') === '') {
+            return;
+        }
+
+        $paymentId = (string) ($payment->id ?? '');
+
+        // Two phases, on purpose.
+        //
+        // The gate is short and transactional: it takes the row lock, runs the two
+        // guards and commits a durable claim. reserve() only serializes deliveries of
+        // the SAME payment id, so two different first payments (two checkout tabs)
+        // would otherwise both pass hasAccessibleBillingSubscription(), both write an
+        // invoice (different mollie_payment_id, so the unique index does not help) and
+        // both create a Mollie subscription, the second forceFill hiding the first
+        // one's id.
+        //
+        // The activation itself runs OUTSIDE any transaction. It used to sit inside
+        // this one, which meant the Mollie CreateSubscription call did too — and
+        // anything that threw after it (a coupon redemption, an app listener, the
+        // after-checkout hook) rolled back `mollie_subscription_id` and the invoice
+        // while the subscription existed at Mollie. The re-delivery then found a clean
+        // slate and created a SECOND Mollie subscription, charging the customer twice
+        // every period. It also held the row lock across arbitrary app code.
+        $gate = $this->openGate($payment, $billable, $paymentId);
+
+        if ($gate === ActivationGate::AlreadyBooked) {
+            Log::info('Webhook re-delivery: invoice exists for first-payment, skipping', [
+                'payment_id' => $paymentId,
+                'billable_id' => $billable->getKey(),
+            ]);
+
+            return;
+        }
+
+        if ($gate === ActivationGate::Duplicate) {
+            Log::warning('Duplicate first-payment received — billable already has an active subscription', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+            ]);
+
+            DuplicatePaymentReceived::dispatch($billable, $paymentId);
+
+            return;
+        }
+
+        try {
+            $this->activate($payment, $billable, $metadata);
+        } finally {
+            // Released on both paths: a throw here leaves real state behind at Mollie
+            // and locally, so the re-delivery must be able to pass the gate at once
+            // rather than waiting out the claim's TTL.
+            $this->support->releaseActivationClaim($billable, $paymentId);
+        }
+    }
+
+    /**
+     * Decide — under the row lock, in its own short transaction — whether this
+     * delivery may activate, and claim the activation if so.
+     *
+     * The invoice guard runs before the duplicate guard: after a crash mid-activation
+     * the billable is both Active *and* holds this payment's invoice, and that is a
+     * re-delivery to swallow silently, not a duplicate payment to report to the app.
+     */
+    protected function openGate(object $payment, Billable $billable, string $paymentId): ActivationGate
+    {
+        /** @var Model&Billable $billable */
+        return DB::transaction(function () use ($payment, $billable, $paymentId): ActivationGate {
             $billable->newQuery()->whereKey($billable->getKey())->lockForUpdate()->first();
             $billable->refresh();
 
-            $this->activate($payment, $billable, $metadata);
+            if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
+                return ActivationGate::AlreadyBooked;
+            }
+
+            if ($billable->hasAccessibleBillingSubscription()) {
+                return ActivationGate::Duplicate;
+            }
+
+            // Throws ActivationClaimHeldException when a different payment's claim is
+            // still fresh; the controller answers 503 so Mollie re-delivers.
+            $this->support->claimActivation($billable, $paymentId);
+
+            return ActivationGate::Proceed;
         });
     }
 
@@ -66,29 +136,6 @@ class FirstPaymentHandler
         $interval = (string) ($metadata['interval'] ?? 'monthly');
         $addonCodes = (array) ($metadata['addon_codes'] ?? []);
         $extraSeats = (int) ($metadata['extra_seats'] ?? 0);
-
-        if ($planCode === '') {
-            return;
-        }
-
-        if ($billable->hasAccessibleBillingSubscription()) {
-            Log::warning('Duplicate first-payment received — billable already has an active subscription', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-            ]);
-
-            DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? ''));
-
-            return;
-        }
-
-        if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
-            Log::info('Webhook re-delivery: invoice exists for first-payment, skipping', [
-                'payment_id' => $payment->id ?? null,
-                'billable_id' => $billable->getKey(),
-            ]);
-            return;
-        }
 
         // Priced BEFORE the invoice is persisted: the checkout charged the
         // discounted gross, and the invoice header is derived from its line items.
