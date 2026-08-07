@@ -117,6 +117,7 @@ class WorkbenchServiceProvider extends ServiceProvider
 
         @mkdir(dirname($database), 0755, true);
         @mkdir($storage, 0755, true);
+        @mkdir($root.'/workbench/storage/cache', 0755, true);
         touch($database);
 
         config([
@@ -137,6 +138,16 @@ class WorkbenchServiceProvider extends ServiceProvider
             // download route regardless of which process ran the webhook — so the
             // disk root is shared, not the per-process storage_path().
             'filesystems.disks.local.root' => $storage,
+
+            'cache.default' => 'file',
+            'cache.stores.file.path' => $root.'/workbench/storage/cache',
+
+            // bavix/laravel-wallet caches balances in the `array` store by
+            // default — per process, so the test process kept reading its own
+            // stale balance after the SERVER credited a wallet. Pointed at the
+            // shared file store instead, so one process's invalidation is the
+            // other's too.
+            'wallet.cache.driver' => 'file',
 
             'session.driver' => 'file',
             'queue.default' => 'sync',
