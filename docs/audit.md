@@ -72,6 +72,10 @@ operator's free-text reason, truncated. Resolution accepts any ISO-2 code, inclu
 matches none of the three signals, so the justification is what makes the entry answerable to an
 auditor. A resolution triggered from the customer-facing modal carries no justification.
 
+`subscription_cancelled` carries `immediately` plus a `reason` — free text, present only
+when an operator cancelled from the admin panel. A customer cancelling from the portal
+states none, and neither does the automatic past-due auto-cancel.
+
 ## Configuration
 
 ```php

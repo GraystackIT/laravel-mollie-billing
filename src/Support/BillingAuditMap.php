@@ -65,6 +65,9 @@ final class BillingAuditMap
             Events\SubscriptionCancelled::class => self::make('subscription_cancelled', AuditCategory::Subscription,
                 fn (Events\SubscriptionCancelled $e): array => [
                     'immediately' => $e->immediately,
+                    // Present only for an operator-initiated cancel; a customer
+                    // cancelling from the portal states no reason.
+                    'reason' => self::truncate($e->reason),
                 ]),
 
             Events\SubscriptionResumed::class => self::make('subscription_resumed', AuditCategory::Subscription,

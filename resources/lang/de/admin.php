@@ -156,6 +156,13 @@ return [
                 'admin_revoke' => 'vom Administrator widerrufen',
             ],
 
+            'cancel_modal' => [
+                'title' => 'Abo kündigen',
+                'note_label' => 'Grund',
+                'note_placeholder' => 'z. B. Kunde hat per E-Mail darum gebeten (Ticket #1234).',
+                'note_description' => 'Wird im Audit-Trail des Billables festgehalten. Eine Kündigung ist nicht rückgängig zu machen — ein Mollie-Abo kann nur neu erstellt, nicht fortgesetzt werden.',
+            ],
+
             'revoke_modal' => [
                 'title' => 'Freischaltung widerrufen',
                 'note_label' => 'Grund',
@@ -174,6 +181,8 @@ return [
                 'grant_not_found' => 'Freischaltung nicht gefunden.',
                 'grant_foreign' => 'Die Freischaltung gehört nicht zu diesem Kunden.',
                 'grant_revoked' => 'Freischaltung widerrufen (:reason).',
+                'cancel_note_required' => 'Bitte halte fest, warum dieses Abo gekündigt wird.',
+                'cancel_note_too_long' => 'Der Grund darf höchstens :max Zeichen lang sein.',
                 'revoke_note_required' => 'Bitte festhalten, warum diese Freischaltung widerrufen wird.',
                 'revoke_note_too_long' => 'Der Grund darf maximal :max Zeichen lang sein.',
             ],

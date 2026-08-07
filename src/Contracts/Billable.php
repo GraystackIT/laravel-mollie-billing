@@ -162,7 +162,7 @@ interface Billable
     public function scopeBillableOrderByEmail(Builder $query, string $direction): Builder;
 
     // Subscription management (actions)
-    public function cancelBillingSubscription(bool $immediately = false): void;
+    public function cancelBillingSubscription(bool $immediately = false, ?string $reason = null): void;
     public function changeBillingPlan(string $planCode, string $interval): void;
     public function resubscribeBillingPlan(): void;
     public function enableBillingAddon(string $addonCode, ?string $couponCode = null, ?array $couponCodes = null): void;

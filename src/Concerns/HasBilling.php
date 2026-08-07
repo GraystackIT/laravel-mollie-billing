@@ -861,9 +861,9 @@ trait HasBilling
 
     // ── Subscription management ──
 
-    public function cancelBillingSubscription(bool $immediately = false): void
+    public function cancelBillingSubscription(bool $immediately = false, ?string $reason = null): void
     {
-        app(CancelSubscription::class)->handle($this, $immediately);
+        app(CancelSubscription::class)->handle($this, $immediately, $reason);
     }
 
     public function changeBillingPlan(string $planCode, string $interval): void

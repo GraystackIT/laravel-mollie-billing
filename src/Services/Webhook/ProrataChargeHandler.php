@@ -117,6 +117,9 @@ class ProrataChargeHandler
                 lineItems: $lineItems,
                 periodStart: $invoicePeriodStart,
                 periodEnd: $invoicePeriodEnd,
+                // Mollie's own record of what it collected. The charge was created
+                // earlier, so today's BILLING_CURRENCY may no longer match it.
+                currency: $payment->amount->currency ?? null,
             );
             event(new PaymentSucceeded($billable, $chargeInvoice));
             $this->support->notifyInvoiceAvailable($billable, $chargeInvoice);

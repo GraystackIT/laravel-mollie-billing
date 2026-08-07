@@ -29,7 +29,13 @@ class CancelSubscription
     ) {
     }
 
-    public function handle(Billable $billable, bool $immediately = false): void
+    /**
+     * `$reason` is only supplied by an operator-initiated cancel from the admin panel.
+     * It is not persisted on the billable — a cancellation is a one-off act, not a
+     * state — but it travels on `SubscriptionCancelled` so the audit trail records why
+     * an irreversible, money-affecting action was taken.
+     */
+    public function handle(Billable $billable, bool $immediately = false, ?string $reason = null): void
     {
         /** @var Model&Billable $billable */
         $isLocal = $billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value
@@ -66,7 +72,7 @@ class CancelSubscription
 
             $this->announceCancelledScheduledChange($billable, $scheduledChange);
 
-            SubscriptionCancelled::dispatch($billable, $immediately);
+            SubscriptionCancelled::dispatch($billable, $immediately, $reason);
 
             return;
         }
@@ -98,7 +104,7 @@ class CancelSubscription
 
         $this->announceCancelledScheduledChange($billable, $scheduledChange);
 
-        SubscriptionCancelled::dispatch($billable, $immediately);
+        SubscriptionCancelled::dispatch($billable, $immediately, $reason);
 
         $recipients = MollieBilling::notifyBillingAdmins($billable);
         if (! empty($recipients)) {

@@ -152,7 +152,12 @@ class InvoiceService
         $invoice->invoice_kind = $invoiceKindEnum;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper($country);
-        $invoice->currency = self::configuredCurrency();
+        // From the payment, not from config: this document records money Mollie has
+        // already collected, and `BILLING_CURRENCY` can have changed since the charge
+        // was created — a renewal booked weeks later would then be labelled with a
+        // currency the customer was never charged in, and a refund of it would be
+        // rejected by Mollie for a currency mismatch.
+        $invoice->currency = self::normalizeCurrency($payment->amount->currency ?? null);
         $invoice->amount_net = (int) $vat['net'];
         $invoice->amount_vat = $summedLineVat;
         $invoice->amount_gross = (int) $vat['net'] + $summedLineVat;
@@ -426,7 +431,7 @@ class InvoiceService
             return [[
                 'index' => $fallback['index'],
                 'net' => $amountNet,
-                'vat' => $this->capAtRemainingInvoiceVat($original, (int) round($amountNet * $fallback['rate'] / 100), $credited),
+                'vat' => $this->capAtRemainingInvoiceVat($original, (int) round($amountNet * $fallback['rate'] / 100)),
                 'rate' => $fallback['rate'],
                 'label' => $fallback['label'],
             ]];
@@ -471,7 +476,7 @@ class InvoiceService
         return $result !== [] ? $result : [[
             'index' => $folded[0]['index'],
             'net' => $amountNet,
-            'vat' => $this->capAtRemainingInvoiceVat($original, (int) round($amountNet * $folded[0]['rate'] / 100), $credited),
+            'vat' => $this->capAtRemainingInvoiceVat($original, (int) round($amountNet * $folded[0]['rate'] / 100)),
             'rate' => $folded[0]['rate'],
             'label' => $folded[0]['label'],
         ]];
@@ -516,14 +521,13 @@ class InvoiceService
      *
      * @param  array<int, array{net: int, vat: int}>  $credited
      */
-    private function capAtRemainingInvoiceVat(BillingInvoice $original, int $vat, array $credited): int
+    private function capAtRemainingInvoiceVat(BillingInvoice $original, int $vat): int
     {
-        $creditedVat = 0;
-        foreach ($credited as $entry) {
-            $creditedVat += $entry['vat'];
-        }
-
-        return max(0, min($vat, abs((int) $original->amount_vat) - $creditedVat));
+        // Invoice-wide question, so it needs the invoice-wide count. Summing the
+        // per-original-line map would miss every credit line without a
+        // `parent_line_item_index` — a credit note created with custom `line_items` —
+        // and the cap would then permit VAT that has already been credited back.
+        return max(0, min($vat, abs((int) $original->amount_vat) - $original->creditedVatTotal()));
     }
 
     /**
@@ -1636,6 +1640,7 @@ class InvoiceService
         array $lineItems,
         ?\Carbon\CarbonInterface $periodStart = null,
         ?\Carbon\CarbonInterface $periodEnd = null,
+        ?string $currency = null,
     ): BillingInvoice {
         /** @var Model&Billable $billable */
         $sumNet = 0;
@@ -1657,7 +1662,11 @@ class InvoiceService
         $invoice->invoice_kind = $kind;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper($country);
-        $invoice->currency = self::configuredCurrency();
+        // Same rule as createForPayment(): when the caller knows the currency the money
+        // moved in, that wins over today's config. Only a purely local document (the
+        // zero-amount audit invoice for a fully coupon-covered order) has none, and for
+        // that one the configured currency is correct because it was priced just now.
+        $invoice->currency = self::normalizeCurrency($currency);
         $invoice->amount_net = $sumNet;
         $invoice->amount_vat = $sumVat;
         $invoice->amount_gross = $sumGross;

@@ -150,6 +150,39 @@ class BillingInvoice extends Model
         return $credited;
     }
 
+    /**
+     * VAT already credited back against this invoice, counting **every** credit line
+     * that points at it — with or without a `parent_line_item_index`.
+     *
+     * {@see creditedPerOriginalLine()} deliberately skips unindexed lines, because
+     * they cannot be attributed to one original line. Summing that map to answer the
+     * invoice-wide question "how much VAT is left to credit" therefore under-counts:
+     * a credit note created with custom `line_items` was invisible, and the next
+     * automatic refund credited VAT that had already been given back.
+     */
+    public function creditedVatTotal(): int
+    {
+        $credited = 0;
+
+        $children = self::query()
+            ->where('billable_type', $this->billable_type)
+            ->where('billable_id', $this->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($children as $child) {
+            foreach ((array) ($child->line_items ?? []) as $line) {
+                if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
+                    continue;
+                }
+
+                $credited += abs((int) ($line['vat_amount'] ?? 0));
+            }
+        }
+
+        return $credited;
+    }
+
     public function hasPdf(): bool
     {
         return $this->pdf_path !== null;

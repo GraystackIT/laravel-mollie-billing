@@ -156,6 +156,13 @@ return [
                 'admin_revoke' => 'revoked by admin',
             ],
 
+            'cancel_modal' => [
+                'title' => 'Cancel subscription',
+                'note_label' => 'Reason',
+                'note_placeholder' => 'e.g. Customer requested it by email (ticket #1234).',
+                'note_description' => 'Recorded in the billable\'s audit trail. A cancellation cannot be undone — a Mollie subscription can only be recreated, not resumed.',
+            ],
+
             'revoke_modal' => [
                 'title' => 'Revoke access grant',
                 'note_label' => 'Reason',
@@ -174,6 +181,8 @@ return [
                 'grant_not_found' => 'Grant not found.',
                 'grant_foreign' => 'Grant does not belong to this billable.',
                 'grant_revoked' => 'Grant revoked (:reason).',
+                'cancel_note_required' => 'Please record why this subscription is being cancelled.',
+                'cancel_note_too_long' => 'The reason may be at most :max characters long.',
                 'revoke_note_required' => 'Please record why this grant is being revoked.',
                 'revoke_note_too_long' => 'The reason may be at most :max characters long.',
             ],

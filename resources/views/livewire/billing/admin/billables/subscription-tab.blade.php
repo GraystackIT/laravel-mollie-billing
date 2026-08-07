@@ -26,6 +26,17 @@ new class extends Component {
     public string $revokeNote = '';
 
     /**
+     * Whether the pending cancel ends the period immediately. Locked because
+     * openCancel() decides it, and the two variants differ in what the customer keeps:
+     * `false` leaves access until `subscription_ends_at`, `true` revokes it now and
+     * settles any open overage.
+     */
+    #[Locked]
+    public bool $cancelImmediately = false;
+    public bool $showCancelModal = false;
+    public string $cancelNote = '';
+
+    /**
      * Stable, locale-independent reason persisted on the redemption and carried in
      * the GrantRevoked event. Translated only for display — a localized string in
      * the column would make the same action unqueryable across locales.
@@ -104,18 +115,69 @@ new class extends Component {
         $this->reset('trialUntil');
     }
 
-    public function cancelAtPeriodEnd(CancelSubscription $service): void
+    /**
+     * Both cancel variants go through a reason prompt rather than a `wire:confirm`.
+     * An operator cancelling someone else's subscription is irreversible — a Mollie
+     * subscription cannot be un-cancelled, only recreated — and money-affecting, and
+     * the audit trail recorded that it happened but never why.
+     */
+    public function openCancel(bool $immediately): void
     {
         $this->error = $this->flash = null;
-        $b = $this->billable();
-        if ($b) { $service->handle($b, false); $this->flash = __('billing::admin.billables.subscription.flash.cancelled_grace'); }
+        $this->cancelNote = '';
+
+        if ($this->billable() === null) {
+            $this->error = __('billing::admin.common.billable_not_found');
+
+            return;
+        }
+
+        $this->cancelImmediately = $immediately;
+        $this->showCancelModal = true;
     }
 
-    public function forceCancel(CancelSubscription $service): void
+    /** The modal's close button and ESC only flip the flag, so reset from here. */
+    public function updatedShowCancelModal(bool $value): void
+    {
+        if (! $value) {
+            $this->reset(['cancelImmediately', 'cancelNote']);
+        }
+    }
+
+    public function confirmCancel(CancelSubscription $service): void
     {
         $this->error = $this->flash = null;
+        $note = trim($this->cancelNote);
+
+        if ($note === '') {
+            $this->error = __('billing::admin.billables.subscription.flash.cancel_note_required');
+
+            return;
+        }
+
+        if (mb_strlen($note) > self::MAX_REVOKE_NOTE_LENGTH) {
+            $this->error = __('billing::admin.billables.subscription.flash.cancel_note_too_long', ['max' => self::MAX_REVOKE_NOTE_LENGTH]);
+
+            return;
+        }
+
         $b = $this->billable();
-        if ($b) { $service->handle($b, true); $this->flash = __('billing::admin.billables.subscription.flash.cancelled_now'); }
+
+        if ($b === null) {
+            $this->error = __('billing::admin.common.billable_not_found');
+
+            return;
+        }
+
+        $immediately = $this->cancelImmediately;
+        $service->handle($b, $immediately, $note);
+
+        $this->showCancelModal = false;
+        $this->reset(['cancelImmediately', 'cancelNote']);
+
+        $this->flash = $immediately
+            ? __('billing::admin.billables.subscription.flash.cancelled_now')
+            : __('billing::admin.billables.subscription.flash.cancelled_grace');
     }
 
     public function resubscribe(ResubscribeSubscription $service): void
@@ -306,8 +368,8 @@ new class extends Component {
                                 <flux:button size="sm" icon="arrow-path" wire:click="resubscribe" wire:confirm="{{ __('billing::admin.billables.subscription.resubscribe_confirm') }}">{{ __('billing::admin.billables.subscription.resubscribe') }}</flux:button>
                             @endif
                             @if ($canCancel)
-                                <flux:button size="sm" icon="pause" wire:click="cancelAtPeriodEnd" wire:confirm="{{ __('billing::admin.billables.subscription.cancel_at_period_end_confirm') }}">{{ __('billing::admin.billables.subscription.cancel_at_period_end') }}</flux:button>
-                                <flux:button size="sm" variant="danger" icon="x-mark" wire:click="forceCancel" wire:confirm="{{ __('billing::admin.billables.subscription.force_cancel_confirm') }}">{{ __('billing::admin.billables.subscription.force_cancel') }}</flux:button>
+                                <flux:button size="sm" icon="pause" wire:click="openCancel(false)">{{ __('billing::admin.billables.subscription.cancel_at_period_end') }}</flux:button>
+                                <flux:button size="sm" variant="danger" icon="x-mark" wire:click="openCancel(true)">{{ __('billing::admin.billables.subscription.force_cancel') }}</flux:button>
                             @endif
                         </div>
                     @endif
@@ -390,6 +452,43 @@ new class extends Component {
             @endif
         </x-mollie-billing::admin.section>
     @endif
+
+    <flux:modal wire:model.self="showCancelModal" name="cancel-subscription" class="md:w-[480px]">
+        <form wire:submit="confirmCancel" class="space-y-5">
+            <div>
+                <flux:heading size="lg">{{ __('billing::admin.billables.subscription.cancel_modal.title') }}</flux:heading>
+                <flux:text class="text-zinc-500 dark:text-zinc-400">
+                    {{ $cancelImmediately
+                        ? __('billing::admin.billables.subscription.force_cancel_confirm')
+                        : __('billing::admin.billables.subscription.cancel_at_period_end_confirm') }}
+                </flux:text>
+            </div>
+
+            <flux:field>
+                <flux:label :badge="__('billing::admin.common.required')">{{ __('billing::admin.billables.subscription.cancel_modal.note_label') }}</flux:label>
+                <flux:textarea
+                    wire:model="cancelNote"
+                    :placeholder="__('billing::admin.billables.subscription.cancel_modal.note_placeholder')"
+                    rows="3"
+                    :maxlength="$maxRevokeNoteLength"
+                />
+                <flux:description>
+                    {{ __('billing::admin.billables.subscription.cancel_modal.note_description') }}
+                </flux:description>
+            </flux:field>
+
+            <div class="flex justify-end gap-2">
+                <flux:modal.close>
+                    <flux:button type="button" size="sm" variant="ghost">{{ __('billing::admin.common.cancel') }}</flux:button>
+                </flux:modal.close>
+                <flux:button type="submit" size="sm" variant="danger" icon="x-mark" wire:loading.attr="disabled">
+                    {{ $cancelImmediately
+                        ? __('billing::admin.billables.subscription.force_cancel')
+                        : __('billing::admin.billables.subscription.cancel_at_period_end') }}
+                </flux:button>
+            </div>
+        </form>
+    </flux:modal>
 
     <flux:modal wire:model.self="showRevokeModal" name="revoke-grant" class="md:w-[480px]">
         <form wire:submit="revokeGrant" class="space-y-5">
