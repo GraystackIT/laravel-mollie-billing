@@ -111,6 +111,46 @@ class FakeMollie
         return self::subscriptionJson((array) DB::table('fake_mollie_subscriptions')->where('id', $id)->first());
     }
 
+    /**
+     * What Mollie's own scheduler does on a subscription's next payment date:
+     * debit the mandate and mint a recurring payment that carries the
+     * SUBSCRIPTION's metadata and id.
+     *
+     * The metadata propagation is the load-bearing part — `MollieWebhookController`
+     * resolves the billable from `metadata.billable_type` / `billable_id`, so a
+     * renewal without it books nothing at all. `recurring_outcome` decides whether
+     * this charge succeeds, which is how a test drives dunning.
+     *
+     * @return array<string, mixed> the payment as the API would return it
+     */
+    public static function chargeSubscription(string $subscriptionId, ?string $amountValue = null): array
+    {
+        $subscription = DB::table('fake_mollie_subscriptions')->where('id', $subscriptionId)->first();
+
+        abort_if($subscription === null, 404, "Fake Mollie subscription {$subscriptionId} not found");
+
+        $payment = self::createPayment([
+            'amount' => [
+                'value' => $amountValue ?? $subscription->amount_value,
+                'currency' => $subscription->amount_currency,
+            ],
+            'description' => $subscription->description ?? 'Recurring payment',
+            'sequenceType' => 'recurring',
+            'customerId' => $subscription->customer_id,
+            'mandateId' => $subscription->mandate_id,
+            'webhookUrl' => $subscription->webhook_url,
+            'metadata' => json_decode((string) ($subscription->metadata ?? '[]'), true) ?: [],
+        ]);
+
+        DB::table('fake_mollie_payments')->where('id', $payment['id'])->update([
+            'subscription_id' => $subscriptionId,
+            'country_code' => 'DE',
+            'updated_at' => now(),
+        ]);
+
+        return self::paymentJson(self::payment($payment['id']));
+    }
+
     public static function payment(string $id): array
     {
         $row = DB::table('fake_mollie_payments')->where('id', $id)->first();

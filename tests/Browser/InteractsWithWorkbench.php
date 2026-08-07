@@ -76,6 +76,23 @@ trait InteractsWithWorkbench
         return FakeMollie::deliverWebhook($paymentId);
     }
 
+    /**
+     * Let Mollie's scheduler fire: charge the billable's subscription and deliver
+     * the webhook. Returns the payment id so a caller can inspect it.
+     */
+    protected function renewSubscription(TestBillable $billable, ?string $amountValue = null): string
+    {
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+
+        expect($subscriptionId)->not->toBe('', 'Billable has no Mollie subscription to renew.');
+
+        $payment = FakeMollie::chargeSubscription($subscriptionId, $amountValue);
+
+        $this->deliverWebhook($payment['id']);
+
+        return $payment['id'];
+    }
+
     protected function setRecurringOutcome(string $outcome): void
     {
         WorkbenchSetting::set('recurring_outcome', $outcome);
@@ -115,18 +132,8 @@ trait InteractsWithWorkbench
 
         $mandateId = FakeMollie::createMandate($customerId);
 
-        $subscriptionId = WorkbenchSetting::nextId('sub');
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $net = (int) $catalog->basePriceNet($plan, $interval);
-        DB::table('fake_mollie_subscriptions')->insert([
-            'id' => $subscriptionId, 'customer_id' => $customerId, 'status' => 'active',
-            'amount_value' => number_format($net * 1.19 / 100, 2, '.', ''), 'amount_currency' => 'EUR',
-            'interval' => $interval === 'yearly' ? '12 months' : '1 month',
-            'description' => 'Workbench subscription', 'mandate_id' => $mandateId,
-            'metadata' => json_encode([]), 'start_date' => now()->toDateString(),
-            'next_payment_date' => now()->addMonth()->toDateString(),
-            'created_at' => now(), 'updated_at' => now(),
-        ]);
 
         $billable = $this->makeBillable(array_merge([
             'billing_street' => 'Musterweg 12',
@@ -142,8 +149,33 @@ trait InteractsWithWorkbench
             'subscription_source' => \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie,
             'subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Active,
             'subscription_period_starts_at' => now()->subDays(10),
-            'subscription_meta' => ['mollie_subscription_id' => $subscriptionId],
         ], $overrides));
+
+        // The subscription carries the same metadata CreateSubscription writes —
+        // load-bearing, because Mollie copies it onto every recurring payment and
+        // MollieWebhookController resolves the billable from exactly those keys. A
+        // renewal without it books nothing at all.
+        $subscriptionId = WorkbenchSetting::nextId('sub');
+        DB::table('fake_mollie_subscriptions')->insert([
+            'id' => $subscriptionId, 'customer_id' => $customerId, 'status' => 'active',
+            'amount_value' => number_format($net * 1.19 / 100, 2, '.', ''), 'amount_currency' => 'EUR',
+            'interval' => $interval === 'yearly' ? '12 months' : '1 month',
+            'description' => 'Workbench subscription', 'mandate_id' => $mandateId,
+            'metadata' => json_encode([
+                'billable_type' => $billable->getMorphClass(),
+                'billable_id' => (string) $billable->getKey(),
+                'plan_code' => $plan,
+                'interval' => $interval,
+            ]),
+            'start_date' => now()->toDateString(),
+            'next_payment_date' => now()->addMonth()->toDateString(),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $billable->forceFill(['subscription_meta' => array_merge(
+            $billable->getBillingSubscriptionMeta(),
+            ['mollie_subscription_id' => $subscriptionId],
+        )])->save();
 
         foreach ($catalog->includedUsages($plan, $interval) as $type => $quantity) {
             if ((int) $quantity > 0) {
