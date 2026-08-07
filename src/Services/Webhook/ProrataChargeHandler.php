@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\PlanChangeFailed;
+use GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
@@ -27,6 +28,20 @@ use Illuminate\Support\Facades\Notification;
 
 class ProrataChargeHandler
 {
+    /**
+     * Subscription states a deferred prorata change may still be applied to.
+     *
+     * Trial and PastDue are included because Phase 2 promotes both to Active — a
+     * mid-trial change converts the trial, and a past-due reset is what the charge
+     * was for. Cancelled, Expired and a `None` source are not: the subscription the
+     * change was meant to modify no longer runs.
+     */
+    protected const APPLICABLE_STATES = [
+        SubscriptionStatus::Active,
+        SubscriptionStatus::Trial,
+        SubscriptionStatus::PastDue,
+    ];
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly InvoiceService $invoiceService,
@@ -71,6 +86,25 @@ class ProrataChargeHandler
             return;
         }
 
+        // A change may not be applied to a subscription that no longer runs.
+        // `CancelSubscription` clears `scheduled_change` but not the deferred-prorata
+        // pendings, so a SEPA charge started before a cancellation settles days later —
+        // after the grace period ended and the expiry pass wiped the plan fields. This
+        // handler then force-filled plan, interval and addons back onto an Expired row,
+        // resurrecting exactly the plan-scoped fields that wipe exists to remove, so
+        // `@planFeature` and the `billing.feature` middleware granted access again to a
+        // subscription that had ended. `ScheduleSubscriptionChange::apply()` states the
+        // rule this path was missing: a change for a subscription that no longer runs
+        // must be dropped, not applied.
+        //
+        // The money is real, so it is booked and reported rather than ignored — an
+        // operator has to refund it.
+        if (! in_array($billable->getBillingSubscriptionStatus(), self::APPLICABLE_STATES, true)) {
+            $this->reportUnapplicableCharge($payment, $billable, $pending);
+
+            return;
+        }
+
         // Captured up front: the plan-change forceFill below drops
         // `pending_plan_change` from the meta, and the coupon codes to redeem
         // (Phase 1 deliberately deferred them) live in there.
@@ -85,7 +119,26 @@ class ProrataChargeHandler
         $newIntervalCode = $intentData !== null
             ? (string) ($intentData['new_interval'] ?? $billable->getBillingSubscriptionInterval())
             : (string) ($billable->getBillingSubscriptionInterval() ?? '');
-        $startsNewPeriod = $oldPlan !== '' && ($oldPlan !== $newPlanCode || $oldInterval !== $newIntervalCode);
+        // A same-interval plan change does NOT open a new billing window. The composer
+        // prices it with the remaining-window factor — `new × daysLeft / periodDays`,
+        // covering only up to the existing period end — and the patcher leaves Mollie's
+        // cadence alone unless the interval changed. Re-anchoring the period here
+        // therefore claimed the customer had paid for a full period from `paidAt`:
+        // `nextBillingDate()` reported a date Mollie does not charge on, the overage
+        // pre-pass missed the real renewal, a graceful cancel granted grace it was not
+        // paid for, and a seat added afterwards was prorated against the phantom window
+        // while the real renewal billed the same days again.
+        //
+        // Interval changes genuinely start a new window (a yearly period cannot
+        // continue a monthly one), and so does the past-due reset, where the patcher
+        // moves Mollie's schedule to `now + 1 interval`.
+        $forcesResetStartDate = (bool) ($intentData['force_reset_start_date'] ?? false);
+        $startsNewPeriod = ($oldInterval !== '' && $oldInterval !== $newIntervalCode) || $forcesResetStartDate;
+
+        // Kept separate from the period question: wallet quotas differ per (plan,
+        // interval), so the adjuster has to run for a plain plan change too — even
+        // though that change keeps the period boundary where it is.
+        $planOrIntervalChanged = $oldPlan !== '' && ($oldPlan !== $newPlanCode || $oldInterval !== $newIntervalCode);
 
         $paidAt = $payment->paidAt ?? null;
         $newPeriodStart = $paidAt ? Carbon::parse((string) $paidAt)->setTimezone('UTC') : BillingTime::nowUtc();
@@ -143,7 +196,7 @@ class ProrataChargeHandler
         $oldPeriodStart = $billable->getBillingPeriodStartsAt();
         $oldPeriodEnd = $billable->nextBillingDate();
 
-        if ($startsNewPeriod) {
+        if ($planOrIntervalChanged) {
             try {
                 $this->walletAdjuster->adjust(
                     $billable,
@@ -220,14 +273,61 @@ class ProrataChargeHandler
             $chargeInvoice,
         );
 
+        // A malformed stored intent cannot be patched or retried — retrying a bug does
+        // not fix it, and letting it escape would 500 the webhook so Mollie re-delivers
+        // forever. The local change is already applied at this point, so log loudly,
+        // leave the pending state to be cleared below, and stop.
         try {
             $intent = PlanChangeIntent::fromArray($pending['intent']);
-            $this->patcher->updateForIntent($billable, $intent);
         } catch (\Throwable $e) {
-            Log::warning('Mollie subscription PATCH failed in Phase 2 — will be inconsistent until next recurring run', [
+            Log::error('Prorata Phase 2: stored plan-change intent is unusable — Mollie was not patched', [
                 'billable' => $billable->getKey(),
+                'payment_id' => (string) ($payment->id ?? ''),
                 'error' => $e->getMessage(),
             ]);
+
+            $this->clearPendingState($billable);
+
+            return;
+        }
+
+        // A converted trial needs Mollie's schedule moved, even on a same-interval
+        // change. Mollie's `startDate` is the trial end (CreateSubscription sets it
+        // there), and the composer priced this charge as "the rest of the local period"
+        // — days 5→30 of a period whose trial ended on day 14. An amount-only PATCH
+        // left the first recurring charge on day 14, so Mollie collected a full month
+        // for days the customer had just paid for: roughly 1.8× the monthly price in
+        // their first ten days. `forceResetStartDate` is what tells the patcher to move
+        // the cadence to one full period out; it was set for the past-due reset only.
+        if ($wasTrial && ! $intent->forceResetStartDate) {
+            $intent = new PlanChangeIntent(
+                billable: $intent->billable,
+                currentPlan: $intent->currentPlan,
+                newPlan: $intent->newPlan,
+                currentInterval: $intent->currentInterval,
+                newInterval: $intent->newInterval,
+                currentSeats: $intent->currentSeats,
+                newSeats: $intent->newSeats,
+                currentAddons: $intent->currentAddons,
+                newAddons: $intent->newAddons,
+                forceResetStartDate: true,
+            );
+        }
+
+        $this->safelyPatch($billable, $intent);
+
+        $this->clearPendingState($billable);
+    }
+
+    /**
+     * Drop the deferred-change markers. Re-read first: `safelyPatch()` may have just
+     * written `pending_subscription_patch`, and a stale copy of the meta would erase it
+     * — leaving nothing for the sweep to retry.
+     */
+    protected function clearPendingState(Billable $billable): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
         }
 
         $billable->refresh();
@@ -392,6 +492,123 @@ class ProrataChargeHandler
                     'cancelled_at' => $orphan['cancelled_at'] ?? null,
                     'intended_plan_change' => $orphan['pending_plan_change'] ?? null,
                     'charge_lines' => $orphan['prorata_charge_lines'] ?? null,
+                ],
+            ),
+        );
+    }
+
+    /**
+     * PATCH Mollie, and queue a retry if it fails.
+     *
+     * This was the fourth marker site the "a failed PATCH actually dispatches
+     * RetrySubscriptionPatchJob" fix missed. A bare log meant nothing retried: the
+     * hourly sweep only reads `pending_subscription_patch`, which was never written,
+     * and the pending state is cleared right after — so Mollie kept charging the old
+     * amount for the rest of the subscription's life while the customer had the new
+     * plan. The renewal handler then reconciles each invoice down to the amount that
+     * actually cleared, by design, so it never self-heals: Pro access at the Basic
+     * price, silently, forever.
+     */
+    protected function safelyPatch(Billable $billable, PlanChangeIntent $intent): void
+    {
+        try {
+            $this->patcher->updateForIntent($billable, $intent);
+
+            return;
+        } catch (\Throwable $e) {
+            Log::warning('Mollie subscription PATCH failed in Phase 2 — queued for retry', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        // `billable_type` normalised to the configured FQCN: PlanChangeIntent::fromArray()
+        // and RetrySubscriptionPatchJob both resolve the row by class name, which a
+        // morph-map alias would not satisfy.
+        $intentData = [
+            ...$intent->toArray(),
+            'billable_type' => (string) config('mollie-billing.billable_model'),
+            'billable_id' => $billable->getKey(),
+        ];
+        $firstAttemptAt = BillingTime::nowUtc()->toIso8601String();
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['pending_subscription_patch'] = [
+            'intent' => $intentData,
+            'first_attempt_at' => $firstAttemptAt,
+            'last_error' => 'Phase 2 PATCH failed',
+        ];
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        RetrySubscriptionPatchJob::dispatch($intentData, $firstAttemptAt);
+    }
+
+    /**
+     * A prorata charge settled for a subscription that has since been cancelled or
+     * expired.
+     *
+     * The pending state is cleared so the next delivery does not try again, and the
+     * plan is deliberately NOT applied: force-filling it would resurrect the
+     * plan-scoped fields the expiry pass wipes, handing feature access back to an
+     * ended subscription. The money did arrive, so it is booked as an invoice (the
+     * customer is entitled to a document for it) and reported for a manual refund —
+     * the same shape `reportOrphanedCharge()` uses for its sibling case.
+     *
+     * @param  array<string, mixed>  $pending
+     */
+    protected function reportUnapplicableCharge(object $payment, Billable $billable, array $pending): void
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        $amountCents = $this->support->amountFromMolliePayment($payment);
+        $status = $billable->getBillingSubscriptionStatus();
+
+        if ($billable instanceof Model) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            unset(
+                $meta['pending_prorata_change'],
+                $meta['pending_plan_change'],
+                $meta['prorata_pending_payment_id'],
+            );
+            $billable->forceFill(['subscription_meta' => $meta])->save();
+        }
+
+        Log::error('Prorata charge settled for a subscription that no longer runs — not applied, needs a manual refund', [
+            'payment_id' => $paymentId,
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+            'amount_cents' => $amountCents,
+            'subscription_status' => $status->value,
+        ]);
+
+        event(new PlanChangeFailed(
+            $billable,
+            (array) ($pending['intent'] ?? []),
+            $paymentId,
+            'Subscription no longer runs ('.$status->value.') — prorata charge not applied',
+        ));
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send(
+            $admins,
+            MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'Prorata charge was paid after the subscription ended — the plan change was not applied and the amount needs to be refunded manually',
+                [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'payment_id' => $paymentId,
+                    'amount_cents' => $amountCents,
+                    'currency' => isset($payment->amount->currency) ? (string) $payment->amount->currency : null,
+                    'subscription_status' => $status->value,
+                    'intended_plan_change' => $pending['intent'] ?? null,
                 ],
             ),
         );

@@ -61,6 +61,11 @@ Phase 2b — Webhook: payment failed
 
 All validation is centralized in `ValidateSubscriptionChange`. It runs in both Phase 1 (pre-flight) and Phase 2 (before applying). Apps can override it via `app->bind`.
 
+Two rules are worth calling out because they are easy to trip over:
+
+- **One pending change at a time.** A change that moves money (a prorata charge *or* a credit) is refused while `pending_plan_change` / `pending_prorata_change` is set. This covers credit-only downgrades, not just charges — a second change keyed to the first one's payment id was applied as the first one's intent and lost without a trace.
+- **A settled charge is never applied to a subscription that no longer runs.** If the billable is Cancelled or Expired by the time Phase 2 arrives, the plan is not applied: the money is invoiced, `PlanChangeFailed` is dispatched and admins are notified for a manual refund. Applying it would resurrect the plan-scoped fields the expiry wipe removes, handing feature access back to an ended subscription.
+
 ### Established Subscription
 
 - A plan change requires an existing subscription. If `subscription_source` is `none` (or unset) — i.e. checkout was never completed, e.g. an abandoned/cancelled first payment — `InvalidSubscriptionStateException` is thrown. Such billables must go through the checkout flow, which obtains a mandate and creates the subscription. The portal's plan screen (`BillingPortalController::plan()`) redirects these billables to checkout for the same reason.
@@ -110,6 +115,10 @@ When the billing interval stays the same (e.g. monthly → monthly):
 
 - **Upgrade** (`newNet > currentNet`): `charge = (newNet - currentNet) * factor`
 - **Downgrade** (`newNet < currentNet`): `credit = (currentNet - newNet) * factor`
+
+**The period boundary does not move.** The factor covers only the remainder of the *current* window, and Mollie's charge date is left untouched (the PATCH changes the amount, not the cadence). So `subscription_period_starts_at` stays where it was, and the change's invoice is stamped with the existing period. Phase 2 re-anchoring the period here made `nextBillingDate()` report a date Mollie does not charge on, and a seat added afterwards was prorated against that phantom window while the real renewal billed the same days again.
+
+Two exceptions do open a new window, and both also move Mollie's schedule: an interval change, and the [past-due reset](#past-due-reset). A plan change that converts an in-flight trial is a third case where the *schedule* moves — Mollie's `startDate` is the trial end, and the charge has just paid for the rest of the local period, so the first recurring charge is pushed one full period out.
 
 ### Interval Changes
 

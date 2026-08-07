@@ -358,11 +358,42 @@ class ValidateSubscriptionChange
      */
     protected function validateMollieReadiness(Billable $billable, SubscriptionChangeContext $context): void
     {
-        if (! $context->isMollie || $context->prorataChargeNet <= 0) {
+        if (! $context->isMollie) {
             return;
         }
 
         if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        // The one-pending-change rule holds for a credit-only change too, and that is
+        // where it used to fall through: the whole method returned early at
+        // `prorataChargeNet <= 0`, so a downgrade (charge 0, credit > 0) issued while
+        // another change's charge was still in flight passed unchallenged. The executor
+        // then reported `in_flight` without composing the refund, and `update()` — which
+        // reads "is a charge pending?" straight off the meta — attached the downgrade to
+        // the OTHER change's payment id. When that payment settled, Phase 2 applied the
+        // other change's intent, cleared the marker, and the downgrade evaporated: no
+        // plan switch, no credit refund, no failure event, and any coupon stacked on it
+        // redeemed against the wrong invoice.
+        //
+        // Scoped to changes that move money, which is also what keeps
+        // `applyPendingPlanChange()` out of it: that path re-validates a change whose
+        // pending marker is by definition present, and builds its context with both
+        // prorata amounts at 0.
+        $movesMoney = $context->prorataChargeNet > 0 || $context->prorataCreditNet > 0;
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if ($movesMoney && (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change']))) {
+            throw new InvalidSubscriptionStateException(
+                'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
+            );
+        }
+
+        // Everything below is about being able to CREATE a charge, so it stays scoped
+        // to changes that actually cost money.
+        if ($context->prorataChargeNet <= 0) {
             return;
         }
 
@@ -372,17 +403,9 @@ class ValidateSubscriptionChange
             );
         }
 
-        $meta = $billable->getBillingSubscriptionMeta();
-
         if (empty($meta['mollie_subscription_id'])) {
             throw new InvalidSubscriptionStateException(
                 'Cannot create a deferred upgrade — no mollie_subscription_id in subscription meta.'
-            );
-        }
-
-        if (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change'])) {
-            throw new InvalidSubscriptionStateException(
-                'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
             );
         }
     }

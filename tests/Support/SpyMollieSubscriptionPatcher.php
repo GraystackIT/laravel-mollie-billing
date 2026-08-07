@@ -35,6 +35,10 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
             'interval' => $intent->newInterval,
             'addons' => array_keys($intent->newAddons),
             'seats' => $intent->newSeats,
+            // Recorded because it decides whether Mollie's charge DATE moves, not just
+            // the amount — the difference between a converted trial being charged once
+            // and being charged twice for the same days.
+            'force_reset_start_date' => $intent->forceResetStartDate,
         ];
         self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
         SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];

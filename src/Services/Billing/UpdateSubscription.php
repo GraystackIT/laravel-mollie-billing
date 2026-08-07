@@ -151,7 +151,16 @@ class UpdateSubscription
                 $billable->refresh();
 
                 // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
-                $hasPendingCharge = ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
+                //
+                // Scoped to `deferred_charge`, because the marker is read off the meta and
+                // an `in_flight` result means the id sitting there belongs to a DIFFERENT
+                // change. Keying this call's `pending_plan_change` to that id made Phase 2
+                // apply the other change's intent, clear the marker and drop this one
+                // without a trace — no plan switch, no refund, no failure event. The
+                // validator now refuses that combination up front; this keeps the write
+                // honest if the two ever interleave anyway.
+                $hasPendingCharge = $prorataResult['path'] === 'deferred_charge'
+                    && ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
 
                 $prorataHandledByExecutor = match ($prorataResult['path']) {
                     // The executor PATCHed Mollie itself.
