@@ -132,10 +132,17 @@ class MandateOnlyPaymentHandler
         $gate = $this->openGate($payment, $billable, $paymentId);
 
         if ($gate === ActivationGate::AlreadyBooked) {
-            Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
-                'payment_id' => $paymentId,
-                'billable_id' => $billable->getKey(),
-            ]);
+            // See FirstPaymentHandler: an invoice without a finished activation is a
+            // crash between the two, not a completed run — and silence there left a
+            // paying customer with no subscription and nobody informed.
+            if (! $this->support->activationCompleted($billable)) {
+                $this->support->reportIncompleteActivation($billable, $payment, 'mandate_only');
+            } else {
+                Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
+                    'payment_id' => $paymentId,
+                    'billable_id' => $billable->getKey(),
+                ]);
+            }
 
             return;
         }
@@ -301,13 +308,20 @@ class MandateOnlyPaymentHandler
         try {
             $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
         } catch (\Throwable $e) {
-            Log::error('Mandate-only audit invoice creation failed', [
+            Log::error('Mandate-only audit invoice creation failed — re-delivery will retry', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $payment->id ?? null,
                 'error' => $e->getMessage(),
             ]);
 
-            return;
+            // Rethrown, not swallowed. Returning here let __invoke() record the outcome
+            // as processed and answer 200, so Mollie never re-delivered: a transient
+            // failure (deadlock, serial collision after its three retries) permanently
+            // ended a signup that had already captured a mandate — with no event, no
+            // admin notification and, unlike the prorata path, no cleanup job to catch
+            // it. The invoice guard plus the activation claim make the retry safe, which
+            // is exactly how FirstPaymentHandler handles the same failure.
+            throw $e;
         }
 
         // A Recurring coupon keeps discounting the renewals, so its discount must
@@ -471,6 +485,12 @@ class MandateOnlyPaymentHandler
                 null,
                 $e->getMessage(),
             ));
+
+            // Admins too. CreateSubscription can throw AFTER the Mollie call but before
+            // its local save, which leaves a live Mollie subscription with no local
+            // record of it — the costliest state in the package, and the only signal was
+            // a log line and an event most apps do not listen to.
+            $this->support->reportIncompleteActivation($billable, $payment, 'trial_activation');
 
             return;
         }

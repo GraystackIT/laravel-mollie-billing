@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Webhook;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
 use GraystackIT\MollieBilling\Events\SubscriptionActivationFailed;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
@@ -81,7 +82,13 @@ class WebhookSupport
             return 0;
         }
 
-        return (int) round(((float) ($refunded->value ?? 0)) * 100);
+        // Scaled by the refund's own currency, like its sibling above. Harmless today
+        // (this feeds only the dedup signature and hasRefunds()), but it was the last
+        // hardcoded ×100 left in the package and one refactor away from a booking.
+        return BillingMoney::minorFromMollieAmount(
+            $refunded->value ?? null,
+            $refunded->currency ?? $payment->amount->currency ?? null,
+        );
     }
 
     /**
@@ -344,6 +351,84 @@ class WebhookSupport
         }
 
         Notification::send($recipients, MollieBilling::resolveNotification(InvoiceAvailableNotification::class, $billable, $invoice));
+    }
+
+    /**
+     * Whether an activation actually finished, as opposed to merely having written
+     * its invoice.
+     *
+     * The gates treat "this payment's invoice exists" as "nothing left to do", which
+     * only holds for a crash *after* the Mollie subscription was created — that call
+     * is what sets the billable Active. Between the invoice being committed and that
+     * call being reached, the invoice exists and nothing else does.
+     */
+    public function activationCompleted(Billable $billable): bool
+    {
+        if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value) {
+            return $billable->hasAccessibleBillingSubscription();
+        }
+
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+
+        return $subscriptionId !== '' && $billable->hasAccessibleBillingSubscription();
+    }
+
+    /**
+     * Report a re-delivery that found this payment's invoice but no finished
+     * activation.
+     *
+     * Nothing here retries: the invoice guard makes re-running the activation unsafe
+     * without more surgery than a webhook should do, and a mandate plus a paid invoice
+     * is a state an operator can resolve in seconds once they know about it. What
+     * mattered was that they were never told — this path logged at info level and
+     * returned, so a paying customer sat with no subscription indefinitely.
+     */
+    public function reportIncompleteActivation(Billable $billable, object $payment, string $context): void
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
+        $reason = 'Activation never completed: this payment has an invoice but the subscription was not created';
+
+        Log::error('Webhook re-delivery found an incomplete activation', [
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+            'payment_id' => $paymentId,
+            'context' => $context,
+            'status' => $billable->getBillingSubscriptionStatus()->value,
+        ]);
+
+        event(new SubscriptionActivationFailed(
+            $billable,
+            $planCode,
+            $interval,
+            $paymentId,
+            null,
+            $reason,
+        ));
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send(
+            $admins,
+            MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'A paid payment has an invoice but its subscription was never created — the customer is paying for nothing',
+                [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'payment_id' => $paymentId,
+                    'context' => $context,
+                    'plan_code' => $planCode,
+                    'interval' => $interval,
+                    'status' => $billable->getBillingSubscriptionStatus()->value,
+                    'error' => $reason,
+                ],
+            ),
+        );
     }
 
     public function reportSubscriptionActivationFailure(

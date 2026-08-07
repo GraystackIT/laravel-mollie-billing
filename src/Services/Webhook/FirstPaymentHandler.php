@@ -67,10 +67,25 @@ class FirstPaymentHandler
         $gate = $this->openGate($payment, $billable, $paymentId);
 
         if ($gate === ActivationGate::AlreadyBooked) {
-            Log::info('Webhook re-delivery: invoice exists for first-payment, skipping', [
-                'payment_id' => $paymentId,
-                'billable_id' => $billable->getKey(),
-            ]);
+            // "Invoice exists" is only equivalent to "nothing left to do" when the
+            // crash happened AFTER CreateSubscription — which is the case the gate's
+            // comment describes, because that call is what sets Active. It is not the
+            // case for the window between the invoice being committed and
+            // CreateSubscription being reached: `createForPayment()` dispatches
+            // InvoiceCreated synchronously, and events are the documented extension
+            // seam, so an app listener with a dead mailer throws right there. The
+            // re-delivery then landed here and logged its way out, forever, leaving a
+            // paid invoice, a saved mandate, status New, no Mollie subscription and no
+            // admin notification. CleanupOrphanedBillablesJob deliberately refuses to
+            // touch a billable that holds an invoice, so nothing reconciled it.
+            if (! $this->support->activationCompleted($billable)) {
+                $this->support->reportIncompleteActivation($billable, $payment, 'first_payment');
+            } else {
+                Log::info('Webhook re-delivery: invoice exists for first-payment, skipping', [
+                    'payment_id' => $paymentId,
+                    'billable_id' => $billable->getKey(),
+                ]);
+            }
 
             return;
         }

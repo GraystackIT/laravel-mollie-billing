@@ -60,10 +60,16 @@ class LocalToMollieUpgradeHandler
         $gate = $this->openGate($payment, $billable, $paymentId);
 
         if ($gate === ActivationGate::AlreadyBooked) {
-            Log::info('Webhook re-delivery: invoice exists for local-to-Mollie upgrade, skipping', [
-                'payment_id' => $paymentId,
-                'billable_id' => $billable->getKey(),
-            ]);
+            // See FirstPaymentHandler: an invoice without a finished activation means the
+            // run died between the two, which is worth telling someone about.
+            if (! $this->support->activationCompleted($billable)) {
+                $this->support->reportIncompleteActivation($billable, $payment, 'local_upgrade');
+            } else {
+                Log::info('Webhook re-delivery: invoice exists for local-to-Mollie upgrade, skipping', [
+                    'payment_id' => $paymentId,
+                    'billable_id' => $billable->getKey(),
+                ]);
+            }
 
             return;
         }

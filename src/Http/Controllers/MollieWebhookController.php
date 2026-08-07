@@ -33,6 +33,16 @@ use Mollie\Laravel\Facades\Mollie;
 
 class MollieWebhookController extends Controller
 {
+    /**
+     * How long a still-pending reservation is believed to be in flight.
+     *
+     * Past this, {@see reserve()} treats it as abandoned and takes it over — see the
+     * reasoning there. Longer than any legitimate delivery (invoice PDF plus several
+     * Mollie round-trips) and far shorter than the 180-day retention that used to be
+     * the only thing clearing a leaked row.
+     */
+    public const RESERVATION_TTL_MINUTES = 15;
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly FirstPaymentArtifacts $firstPaymentArtifacts,
@@ -61,8 +71,19 @@ class MollieWebhookController extends Controller
 
         $reservation = $this->reserve($paymentId);
         if ($reservation === null) {
-            Log::info('Webhook skipped — another delivery for this payment is in progress', ['payment_id' => $paymentId]);
-            return response('', 200);
+            // 503, not 200: this delivery may carry information the in-flight one
+            // cannot see. Mollie re-calls the same payment when a refund is created,
+            // and the country-mismatch flow refunds the very payment being processed —
+            // so the holder fetched it before that refund existed, records `…:paid`,
+            // and answering 200 here told Mollie the refund delivery was handled.
+            // `refunded_net` then stayed 0 and the books over-stated revenue.
+            //
+            // Safe to retry because reserve() now takes over an abandoned reservation
+            // after RESERVATION_TTL_MINUTES, so this cannot loop forever. The
+            // claim-held branch below already answers 503 for exactly this reason.
+            Log::info('Webhook deferred — another delivery for this payment is in progress', ['payment_id' => $paymentId]);
+
+            return response('', 503);
         }
 
         try {
@@ -178,11 +199,58 @@ class MollieWebhookController extends Controller
             ['received_at' => BillingTime::nowUtc()],
         );
 
-        if (! $reservation->wasRecentlyCreated) {
-            return null;
+        if ($reservation->wasRecentlyCreated) {
+            return $reservation;
         }
 
-        return $reservation;
+        // A pending row this old is not "in flight", it is abandoned. Nothing unwinds
+        // the reservation when the process dies outright — an OOM or max_execution_time
+        // fatal during PDF generation or the Mollie/VIES calls, a SIGKILL on deploy, or
+        // the delete() in __invoke()'s own catch failing (a lost DB connection is
+        // exactly what got us into that catch). The row then survived forever with the
+        // pending signature, and because a non-created row means "skip", every later
+        // delivery of that payment was answered 200: Mollie marked the webhook
+        // delivered and stopped. A first payment was never activated — money collected,
+        // no subscription, no invoice — and a renewal never booked, never advanced the
+        // period and never recharged the wallets, for the 180 days until
+        // PruneProcessedWebhooksJob removed the row.
+        //
+        // Same reasoning as the activation claim's TTL takeover, which was given one
+        // for this failure mode; the reservation was not.
+        if ($this->reservationIsAbandoned($reservation)) {
+            Log::warning('Reclaiming an abandoned webhook reservation — a previous delivery died without unwinding it', [
+                'payment_id' => $paymentId,
+                'received_at' => (string) ($reservation->received_at ?? ''),
+            ]);
+
+            $reservation->forceFill(['received_at' => BillingTime::nowUtc()])->save();
+
+            return $reservation;
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether a still-pending reservation is old enough to be treated as dead.
+     *
+     * Generous on purpose: a legitimate delivery holds the row for as long as its
+     * handler runs, which includes PDF generation and several Mollie calls. Reclaiming
+     * one that is merely slow would reintroduce the double-activation race the
+     * reservation prevents — so the window has to be longer than any real delivery,
+     * and the activation claim guards that race independently anyway.
+     */
+    protected function reservationIsAbandoned(BillingProcessedWebhook $reservation): bool
+    {
+        $receivedAt = $reservation->received_at;
+
+        if ($receivedAt === null) {
+            return true;
+        }
+
+        return BillingTime::toUtc($receivedAt)
+            ->addMinutes(self::RESERVATION_TTL_MINUTES)
+            ->isPast();
     }
 
     /**
