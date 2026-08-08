@@ -11,7 +11,6 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
-use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -238,7 +237,6 @@ class FirstPaymentHandler
 
         $this->firstPaymentArtifacts->runCountryMatchCheck($billable);
 
-        event(new SubscriptionCreated($billable, $planCode, $interval));
         event(new PaymentSucceeded($billable, $invoice));
 
         $this->support->notifyInvoiceAvailable($billable, $invoice);

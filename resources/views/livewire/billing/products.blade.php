@@ -38,9 +38,11 @@ new class extends Component {
     /**
      * Read gate for everything this page renders and prices.
      *
-     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
-     * update request never re-enters a route's middleware stack anyway — so nothing
-     * outside this component decides who gets to read which products the tenant has
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read which products the tenant has
      * already bought, or probe coupon validity against it. Withholding the billable falls
      * through to the same empty state as "none resolved"; `purchase()` keeps resolving it
      * unguarded so it can still answer 403.

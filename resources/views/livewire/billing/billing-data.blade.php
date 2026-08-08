@@ -240,9 +240,11 @@ new class extends Component {
     /**
      * The same gate for the read path, which the hardening above skipped.
      *
-     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
-     * update request never re-enters a route's middleware stack anyway — so nothing
-     * outside this component decides who gets to read the company address, the VAT
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the company address, the VAT
      * number and the payment method on file. Withholding the billable leaves the form
      * empty, while `save()` and `changePaymentMethod()` keep resolving it unguarded so
      * they can still answer 403.

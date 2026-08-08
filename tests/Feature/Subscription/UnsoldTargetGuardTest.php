@@ -6,7 +6,6 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
-use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;

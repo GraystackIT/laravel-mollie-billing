@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Tests\Browser;
 
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
-use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Testing\TestBillable;

@@ -76,6 +76,7 @@ return [
     'included' => 'inkl.',
     'addons' => 'Zusatzmodule',
     'active' => 'aktiv',
+    'upgrade_required' => 'Diese Funktion ist in Ihrem aktuellen Tarif nicht enthalten. Führen Sie ein Upgrade durch, um sie freizuschalten.',
     'usage' => 'Verbrauch',
     'overage' => 'Überverbrauch',
     'remaining' => 'verbleibend',

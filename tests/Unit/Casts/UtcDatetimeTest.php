@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
 use GraystackIT\MollieBilling\Models\Coupon;
-use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;

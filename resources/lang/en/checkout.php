@@ -137,6 +137,7 @@ return [
     // Errors
     'error_billable_creation' => 'Could not create the billing account. Please try again.',
     'error_no_billable' => 'Could not resolve the billing account. Please try again.',
+    'promotion_expired' => 'That promotional code is no longer valid, so it has not been applied.',
     'error_already_in_progress' => 'Your checkout is already being processed. Please wait a moment before trying again.',
     'error_payment_creation' => 'Could not create the payment. Please try again.',
     'error_unexpected' => 'An unexpected error occurred. Please try again or contact support.',

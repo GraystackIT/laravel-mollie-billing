@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
-use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
@@ -206,7 +205,7 @@ class BillingInvoice extends Model
     }
 
     /**
-     * Liefert ein einzelnes line_item per Index oder null.
+     * A single line item by index, or null.
      *
      * @return array<string, mixed>|null
      */
@@ -215,27 +214,6 @@ class BillingInvoice extends Model
         $items = $this->line_items ?? [];
 
         return $items[$index] ?? null;
-    }
-
-    /**
-     * Tage von line_item.period_start bis line_item.period_end.
-     */
-    /**
-     * Resolve the period for a single line item with fallback chain:
-     * line.period_* → invoice.period_* → null.
-     *
-     * @param  array<string, mixed>  $line
-     * @return array{0: ?CarbonInterface, 1: ?CarbonInterface}
-     */
-    private function lineItemPeriod(array $line): array
-    {
-        $rawStart = $line['period_start'] ?? $this->period_start;
-        $rawEnd = $line['period_end'] ?? $this->period_end;
-
-        return [
-            $rawStart !== null ? \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawStart) : null,
-            $rawEnd !== null ? \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawEnd) : null,
-        ];
     }
 
     /**
@@ -272,41 +250,6 @@ class BillingInvoice extends Model
             ->includedSeats((string) $planCode);
 
         return $includedSeats + $extraSeats;
-    }
-
-    public function lineItemDaysActive(int $index): int
-    {
-        $line = $this->lineItem($index);
-        if ($line === null) {
-            return 0;
-        }
-
-        [$start, $end] = $this->lineItemPeriod($line);
-        if ($start === null || $end === null) {
-            return 0;
-        }
-
-        return \GraystackIT\MollieBilling\Support\BillingPolicy::prorataPeriodDays($start, $end)['total'];
-    }
-
-    /**
-     * Days from $reference to line_item.period_end (always relative to now — the
-     * $reference parameter is legacy and is ignored; the single source of truth
-     * is BillingPolicy::prorataPeriodDays).
-     */
-    public function lineItemDaysRemaining(int $index, ?CarbonInterface $reference = null): int
-    {
-        $line = $this->lineItem($index);
-        if ($line === null) {
-            return 0;
-        }
-
-        [$start, $end] = $this->lineItemPeriod($line);
-        if ($start === null || $end === null) {
-            return 0;
-        }
-
-        return \GraystackIT\MollieBilling\Support\BillingPolicy::prorataPeriodDays($start, $end)['remaining'];
     }
 
     /**

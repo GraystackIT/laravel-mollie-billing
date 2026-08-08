@@ -76,6 +76,7 @@ return [
     'included' => 'included',
     'addons' => 'Add-ons',
     'active' => 'active',
+    'upgrade_required' => 'That feature is not part of your current plan. Upgrade to unlock it.',
     'usage' => 'Usage',
     'overage' => 'overage',
     'remaining' => 'remaining',

@@ -13,13 +13,9 @@ use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Notifications\AnonymousNotifiable;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Notification;
-use Mockery as M;
 use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
-use Mollie\Api\Http\Response as MollieResponse;
 use Mollie\Laravel\Facades\Mollie;
-use Psr\Http\Message\RequestInterface as PsrRequest;
-use Psr\Http\Message\StreamInterface as PsrStream;
 
 beforeEach(function (): void {
     config()->set('mollie-billing.billable_model', TestBillable::class);

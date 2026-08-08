@@ -14,7 +14,6 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Testing\TestBillable;
-use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Laravel\Facades\Mollie;

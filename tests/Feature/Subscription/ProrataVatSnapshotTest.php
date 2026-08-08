@@ -11,8 +11,6 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Testing\TestBillable;
-use Mollie\Api\Http\Data\Money;
-use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 beforeEach(function (): void {

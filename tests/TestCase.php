@@ -10,7 +10,6 @@ use GraystackIT\MollieBilling\MollieBillingServiceProvider;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Route;
 use Mpociot\VatCalculator\VatCalculatorServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 

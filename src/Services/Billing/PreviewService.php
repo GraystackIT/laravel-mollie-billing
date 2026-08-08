@@ -60,7 +60,15 @@ class PreviewService
 
         // Auto-filter incompatible addons when the plan changes.
         $incompatibleAddons = [];
-        $newAddons = $dto->addons ?? $currentAddons;
+        // Normalised first. `SubscriptionUpdateRequest` passes `addons` through untouched
+        // and `UpdateSubscription::normalizeAddonCodes()` documents support for both a
+        // list of codes and a code => quantity map — and the package's own addons screen
+        // passes the list form. Read as a map, its integer keys made every addon vanish
+        // from `newPriceNet`, from the line items and from the intent: the coupon discount
+        // was quoted against the plan alone (−5,80 shown, −6,80 charged), and with another
+        // addon already active the composer emitted refund lines for one the customer was
+        // keeping.
+        $newAddons = self::normalizeAddonQuantities($dto->addons) ?? $currentAddons;
 
         if ($planChanged) {
             $filteredAddons = [];
@@ -768,6 +776,32 @@ class PreviewService
         }
 
         return $items;
+    }
+
+    /**
+     * Bring an `addons` payload into the one shape this service reads: code => quantity.
+     *
+     * Mirrors `UpdateSubscription::normalizeAddonCodes()`, which accepts both forms.
+     *
+     * @param  array<int|string, mixed>|null  $addons
+     * @return array<string, int>|null
+     */
+    private static function normalizeAddonQuantities(?array $addons): ?array
+    {
+        if ($addons === null) {
+            return null;
+        }
+
+        if (array_is_list($addons)) {
+            return array_fill_keys(array_map('strval', $addons), 1);
+        }
+
+        $normalised = [];
+        foreach ($addons as $code => $quantity) {
+            $normalised[(string) $code] = (int) $quantity;
+        }
+
+        return $normalised;
     }
 
     /**

@@ -18,7 +18,7 @@ Every refund follows the same core pattern:
 
 1. **Validate** -- invoice must be `Paid` with a `mollie_payment_id`
 2. **Call Mollie** -- `CreatePaymentRefundRequest` with gross amount
-3. **Create credit note** -- negative-amount `BillingInvoice` with `InvoiceKind::CreditNote`
+3. **Create credit note** -- negative-amount `BillingInvoice` with `InvoiceKind::Refund`
 4. **Update tracking** -- increment `refunded_net` on the original invoice
 5. **Dispatch events** -- `InvoiceRefunded`, `CreditNoteIssued`
 6. **Notify** -- `RefundProcessedNotification` to billable admins
@@ -109,7 +109,7 @@ This fires a `WalletCredited` event and does not touch Mollie.
 - **Negative amounts** -- `amount_net`, `amount_vat`, `amount_gross` are all negative
 - **VAT rate** -- copied from the original invoice (never re-calculated)
 - **Status** -- always `InvoiceStatus::Refunded`
-- **Kind** -- always `InvoiceKind::CreditNote`
+- **Kind** -- always `InvoiceKind::Refund` (the enum has no `CreditNote` case; a credit note *is* a refund invoice)
 - **Serial number** -- prefixed with `CR` (via `InvoiceNumberGenerator`)
 - **PDF** -- generated and stored on the configured disk
 
@@ -149,13 +149,13 @@ Multiple partial refunds are supported. `RefundExceedsInvoiceAmountException` is
 
 ## Prorata Refunds (Plan Downgrades)
 
-When a user downgrades their plan mid-period, `UpdateSubscription::refundProrataCredit()` handles the refund:
+When a user downgrades their plan mid-period, the refund is composed and executed by
+`ProrataComposer` → `ProrataExecutor` → `InvoiceService::createRefund()`:
 
-1. Finds the most recent paid invoice for the current subscription via `findSubscriptionPaymentId()` (local DB lookup, no Mollie API call)
-2. Calculates VAT using the billable's country
-3. Calls Mollie refund against that payment
-4. Creates a standalone credit note with `RefundReasonCode::PlanDowngrade`
-5. Handles 409 conflicts (duplicate refunds) by checking for existing credit notes
+1. `ProrataComposer` builds one refund line per original line item, resolved through `BillingInvoice::currentPeriodLines()` — so each credit is posted against the invoice and the payment that actually holds the money, at that line's own VAT rate.
+2. Each line is capped against the original invoice's remaining refundable amount (a `refund_cap_note` records the reduction).
+3. `InvoiceService::createRefund()` calls Mollie per line with a per-line idempotency token that survives a retry, then writes **one** credit note covering the batch and increments `refunded_net`.
+4. Lines Mollie rejected go to `subscription_meta.pending_refund_retries`, which `RetryRefundLineJob` works through.
 
 ## Webhook Sync (Mollie Dashboard Refunds)
 
@@ -210,7 +210,7 @@ This makes refunds identifiable in the Mollie dashboard.
 | Flow | Protection |
 |------|------------|
 | `RefundInvoiceService::refund()` | `lockForUpdate` + `remainingRefundableNet()` check |
-| `refundProrataCredit()` | 409 error handling + credit note existence check |
+| `InvoiceService::createRefund()` | Per-line idempotency token (stable across retries) + clamp against `effectiveRefundedNet()` |
 | Webhook sync | Deduplication by Mollie refund ID in `mollie_payment_id` |
 | Chargeback sync | Deduplication by Mollie chargeback ID in the credit note's `line_items` |
 

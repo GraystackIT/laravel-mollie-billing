@@ -180,7 +180,7 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 3. Sets `subscription_source = local`, `subscription_status = active`, `subscription_ends_at = null`, `subscription_period_starts_at = now()`.
 4. Skips `syncMollieSubscription()`.
 5. Runs `WalletPlanChangeAdjuster` to reduce plan credits to the free-plan quota; `purchased_balance` is preserved.
-6. Refunds any prorata credit via `refundProrataCredit()` if `apply_at = immediate` and a mandate is still available.
+6. Refunds any prorata credit through `ProrataExecutor` → `InvoiceService::createRefund()` if `apply_at = immediate` and a mandate is still available.
 
 `config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` with `internal=true` to bypass the user-input mode check).
 

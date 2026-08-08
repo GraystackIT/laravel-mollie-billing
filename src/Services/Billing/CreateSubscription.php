@@ -155,10 +155,20 @@ class CreateSubscription
             default => BillingTime::nowUtc()->addMonth(),
         };
 
+        // The mandate all four activation paths already hand us. Without it Mollie binds
+        // the subscription to "the customer's first valid mandate", which on a recovery
+        // checkout is the *old* one — and MandateUpdated has just queued
+        // RevokeMollieMandateJob for exactly that mandate. The worker then revokes what the
+        // subscription is bound to, so the first real charge after the trial fails against
+        // a revoked mandate and dunning starts for a customer who had just supplied a
+        // working payment method.
+        $mandateId = (string) ($spec['mandate_id'] ?? $billable->getMollieMandateId() ?? '');
+
         $subscription = Mollie::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
             amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             interval: $interval === 'yearly' ? '12 months' : '1 month',
+            mandateId: $mandateId !== '' ? $mandateId : null,
             description: "{$planCode} subscription",
             startDate: new Date($startDate),
             metadata: [

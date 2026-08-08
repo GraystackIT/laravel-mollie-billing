@@ -11,7 +11,6 @@ use GraystackIT\MollieBilling\Enums\DiscountType;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\CouponRedeemed;
 use GraystackIT\MollieBilling\Events\GrantRevoked;
-use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Events\SubscriptionExtended;
 use GraystackIT\MollieBilling\Exceptions\AccessGrantConflictsWithMollieSubscriptionException;
 use GraystackIT\MollieBilling\Exceptions\AccessGrantRequiresActiveSubscriptionException;
@@ -1496,11 +1495,10 @@ class CouponService
                 }
             }
 
-            event(new SubscriptionCreated(
-                $billable,
-                (string) $coupon->grant_plan_code,
-                (string) $coupon->grant_interval,
-            ));
+            // Not dispatched here: ActivateLocalSubscription — the only path that gets
+            // this far — ends with SubscriptionCreated itself. Firing it again wrote a
+            // second `subscription_created` audit row at the same second and ran every app
+            // listener twice, provisioning whatever they provision a second time.
         } else {
             // Extend existing local subscription.
             $newEnd = ($currentEnd && $currentEnd->isFuture()

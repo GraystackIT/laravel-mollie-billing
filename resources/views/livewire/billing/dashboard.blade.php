@@ -53,9 +53,11 @@ new class extends Component {
     /**
      * The same gate for the read path, which the hardening above skipped.
      *
-     * The package's portal routes carry no `billing.portal` middleware, and a Livewire
-     * update request never re-enters a route's middleware stack anyway — so nothing
-     * outside this component decides who gets to read the tenant's plan, address,
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's plan, address,
      * invoices and wallet balances. Withholding the billable renders the same
      * "no billable" state as an unresolvable tenant, while the actions keep resolving it
      * unguarded so they can still answer 403.
@@ -137,7 +139,7 @@ new class extends Component {
                 $billable,
                 $mismatch,
                 $newCountry,
-                MollieBilling::resolveBillable(request()) ? request()->user()?->getKey() : null,
+                request()->user()?->getKey(),
             );
         } catch (\Throwable $e) {
             report($e);
@@ -187,11 +189,18 @@ new class extends Component {
     public function endTrial(): void
     {
         $billable = $this->resolveBillable();
-        if (! $billable || ! $billable->isOnBillingTrial()) {
+        if (! $billable) {
             return;
         }
 
+        // Authorize FIRST, like every other action here: a 403 for "on trial" and a silent
+        // 200 for "not on trial" told an unauthorized team member the tenant's trial state,
+        // which the read gate otherwise withholds entirely.
         $this->authorizeBillingAction($billable);
+
+        if (! $billable->isOnBillingTrial()) {
+            return;
+        }
         try {
             // Immediate cancel: trial ends now, Mollie subscription cancelled,
             // status flips to Cancelled with subscription_ends_at = now. The
@@ -804,7 +813,13 @@ new class extends Component {
         @if (count($d['usageTypes']) > 0)
             <div class="space-y-4">
                 <flux:heading size="lg">{{ __('billing::portal.usage') }}</flux:heading>
-                <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-{{ min(count($d['usageTypes']), 4) }}">
+                {{-- An inline grid-template, not an interpolated utility class: Tailwind only
+                     emits classes it can see as complete strings, so `lg:grid-cols-{{ n }}`
+                     was never compiled and three meters silently fell back to two per row.
+                     `auto-fit` also drops the breakpoints — the meters wrap on width rather
+                     than on a guessed column count. plan-change.blade.php uses the same
+                     inline-template approach. --}}
+                <div class="grid gap-4" style="grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))">
                     @foreach ($d['usageTypes'] as $usage)
                         <livewire:mollie-billing::components.usage-meter
                             :type="$usage['type']"

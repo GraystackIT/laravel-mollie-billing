@@ -138,6 +138,18 @@
     </flux:sidebar>
 
     <flux:main container>
+        {{-- Redirects into the portal carry their reason here. RequirePlanFeature,
+             RequireResolvedCountryMismatch and PromotionController each flashed a message
+             under a key of their own invention — `billing.status`, `billing_status`,
+             `billing.promotion_status` — and no view read any of them, so a customer
+             bounced off a gated feature, an unresolved country check or an expired promo
+             link landed on the dashboard with no explanation at all. --}}
+        @if (session('billing_status'))
+            <div class="mb-6">
+                <flux:callout variant="warning" icon="exclamation-triangle" inline>{{ session('billing_status') }}</flux:callout>
+            </div>
+        @endif
+
         @livewire($livewireComponent)
     </flux:main>
 

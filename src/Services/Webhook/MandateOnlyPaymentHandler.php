@@ -14,7 +14,6 @@ use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\SubscriptionActivationFailed;
-use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Events\TrialStarted;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
@@ -412,7 +411,6 @@ class MandateOnlyPaymentHandler
             }
         }
 
-        event(new SubscriptionCreated($billable, $planCode, $interval));
         event(new PaymentSucceeded($billable, $invoice));
 
         $this->support->notifyInvoiceAvailable($billable, $invoice);
@@ -542,7 +540,6 @@ class MandateOnlyPaymentHandler
             }
         }
 
-        event(new SubscriptionCreated($billable, $planCode, $interval));
         event(new TrialStarted($billable, $planCode, $trialDays));
 
         MollieBilling::runAfterCheckout($billable, true);

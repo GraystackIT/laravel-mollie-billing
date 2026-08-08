@@ -2,6 +2,8 @@
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Enums\CouponType;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
@@ -108,7 +110,19 @@ new class extends Component {
             return;
         }
 
-        $b->extendBillingTrialUntil($until);
+        // Caught, like every other action in this component: extendBillingTrialUntil()
+        // refuses Cancelled and Expired ("resubscribe instead of extending"), and both
+        // keep `trial_ends_at` set — so the form rendered, the operator picked a date, and
+        // the exception went out of the Livewire action as a 500 with the guidance nobody
+        // ever saw.
+        try {
+            $b->extendBillingTrialUntil($until);
+        } catch (InvalidSubscriptionStateException $e) {
+            $this->error = $e->getMessage();
+
+            return;
+        }
+
         $this->flash = __('billing::admin.billables.subscription.flash.trial_extended', [
             'date' => $until->format('Y-m-d H:i'),
         ]);
@@ -325,7 +339,15 @@ new class extends Component {
             @php
                 $status = $b->getBillingSubscriptionStatus();
                 $endsAt = $b->getBillingSubscriptionEndsAt();
-                $canExtendTrial = $b->isOnBillingTrial() || ($b->trial_ends_at !== null);
+                // Only the states extendBillingTrialUntil() accepts. `trial_ends_at !== null`
+                // is true for anything that ever trialled, including Cancelled and Expired,
+                // where the trait refuses and tells the operator to resubscribe instead.
+                $canExtendTrial = in_array($b->getBillingSubscriptionStatus(), [
+                    SubscriptionStatus::New,
+                    SubscriptionStatus::Trial,
+                    SubscriptionStatus::Active,
+                    SubscriptionStatus::PastDue,
+                ], true) && ($b->isOnBillingTrial() || $b->trial_ends_at !== null);
                 $canResubscribe = $status === \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled
                     && $endsAt !== null && $endsAt->isFuture();
                 $canCancel = ! in_array($status, [

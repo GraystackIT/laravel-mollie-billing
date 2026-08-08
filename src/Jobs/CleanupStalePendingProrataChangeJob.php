@@ -6,7 +6,6 @@ namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
-use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;

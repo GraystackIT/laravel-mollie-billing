@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\MollieBilling;
-use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 
 afterEach(function (): void {

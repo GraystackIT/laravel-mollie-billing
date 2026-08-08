@@ -8,7 +8,6 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionCannotPurchaseProductsException;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Testing\TestBillable;
-use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 beforeEach(function (): void {

@@ -137,6 +137,7 @@ return [
     // Errors
     'error_billable_creation' => 'Das Abrechnungskonto konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
     'error_no_billable' => 'Das Abrechnungskonto konnte nicht aufgelöst werden. Bitte versuchen Sie es erneut.',
+    'promotion_expired' => 'Dieser Aktionscode ist nicht mehr gültig und wurde daher nicht angewendet.',
     'error_already_in_progress' => 'Ihr Checkout wird bereits verarbeitet. Bitte warten Sie einen Moment, bevor Sie es erneut versuchen.',
     'error_payment_creation' => 'Die Zahlung konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
     'error_unexpected' => 'Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
