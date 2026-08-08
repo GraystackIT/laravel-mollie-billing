@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
+use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Database\Eloquent\Model;
@@ -40,6 +41,20 @@ class ScheduleSubscriptionChange
                     ->lockForUpdate()
                     ->first();
                 $billable->refresh();
+            }
+
+            // Refused, not silently accepted: `apply()` drops a change whose status is no
+            // longer applicable, so scheduling one for a Cancelled-in-grace customer
+            // promised a "scheduled for <date>" that would never happen — the portal
+            // rendered the confirmation, the daily dispatcher then discarded it without
+            // ever telling anyone. A cancelled customer wanting a different plan has to
+            // resubscribe; that path exists.
+            if (! $this->isApplicable($billable)) {
+                throw new InvalidSubscriptionStateException(
+                    'Cannot schedule a subscription change while the subscription is '
+                    .($billable->getBillingSubscriptionStatus()?->value ?? 'in no billable state')
+                    .'. Resubscribe first.'
+                );
             }
 
             $currentPlan = $billable->getBillingSubscriptionPlanCode() ?? '';
@@ -81,7 +96,7 @@ class ScheduleSubscriptionChange
                 ));
             }
 
-            $scheduledAt = $billable->nextBillingDate() ?? BillingTime::nowUtc();
+            $scheduledAt = $this->periodEndFor($billable);
 
             $scheduledChange = [
                 'plan_code' => $newPlan,
@@ -277,6 +292,32 @@ class ScheduleSubscriptionChange
      * a full first period. Cancelled, Expired and New are not — there is nothing to
      * change, and for Cancelled the customer explicitly asked to stop.
      */
+    /**
+     * When "end of period" actually falls.
+     *
+     * For a trial that is `nextBillingDate()` OR the trial end, whichever comes first.
+     * `nextBillingDate()` is `period_start + interval` (day 30 of a 30-day month), but a
+     * trial's first charge lands on `trial_ends_at` (day 14) — CreateSubscription sets
+     * Mollie's `startDate` to exactly that. Anchoring on day 30 scheduled the change into
+     * the middle of the first *paid* period, where it was applied as an immediate,
+     * `internal` update: the lapsed-period guard is waived for those, so nothing stopped
+     * it from raising the very prorata charge the customer had scheduled the change to
+     * avoid.
+     */
+    private function periodEndFor(Billable $billable): \Carbon\CarbonInterface
+    {
+        $next = $billable->nextBillingDate();
+        $trialEnd = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial
+            ? $billable->getBillingTrialEndsAt()
+            : null;
+
+        if ($next !== null && $trialEnd !== null) {
+            return $trialEnd->lessThan($next) ? $trialEnd : $next;
+        }
+
+        return $next ?? $trialEnd ?? BillingTime::nowUtc();
+    }
+
     private function isApplicable(Billable $billable): bool
     {
         return in_array($billable->getBillingSubscriptionStatus(), [

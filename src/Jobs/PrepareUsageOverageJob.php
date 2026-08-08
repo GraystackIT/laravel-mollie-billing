@@ -8,11 +8,8 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
-use GraystackIT\MollieBilling\Events\SubscriptionCancelled;
 use GraystackIT\MollieBilling\Events\SubscriptionExpired;
-use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
-use GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
@@ -28,7 +25,6 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Notification;
 use Throwable;
 
 class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
@@ -337,6 +333,7 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $isLocal = $billable->isLocalBillingSubscription();
         $hasMandate = $billable->hasMollieMandate();
         $isCancelled = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Cancelled;
+        $isPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
 
         // Trial-lifecycle notifications and expiry transitions live in
         // ProcessTrialLifecycleJob — this job is concerned with overage charging
@@ -357,7 +354,13 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Case C — Local subscription continues: reset wallet quota.
-        if ($isLocal && $renewsTomorrow && ! $isCancelled) {
+        //
+        // PastDue is excluded: a past-due local subscription is not renewing, it is
+        // waiting to be cancelled. `nextBillingDate()` keeps cycling for it (the period
+        // anchor is never cleared), so a mandate-less expired trial parked in PastDue
+        // used to collect a fresh month of consumable quota on every anniversary —
+        // indefinitely, for a customer who never paid.
+        if ($isLocal && $renewsTomorrow && ! $isCancelled && ! $isPastDue) {
             $this->resetLocalQuota($billable, $walletService, $tomorrowStart);
 
             return;
@@ -446,15 +449,5 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                 'subscription_period_starts_at' => $tomorrowStart,
             ])->save();
         });
-    }
-
-    private function notifyBillable(Model $billable, $notification): void
-    {
-        $recipients = MollieBilling::notifyBillingAdmins($billable);
-        $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
-
-        if ($recipients !== []) {
-            Notification::send($recipients, $notification);
-        }
     }
 }

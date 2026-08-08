@@ -184,6 +184,12 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 
 `config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` with `internal=true` to bypass the user-input mode check).
 
+### When "end of period" falls
+
+`ScheduleSubscriptionChange::schedule()` anchors on `nextBillingDate()`, except **on a trial**, where it takes the earlier of `nextBillingDate()` and `trial_ends_at`. A trial's first charge lands on `trial_ends_at` (day 14), not on the period anniversary (day 30) — anchoring on the latter applied the change in the middle of the first paid period, and since `apply()` re-enters as an `internal` immediate update the lapsed-period guard is waived, so it raised the very prorata charge the customer scheduled the change to avoid.
+
+`schedule()` refuses (`InvalidSubscriptionStateException`) for any status `apply()` would not act on — i.e. anything other than `active`, `trial`, `past_due`. A cancelled-in-grace customer used to get a "scheduled for &lt;date&gt;" confirmation for a change the daily dispatcher then silently discarded; the path for them is to resubscribe.
+
 ## Past-Due Reset
 
 When a recurring charge fails the subscription enters `subscription_status = past_due`. From this state the user can recover in two ways: pay the failed invoice (regular dunning), or switch to any paid plan. The plan-switch path is the **Past-Due reset** — a special branch through the standard `UpdateSubscription` flow.

@@ -9,8 +9,10 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Casts\UtcDatetime;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Support\BillingAuditEntry;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
@@ -635,13 +637,48 @@ trait HasBilling
      */
     public function extendBillingTrialUntil(CarbonInterface $until): void
     {
+        // A trial can only be extended where one can legitimately run. The status flip
+        // below is unconditional on `Trial`, and `hasAccessibleBillingSubscription()`
+        // grants Trial full access without looking at anything else — so an extension on
+        // a Cancelled or Expired row resurrected a subscription that had ended, with no
+        // Mollie subscription behind it (Expired even has its plan code wiped, so the
+        // customer landed in a portal gated open on a plan that no longer exists). The
+        // coupon path guards this; the direct and admin paths did not.
+        //
+        // PastDue stays allowed: it is a dunning state, not an ending, and "give them
+        // another week to add a card" is the whole point of the admin action.
+        if (! in_array($this->subscription_status, [
+            SubscriptionStatus::New,
+            SubscriptionStatus::Trial,
+            SubscriptionStatus::Active,
+            SubscriptionStatus::PastDue,
+        ], true)) {
+            throw new InvalidSubscriptionStateException(
+                'Cannot extend a trial while the subscription is '
+                .($this->subscription_status?->value ?? 'in no billable state')
+                .'. Resubscribe instead of extending.'
+            );
+        }
+
         $previous = $this->trial_ends_at;
         $newEnd = $previous && $previous->isAfter($until) ? $previous : $until;
 
         $this->forceFill(['trial_ends_at' => $newEnd])->save();
 
         if ($this->subscription_status !== SubscriptionStatus::Trial && $newEnd->isFuture()) {
-            $this->forceFill(['subscription_status' => SubscriptionStatus::Trial])->save();
+            // Promoting out of PastDue ends that dunning episode. Keeping `past_due_since`
+            // would have the auto-cancel clock still running against the *old* failure:
+            // ProcessTrialLifecycleJob re-stamps it with `??`, so the moment this new
+            // trial lapsed the row would be auto-cancelled on the next sweep — the
+            // extension the operator granted, silently undone.
+            $meta = $this->subscription_status === SubscriptionStatus::PastDue
+                ? SubscriptionMetaHygiene::withoutDunningEpisode($this->getBillingSubscriptionMeta())
+                : null;
+
+            $this->forceFill(array_merge(
+                ['subscription_status' => SubscriptionStatus::Trial],
+                $meta !== null ? ['subscription_meta' => $meta] : [],
+            ))->save();
         }
 
         $changed = $previous === null || ! $previous->equalTo($newEnd);

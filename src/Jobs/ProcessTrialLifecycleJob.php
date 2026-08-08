@@ -168,9 +168,24 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
                             continue;
                         }
 
-                        $billable->forceFill([
-                            'subscription_status' => SubscriptionStatus::PastDue,
-                        ])->save();
+                        // `past_due_since` alongside the status flip, like every other
+                        // path into PastDue (SubscriptionPaymentHandler::failed(),
+                        // RetryUsageOverageChargeJob::giveUp(), ChargebackHandler).
+                        //
+                        // Without it, PrepareUsageOverageJob's auto-cancel pass skips the
+                        // row — it keys off exactly this stamp — so a mandate-less expired
+                        // trial never walked PastDue → Cancelled → Expired and never
+                        // reached the plan-field wipe. `hasPlanFeature()`, `@planFeature`
+                        // and the `billing.feature` middleware kept answering from the
+                        // retained plan code for a customer who never paid, and because
+                        // the row stays Local with a cycling nextBillingDate(), the
+                        // overage job's local-quota pass handed it fresh consumable quota
+                        // every month, forever.
+                        $this->mutateBillingMeta($billable, fn (array $meta): array => [
+                            ...$meta,
+                            'past_due_since' => $meta['past_due_since']
+                                ?? BillingTime::nowUtc()->toIso8601String(),
+                        ], ['subscription_status' => SubscriptionStatus::PastDue]);
 
                         event(new TrialExpired($billable));
                         $this->notify($billable, MollieBilling::resolveNotification(TrialExpiredNotification::class, $billable));
