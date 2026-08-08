@@ -193,7 +193,8 @@ planOnlyBalance    = currentBalance - purchasedRemaining
 
 elapsedFraction    = 1 - prorataFactor(periodStart, periodEnd)
 proratedOldQuota   = round(oldIncluded * elapsedFraction)
-excess             = max(0, proratedOldQuota - planOnlyBalance)
+actuallyUsed       = max(0, oldIncluded - planOnlyBalance)
+excess             = max(0, actuallyUsed - proratedOldQuota)
 rolloverCredits    = rollover ? max(0, planOnlyBalance - oldIncluded) : 0
 targetBalance      = newIncluded + rolloverCredits + purchasedRemaining - excess
 ```
@@ -222,7 +223,7 @@ If `targetBalance < 0`, the remainder is charged as overage via `ChargeUsageOver
 | Normal usage | 1000/yr | 6mo (50%) | 300 | 700 | 500 | 0 | 600 | **600** | 0 |
 | All consumed | 1000/yr | 6mo (50%) | 1000 | 0 | 500 | 500 | 600 | **100** | 0 |
 | Heavy overage | 1000/yr | 6mo (50%) | 1100 | -100 | 500 | 600 | 600 | **0** | 0 |
-| Excess > new quota | 1000/yr | 3mo (25%) | 1000 | 0 | 250 | 250 | 200 | **0** | 50 |
+| Excess > new quota | 1000/yr | 3mo (25%) | 1000 | 0 | 249 | 751 | 200 | **0** | 551 |
 | Nothing used | 1000/yr | 6mo (50%) | 0 | 1000 | 500 | 0 | 600 | **600** | 0 |
 
 ### Examples With Purchased Credits

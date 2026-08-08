@@ -13,6 +13,7 @@ use Elegantly\Invoices\Support\Address;
 use Elegantly\Invoices\Support\Buyer;
 use Elegantly\Invoices\Support\PaymentInstruction;
 use Elegantly\Invoices\Support\Seller;
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
@@ -88,8 +89,14 @@ class InvoiceService
      *
      * @param  array<int, array<string, mixed>>  $lineItems
      */
-    public function createForPayment(object $payment, string $invoiceKind, array $lineItems, Billable $billable): BillingInvoice
-    {
+    public function createForPayment(
+        object $payment,
+        string $invoiceKind,
+        array $lineItems,
+        Billable $billable,
+        ?CarbonInterface $periodStart = null,
+        ?CarbonInterface $periodEnd = null,
+    ): BillingInvoice {
         /** @var Model&Billable $billable */
         $expectedNet = $this->expectedNetFromLineItems($lineItems);
         $summedNet = $this->sumTotalNet($lineItems);
@@ -112,8 +119,16 @@ class InvoiceService
         // Period for line items: prefer the billable's current subscription period
         // (so currentPeriodLines() can later locate them for refunds), else fall back
         // to "now → now+1 month" as a defensive default for one-off charges.
-        $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
-        $linePeriodEnd = $billable->nextBillingDate() ?? BillingTime::addInterval(BillingTime::nowUtc(), 'monthly');
+        //
+        // A caller that is *starting* a period has to pass it explicitly. The billable's
+        // anchor still describes the period that just ended at that point — the renewal
+        // handler advances it after the invoice exists — so a renewal invoice was stamped
+        // with the expired window. `currentPeriodLines()` drops any line whose period_end is
+        // more than a day from the billable's own period end, so it could not find the very
+        // invoice that paid for the current period: every mid-period downgrade after a
+        // renewal composed its refund against nothing and credited 0.
+        $linePeriodStart = $periodStart ?? $billable->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
+        $linePeriodEnd = $periodEnd ?? $billable->nextBillingDate() ?? BillingTime::addInterval(BillingTime::nowUtc(), 'monthly');
 
         $normalizedLines = array_map(function (array $line) use ($rate, $zeroRated, $linePeriodStart, $linePeriodEnd): array {
             // Normalize legacy kind alias.

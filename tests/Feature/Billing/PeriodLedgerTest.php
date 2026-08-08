@@ -480,3 +480,294 @@ it('books what Mollie actually collected when the amount differs, and says so', 
 
     assertInvoicesInternallyConsistent();
 });
+
+it('discounts a mid-period upgrade with a recurring coupon and records what it discounted', function (): void {
+    config()->set('mollie-billing-plans.plans.enterprise', [
+        'name' => 'Enterprise',
+        'tier' => 3,
+        'included_seats' => 1,
+        'feature_keys' => [],
+        'allowed_addons' => ['analytics'],
+        'intervals' => [
+            'monthly' => [
+                'base_price_net' => 5900,
+                'seat_price_net' => 500,
+                'included_usages' => ['Tokens' => 5000],
+                'usage_overage_prices' => ['Tokens' => 2],
+            ],
+        ],
+    ]);
+
+    $coupon = Coupon::create([
+        'code' => 'UPGRADE25',
+        'name' => 'Upgrade 25',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'active' => true,
+        'stackable' => false,
+    ]);
+
+    $billable = ledgerBillable('2026-01-01T09:00:00Z');
+    $this->travelTo(BillingTime::toUtc('2026-01-11T12:00:00Z'));
+
+    BillingInvoice::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'mollie_payment_id' => 'tr_ledger_coupon_period',
+        'invoice_kind' => InvoiceKind::Subscription,
+        'status' => InvoiceStatus::Paid,
+        'country' => 'AT',
+        'currency' => 'EUR',
+        'amount_net' => 4300,
+        'amount_vat' => 860,
+        'amount_gross' => 5160,
+        'serial_number' => 'IN-LEDGER-C1',
+        'period_start' => BillingTime::toUtc('2026-01-01T09:00:00Z'),
+        'period_end' => BillingTime::toUtc('2026-02-01T09:00:00Z'),
+        'line_items' => [
+            ['kind' => 'plan', 'code' => 'pro', 'label' => 'Pro', 'quantity' => 1, 'unit_price_net' => 2900, 'amount_net' => 2900, 'vat_rate' => 20.0, 'vat_amount' => 580, 'amount_gross' => 3480, 'period_start' => '2026-01-01T09:00:00+00:00', 'period_end' => '2026-02-01T09:00:00+00:00'],
+            ['kind' => 'seats', 'code' => null, 'label' => 'Extra seat', 'quantity' => 1, 'unit_price_net' => 500, 'amount_net' => 500, 'vat_rate' => 20.0, 'vat_amount' => 100, 'amount_gross' => 600, 'period_start' => '2026-01-01T09:00:00+00:00', 'period_end' => '2026-02-01T09:00:00+00:00'],
+            ['kind' => 'addon', 'code' => 'analytics', 'label' => 'Analytics', 'quantity' => 1, 'unit_price_net' => 900, 'amount_net' => 900, 'vat_rate' => 20.0, 'vat_amount' => 180, 'amount_gross' => 1080, 'period_start' => '2026-01-01T09:00:00+00:00', 'period_end' => '2026-02-01T09:00:00+00:00'],
+        ],
+    ]);
+
+    $preview = \GraystackIT\MollieBilling\Facades\MollieBilling::preview()
+        ->previewUpdate($billable->fresh(), ['plan_code' => 'enterprise', 'coupon_codes' => ['UPGRADE25']]);
+
+    // The two discounts are separate things and both have to be right.
+    //
+    // Due now: the new configuration is charged for the 21 remaining of 31 days
+    // (7300 × 21/31 = 4946) and the old one credited for the same window
+    // (4300 × 21/31 = 2914) — a delta of 2032 — and the coupon takes 25% of that delta,
+    // 508, as its own line. So 4946 − 2914 − 508 = 1524, and `prorataChargeNet` is the
+    // figure after the discount, matching `prorataTotalNet`.
+    $lines = array_map(
+        fn (array $l) => [(string) ($l['kind'] ?? ''), (int) ($l['amount_net'] ?? 0)],
+        $preview['prorataLines'] ?? [],
+    );
+
+    expect($lines)->toContain(['plan', 3997])       // 5900 × 21/31
+        ->and($lines)->toContain(['plan', -1965])   // −2900 × 21/31
+        ->and($lines)->toContain(['coupon', -508])
+        ->and(array_sum(array_column($lines, 1)))->toBe(1524)
+        ->and($preview['prorataChargeNet'])->toBe(1524)
+        ->and($preview['prorataTotalNet'])->toBe(1524);
+
+    // Going forward: 25% of the *new* recurring net, which is a different number and must
+    // not be confused with the one above.
+    expect($preview['couponDiscountNet'])->toBe(1825)
+        ->and($preview['newPriceNet'])->toBe(7300);
+
+    $result = app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
+        ->update($billable->fresh(), ['plan_code' => 'enterprise', 'coupon_codes' => ['UPGRADE25']]);
+
+    // An upgrade whose prorata is collected by Mollie is deferred: the plan does not switch
+    // and — this is the part worth pinning — the recurring discount is NOT activated yet.
+    // Writing the marker here would give the customer a standing discount off the back of a
+    // payment that has not settled, and the redemption row would carry no invoice id.
+    // Phase 2 does both once the charge clears (see ProrataChargePhaseTwoTest).
+    expect($result['pendingPaymentConfirmation'])->toBeTrue()
+        ->and($billable->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon')
+        ->and($billable->fresh()->subscription_plan_code)->toBe('pro')
+        // The intent is stored with the coupon, so Phase 2 can redeem it against the
+        // invoice the charge produced.
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['pending_plan_change']['coupon_codes'] ?? [])
+        ->toBe(['UPGRADE25']);
+
+    assertInvoicesInternallyConsistent();
+});
+
+it('stamps a renewal invoice with the period it paid for, so a later downgrade can credit it', function (): void {
+    config()->set('mollie-billing-plans.plans.starter', [
+        'name' => 'Starter',
+        'tier' => 1,
+        'included_seats' => 1,
+        'feature_keys' => [],
+        'allowed_addons' => [],
+        'intervals' => [
+            'monthly' => ['base_price_net' => 900, 'seat_price_net' => null, 'included_usages' => ['Tokens' => 100]],
+        ],
+    ]);
+
+    $billable = ledgerBillable('2026-01-01T09:00:00Z');
+
+    deliverLedgerRenewal($billable, 'tr_ledger_window', '2026-02-01T09:04:12Z', '51.60');
+
+    $invoice = BillingInvoice::query()->latest('id')->first();
+    $fresh = $billable->fresh();
+
+    // The invoice documents the period the money bought — 1 Feb to 1 Mar — not the one that
+    // just expired. It used to carry [1 Jan, 1 Feb] because the anchor was only advanced
+    // afterwards, and `currentPeriodLines()` then dropped every line of it: its period_end
+    // was 28 days away from the billable's own, far past the one-day tolerance.
+    expect($invoice->period_start->toIso8601String())->toBe('2026-02-01T09:04:12+00:00')
+        ->and($invoice->period_end->toIso8601String())->toBe('2026-03-01T09:04:12+00:00')
+        ->and($fresh->getBillingPeriodStartsAt()->toIso8601String())->toBe('2026-02-01T09:04:12+00:00');
+
+    // Which is what makes the invoice findable — and a downgrade creditable.
+    $candidates = BillingInvoice::currentPeriodLines($fresh, 'plan', 'pro');
+    expect($candidates)->not->toBeEmpty();
+
+    // Half way through the new period, dropping to a 900 plan: the 4300 just paid is
+    // credited pro rata. With the invoice unfindable this produced a charge and no credit at
+    // all, leaving the customer 21.50 net out of pocket.
+    $this->travelTo(BillingTime::toUtc('2026-02-15T09:04:12Z'));
+
+    $preview = \GraystackIT\MollieBilling\Facades\MollieBilling::preview()
+        ->previewUpdate($fresh, ['plan_code' => 'starter', 'addons' => [], 'seats' => 1]);
+
+    $credits = array_filter(
+        array_map(fn (array $l) => (int) ($l['amount_net'] ?? 0), $preview['prorataLines'] ?? []),
+        fn (int $net) => $net < 0,
+    );
+
+    expect($credits)->not->toBeEmpty()
+        ->and(array_sum($credits))->toBeLessThan(-1500);
+});
+
+it('invoices an out-of-order renewal without booking it as a new period', function (): void {
+    config()->set('mollie-billing-plans.usage_types', ['Tokens' => ['rollover' => true]]);
+
+    $billable = ledgerBillable('2026-01-01T09:00:00Z');
+
+    deliverLedgerRenewal($billable, 'tr_ledger_ooo_b', '2026-02-01T09:00:00Z', '51.60');
+
+    $afterB = $billable->fresh();
+    expect($afterB->subscription_period_starts_at->toIso8601String())->toBe('2026-02-01T09:00:00+00:00')
+        ->and((int) $afterB->getWallet('Tokens')->balanceInt)->toBe(1000);
+
+    // A delivery for an older payment arrives late. Idempotency here is per payment, so this
+    // one has no invoice yet and used to run the whole body: the anchor went back a month —
+    // after which the overage pass's "renews tomorrow" never matched again until the next
+    // renewal, so that period's overage was never collected — and a rollover wallet was
+    // credited a second full period on top, permanently.
+    deliverLedgerRenewal($billable->fresh(), 'tr_ledger_ooo_a', '2026-01-01T09:00:00Z', '51.60');
+
+    $afterA = $billable->fresh();
+
+    expect($afterA->subscription_period_starts_at->toIso8601String())->toBe('2026-02-01T09:00:00+00:00')
+        ->and((int) $afterA->getWallet('Tokens')->balanceInt)->toBe(1000);
+
+    // The money did arrive, so the document exists either way.
+    expect(BillingInvoice::query()->where('mollie_payment_id', 'tr_ledger_ooo_a')->count())->toBe(1);
+});
+
+it('does not hand back units when a plan-change overage settles', function (): void {
+    config()->set('mollie-billing-plans.plans.free', [
+        'name' => 'Free',
+        'tier' => 0,
+        'included_seats' => 1,
+        'feature_keys' => [],
+        'allowed_addons' => [],
+        'intervals' => [
+            'monthly' => ['base_price_net' => 0, 'seat_price_net' => null, 'included_usages' => ['Tokens' => 10]],
+        ],
+    ]);
+    config()->set('mollie-billing-plans.usage_types', ['Tokens' => ['rollover' => true]]);
+
+    $billable = ledgerBillable('2026-01-01T09:00:00Z');
+    $billable->forceFill(['active_addon_codes' => [], 'subscription_meta' => ['mollie_subscription_id' => 'sub_ledger', 'seat_count' => 1]])->save();
+
+    app(\GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::class)
+        ->credit($billable->fresh(), 'Tokens', 1000, 'seed');
+    $billable->fresh()->recordBillingUsage('Tokens', 900);
+
+    // Half way through: the elapsed entitlement is 500, 900 was consumed, so 400 is excess.
+    // The new plan includes 10, so 390 is charged — and the adjuster clamps the wallet to 0
+    // in the same breath, because those units are already accounted for.
+    $this->travelTo(BillingTime::toUtc('2026-01-16T09:00:00Z'));
+
+    app(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class)->adjust(
+        $billable->fresh(),
+        'pro',
+        'monthly',
+        'free',
+        'monthly',
+        BillingTime::toUtc('2026-01-01T09:00:00Z'),
+        BillingTime::toUtc('2026-02-01T09:00:00Z'),
+    );
+
+    $snapshot = $billable->fresh()->getBillingSubscriptionMeta()['usage_overage'] ?? [];
+    $charged = (int) ($snapshot['line_items'][0]['quantity'] ?? 0);
+
+    expect((int) $billable->fresh()->getWallet('Tokens')->balanceInt)->toBe(0)
+        ->and($charged)->toBeGreaterThan(0);
+
+    // Settling it must NOT credit those units back: there is no negative balance to clear,
+    // so the credit would land on 0 and hand the customer capacity they never bought — and a
+    // rollover type would keep it for good.
+    LedgerFakeWebhookController::$nextPayment = (object) [
+        'id' => (string) $snapshot['payment_id'],
+        'status' => 'paid',
+        'amount' => (object) ['value' => '9.36', 'currency' => 'EUR'],
+        'paidAt' => '2026-01-16T10:00:00Z',
+        'subscriptionId' => null,
+        'countryCode' => 'AT',
+        'metadata' => [
+            'type' => 'overage',
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+            'line_items' => $snapshot['line_items'],
+        ],
+    ];
+    $this->postJson(route('billing.webhook'), ['id' => (string) $snapshot['payment_id']])->assertStatus(200);
+
+    expect((int) $billable->fresh()->getWallet('Tokens')->balanceInt)->toBe(0);
+});
+
+it('refuses a plan-change overage while a period-end charge is still settling', function (): void {
+    $billable = ledgerBillable();
+
+    $billable->recordBillingUsage('Tokens', 0);
+    app(\GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::class)
+        ->credit($billable, 'Tokens', 1000, 'seed');
+    $billable->fresh()->recordBillingUsage('Tokens', 1037);
+
+    // The period-end charge for 37 units, still in flight.
+    app(ChargeUsageOverageDirectly::class)->handle($billable->fresh());
+    $inFlight = (string) ($billable->fresh()->getBillingSubscriptionMeta()['usage_overage']['payment_id'] ?? '');
+
+    expect($inFlight)->not->toBe('');
+
+    // A plan change now wants to charge its own excess. The snapshot is a single slot, and
+    // overwriting it lost the in-flight charge's units while making the retry job — which
+    // resolves the snapshot, not a payment id — charge the *new* line items a second time.
+    $result = app(ChargeUsageOverageDirectly::class)->handleExplicit($billable->fresh(), [
+        ['kind' => 'overage', 'type' => 'Tokens', 'code' => 'Tokens', 'label' => 'Tokens', 'quantity' => 27, 'unit_price_net' => 2, 'total_net' => 54],
+    ]);
+
+    expect($result->wasCharged())->toBeFalse()
+        ->and((string) ($billable->fresh()->getBillingSubscriptionMeta()['usage_overage']['payment_id'] ?? ''))->toBe($inFlight);
+});
+
+it('keeps a Local rollover renewal from relabelling plan quota as purchased', function (): void {
+    config()->set('mollie-billing-plans.usage_types', ['Tokens' => ['rollover' => true]]);
+
+    $billable = ledgerBillable('2026-01-01T09:00:00Z');
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Local,
+        'active_addon_codes' => [],
+    ])->save();
+
+    $wallet = $billable->fresh()->getWallet('Tokens')
+        ?? $billable->fresh()->createWallet(['name' => 'Tokens', 'slug' => 'Tokens']);
+
+    // 500 bought units, all consumed: nothing purchased is left.
+    app(\GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::class)
+        ->credit($billable->fresh(), 'Tokens', 500, 'coupon_credit');
+    \GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::addPurchasedBalance($billable->fresh()->getWallet('Tokens'), 500);
+    $billable->fresh()->recordBillingUsage('Tokens', 500);
+
+    expect((int) $billable->fresh()->getWallet('Tokens')->balanceInt)->toBe(0);
+
+    // The Local renewal pass credits the new quota. A bare credit() left purchased_balance at
+    // 500, so the fresh plan quota read as purchased — and purchased units survive every
+    // later reset and inflate the target balance of the next plan change.
+    $this->travelTo(BillingTime::toUtc('2026-01-31T02:00:00Z'));
+    app()->call([app(\GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob::class), 'handle']);
+
+    $fresh = $billable->fresh();
+
+    expect((int) \GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::getPurchasedBalance($fresh->getWallet('Tokens')))->toBe(0);
+});

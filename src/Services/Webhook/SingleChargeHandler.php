@@ -120,17 +120,14 @@ class SingleChargeHandler
             // `usage_overage_counted_payments` goes too: the dunning budget is a list of
             // payment ids, and while a stale list is ignored (it is scoped to its
             // snapshot's created_at) leaving it behind accumulates dead meta.
-            $this->mutateBillingMeta($billable, static function (array $meta): array {
-                unset(
-                    $meta['usage_overage'],
-                    $meta['usage_overage_status'],
-                    $meta['usage_overage_attempts'],
-                    $meta['usage_overage_counted_payments'],
-                );
-
-                return $meta;
-            });
-
+            // Wallets first, markers second. A hard kill between the two is not catchable,
+            // and the two orders fail very differently: clearing first leaves the debt on the
+            // wallet with no snapshot and no marker, so nothing can match this payment again
+            // and the next sweep charges the same units a second time. Crediting first leaves
+            // a `pending` snapshot whose invoice already exists — which
+            // `pendingChargeIsSettled()` and `CleanupStalePendingOverageChargeJob::markSpent()`
+            // both already recognise and clean up.
+            //
             // Wrapped: the invoice exists by now, so a throw here would be swallowed by
             // the re-delivery's invoice guard and the customer would have paid for units
             // that were never credited.
@@ -143,6 +140,17 @@ class SingleChargeHandler
                     'error' => $e->getMessage(),
                 ]);
             }
+
+            $this->mutateBillingMeta($billable, static function (array $meta): array {
+                unset(
+                    $meta['usage_overage'],
+                    $meta['usage_overage_status'],
+                    $meta['usage_overage_attempts'],
+                    $meta['usage_overage_counted_payments'],
+                );
+
+                return $meta;
+            });
 
             event(new OverageCharged($billable, $invoice, $lineItems));
         }
@@ -287,6 +295,16 @@ class SingleChargeHandler
     {
         foreach ($lineItems as $line) {
             if (($line['kind'] ?? 'overage') !== 'overage') {
+                continue;
+            }
+
+            // A plan-change overage is charged for units the adjuster has already offset
+            // against the new quota — it clamps the wallet to 0 in the same breath — so
+            // there is no negative balance for this credit to clear. Crediting anyway
+            // handed the customer the charged quantity for free, and a rollover type kept
+            // it for good. Only a period-end charge, where the balance is still negative,
+            // settles a wallet.
+            if (($line['settles_wallet'] ?? true) === false) {
                 continue;
             }
 

@@ -117,6 +117,13 @@ class WalletPlanChangeAdjuster
                         'kind' => 'overage',
                         'code' => $slug,
                         'type' => $slug,
+                        // The wallet is clamped to 0 right here, so these units are already
+                        // accounted for — the customer is paying for consumption that has
+                        // happened, not buying capacity. `settleOverageWallets()` credits
+                        // `quantity` back for a period-end charge, where the balance is still
+                        // negative and needs clearing; doing that here would land the credit
+                        // on 0 and hand out free units (permanently, for a rollover type).
+                        'settles_wallet' => false,
                         'label' => (string) __('billing::portal.invoice_line_overage', [
                             'type' => $this->catalog->usageTypeName($slug),
                         ]),

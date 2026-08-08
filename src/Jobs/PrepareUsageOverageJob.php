@@ -459,7 +459,12 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             foreach ($included as $type => $quantity) {
                 if ((int) $quantity > 0) {
                     if ($catalog->usageRollover((string) $type)) {
-                        $walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_renewal_rollover');
+                        // Through creditRollover(), like the webhook renewal: a bare credit()
+                        // left `purchased_balance` untouched, and since a rollover type never
+                        // zeroes its wallet nothing else ever brought it down — so each new
+                        // period's plan quota was re-attributed to "purchased" and survived
+                        // every later reset.
+                        $walletService->creditRollover($billable, (string) $type, (int) $quantity);
                     } else {
                         $walletService->resetAndCredit($billable, (string) $type, (int) $quantity, 'subscription_renewal');
                     }

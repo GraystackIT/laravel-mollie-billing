@@ -124,6 +124,39 @@ class WalletUsageService
      * Credit (top up) a quantity into the named usage wallet. Used to seed the
      * included quota at activation time, at each renewal and for coupon credits.
      */
+    /**
+     * Credit a rollover renewal's quota, clamping the purchased balance first.
+     *
+     * A rollover type never zeroes its wallet, so nothing else ever brings
+     * `purchased_balance` down — and it is purchased units that survive resets and plan
+     * changes. Left unclamped, a stale value re-attributes each new period's plan quota to
+     * "purchased": a wallet whose 500 bought units were fully consumed still reported 500
+     * purchased, so the next 100-unit renewal read as 100 purchased (and 100/100 of the plan
+     * quota consumed although nothing was), a later upgrade computed its target balance 500
+     * units too high, and every subsequent non-rollover reset re-credited them forever.
+     *
+     * The webhook renewal has always clamped; `PrepareUsageOverageJob::resetLocalQuota()` —
+     * the Local path — did not, which is how the two came apart. Both call this now, and
+     * `SyncPurchasedBalanceCommand`'s history replay treats the same reason as a clamp point.
+     */
+    public function creditRollover(Billable $billable, string $type, int $quantity, ?string $reason = null): void
+    {
+        if ($quantity <= 0) {
+            return;
+        }
+
+        $wallet = $billable->getWallet($type);
+
+        if ($wallet !== null) {
+            self::setPurchasedBalance($wallet, self::computePurchasedRemaining(
+                self::getPurchasedBalance($wallet),
+                (int) $wallet->balanceInt,
+            ));
+        }
+
+        $this->credit($billable, $type, $quantity, $reason ?? 'subscription_renewal_rollover');
+    }
+
     public function credit(Billable $billable, string $type, int $quantity, ?string $reason = null): void
     {
         if ($quantity <= 0) {

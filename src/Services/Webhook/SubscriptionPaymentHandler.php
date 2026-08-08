@@ -171,7 +171,31 @@ class SubscriptionPaymentHandler
             (float) ($vat['rate'] ?? 0.0),
         );
 
-        $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
+        $paidAt = $payment->paidAt ?? null;
+
+        // The window this payment bought, computed before the invoice rather than after it.
+        //
+        // The anchor on the billable still describes the period that just *ended* — it is
+        // advanced further down, once the invoice exists — so leaving createForPayment() to
+        // read it stamped the renewal invoice with the expired window. `currentPeriodLines()`
+        // drops any line whose period_end is more than a day from the billable's own period
+        // end, so it could not find the very invoice that paid for the current period: a
+        // mid-period downgrade after a renewal composed its refund against nothing and
+        // credited 0. MandateOnlyPaymentHandler writes its anchor before invoicing and
+        // ProrataChargeHandler stamps the new window explicitly, for the same reason.
+        $newPeriodStart = $paidAt !== null
+            ? Carbon::parse((string) $paidAt)->setTimezone('UTC')
+            : BillingTime::nowUtc();
+        $newPeriodEnd = BillingTime::addInterval($newPeriodStart, $interval);
+
+        $invoice = $this->salesInvoiceService->createForPayment(
+            $payment,
+            'subscription',
+            $lineItems,
+            $billable,
+            $newPeriodStart,
+            $newPeriodEnd,
+        );
 
         // The same state rule `failed()` applies, and for the same reason — except this is
         // the side money actually arrives on. Nothing here stops Mollie from charging a
@@ -189,6 +213,29 @@ class SubscriptionPaymentHandler
         // and the operators are told.
         if (! $this->isBillableState($billable)) {
             $this->support->reportRenewalForEndedSubscription($billable, $payment, $invoice);
+
+            return;
+        }
+
+        // A delivery for an *older* renewal must not be booked as a fresh period. Idempotency
+        // here is per payment, so a late delivery for a payment that has no invoice yet used
+        // to run the whole body: the anchor went back a month — after which
+        // `PrepareUsageOverageJob`'s `renewsTomorrow` never matched again until the next
+        // renewal, so that period's overage was never collected — and the wallet loop credited
+        // a second full period on top, permanently for a rollover type. The invoice above
+        // stays: the money did arrive and the customer is entitled to the document.
+        $currentAnchor = $billable->getBillingPeriodStartsAt();
+
+        // Strictly earlier, not "not later": a payment settling in the same second as the
+        // anchor (a signup whose first renewal is simulated at the same instant, say) is not
+        // out of order, and refusing it would skip a legitimate period's quota.
+        if ($currentAnchor !== null && $newPeriodStart->lessThan($currentAnchor)) {
+            Log::warning('Renewal delivered out of order — invoiced, but not booked as a new period', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'current_anchor' => $currentAnchor->toIso8601String(),
+                'delivered_paid_at' => $newPeriodStart->toIso8601String(),
+            ]);
 
             return;
         }
@@ -253,16 +300,8 @@ class SubscriptionPaymentHandler
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
             try {
                 if ($this->catalog->usageRollover((string) $type)) {
-                    $wallet = $billable->getWallet((string) $type);
-                    if ($wallet !== null) {
-                        $purchasedRemaining = WalletUsageService::computePurchasedRemaining(
-                            WalletUsageService::getPurchasedBalance($wallet),
-                            (int) $wallet->balanceInt,
-                        );
-                        WalletUsageService::setPurchasedBalance($wallet, $purchasedRemaining);
-                    }
-
-                    $this->walletService->credit($billable, (string) $type, (int) $units, 'subscription_renewal_rollover');
+                    // Clamps the purchased balance before crediting — see creditRollover().
+                    $this->walletService->creditRollover($billable, (string) $type, (int) $units);
                 } else {
                     // A charge for these units may still be settling — with SEPA it
                     // usually is, since Mollie creates the renewal about two days ahead
@@ -283,8 +322,8 @@ class SubscriptionPaymentHandler
             }
         }
 
-        $paidAt = $payment->paidAt ?? null;
-        $periodStartsAt = $paidAt ? Carbon::parse((string) $paidAt)->setTimezone('UTC') : BillingTime::nowUtc();
+        // Already resolved above, where the invoice's period was computed from it.
+        $periodStartsAt = $newPeriodStart;
 
         $derivedSeatCount = $invoice->deriveSeatCount();
 

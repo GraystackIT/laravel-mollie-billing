@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
@@ -82,6 +83,33 @@ class ChargeUsageOverageDirectly
     public function handleExplicit(Billable $billable, array $lineItems): UsageOverageChargeResult
     {
         if ($lineItems === []) {
+            return UsageOverageChargeResult::nothingToCharge();
+        }
+
+        // `subscription_meta.usage_overage` is a single slot, and this path had no in-flight
+        // guard while `safeCharge()` does. A plan-change charge therefore overwrote a
+        // period-end charge that was still settling — inheriting its `created_at`, so its
+        // dunning cycle and its counted-payments list too. `RetryUsageOverageChargeJob`
+        // resolves the snapshot rather than a payment id, so a failure webhook for the
+        // overwritten payment then acted on the new one: the *new* line items were charged a
+        // second time while the overwritten charge's units were never recovered and were
+        // invisible even to the stale-snapshot sweep, which only polls the id in the slot.
+        $meta = $billable->getBillingSubscriptionMeta();
+        $inFlight = (array) ($meta[self::META_KEY] ?? []);
+        $inFlightPaymentId = (string) ($inFlight['payment_id'] ?? '');
+
+        if ($inFlightPaymentId !== ''
+            && ($meta['usage_overage_status'] ?? null) === self::STATUS_PENDING
+            && ! $this->pendingChargeIsSettled($billable)
+        ) {
+            Log::warning('Refusing a plan-change overage charge while another is still in flight', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'in_flight_payment_id' => $inFlightPaymentId,
+            ]);
+
+            // Not an exception: the plan change itself is legitimate and must go through. The
+            // excess stays on the wallet as a negative balance, which the next period-end
+            // sweep charges once the slot is free.
             return UsageOverageChargeResult::nothingToCharge();
         }
 
