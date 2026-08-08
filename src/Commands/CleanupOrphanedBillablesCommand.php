@@ -65,14 +65,21 @@ class CleanupOrphanedBillablesCommand extends Command
             return self::SUCCESS;
         }
 
+        $vetoedBefore = CleanupOrphanedBillablesJob::vetoedCount();
+
         CleanupOrphanedBillablesJob::dispatchSync();
 
         $remaining = CleanupOrphanedBillablesJob::candidateCount();
+        $vetoed = CleanupOrphanedBillablesJob::vetoedCount() - $vetoedBefore;
 
+        // Three buckets, because a veto shrinks the candidate count exactly like a deletion
+        // does: rows the app's closure refused to delete were being reported as removed, and
+        // on a destructive command that count is the only feedback the operator gets.
         $this->info(sprintf(
-            'Cleanup finished — %d of %d candidate(s) removed, %d kept by the paid-money guards.',
-            $candidates - $remaining,
+            'Cleanup finished — %d of %d candidate(s) removed, %d vetoed by the app, %d kept by the paid-money guards.',
+            max(0, $candidates - $remaining - $vetoed),
             $candidates,
+            max(0, $vetoed),
             $remaining,
         ));
 

@@ -405,17 +405,14 @@ class MandateOnlyPaymentHandler
             'subscription_status' => SubscriptionStatus::Active,
         ])->save();
 
-        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $quantity) {
-            if ((int) $quantity > 0) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
-            }
-        }
-
-        event(new PaymentSucceeded($billable, $invoice));
-
-        $this->support->notifyInvoiceAvailable($billable, $invoice);
-
-        MollieBilling::runAfterCheckout($billable, true);
+        // Each step isolated — see WebhookSupport::completeActivation(). Once the invoice
+        // exists a throw here is terminal: the re-delivery answers AlreadyBooked and takes
+        // the quiet branch, so whatever was skipped would never run.
+        $this->support->completeActivation(
+            $billable,
+            $invoice,
+            $this->catalog->includedUsages($planCode, $interval),
+        );
     }
 
     /**
@@ -528,21 +525,29 @@ class MandateOnlyPaymentHandler
             $this->countRecurringGrant($billable, $pricedCoupon, $planCode, $interval);
         }
 
+        // Prorated to the trial length, then handed to completeActivation() so one failing
+        // wallet cannot cost the customer the rest of their quota, the TrialStarted event
+        // the app provisions on, or the after-checkout hook.
         $intervalDays = $interval === 'yearly' ? 365 : 30;
+        $trialQuota = [];
+
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $included) {
             $included = (int) $included;
+
             if ($included <= 0) {
                 continue;
             }
-            $credit = (int) ceil($included * $trialDays / $intervalDays);
-            if ($credit > 0) {
-                $this->walletService->credit($billable, (string) $type, $credit, 'subscription_trial_start');
-            }
+
+            $trialQuota[(string) $type] = (int) ceil($included * $trialDays / $intervalDays);
         }
 
-        event(new TrialStarted($billable, $planCode, $trialDays));
-
-        MollieBilling::runAfterCheckout($billable, true);
+        $this->support->completeActivation(
+            $billable,
+            null,
+            $trialQuota,
+            fn () => event(new TrialStarted($billable, $planCode, $trialDays)),
+            'subscription_trial_start',
+        );
     }
 
     /**

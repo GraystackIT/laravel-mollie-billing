@@ -554,9 +554,14 @@ class ProrataChargeHandler
      * The pending state is cleared so the next delivery does not try again, and the
      * plan is deliberately NOT applied: force-filling it would resurrect the
      * plan-scoped fields the expiry pass wipes, handing feature access back to an
-     * ended subscription. The money did arrive, so it is booked as an invoice (the
-     * customer is entitled to a document for it) and reported for a manual refund —
-     * the same shape `reportOrphanedCharge()` uses for its sibling case.
+     * ended subscription.
+     *
+     * No invoice is written, and that is a decision rather than an omission — this
+     * docblock used to claim one. The Phase-1 charge lines describe a plan change that is
+     * not happening, so a document built from them would state something untrue about what
+     * the customer bought. What the operator needs in order to refund it is the payment id
+     * and the amount, which the event and the admin notification carry. The same shape
+     * `reportOrphanedCharge()` uses for its sibling case.
      *
      * @param  array<string, mixed>  $pending
      */

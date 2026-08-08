@@ -21,6 +21,9 @@ class BillingInvoice extends Model
 
     protected $guarded = [];
 
+    /** @var \Illuminate\Support\Collection<int, self>|null */
+    protected ?\Illuminate\Support\Collection $refundChildren = null;
+
     protected function casts(): array
     {
         return [
@@ -52,6 +55,30 @@ class BillingInvoice extends Model
     public function vatValidation(): BelongsTo
     {
         return $this->belongsTo(BillingVatValidation::class, 'vat_validation_id');
+    }
+
+    /**
+     * Every credit note of this invoice's billable, loaded once per instance.
+     *
+     * The three readers below each ran the same query, and `creditNetForGross()` calls into
+     * them up to eighteen times for a single refund — all inside the transaction that holds
+     * the invoice row lock and the serial range, which is what made a lock-wait timeout
+     * against a concurrent admin refund realistic. The reference lives inside `line_items`
+     * JSON so it cannot be narrowed in SQL; loading it once is the whole win.
+     *
+     * Memoised per instance, deliberately not per process: the refund paths snapshot
+     * `effectiveRefundedNet()` before writing a credit note and read it again afterwards, on
+     * a fresh instance.
+     *
+     * @return \Illuminate\Support\Collection<int, self>
+     */
+    protected function refundChildren(): \Illuminate\Support\Collection
+    {
+        return $this->refundChildren ??= self::query()
+            ->where('billable_type', $this->billable_type)
+            ->where('billable_id', $this->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
     }
 
     public function isFullyRefunded(): bool
@@ -86,13 +113,8 @@ class BillingInvoice extends Model
     public function derivedRefundedNet(): int
     {
         $sum = 0;
-        $children = self::query()
-            ->where('billable_type', $this->billable_type)
-            ->where('billable_id', $this->billable_id)
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get(['line_items']);
 
-        foreach ($children as $child) {
+        foreach ($this->refundChildren() as $child) {
             foreach ((array) ($child->line_items ?? []) as $line) {
                 if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
                     continue;
@@ -124,13 +146,7 @@ class BillingInvoice extends Model
     {
         $credited = [];
 
-        $children = self::query()
-            ->where('billable_type', $this->billable_type)
-            ->where('billable_id', $this->billable_id)
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get(['line_items']);
-
-        foreach ($children as $child) {
+        foreach ($this->refundChildren() as $child) {
             foreach ((array) ($child->line_items ?? []) as $line) {
                 if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
                     continue;
@@ -163,13 +179,7 @@ class BillingInvoice extends Model
     {
         $credited = 0;
 
-        $children = self::query()
-            ->where('billable_type', $this->billable_type)
-            ->where('billable_id', $this->billable_id)
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get(['line_items']);
-
-        foreach ($children as $child) {
+        foreach ($this->refundChildren() as $child) {
             foreach ((array) ($child->line_items ?? []) as $line) {
                 if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
                     continue;

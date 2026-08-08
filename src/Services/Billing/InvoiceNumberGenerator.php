@@ -53,7 +53,13 @@ class InvoiceNumberGenerator
             $yearLen = substr_count($format, 'Y');
             $counterLen = substr_count($format, 'C');
 
-            $prefixStr = str_pad($prefix, $prefixLen, ' ', STR_PAD_RIGHT);
+            // Truncated as well as padded. `extractCounter()` reads the counter at a fixed
+            // offset computed from the *format*, so a prefix longer than its `P` run made
+            // writer and reader disagree: with the default `PP-YYCCCCCC` and prefix `INV`,
+            // the serials converged on IN V-25555556 and then repeated — the unique index
+            // rejected it, persistWithSerial() retried three identical times and rethrew, so
+            // every invoice from that point on failed for money Mollie had already collected.
+            $prefixStr = str_pad(substr($prefix, 0, max(0, $prefixLen)), $prefixLen, ' ', STR_PAD_RIGHT);
             $yearStr = str_pad((string) $year, $yearLen, '0', STR_PAD_LEFT);
 
             // A bounded range rather than LIKE 'IN-25______'. The counter slot is

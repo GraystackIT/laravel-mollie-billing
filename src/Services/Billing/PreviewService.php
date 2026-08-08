@@ -138,8 +138,13 @@ class PreviewService
         // Coupon handling — iterate over all applied coupon codes (stackable).
         // We split the resolution into two separate discount totals:
         //   - $couponDiscountNet         applies to the recurring price (only Recurring-type)
-        //   - $prorataCouponDiscountNet  applies to the prorata charge ("due now") and is
-        //                                fed by both Recurring AND SinglePayment coupons.
+        //   - $prorataCouponDiscountNet  applies to the prorata charge ("due now"), fed by
+        //                                the same Recurring coupons. SinglePayment codes are
+        //                                refused by validate() below (`allowed_types`), the
+        //                                same way UpdateSubscription refuses them — so the
+        //                                branch that used to collect them here was
+        //                                unreachable, and it was also the copy missing the
+        //                                `min(…, $remainingProrata)` clamp its live twin has.
         // Other coupon types (Credits, TrialExtension, AccessGrant, PeriodExtension)
         // have no monetary effect on plan changes and are silently skipped here —
         // they get redeemed in `UpdateSubscription::update()` for their side effects.
@@ -149,9 +154,6 @@ class PreviewService
         $remainingRecurring = $newNet;
         /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
         $resolvedRecurringCoupons = [];
-        /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
-        $resolvedSinglePaymentCoupons = [];
-
         foreach ($dto->couponCodes as $code) {
             try {
                 $coupon = $this->couponService->validate(
@@ -186,8 +188,6 @@ class PreviewService
                             'total_net' => -$thisDiscount,
                         ];
                     }
-                } elseif ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment) {
-                    $resolvedSinglePaymentCoupons[] = ['coupon' => $coupon, 'discount' => 0];
                 }
             } catch (InvalidCouponException $e) {
                 $warnings[] = 'Coupon '.$code.' is not applicable: '.$e->getMessage();
@@ -241,11 +241,10 @@ class PreviewService
         }
 
         // Coupon discounts on the prorata charge ("due now"):
-        //   - Both Recurring and SinglePayment coupons apply their discount rate
-        //     directly against the prorata charge net (the actual money flowing
-        //     "now"), not against the full recurring net. The recurring coupon's
-        //     ongoing discount on future renewals is independent and lives in
-        //     the active_recurring_coupon marker.
+        //   - A Recurring coupon's rate applies directly against the prorata charge net
+        //     (the actual money flowing "now"), not against the full recurring net. Its
+        //     ongoing discount on future renewals is independent and lives in the
+        //     active_recurring_coupon marker.
         //   - All discounts are capped at the remaining prorata charge net so
         //     the line can never go negative.
         $remainingProrata = $prorataChargeNet;
@@ -262,17 +261,6 @@ class PreviewService
             }
         }
         unset($entry);
-        foreach ($resolvedSinglePaymentCoupons as &$entry) {
-            if ($remainingProrata <= 0) {
-                break;
-            }
-            $thisDiscount = $this->couponService->computeRecurringDiscount($entry['coupon'], $remainingProrata);
-            if ($thisDiscount > 0) {
-                $entry['discount'] = $thisDiscount;
-                $prorataCouponDiscountNet += $thisDiscount;
-                $remainingProrata -= $thisDiscount;
-            }
-        }
         unset($entry);
 
         $prorataChargeNet = max(0, $prorataChargeNet - $prorataCouponDiscountNet);
@@ -538,7 +526,7 @@ class PreviewService
                 $newSeats,
                 $currentAddons,
                 $newAddons,
-                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons, $resolvedSinglePaymentCoupons),
+                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons),
             ),
         ];
     }
@@ -546,29 +534,22 @@ class PreviewService
     /**
      * Build the per-coupon discount lines for the prorata charge ("due now").
      *
-     * Both Recurring and SinglePayment coupons here render the discount that was
-     * actually applied to the prorata charge — already pre-computed in the
-     * loop above (`$entry['prorataDiscount']` for recurring, `$entry['discount']`
-     * for first-payment). No further scaling here.
+     * Renders the discount that was actually applied to the prorata charge — already
+     * pre-computed in the loop above as `$entry['prorataDiscount']`. No further scaling
+     * here.
      *
      * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int, prorataDiscount?: int}>  $recurringCoupons
-     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>  $singlePaymentCoupons
      * @return list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>
      */
-    private function buildProrataCouponDiscountLines(
-        array $recurringCoupons,
-        array $singlePaymentCoupons,
-    ): array {
+    private function buildProrataCouponDiscountLines(array $recurringCoupons): array
+    {
         $out = [];
+
         foreach ($recurringCoupons as $entry) {
             $proratedDiscount = (int) ($entry['prorataDiscount'] ?? 0);
+
             if ($proratedDiscount > 0) {
                 $out[] = ['coupon' => $entry['coupon'], 'discount' => $proratedDiscount];
-            }
-        }
-        foreach ($singlePaymentCoupons as $entry) {
-            if ((int) $entry['discount'] > 0) {
-                $out[] = ['coupon' => $entry['coupon'], 'discount' => (int) $entry['discount']];
             }
         }
 

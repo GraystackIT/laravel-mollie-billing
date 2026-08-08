@@ -349,7 +349,7 @@ php artisan billing:sync-purchased-balance
 
 Backfills `purchased_balance` on all wallets from transaction history (one-time orders + coupon credits). Run once after upgrading to a version that tracks purchased credits separately. Safe to re-run — `--dry-run` shows what would change, `--force` skips the prompt.
 
-Only purchases made **since the last renewal** count; anything older was already accounted for by that renewal's own carry-over computation. The period boundary is the latest `period_reset` *or* `period_credit` transaction: `period_reset` is only written when the balance was non-zero, so a wallet that renewed at exactly 0 had no anchor at all and the window reached back into earlier periods, resurrecting purchased credits the customer had long consumed — which every later reset then re-credited on top of the new quota.
+It replays the wallet's whole transaction history rather than summing a window: purchases add, and every renewal clamps the running total against the balance it found — exactly what `resetAndCredit()` does. A window cannot answer this, because `resetAndCredit()` deliberately *carries* an unconsumed purchase forward by re-persisting `purchased_balance`, so a pack bought last period and still unused has no transaction in this one. Summing the window produced 0 and this command wrote it, after which the next renewal withdrew the whole balance and credited only the plan quota — credits the customer had paid for, gone. Rollover wallets failed the other way: their renewal writes `subscription_renewal_rollover`, which matched no anchor at all, so the reconciliation ran against the wallet's lifetime and relabelled plan units as purchased.
 
 ## Extension Points
 
@@ -357,3 +357,28 @@ Only purchases made **since the last renewal** count; anything older was already
 - **Custom validation:** Bind your own `ValidateSubscriptionChange` to customize overage handling during plan changes
 - **Event listeners:** React to `WalletReset`, `WalletCredited`, `OverageCharged` for logging, notifications, etc.
 - **Usage type names:** Add translations to `resources/lang/{locale}/usages.php` or override `usageTypeName()` in a custom catalog
+
+### A charge whose webhook never arrived
+
+`usage_overage_status = pending` with a `payment_id` means "a charge exists and its outcome
+belongs to the webhook". Both of `PrepareUsageOverageJob`'s own passes skip such a snapshot,
+which is right while the payment is in flight — and was permanent when the delivery was lost
+(a Mollie outage, or app downtime past Mollie's retry window). The charge was never
+collected, `hasUnsettledOverageFor()` stayed true so every renewal carried the negative
+balance into the new period, and every future overage for that billable was silenced.
+
+`CleanupStalePendingOverageChargeJob` (daily, 04:15 UTC) closes that. After
+`STALE_AFTER_HOURS` (72) it asks Mollie:
+
+- **`paid`** — replays the delivery through the webhook controller, so the invoice, the
+  wallet settlement and the events are exactly what the webhook would have produced. The
+  invoice guard makes a duplicate a no-op.
+- **`failed` / `canceled` / `expired`** — writes the snapshot off as `failed` and notifies
+  the admins. The wallet debt stays outstanding, but the next cycle may charge for it again
+  instead of being silenced.
+- **still `open`/`pending` past `HARD_LIMIT_DAYS` (14)** — the same write-off. A payment
+  stuck that long is not going to settle.
+- **an invoice already exists** — the webhook did run and only the snapshot was left behind:
+  the snapshot and the dunning budget are cleared.
+
+Mollie being unreachable is not a verdict; the next pass asks again.

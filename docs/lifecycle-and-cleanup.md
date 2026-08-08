@@ -15,7 +15,8 @@ The goal of this page is to give integrators a precise picture of which states t
 | 5. Stuck in `past_due` indefinitely | `PrepareUsageOverageJob` Pass 4 auto-cancels after `past_due_max_days` (default 30) | Adjust `BILLING_PAST_DUE_MAX_DAYS` to taste, or set `0` to keep the legacy behavior |
 | 6. Paid webhook for an unresolvable billable | Logs a warning + sends `AdminPaidWithoutBillableNotification` | Reconcile manually — the money cleared at Mollie but no local record was touched |
 | 7. Prorata plan change charged, webhook never arrived | `CleanupStalePendingProrataChangeJob` (daily) asks Mollie, unblocks the customer, and alerts on a payment that was collected | Reconcile a `paid` orphan by hand — apply the plan change or refund |
-| 8. Billable table mixes customers with non-customers (staff/admins) | `HasBilling` applies `BillingScope` globally and delegates to `applyBillingScope()` on the model | Override `applyBillingScope(Builder $query)` to filter out non-billable rows |
+| 8. Overage charged, webhook never arrived | `CleanupStalePendingOverageChargeJob` (daily) asks Mollie after 72 h: replays a lost `paid` delivery, writes off a terminal failure, and after 14 days writes off one still sitting at `open` | Reconcile the wallet debt of a written-off charge — it is still outstanding |
+| 9. Billable table mixes customers with non-customers (staff/admins) | `HasBilling` applies `BillingScope` globally and delegates to `applyBillingScope()` on the model | Override `applyBillingScope(Builder $query)` to filter out non-billable rows |
 
 ## 1. Checkout started, never completed
 

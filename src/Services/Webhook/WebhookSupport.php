@@ -7,12 +7,14 @@ namespace GraystackIT\MollieBilling\Services\Webhook;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
+use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\RenewalCollectedForEndedSubscription;
 use GraystackIT\MollieBilling\Events\SubscriptionActivationFailed;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
+use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -369,6 +371,75 @@ class WebhookSupport
         }
 
         return $claimed->gt(BillingTime::nowUtc()->subMinutes(self::ACTIVATION_CLAIM_TTL_MINUTES));
+    }
+
+    /**
+     * Run an activation's post-invoice side effects, each isolated from the others.
+     *
+     * Once the invoice exists, a throw in here is terminal: the re-delivery's gate answers
+     * `AlreadyBooked`, `activationCompleted()` is true, and it takes the quiet branch —
+     * `Log::info` and 200. Unwrapped, an app listener on `WalletCredited` that threw on the
+     * second usage type left the customer Active and paying with half their quota, the
+     * three-way country check never run, `SubscriptionCreated` never dispatched for the app
+     * to react to, and nobody told. `OneTimeOrderHandler`, `LocalToMollieUpgradeHandler` and
+     * `SingleChargeHandler` have wrapped their equivalents all along.
+     *
+     * @param  iterable<string, int|string>  $includedUsages
+     * @param  (callable(): void)|null  $extraStep  Whatever this particular activation owns —
+     *         the three-way country check for a first payment, `TrialStarted` for a trial.
+     */
+    public function completeActivation(
+        Billable $billable,
+        ?BillingInvoice $invoice,
+        iterable $includedUsages,
+        ?callable $extraStep = null,
+        string $creditReason = 'subscription_activation',
+    ): void {
+        foreach ($includedUsages as $type => $quantity) {
+            if ((int) $quantity <= 0) {
+                continue;
+            }
+
+            $this->safely(
+                fn () => app(WalletUsageService::class)->credit($billable, (string) $type, (int) $quantity, $creditReason),
+                'crediting the included usage quota',
+                $billable,
+                ['usage_type' => (string) $type, 'quantity' => (int) $quantity],
+            );
+        }
+
+        if ($extraStep !== null) {
+            $this->safely($extraStep, 'running the activation-specific step', $billable);
+        }
+
+        // A trial activation collects no payment, so it has no invoice to announce.
+        if ($invoice !== null) {
+            $this->safely(fn () => event(new PaymentSucceeded($billable, $invoice)), 'dispatching PaymentSucceeded', $billable);
+            $this->safely(fn () => $this->notifyInvoiceAvailable($billable, $invoice), 'sending the invoice notification', $billable);
+        }
+
+        $this->safely(fn () => MollieBilling::runAfterCheckout($billable, true), 'running the after-checkout hook', $billable);
+    }
+
+    /**
+     * Run one post-invoice step, logging at error level if it fails.
+     *
+     * Error, not warning: every one of these steps is something a customer paid for.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function safely(callable $step, string $what, Billable $billable, array $context = []): void
+    {
+        try {
+            $step();
+        } catch (\Throwable $e) {
+            Log::error('Activation side effect failed after the invoice was written', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'step' => $what,
+                'error' => $e->getMessage(),
+                ...$context,
+            ]);
+        }
     }
 
     public function notifyInvoiceAvailable(Billable $billable, BillingInvoice $invoice): void

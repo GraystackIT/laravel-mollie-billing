@@ -5,6 +5,7 @@ declare(strict_types=1);
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
+use GraystackIT\MollieBilling\Events\WalletCredited;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
@@ -105,14 +106,14 @@ function firstPaymentStub(TestBillable $billable, string $paymentId): object
     ];
 }
 
-it('does not create a second Mollie subscription when a failure after the Mollie call forces a redelivery', function (): void {
+it('finishes the activation even when the app\'s after-checkout hook throws', function (): void {
     $billable = claimBillable();
 
     $creates = 0;
     mockMollieCountingCreates($creates);
 
-    // The after-checkout hook is an arbitrary app closure and the last
-    // activation step — it throws AFTER the Mollie subscription exists.
+    // The after-checkout hook is an arbitrary app closure and the last activation step —
+    // it throws AFTER the Mollie subscription exists.
     $shouldThrow = true;
     MollieBilling::afterCheckoutUsing(function (Billable $b, bool $success) use (&$shouldThrow): void {
         if ($shouldThrow) {
@@ -124,23 +125,30 @@ it('does not create a second Mollie subscription when a failure after the Mollie
     ActivationClaimFakeWebhookController::$nextPayment = firstPaymentStub($billable, 'tr_claim_crash');
 
     try {
-        $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_crash'])->assertStatus(500);
+        // 200, not 500. Letting the throw escape *looked* like durability — Mollie
+        // re-delivers — but the re-delivery finds the invoice, answers AlreadyBooked and
+        // takes the quiet branch, so the steps that never ran were never going to run.
+        // Each side effect is isolated now: the hook's failure is logged at error level
+        // and everything else completes.
+        $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_crash'])->assertStatus(200);
 
-        // The partial state survives the throw — that is the fix: nothing that
-        // already happened at Mollie may be rolled back locally, and the claim
-        // is released so the re-delivery can pass the gate.
         $billable->refresh();
         $meta = $billable->getBillingSubscriptionMeta();
+
         expect($creates)->toBe(1)
             ->and($meta['mollie_subscription_id'] ?? null)->toBe('sub_claim_1')
             ->and($meta)->not->toHaveKey(WebhookSupport::ACTIVATION_CLAIM_META_KEY)
-            ->and(BillingInvoice::where('mollie_payment_id', 'tr_claim_crash')->count())->toBe(1);
+            ->and(BillingInvoice::where('mollie_payment_id', 'tr_claim_crash')->count())->toBe(1)
+            ->and($billable->subscription_status)->toBe(SubscriptionStatus::Active)
+            // The quota the customer paid for. This is what the escaping throw used to
+            // cost when it happened one step earlier in the same sequence.
+            ->and((int) ($billable->getWallet('Tokens')?->balanceInt ?? 0))->toBe(10);
 
         Event::fake([DuplicatePaymentReceived::class]);
 
-        // Mollie re-delivers after the 500. The invoice guard must swallow the
-        // re-run: no second CreateSubscriptionRequest, no second invoice, and
-        // no duplicate-payment handling for the customer's only payment.
+        // And should Mollie re-deliver anyway, the invoice guard still swallows the re-run:
+        // no second CreateSubscriptionRequest, no second invoice, and no duplicate-payment
+        // handling for the customer's only payment.
         $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_crash'])->assertStatus(200);
     } finally {
         $prop = (new ReflectionClass(MollieBilling::class))->getProperty('afterCheckoutCallback');
@@ -244,7 +252,7 @@ it('lets the same payment re-claim immediately after a crash between the claim a
         ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey(WebhookSupport::ACTIVATION_CLAIM_META_KEY);
 });
 
-it('does not create a second Mollie subscription when a mandate-only trial activation fails after the Mollie call', function (): void {
+it('finishes a mandate-only trial activation even when the after-checkout hook throws', function (): void {
     $billable = claimBillable();
 
     $creates = 0;
@@ -277,22 +285,30 @@ it('does not create a second Mollie subscription when a mandate-only trial activ
     ];
 
     try {
-        $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_trial_crash'])->assertStatus(500);
+        // 200: the hook's failure is logged and isolated, so the trial itself is complete —
+        // including the prorated quota, which an escaping throw one step earlier used to
+        // cost the customer for good (the re-delivery answers with the duplicate outcome
+        // and never re-runs the activation).
+        $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_trial_crash'])->assertStatus(200);
 
         $billable->refresh();
         $meta = $billable->getBillingSubscriptionMeta();
         expect($creates)->toBe(1)
             ->and($billable->subscription_status)->toBe(SubscriptionStatus::Trial)
             ->and($meta['mollie_subscription_id'] ?? null)->toBe('sub_claim_1')
-            ->and($meta)->not->toHaveKey(WebhookSupport::ACTIVATION_CLAIM_META_KEY);
+            ->and($meta)->not->toHaveKey(WebhookSupport::ACTIVATION_CLAIM_META_KEY)
+            // 10 monthly tokens prorated to 14 of 30 days.
+            ->and((int) ($billable->getWallet('Tokens')?->balanceInt ?? 0))->toBe(5);
 
         $trialEndsAt = $billable->trial_ends_at?->toIso8601String();
 
         Event::fake([DuplicatePaymentReceived::class]);
 
-        // Re-delivery: the trial branch writes no invoice, so the accessible
-        // Trial subscription is what stops the re-run — surfaced as the
-        // duplicate outcome, exactly like any later mandate-only payment.
+        // A re-delivery of the same payment now carries the same outcome signature as one
+        // already recorded as processed, so it is deduplicated before any handler runs —
+        // which is why nothing reports it as a duplicate *payment*. Previously the escaping
+        // throw released the reservation, the re-run reached the handler, and the accessible
+        // Trial subscription was what stopped it.
         $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_trial_crash'])->assertStatus(200);
 
         $billable->refresh();
@@ -300,7 +316,7 @@ it('does not create a second Mollie subscription when a mandate-only trial activ
             ->and($billable->subscription_status)->toBe(SubscriptionStatus::Trial)
             ->and($billable->trial_ends_at?->toIso8601String())->toBe($trialEndsAt);
 
-        Event::assertDispatched(DuplicatePaymentReceived::class);
+        Event::assertNotDispatched(DuplicatePaymentReceived::class);
     } finally {
         $prop = (new ReflectionClass(MollieBilling::class))->getProperty('afterCheckoutCallback');
         $prop->setValue(null, null);
@@ -346,4 +362,39 @@ it('defers a mandate-only activation while another payment holds a fresh claim',
         ->and($billable->subscription_status)->toBe(SubscriptionStatus::New)
         ->and($billable->getBillingSubscriptionMeta()[WebhookSupport::ACTIVATION_CLAIM_META_KEY]['payment_id'] ?? null)->toBe('tr_other_tab')
         ->and(BillingProcessedWebhook::where('mollie_payment_id', 'tr_claim_mandate_blocked')->count())->toBe(0);
+});
+
+it('credits the rest of the quota when one wallet listener throws', function (): void {
+    // WalletCredited is a documented extension seam and is dispatched synchronously, so an
+    // app listener is one throw away from the middle of an activation. Unwrapped, the
+    // customer was left Active and paying with half their quota, no country-match check,
+    // no SubscriptionCreated for the app to react to, and nobody told — because the
+    // re-delivery finds the invoice, answers AlreadyBooked and takes the quiet branch.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', [
+        'Tokens' => 10,
+        'SMS' => 20,
+    ]);
+
+    $billable = claimBillable();
+
+    $creates = 0;
+    mockMollieCountingCreates($creates);
+
+    Event::listen(WalletCredited::class, function (WalletCredited $event): void {
+        if ($event->usageType === 'Tokens') {
+            throw new RuntimeException('CRM push for the Tokens wallet exploded');
+        }
+    });
+
+    ActivationClaimFakeWebhookController::$nextPayment = firstPaymentStub($billable, 'tr_claim_listener');
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_claim_listener'])->assertStatus(200);
+
+    $billable->refresh();
+
+    // The failing wallet is the only casualty; everything after it completed.
+    expect((int) ($billable->getWallet('SMS')?->balanceInt ?? 0))->toBe(20)
+        ->and($billable->subscription_status)->toBe(SubscriptionStatus::Active)
+        ->and($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? null)->toBe('sub_claim_1')
+        ->and(BillingInvoice::where('mollie_payment_id', 'tr_claim_listener')->count())->toBe(1);
 });

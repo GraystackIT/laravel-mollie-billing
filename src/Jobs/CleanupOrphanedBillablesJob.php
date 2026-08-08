@@ -158,6 +158,26 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
         return (int) (self::candidateQuery()?->count() ?? 0);
     }
 
+    /**
+     * How many rows the app's cleanup closure has refused to delete.
+     *
+     * `candidateQuery()` excludes them, so a veto shrinks the candidate count exactly like a
+     * deletion does — which is why the command's "removed" figure, computed as a delta,
+     * reported vetoed rows as deleted. Counted separately here so the two can be told apart.
+     */
+    public static function vetoedCount(): int
+    {
+        $billableClass = config('mollie-billing.billable_model');
+
+        if (! is_string($billableClass) || ! class_exists($billableClass)) {
+            return 0;
+        }
+
+        return (int) $billableClass::withoutGlobalScope(BillingScope::class)
+            ->whereJsonContainsKey('subscription_meta->'.self::VETOED_KEY)
+            ->count();
+    }
+
     private function processBillable(Billable $billable): void
     {
         if (! ($billable instanceof Model)) {

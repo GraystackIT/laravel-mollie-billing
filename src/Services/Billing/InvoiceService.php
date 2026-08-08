@@ -1401,8 +1401,10 @@ class InvoiceService
                 'period_end' => $original->period_end?->toIso8601String(),
                 'created_at' => BillingTime::nowUtc()->toIso8601String(),
             ];
-            $meta['country_corrections'] = $pending;
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            $this->mutateBillingMeta($billable, fn (array $meta): array => [
+                ...$meta,
+                'country_corrections' => $pending,
+            ]);
         }
 
         return $payment;
@@ -1475,12 +1477,18 @@ class InvoiceService
 
         $this->generateAndStorePdf($invoice, $billable);
 
-        // Clear the pending entry so a duplicate webhook (idempotency) can no-op.
-        unset($meta['country_corrections'][$paymentId]);
-        if (empty($meta['country_corrections'])) {
-            unset($meta['country_corrections']);
-        }
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+        // Clear the pending entry so a duplicate webhook (idempotency) can no-op — under the
+        // lock, and re-reading rather than replaying the snapshot taken before the serial
+        // allocation and the PDF render above.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId): array {
+            unset($meta['country_corrections'][$paymentId]);
+
+            if (empty($meta['country_corrections'])) {
+                unset($meta['country_corrections']);
+            }
+
+            return $meta;
+        });
 
         event(new InvoiceCreated($billable, $invoice));
 
@@ -1766,15 +1774,21 @@ class InvoiceService
             webhookUrl: route(BillingRoute::webhook()),
         ));
 
-        $meta = $billable->getBillingSubscriptionMeta();
-        $meta['pending_prorata_change'] = [
-            'charge_payment_id' => is_object($payment) ? ($payment->id ?? null) : null,
-            'charge_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $chargeLines),
-            'refund_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $pendingRefundLines),
-            'intent' => $intent->toArray(),
-            'created_at' => BillingTime::nowUtc()->toIso8601String(),
-        ];
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+        // Under the row lock, touching only this key. The read used to happen before the
+        // Mollie round-trip above and the whole JSON column was written back afterwards, so
+        // anything a concurrent writer committed in that window was reverted — including a
+        // `pending_refund_retries` line the retry job had just consumed, which
+        // SweepPendingRetriesJob then paid out a second time.
+        $this->mutateBillingMeta($billable, fn (array $meta): array => [
+            ...$meta,
+            'pending_prorata_change' => [
+                'charge_payment_id' => is_object($payment) ? ($payment->id ?? null) : null,
+                'charge_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $chargeLines),
+                'refund_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $pendingRefundLines),
+                'intent' => $intent->toArray(),
+                'created_at' => BillingTime::nowUtc()->toIso8601String(),
+            ],
+        ]);
     }
 
     /**
@@ -2174,10 +2188,30 @@ class InvoiceService
         $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
         $this->persistWithSerial($invoice, 'subscription');
 
+        // The refund lines are real credits against real invoices, so the originals have to
+        // know about them. `derivedRefundedNet()` and `currentPeriodLines()` both filter on
+        // `invoice_kind = Refund` and this document is a Subscription, so without this the
+        // reversed line stayed 100% refundable *and* kept its full remaining quantity: a
+        // later downgrade composed its refund against this switch invoice — which carries no
+        // `mollie_payment_id` — and `createRefund()` could never pay it out, while the
+        // invoice that actually holds the money still read as untouched.
+        foreach ($refundLines as $line) {
+            $original = $line->originalInvoice;
+
+            if ($original === null) {
+                continue;
+            }
+
+            $original->refunded_net = min(
+                (int) $original->amount_net,
+                (int) $original->refunded_net + abs((int) $line->amountNet),
+            );
+            $original->save();
+        }
+
         $this->generateAndStorePdf($invoice, $billable);
         event(new InvoiceCreated($billable, $invoice));
 
         return $invoice;
     }
-
 }

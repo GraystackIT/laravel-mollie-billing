@@ -285,9 +285,25 @@ class CheckConfigCommand extends Command
     private function validateSerialNumberPrefixes(string $scope): void
     {
         $prefixes = (array) config('mollie-billing.invoices.serial_number.prefix', []);
+        $slots = substr_count((string) config('mollie-billing.invoices.serial_number.format', 'PP-YYCCCCCC'), 'P');
+
         foreach (['invoice', 'credit_note', 'one_time_order'] as $kind) {
             if (! isset($prefixes[$kind])) {
                 $this->addWarning($scope, "invoices.serial_number.prefix.{$kind} is not defined — defaults will be used.");
+
+                continue;
+            }
+
+            // A prefix longer than its `P` run is now truncated by the generator, which keeps
+            // the sequence intact but silently shortens what the operator configured — so say
+            // so here, where it can still be fixed.
+            if (strlen((string) $prefixes[$kind]) > $slots) {
+                $this->addError($scope, sprintf(
+                    'invoices.serial_number.prefix.%s [%s] is longer than the %d "P" slot(s) in the format — it will be truncated.',
+                    $kind,
+                    (string) $prefixes[$kind],
+                    $slots,
+                ));
             }
         }
     }

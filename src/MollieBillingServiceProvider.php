@@ -24,6 +24,7 @@ use GraystackIT\MollieBilling\Http\Middleware\RequireResolvedCountryMismatch;
 use GraystackIT\MollieBilling\IpGeolocation\IpGeolocationManager;
 use GraystackIT\MollieBilling\Jobs\CleanupOrphanedBillablesJob;
 use GraystackIT\MollieBilling\Jobs\CleanupStalePendingCountryCorrectionJob;
+use GraystackIT\MollieBilling\Jobs\CleanupStalePendingOverageChargeJob;
 use GraystackIT\MollieBilling\Jobs\CleanupStalePendingProrataChangeJob;
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
@@ -299,6 +300,15 @@ class MollieBillingServiceProvider extends ServiceProvider
             // rejects every later plan change for that billable.
             $schedule->job(CleanupStalePendingProrataChangeJob::class)
                 ->dailyAt('03:45')
+                ->timezone('UTC');
+
+            // The same for an overage charge. A `pending` snapshot carrying a payment id is
+            // skipped by both of PrepareUsageOverageJob's own passes — correct while the
+            // payment is in flight, and permanent when its webhook is lost: the charge is
+            // never collected, every renewal carries the negative balance forward, and every
+            // future overage for that billable is silenced.
+            $schedule->job(CleanupStalePendingOverageChargeJob::class)
+                ->dailyAt('04:15')
                 ->timezone('UTC');
 
             // Safety net for the retry markers. UpdateSubscription and ProrataExecutor

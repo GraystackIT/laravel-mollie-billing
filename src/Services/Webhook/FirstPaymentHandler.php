@@ -229,18 +229,18 @@ class FirstPaymentHandler
             'subscription_period_starts_at' => BillingTime::nowUtc(),
         ])->save();
 
-        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $quantity) {
-            if ((int) $quantity > 0) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
-            }
-        }
-
-        $this->firstPaymentArtifacts->runCountryMatchCheck($billable);
-
-        event(new PaymentSucceeded($billable, $invoice));
-
-        $this->support->notifyInvoiceAvailable($billable, $invoice);
-
-        MollieBilling::runAfterCheckout($billable, true);
+        // Each side effect is wrapped, the way OneTimeOrderHandler, LocalToMollieUpgradeHandler
+        // and SingleChargeHandler already wrap theirs. Once the invoice exists a throw here is
+        // terminal: the re-delivery's gate answers AlreadyBooked, activationCompleted() is
+        // true, and it takes the quiet branch — Log::info and 200. So an app listener on
+        // WalletCredited that throws on the second usage type left the customer Active and
+        // paying with half their quota, no country-mismatch check, no SubscriptionCreated for
+        // the app to react to, and nobody told.
+        $this->support->completeActivation(
+            $billable,
+            $invoice,
+            $this->catalog->includedUsages($planCode, $interval),
+            fn () => $this->firstPaymentArtifacts->runCountryMatchCheck($billable),
+        );
     }
 }
