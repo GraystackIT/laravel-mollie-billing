@@ -378,19 +378,40 @@ class ProrataChargeHandler
             $billedDiscountByCode[$code] = abs((int) ($line['amount_net'] ?? 0));
         }
 
+        // Only what Phase 1 actually deferred. `UpdateSubscription` defers its redemption
+        // exclusively for a plan or interval change; a seat sync or an addon change redeems
+        // straight away *and* creates a deferred Mollie charge. Falling back to the codes
+        // found in the charge lines therefore redeemed those a second time — and that
+        // fallback carries no `new_net`, so `orderAmountNet` was 0 and `redeem()` rewrote
+        // `active_recurring_coupon` with `base_amount_net = 0`. From then on
+        // `computeMarkerDiscount()` returned 0 for good and the PATCH that follows set Mollie
+        // back to the full price: a 50%/12-month campaign quietly stopped discounting after
+        // one seat change, and the customer had burned two campaign slots for it.
+        if ($pendingPlanChange === null) {
+            return;
+        }
+
         $codes = (array) ($pendingPlanChange['coupon_codes'] ?? []);
         if ($codes === [] && ! empty($pendingPlanChange['coupon_code'])) {
             $codes = [(string) $pendingPlanChange['coupon_code']];
-        }
-        if ($codes === [] && $billedDiscountByCode !== []) {
-            $codes = array_keys($billedDiscountByCode);
         }
 
         if ($codes === []) {
             return;
         }
 
+        // The recurring net the marker has to be anchored to. Zero would silence the
+        // discount permanently, so a payload without it is not something to guess at.
         $orderAmountNet = (int) ($pendingPlanChange['new_net'] ?? 0);
+
+        if ($orderAmountNet <= 0) {
+            Log::warning('Prorata phase 2 skipped the coupon redemption — the deferred change carries no recurring net', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'codes' => $codes,
+            ]);
+
+            return;
+        }
 
         foreach ($codes as $code) {
             $codeUpper = strtoupper((string) $code);

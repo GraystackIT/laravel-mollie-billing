@@ -21,6 +21,7 @@ use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
@@ -135,6 +136,33 @@ class SubscriptionPaymentHandler
         $pendingTrialDiscountNet = $pendingTrialCoupon !== null
             ? max(0, (int) $pendingTrialCoupon['discount_net'])
             : 0;
+
+        // A parked single-payment coupon only counts if Mollie actually collected less.
+        //
+        // The coupon is stashed at trial start, but the Mollie subscription is created at the
+        // full price and nothing reduces the trial-end charge — so the discount line was put
+        // on the invoice, `reconcileWithPaidAmount()` cancelled it back out with an
+        // `adjustment`, `PaymentAmountMismatch` fired, and the coupon was redeemed anyway:
+        // the customer paid full price, the campaign lost a slot, and a redemption row
+        // claimed a discount nobody received. This is the rule
+        // `StartSubscriptionCheckout::amountReflectsCoupon()` applies on its own auto-apply
+        // path — keep the coupon usable rather than book a promise that was not kept.
+        if ($pendingTrialCoupon !== null
+            && $pendingTrialDiscountNet > 0
+            && ! $this->paidAmountReflects($payment, $expectedNet - $pendingTrialDiscountNet, $billable)
+        ) {
+            Log::warning('Parked trial coupon not applied — Mollie collected the undiscounted amount', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $payment->id ?? null,
+                'coupon_code' => (string) $pendingTrialCoupon['coupon']->code,
+                'discount_net' => $pendingTrialDiscountNet,
+            ]);
+
+            // Left in the slot on purpose: the code has not been honoured, so it must stay
+            // spendable. The operator hears about it through the warning above.
+            $pendingTrialCoupon = null;
+            $pendingTrialDiscountNet = 0;
+        }
 
         $couponDiscountNet = $this->couponService->computeMarkerDiscount($billable, $expectedNet);
         $netForCharge = max(0, $expectedNet - $couponDiscountNet - $pendingTrialDiscountNet);
@@ -500,6 +528,25 @@ class SubscriptionPaymentHandler
             'unit_price_net' => -$discountNet,
             'total_net' => -$discountNet,
         ];
+    }
+
+    /**
+     * Whether what Mollie collected matches a given net, once VAT is added.
+     *
+     * The comparison has to happen on gross, because that is what the payment carries, and
+     * with a cent of slack for the rounding difference between per-line and total VAT.
+     */
+    protected function paidAmountReflects(object $payment, int $net, Billable $billable): bool
+    {
+        $currency = BillingMoney::normalizeCurrency($payment->amount->currency ?? null);
+        $paidGross = BillingMoney::minorFromMollieAmount((string) ($payment->amount->value ?? '0'), $currency);
+        $expectedGross = (int) $this->vatService->calculate(
+            (string) ($billable->getBillingCountry() ?? ''),
+            max(0, $net),
+            $billable,
+        )['gross'];
+
+        return abs($paidGross - $expectedGross) <= 1;
     }
 
     /**

@@ -545,23 +545,36 @@ it('SinglePayment on a trial signup: discounts the charge that ends the trial, n
         ->and(SignupMollieRecorder::lastSubscription()['start_date'])
         ->toBe(BillingTime::nowUtc()->addDays(14)->toDateString());
 
-    // …and the stashed coupon is applied when it arrives. Mollie charged the full
-    // price, so the discount lands as a credit on the invoice, which is why the
-    // gross stays 23.80 while the coupon line is on the document.
+    // …and that is the problem this case now pins. A Mollie subscription has one amount,
+    // so there is nowhere for a single-charge discount to live: the trial-end charge
+    // collects the full 23.80. The handler used to put a −10.00 coupon line on the invoice
+    // anyway, `reconcileWithPaidAmount()` cancelled it back out with a +10.00 adjustment
+    // (leaving net 2000 / gross 2380 — the customer saved nothing), `PaymentAmountMismatch`
+    // fired, and the coupon was redeemed regardless: a spent campaign slot and a redemption
+    // row claiming a discount nobody received.
+    //
+    // So the coupon is not applied when the collected amount does not reflect it, and stays
+    // spendable. Discounting the first charge after a trial needs Mollie to collect it as a
+    // payment of its own — see docs/coupons.md.
     $this->travel(14)->days();
     $converting = renewSignup($billable, 'tr_signup_trial_end', '23.80');
 
-    expect(signupCouponLineNet($converting))->toBe(-1000)
-        ->and(CouponRedemption::query()->count())->toBe(1)
+    expect(signupCouponLineNet($converting))->toBeNull()
+        ->and((int) $converting->amount_net)->toBe(2000)
+        ->and((int) $converting->amount_gross)->toBe(2380)
+        ->and(CouponRedemption::query()->count())->toBe(0)
         ->and($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Active);
 
-    // The next charge is full price — the slot is spent.
+    // And the code is still there to be used somewhere it can actually be honoured.
+    expect($billable->refresh()->getBillingSubscriptionMeta())
+        ->toHaveKey('pending_first_charge_coupon');
+
     $this->travel(30)->days();
     $renewal = renewSignup($billable, 'tr_signup_after_trial', '23.80');
 
     expect((int) $renewal->amount_net)->toBe(2000)
         ->and(signupCouponLineNet($renewal))->toBeNull()
-        ->and(CouponRedemption::query()->count())->toBe(1);
+        ->and(CouponRedemption::query()->count())->toBe(0);
 });
 
 it('Recurring on a trial signup: keeps discounting every charge after the trial', function (): void {

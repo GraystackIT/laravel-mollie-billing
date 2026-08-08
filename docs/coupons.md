@@ -115,7 +115,13 @@ A signup coupon is priced by three different pieces of code — the checkout cha
 
 Two consequences worth knowing:
 
-- **On a trial signup the coupon is applied at the charge that ends the trial, not at signup.** A `single_payment` coupon is parked in `subscription_meta.pending_first_charge_coupon` and discounts that one charge; a `recurring` coupon's marker is written straight away, so Mollie's subscription is created at the discounted amount and every charge from the trial's end on is discounted. Redemption records follow the same timing — during a trial nothing is charged, so nothing is redeemed yet.
+- **On a trial signup a `recurring` coupon works; a `single_payment` one does not.** A recurring coupon's marker is written straight away, so Mollie's subscription is created at the discounted amount and every charge from the trial's end on is discounted. A `single_payment` coupon is parked in `subscription_meta.pending_first_charge_coupon` — but a Mollie subscription carries a single amount, and there is nowhere for a one-charge discount to live: the trial-end charge collects the full price.
+
+  The handler therefore **does not apply it**, and leaves the code in the slot so it stays spendable somewhere it can be honoured (a one-time order, a checkout without a trial). It used to put the discount line on the invoice regardless; `reconcileWithPaidAmount()` then cancelled it out with an adjustment line so the customer saved nothing, `PaymentAmountMismatch` fired on every such conversion, and the coupon was redeemed anyway — a spent campaign slot and a redemption row claiming a discount nobody received. A warning is logged when this happens, because the customer was shown a discount at signup.
+
+  Discounting the first charge after a trial properly requires collecting it as a payment of its own and starting the subscription one period later. That is not implemented.
+
+  Redemption records follow the charge either way — during a trial nothing is charged, so nothing is redeemed yet.
 
 - **A trial and a fully covering `recurring` coupon can collide** (a promotion link auto-applies the code while the checkout form still submits the full gross). The Mollie start date is then the **later** of the trial end and the coupon's `valid_until + 1 day`: charging at trial end would collect money during months the coupon promised free.
 

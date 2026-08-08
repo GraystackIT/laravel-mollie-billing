@@ -771,3 +771,71 @@ it('keeps a Local rollover renewal from relabelling plan quota as purchased', fu
 
     expect((int) \GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::getPurchasedBalance($fresh->getWallet('Tokens')))->toBe(0);
 });
+
+it('does not redeem a recurring coupon twice when a seat change defers its charge', function (): void {
+    $coupon = Coupon::create([
+        'code' => 'SEATS50',
+        'name' => 'Seats 50',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+        'active' => true,
+        'stackable' => false,
+        'max_redemptions_per_billable' => 6,
+    ]);
+
+    $billable = ledgerBillable('2026-01-01T09:00:00Z');
+    $billable->forceFill(['active_addon_codes' => []])->save();
+    $this->travelTo(BillingTime::toUtc('2026-01-06T09:00:00Z'));
+
+    // A seat change is not a plan change, so UpdateSubscription redeems in its own phase —
+    // and it also raises a deferred Mollie charge for the prorated seat.
+    app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
+        ->update($billable->fresh(), ['seats' => 3, 'coupon_codes' => ['SEATS50']]);
+
+    $afterPhaseOne = $billable->fresh();
+    $marker = $afterPhaseOne->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+    expect($marker)->not->toBeNull()
+        ->and((int) $marker['base_amount_net'])->toBeGreaterThan(0);
+
+    $basisAfterPhaseOne = (int) $marker['base_amount_net'];
+    $redemptionsAfterPhaseOne = CouponRedemption::query()->where('coupon_id', $coupon->id)->count();
+
+    // Phase 2 used to redeem the same code again off the back of the charge lines. That
+    // fallback carries no recurring net, so `redeem()` rewrote the marker with
+    // base_amount_net = 0 — after which computeMarkerDiscount() returned 0 for good and the
+    // PATCH that follows put Mollie back to the full price. A 50%/12-month campaign stopped
+    // discounting after one seat change, and the customer had burned two slots for it.
+    $pending = $afterPhaseOne->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
+
+    if ($pending !== null) {
+        LedgerFakeWebhookController::$nextPayment = (object) [
+            'id' => (string) ($pending['charge_payment_id'] ?? 'tr_ledger_seat_charge'),
+            'status' => 'paid',
+            'amount' => (object) ['value' => '1.00', 'currency' => 'EUR'],
+            'paidAt' => '2026-01-06T10:00:00Z',
+            'subscriptionId' => 'sub_ledger',
+            'countryCode' => 'AT',
+            'metadata' => [
+                'type' => 'prorata_charge',
+                'billable_type' => $billable->getMorphClass(),
+                'billable_id' => (string) $billable->getKey(),
+            ],
+        ];
+
+        $this->postJson(route('billing.webhook'), ['id' => (string) ($pending['charge_payment_id'] ?? 'tr_ledger_seat_charge')])
+            ->assertStatus(200);
+    }
+
+    $fresh = $billable->fresh();
+    $finalMarker = $fresh->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+    expect($finalMarker)->not->toBeNull()
+        ->and((int) $finalMarker['base_amount_net'])->toBe($basisAfterPhaseOne)
+        ->and(CouponRedemption::query()->where('coupon_id', $coupon->id)->count())->toBe($redemptionsAfterPhaseOne);
+
+    // Which is the point: the discount still computes.
+    expect(app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)
+        ->computeMarkerDiscount($fresh, $basisAfterPhaseOne))->toBeGreaterThan(0);
+});
