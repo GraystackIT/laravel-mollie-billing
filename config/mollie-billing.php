@@ -73,6 +73,17 @@ return [
     // are interpreted in this currency. Mollie payments, sales invoices and BillingInvoice
     // persist this code. The EU VAT/OSS system (mpociot/vat-calculator, VIES, OSS export)
     // is EU-only but the currency itself is independent of it.
+    /*
+     * Largest seat count a single change may request.
+     *
+     * The portal's number input is client-side only and `SyncSeats` clamped nothing but
+     * the lower bound, so a mistyped order of magnitude (or a `$wire.set()`) reached
+     * `SubscriptionAmount::net()` and raised a prorata charge in the millions. Checkout has
+     * capped the equivalent field at 100 all along; this is the same intent for the change
+     * path. Raise it if you sell to organisations that large.
+     */
+    'max_seats' => (int) env('BILLING_MAX_SEATS', 1000),
+
     'currency' => env('BILLING_CURRENCY', 'EUR'),
     // Leave unset to let BillingMoney derive the symbol from `currency` (EUR → €,
     // USD → $, GBP → £, anything else → the ISO code). Only set this to override

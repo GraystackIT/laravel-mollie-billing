@@ -58,6 +58,35 @@ class CancelSubscription
         // mandate — charge overage against a customer who has already left.
         unset($meta['scheduled_change']);
 
+        // An in-flight prorata charge is voided too, while it still can be. A SEPA upgrade
+        // charge takes days to settle and needs no customer interaction, so cancelling
+        // minutes later left it armed: ProrataChargeHandler correctly refuses to apply the
+        // change when it lands, but the money has been collected from somebody who left and
+        // an operator has to refund it by hand. cancelPendingPlanChange() already knows how
+        // to do this properly — it refuses to touch a payment that has settled, and records
+        // an orphan marker plus an admin alert when the payment can no longer be cancelled.
+        if (($meta['prorata_pending_payment_id'] ?? null) !== null
+            || ($meta['pending_prorata_change'] ?? null) !== null
+            || ($meta['pending_plan_change'] ?? null) !== null
+        ) {
+            try {
+                app(UpdateSubscription::class)->cancelPendingPlanChange($billable);
+
+                // It writes its own meta, so re-read before this method's own write.
+                $billable->refresh();
+                $meta = array_replace($billable->getBillingSubscriptionMeta(), [
+                    'cancelled_from' => $meta['cancelled_from'],
+                ]);
+                unset($meta['scheduled_change']);
+            } catch (\Throwable $e) {
+                // Never what fails a cancellation the customer asked for.
+                Log::warning('Could not void the in-flight prorata charge while cancelling', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         if ($isLocal) {
             $endsAt = $immediately
                 ? BillingTime::nowUtc()

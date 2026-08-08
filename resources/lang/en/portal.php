@@ -227,6 +227,7 @@ return [
     'prices_excl_vat' => 'Prices excl. VAT.',
     'prices_incl_vat' => 'Prices incl. VAT.',
     'seats_flash' => [
+        'too_many' => 'That is more seats than we can process in one change (maximum :max). Please contact us for a larger team.',
         'synced' => 'Seats updated.',
     ],
     'products' => [
@@ -367,6 +368,7 @@ return [
         'pending_change_cancelled' => 'The pending plan change has been cancelled.',
         'plan_change_failed' => 'Your plan upgrade could not be completed because the payment failed. Please try again or update your payment method.',
         'billing_details_saved' => 'Billing details saved.',
+        'force_charge_no_longer_needed' => 'Nothing to charge — your subscription is no longer past due. Reload the page to see its current state.',
         'force_charge_scheduled' => 'Mollie will charge your payment method shortly.',
         'error' => 'An error occurred. Please try again.',
     ],

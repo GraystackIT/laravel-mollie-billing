@@ -242,6 +242,19 @@ new class extends Component {
 
         $this->authorizeBillingAction($billable);
 
+        // Re-checked here, not just in the render that drew the button: the dashboard has
+        // no wire:poll, so the banner can be arbitrarily stale. Between the render and the
+        // click Mollie can charge and the webhook activate the subscription — and
+        // forceImmediateCharge() looks at neither status nor start date, so the click
+        // PATCHed startDate to today on an Active subscription and collected a second full
+        // period for one already paid. Same shape as the admin past-due list's retry().
+        if (! $billable->isBillingPastDue()) {
+            $this->flash = __('billing::portal.flash.force_charge_no_longer_needed');
+            $this->flashError = true;
+
+            return;
+        }
+
         if ($gate->forceImmediateCharge($billable)) {
             $this->flash = __('billing::portal.flash.force_charge_scheduled');
             $this->flashError = false;

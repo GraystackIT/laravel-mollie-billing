@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Support\BillingAuditEntry;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
@@ -742,10 +743,20 @@ trait HasBilling
             : $this->subscription_period_starts_at->copy()->addMonth();
     }
 
-    public function totalBillingSpentGross(): int
+    /**
+     * Total gross this billable has paid, in one currency.
+     *
+     * Scoped to `$currency` (default: the configured one) because the name promises a
+     * single figure a consumer will render as money. Unscoped it added `amount_gross`
+     * across currencies, so a billable whose `BILLING_CURRENCY` changed mid-life reported
+     * 20.00 GBP + 10.00 EUR as "€30.00" — an amount nobody ever paid. The portal's own
+     * invoice card has scoped this all along; the public accessor apps use had not.
+     */
+    public function totalBillingSpentGross(?string $currency = null): int
     {
         return (int) $this->billingInvoices()
             ->whereIn('status', ['paid', 'refunded'])
+            ->where('currency', BillingMoney::normalizeCurrency($currency))
             ->sum('amount_gross');
     }
 

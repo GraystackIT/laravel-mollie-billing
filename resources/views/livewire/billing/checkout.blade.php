@@ -365,9 +365,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'name' => $catalog->planName($code) ?? $code,
                 'description' => $catalog->planDescription($code),
                 'included_seats' => $catalog->includedSeats($code),
+                // Filtered by the *selected* interval as well as by the plan: an addon that
+                // does not sell this interval prices at 0, so it rendered as "€0.00 / per
+                // year" and looked like a free perk of the annual plan — and then
+                // StartSubscriptionCheckout refused the order, which submit() could only
+                // report as the generic "payment could not be created". The plan step's own
+                // addon list is fed from here too.
                 'allowed_addons' => array_values(array_filter(
                     $allAddons,
-                    fn (string $addonCode): bool => $catalog->planAllowsAddon($code, $addonCode),
+                    fn (string $addonCode): bool => $catalog->planAllowsAddon($code, $addonCode)
+                        && $catalog->addonOffersInterval($addonCode, $this->interval),
                 )),
                 'intervals' => [
                     'monthly' => [
@@ -923,13 +930,37 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function updatedInterval(): void
     {
         $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+        $this->dropAddonsNotSoldInSelection();
         $this->refreshCouponAfterSelectionChange();
     }
 
     public function updatedPlanCode(): void
     {
         $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+        $this->dropAddonsNotSoldInSelection();
         $this->refreshCouponAfterSelectionChange();
+    }
+
+    /**
+     * Drop already-ticked addons the new selection does not sell.
+     *
+     * Otherwise switching to yearly kept a monthly-only addon ticked and priced at 0 — a
+     * free extra on the confirm step, refused only when the order reached
+     * StartSubscriptionCheckout, where submit() could report nothing more useful than
+     * "payment could not be created".
+     */
+    private function dropAddonsNotSoldInSelection(): void
+    {
+        if ($this->addon_codes === []) {
+            return;
+        }
+
+        $allowed = (array) ($this->selectedPlan()['allowed_addons'] ?? []);
+
+        $this->addon_codes = array_values(array_filter(
+            $this->addon_codes,
+            fn ($code): bool => in_array((string) $code, $allowed, true),
+        ));
     }
 
     /**
@@ -1340,6 +1371,9 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     private function validateStep3(): void
     {
         $plan = $this->selectedPlan();
+        // Already interval-filtered by plans(), so the `in:` rule refuses an addon the
+        // selected interval does not sell — with a field-level message instead of the
+        // generic payment error the service's exception used to surface as.
         $allowed = (array) ($plan['allowed_addons'] ?? []);
 
         $this->validate([

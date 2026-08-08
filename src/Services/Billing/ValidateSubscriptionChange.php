@@ -14,7 +14,6 @@ use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
-use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use Illuminate\Database\Eloquent\Model;
@@ -39,7 +38,6 @@ class ValidateSubscriptionChange
 {
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
-        private readonly ChargeUsageOverageDirectly $overageService,
     ) {}
 
     /**

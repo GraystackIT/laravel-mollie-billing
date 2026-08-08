@@ -227,6 +227,7 @@ return [
     'prices_excl_vat' => 'Preise exkl. USt.',
     'prices_incl_vat' => 'Preise inkl. USt.',
     'seats_flash' => [
+        'too_many' => 'Das sind mehr Plätze, als wir in einer Änderung verarbeiten können (Maximum :max). Für größere Teams sprechen Sie uns bitte an.',
         'synced' => 'Plätze aktualisiert.',
     ],
     'products' => [
@@ -367,6 +368,7 @@ return [
         'pending_change_cancelled' => 'Die ausstehende Planänderung wurde abgebrochen.',
         'plan_change_failed' => 'Dein Plan-Upgrade konnte nicht durchgeführt werden, da die Zahlung fehlgeschlagen ist. Bitte versuche es erneut oder aktualisiere deine Zahlungsmethode.',
         'billing_details_saved' => 'Rechnungsdaten gespeichert.',
+        'force_charge_no_longer_needed' => 'Es ist nichts einzuziehen — Ihr Abo ist nicht mehr überfällig. Laden Sie die Seite neu, um den aktuellen Stand zu sehen.',
         'force_charge_scheduled' => 'Mollie bucht in Kürze von deinem Zahlungsmittel ab.',
         'error' => 'Ein Fehler ist aufgetreten. Bitte versuche es erneut.',
     ],

@@ -99,7 +99,7 @@ interface Billable
     public function billingInvoices(): MorphMany;
     public function latestBillingInvoice(): ?BillingInvoice;
     public function nextBillingDate(): ?CarbonInterface;
-    public function totalBillingSpentGross(): int;
+    public function totalBillingSpentGross(?string $currency = null): int;
     public function redeemedBillingCoupons(): MorphMany;
 
     // Plan metadata (human-readable, for UI)

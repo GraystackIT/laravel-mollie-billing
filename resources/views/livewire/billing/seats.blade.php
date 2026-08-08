@@ -2,6 +2,7 @@
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Exceptions\SeatCountExceedsMaximumException;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\Coupon;
@@ -285,6 +286,11 @@ new class extends Component {
             $this->couponError = null;
             $this->couponDiscountNet = null;
             $this->couponWarnings = [];
+        } catch (SeatCountExceedsMaximumException $e) {
+            // Its own message: the generic error banner left the customer guessing which
+            // number the form would accept.
+            $this->flash = __('billing::portal.seats_flash.too_many', ['max' => $e->maximum]);
+            $this->flashSuccess = false;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
