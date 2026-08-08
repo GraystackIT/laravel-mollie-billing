@@ -23,12 +23,16 @@ use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 
 class SubscriptionPaymentHandler
 {
+    use MutatesBillingMeta;
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly SubscriptionCatalogInterface $catalog,
@@ -246,47 +250,68 @@ class SubscriptionPaymentHandler
         $periodStartsAt = $paidAt ? Carbon::parse((string) $paidAt)->setTimezone('UTC') : BillingTime::nowUtc();
 
         $derivedSeatCount = $invoice->deriveSeatCount();
-        $meta = $billable->getBillingSubscriptionMeta();
-        if ($derivedSeatCount !== null) {
-            $meta['seat_count'] = $derivedSeatCount;
-        }
 
         $currentStatus = $billable->getBillingSubscriptionStatus();
         $wasTrial = $currentStatus === SubscriptionStatus::Trial;
         $wasPastDue = $currentStatus === SubscriptionStatus::PastDue;
 
-        // A successful recurring charge recovers a PastDue billable — drop the
-        // failure markers so the dashboard banner and overage retry job stop
-        // treating it as overdue. Mirrors ProrataChargeHandler's cleanup.
-        if ($wasPastDue) {
-            unset($meta['payment_failure'], $meta['past_due_since']);
-        }
-
-        // The override exists to delay ONE charge — a TrialExtension coupon pushing
-        // the trial end, a PeriodExtension granting free days. That charge has now
-        // happened, so the override is spent: `subscription_period_starts_at` above
-        // is the new anchor. Left in place it outranks that anchor in
-        // `nextBillingDate()` for as long as it stays in the future, which made a
-        // converted trial report a next-billing date a month early — and everything
-        // reading that date got it wrong with it: the overage pass fires the day
-        // before it, and a prorata plan change measures its factor against it, so
-        // the customer was charged the wrong amount at the wrong time.
-        unset($meta['next_charge_date_override']);
-
-        $updates = [
-            'subscription_period_starts_at' => $periodStartsAt,
-            'subscription_meta' => $meta,
-        ];
+        $updates = ['subscription_period_starts_at' => $periodStartsAt];
 
         if ($wasTrial || $wasPastDue) {
             $updates['subscription_status'] = SubscriptionStatus::Active;
         }
         if ($wasTrial) {
             $updates['trial_ends_at'] = null;
-            event(new TrialConverted($billable, $planCode));
         }
 
-        $billable->forceFill($updates)->save();
+        // Locked read-modify-write, touching only the keys this handler owns.
+        //
+        // The meta was read at the top of paid(), then a wide window of invoice and
+        // wallet work followed, and finally the whole blob was written back. Anything
+        // that committed in between was reverted: an overage webhook clearing its
+        // `usage_overage*` keys in the same second (they settle a day apart *by design*)
+        // came back from the dead and PrepareUsageOverageJob then skipped that billable's
+        // overage collection indefinitely; a SyncSeats that raised `seat_count` and
+        // PATCHed Mollie was rolled back locally, so Mollie billed n+2 seats while the
+        // row said n and the next renewal rebuilt its lines from the stale count.
+        $this->mutateBillingMeta(
+            $billable,
+            static function (array $meta) use ($derivedSeatCount, $wasPastDue): array {
+                if ($derivedSeatCount !== null) {
+                    $meta['seat_count'] = $derivedSeatCount;
+                }
+
+                // A successful recurring charge recovers a PastDue billable — drop the
+                // failure markers so the dashboard banner and overage retry job stop
+                // treating it as overdue. Mirrors ProrataChargeHandler's cleanup.
+                if ($wasPastDue) {
+                    $meta = SubscriptionMetaHygiene::withoutDunningEpisode($meta);
+                }
+
+                // The override exists to delay ONE charge — a TrialExtension coupon
+                // pushing the trial end, a PeriodExtension granting free days. That charge
+                // has now happened, so the override is spent:
+                // `subscription_period_starts_at` above is the new anchor. Left in place
+                // it outranks that anchor in `nextBillingDate()` for as long as it stays
+                // in the future, which made a converted trial report a next-billing date a
+                // month early — and everything reading that date got it wrong with it: the
+                // overage pass fires the day before it, and a prorata plan change measures
+                // its factor against it.
+                unset($meta['next_charge_date_override']);
+
+                return $meta;
+            },
+            $updates,
+        );
+
+        // AFTER the save, not before. Firing it first meant a throwing app listener left
+        // the billable on status Trial with a past `trial_ends_at` — which
+        // `hasAccessibleBillingSubscription()` refuses — so a customer who had just paid
+        // was locked out for a whole period, and the period anchor was never advanced.
+        // The re-delivery could not repair it either: the invoice guard short-circuits.
+        if ($wasTrial) {
+            event(new TrialConverted($billable, $planCode));
+        }
 
         event(new PaymentSucceeded($billable, $invoice));
 

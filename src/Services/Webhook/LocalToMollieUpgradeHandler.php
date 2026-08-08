@@ -204,15 +204,27 @@ class LocalToMollieUpgradeHandler
         }
 
         if ($oldPlan !== '') {
-            $this->walletAdjuster->adjust(
-                $billable,
-                $oldPlan,
-                $oldInterval,
-                $planCode,
-                $interval,
-                $oldPeriodStart,
-                $oldPeriodEnd,
-            );
+            // Wrapped like its prorata sibling: past this point the invoice exists, so a
+            // throw would be swallowed by the re-delivery's invoice guard and the wallets
+            // would stay on the old plan's quota forever.
+            try {
+                $this->walletAdjuster->adjust(
+                    $billable,
+                    $oldPlan,
+                    $oldInterval,
+                    $planCode,
+                    $interval,
+                    $oldPeriodStart,
+                    $oldPeriodEnd,
+                );
+            } catch (\Throwable $e) {
+                Log::error('Wallet adjust during the local-to-Mollie upgrade failed', [
+                    'billable_id' => $billable->getKey(),
+                    'old_plan' => $oldPlan,
+                    'new_plan' => $planCode,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         $this->firstPaymentArtifacts->runCountryMatchCheck($billable);

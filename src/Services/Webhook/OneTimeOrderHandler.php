@@ -174,20 +174,38 @@ class OneTimeOrderHandler
         ]);
 
         if ($usageType !== null && $quantity !== null && $quantity > 0) {
-            $this->walletService->credit($billable, $usageType, $quantity, 'one_time_order:'.$productCode);
+            // Wrapped, unlike before. The invoice exists by now, so an uncaught throw
+            // here produced a 500 whose re-delivery short-circuits on the invoice guard —
+            // and everything after the invoice never ran again. The customer had paid for
+            // credits, the coupons were redeemed, and the wallet was never credited.
+            // Logged loudly rather than rethrown: rethrowing would make Mollie re-deliver
+            // a payment whose invoice already exists, which the guard then swallows
+            // anyway.
+            try {
+                $this->walletService->credit($billable, $usageType, $quantity, 'one_time_order:'.$productCode);
 
-            if ($billable instanceof Model) {
-                $wallet = $billable->getWallet($usageType);
-                if ($wallet !== null) {
-                    WalletUsageService::addPurchasedBalance($wallet, $quantity);
+                if ($billable instanceof Model) {
+                    $wallet = $billable->getWallet($usageType);
+                    if ($wallet !== null) {
+                        WalletUsageService::addPurchasedBalance($wallet, $quantity);
+                    }
                 }
-            }
 
-            Log::info('One-time order: wallet credited', [
-                'product_code' => $productCode,
-                'usage_type' => $usageType,
-                'quantity' => $quantity,
-            ]);
+                Log::info('One-time order: wallet credited', [
+                    'product_code' => $productCode,
+                    'usage_type' => $usageType,
+                    'quantity' => $quantity,
+                ]);
+            } catch (\Throwable $e) {
+                Log::error('One-time order: wallet credit failed — the customer paid for credits they did not receive', [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'invoice_id' => (int) $invoice->id,
+                    'product_code' => $productCode,
+                    'usage_type' => $usageType,
+                    'quantity' => $quantity,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         event(new OneTimeOrderCompleted($billable, $invoice, $productCode, $metadata));
