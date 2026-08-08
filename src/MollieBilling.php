@@ -283,7 +283,13 @@ class MollieBilling
         return (self::$urlParametersCallback)($billable);
     }
 
-    /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:Closure}> */
+    /**
+     * @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:Closure, enter?:Closure}>
+     *
+     * `validate` runs when the step is left forwards; the optional `enter` runs whenever the
+     * step is arrived at, in either direction, so a step whose state can go stale while the
+     * user is elsewhere can re-establish it.
+     */
     public static function resolveCheckoutSteps(): array
     {
         return self::$checkoutStepsCallback ? (self::$checkoutStepsCallback)() : [];

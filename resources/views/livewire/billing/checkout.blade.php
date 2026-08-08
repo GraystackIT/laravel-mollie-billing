@@ -543,7 +543,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     // Custom checkout steps (resolved fresh each call — closures can't be serialised by Livewire)
     // -------------------------------------------------------------------------
 
-    /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:\Closure}> */
+    /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:\Closure, enter?:\Closure}> */
     private function customSteps(): array
     {
         return MollieBilling::resolveCheckoutSteps();
@@ -1234,6 +1234,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $offset = $this->customStepCount();
         $pkg = $this->packageStep();
 
+        // Nothing from the previous attempt survives the move.
+        //
+        // `validate()` only clears the keys it is about to check, and a custom step that
+        // reports its own problem with `addError()` uses a key no later `validate()` touches —
+        // so the message stayed on screen after the user had fixed the thing it complained
+        // about. An email-confirmation step is the plain case: "please confirm your address"
+        // sat under a field that already said "confirmed".
+        $this->resetErrorBag();
+        $this->resetValidation();
+
         // Validate the current step
         if ($this->step <= $offset) {
             $this->validateCustomStep($this->step);
@@ -1255,6 +1265,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         }
 
         $this->step++;
+        $this->enterCustomStep($this->step);
 
         // After advancing into the confirm step, re-validate any applied coupon
         // against the form state the user is about to submit. If it no longer
@@ -1279,6 +1290,11 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $offset = $this->customStepCount();
         $pkg = $this->packageStep();
 
+        // Same reset as next(): a message about the step being left must not greet the user on
+        // the step they are returning to.
+        $this->resetErrorBag();
+        $this->resetValidation();
+
         // Skip addons step backwards
         if ($pkg === 4 && ! $this->hasAddonsOrSeatsStep()) {
             $this->step = $offset + 2;
@@ -1291,11 +1307,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // on the plan step (there is nothing earlier to navigate to).
         if ($this->billing_locked && $pkg === 2) {
             $this->step = $offset > 0 ? $offset : $this->step;
+            $this->enterCustomStep($this->step);
 
             return;
         }
 
         $this->step = max(1, $this->step - 1);
+        $this->enterCustomStep($this->step);
     }
 
     private function validateCustomStep(int $step): void
@@ -1304,6 +1322,32 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
         if ($customStep !== null && isset($customStep['validate'])) {
             ($customStep['validate'])($this);
+        }
+    }
+
+    /**
+     * Tell a custom step it is being entered — forwards or backwards.
+     *
+     * The step contract had `validate` and nothing else, so a step whose state can go stale
+     * while the user is elsewhere had no way to notice. The case that surfaced it: an
+     * email-confirmation step whose confirmation no longer holds once the user navigates back,
+     * with no way to request a new code because nothing told the step it was live again. A
+     * page reload was the only way forward.
+     *
+     * Called on every arrival, including a re-entry into the step just left, so an `enter`
+     * callback has to be safe to run repeatedly. It runs after `$this->step` has moved, so the
+     * callback sees the step it is being asked about as the current one.
+     */
+    private function enterCustomStep(int $step): void
+    {
+        if ($step > $this->customStepCount()) {
+            return;
+        }
+
+        $customStep = $this->customSteps()[$step - 1] ?? null;
+
+        if ($customStep !== null && isset($customStep['enter'])) {
+            ($customStep['enter'])($this);
         }
     }
 

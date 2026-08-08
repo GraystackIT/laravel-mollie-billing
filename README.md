@@ -356,6 +356,28 @@ Each step definition requires:
 | `description` | `string` | Subheading text below the headline. |
 | `view` | `string` | Blade view name to `@include` for this step's form fields. |
 | `validate` | `Closure` | *(optional)* Receives the Livewire `Component` instance. Throw a `ValidationException` (or call `$component->validate(...)`) to block navigation. |
+| `enter` | `Closure` | *(optional)* Receives the Livewire `Component` instance whenever the step is arrived at — forwards **and** backwards. Use it for state that cannot be trusted once the customer has been elsewhere. |
+
+**Steps that gate on something outside the form.** A step verifying an email address, a phone
+number or an external account has state the form itself does not hold, and two things follow
+from that:
+
+- Its complaint clears itself. `next()` and `back()` reset the error bag before they do
+  anything, so a message keyed on something no later `validate()` rule touches does not outlive
+  the problem it described.
+- It is told when it becomes current again. `enter` runs on every arrival, so a verification
+  that no longer holds after a Back can be dropped and re-requested:
+
+```php
+'enter' => function (Component $component): void {
+    // Whatever was confirmed before the customer navigated away is no longer current.
+    $component->customData['email_confirmed'] = false;
+    $component->customData['confirmation_sent'] = false;
+},
+```
+
+`enter` fires on a re-entry into the step just left as well, so it has to be safe to run
+repeatedly — do not send an email from it; set the state that lets the customer ask for one.
 
 **Binding form data** — The checkout component exposes a `public array $customData = []` property. Use `wire:model` with dot notation in your step view:
 
