@@ -431,6 +431,29 @@ class CouponService
             }
         }
 
+        // The one dimension no path can satisfy — and therefore the one that has to say so.
+        // `applicable_usages` restricts a coupon to specific metered usage types, but no
+        // charge in this package carries a usage dimension a coupon could be scoped to:
+        // overage is charged by `ChargeUsageOverageDirectly`, which builds its line items
+        // from wallet balances and never consults a coupon. Skipping the check meant the
+        // field did the exact opposite of what an operator setting it intends — "tokens
+        // only" made the coupon apply to *everything*, at full discount value. Rejecting is
+        // conservative and visible: the coupon is unusable until a path passes `usageTypes`.
+        if (! empty($coupon->applicable_usages)) {
+            $usageTypes = (array) ($context['usageTypes'] ?? []);
+
+            if ($usageTypes === []) {
+                throw new InvalidCouponException($billable, $code, 'usage_not_applicable');
+            }
+
+            $allowedUsages = (array) $coupon->applicable_usages;
+            foreach ($usageTypes as $usageType) {
+                if (! in_array($usageType, $allowedUsages, true)) {
+                    throw new InvalidCouponException($billable, $code, 'usage_not_applicable');
+                }
+            }
+        }
+
         if (
             $coupon->minimum_order_amount_net !== null
             && $orderAmount < (int) $coupon->minimum_order_amount_net

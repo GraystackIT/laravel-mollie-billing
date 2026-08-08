@@ -217,6 +217,7 @@ new class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),

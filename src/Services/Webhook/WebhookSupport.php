@@ -206,8 +206,7 @@ class WebhookSupport
 
         event(new PaymentAmountMismatch($billable, (string) ($payment->id ?? ''), $expectedGross, $actualGross));
 
-        $actualNet = $this->netFromGross($actualGross, $vatRate);
-        $delta = $actualNet - $expectedNet;
+        $delta = $this->reconcilingDelta($lineItems, $actualGross, $vatRate);
 
         Log::warning('Webhook invoice amount differs from the amount paid — reconciling to the paid amount', [
             'payment_id' => $payment->id ?? null,
@@ -232,6 +231,64 @@ class WebhookSupport
         ];
 
         return $lineItems;
+    }
+
+    /**
+     * The adjustment net that makes the invoice header land exactly on the amount paid.
+     *
+     * `round(gross / (1 + rate))` is the obvious answer and it is off by a cent or two,
+     * because it is not the sum the header is actually built from: `InvoiceService` totals
+     * the per-line VAT (`Σ round(lineNet × rate)`), which differs from `round(Σ lineNet ×
+     * rate)` by the per-line residuals — and the adjustment line contributes a residual of
+     * its own. So the document that exists to record "what Mollie actually collected"
+     * recorded a gross the customer was never charged, output VAT was declared against it,
+     * and `refunded_net` carried headroom Mollie refuses to honour: a full refund of such
+     * an invoice fails outright.
+     *
+     * Solved by measuring instead of deriving: the naive net delta is the starting point,
+     * and the candidates around it are re-grossed through the same per-line summation the
+     * invoice header uses, keeping whichever lands closest.
+     *
+     * Exactly is not always reachable. `net + round(net × rate)` skips values — at 20 % it
+     * steps from 5102 to 5104, so a payment of 51,03 has no representation as a
+     * single-rate document at all — which is why the caller tolerates a cent and why this
+     * minimises the gap instead of insisting on zero. What it does remove is the drift
+     * that grows with the number of lines: six lines whose VAT rounds up individually put
+     * `Σ round(net × rate)` three cents above `round(Σ net × rate)`, and the naive delta
+     * inherits all three.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     */
+    private function reconcilingDelta(array $lineItems, int $actualGross, float $vatRate): int
+    {
+        $naive = $this->netFromGross($actualGross, $vatRate) - $this->netFromLineItems($lineItems);
+
+        $best = $naive;
+        $bestGap = null;
+
+        foreach ([0, -1, 1, -2, 2, -3, 3] as $nudge) {
+            $candidate = $naive + $nudge;
+
+            $probe = $lineItems;
+            if ($candidate !== 0) {
+                $probe[] = ['kind' => 'adjustment', 'total_net' => $candidate];
+            }
+
+            $gap = abs($this->grossForLineItems($probe, $vatRate) - $actualGross);
+
+            // Ties go to the first candidate seen, and the order above walks outwards from
+            // the naive value — so among equally good deltas the smallest adjustment wins.
+            if ($bestGap === null || $gap < $bestGap) {
+                $best = $candidate;
+                $bestGap = $gap;
+
+                if ($gap === 0) {
+                    break;
+                }
+            }
+        }
+
+        return $best;
     }
 
     /**

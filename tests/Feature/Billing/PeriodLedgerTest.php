@@ -924,3 +924,58 @@ it('keeps discounting while the coupon outlives the period it just paid for', fu
     $after = $billable->fresh()->getBillingSubscriptionMeta();
     expect($after['active_recurring_coupon']['base_amount_net'] ?? null)->toBe(4300);
 });
+
+it('books a mismatched renewal to the exact cent Mollie collected', function (): void {
+    $billable = ledgerBillable();
+
+    // 4300 net at 20% is 5160 gross. Mollie collected 51,07 — a stale PATCH, a price that
+    // moved, whatever: the payment is the fact. 5107 / 1.2 = 4255.83, and the header VAT is
+    // the sum of the per-line VAT, so deriving the adjustment from the rounded net left the
+    // document one or two cents away from the money. It recorded a gross nobody was charged,
+    // declared output VAT against it, and left `refunded_net` headroom Mollie will not
+    // honour — a full refund of that invoice is rejected.
+    deliverLedgerRenewal($billable, 'tr_mismatch_exact', '2026-02-01T09:04:12Z', '51.07');
+
+    $invoice = BillingInvoice::query()->where('mollie_payment_id', 'tr_mismatch_exact')->firstOrFail();
+
+    expect((int) $invoice->amount_gross)->toBe(5107);
+
+    assertInvoicesInternallyConsistent();
+});
+
+it('books every cent of a mismatched renewal across a spread of amounts', function (): void {
+    // One amount could pass by luck. These sweep the residual space: each is a gross whose
+    // naive net (round(gross / 1.2)) re-grosses to something else once the VAT is summed
+    // per line rather than on the total.
+    foreach ([5101, 5102, 5103, 5104, 5105, 5106, 5108, 5109, 4999, 6001] as $i => $gross) {
+        $billable = ledgerBillable();
+        $value = number_format($gross / 100, 2, '.', '');
+
+        deliverLedgerRenewal($billable, 'tr_sweep_'.$i, '2026-02-01T09:04:12Z', $value);
+
+        $invoice = BillingInvoice::query()->where('mollie_payment_id', 'tr_sweep_'.$i)->firstOrFail();
+
+        // Within a cent, and as close as a single-rate document can get: `net + round(net
+        // × rate)` skips values, so 51,03 has no exact representation at 20 % at all.
+        expect(abs((int) $invoice->amount_gross - $gross))->toBeLessThanOrEqual(1, "gross for {$value}");
+    }
+
+    assertInvoicesInternallyConsistent();
+});
+
+it('does not inherit the per-line VAT drift when reconciling a many-line invoice', function (): void {
+    // The drift the naive `round(gross / (1 + rate))` carries, isolated from the webhook.
+    // Six 250-cent lines at 19% each round their 47,5 cents of VAT up, so the header's
+    // `Σ round(net × rate)` is 288 where `round(Σ net × rate)` is 285 — three cents the
+    // adjustment then inherited, on top of its own residual.
+    $lines = array_fill(0, 6, ['kind' => 'plan', 'code' => 'x', 'label' => 'X', 'quantity' => 1, 'total_net' => 250]);
+
+    $support = app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class);
+    $billable = ledgerBillable();
+
+    $payment = (object) ['id' => 'tr_drift', 'amount' => (object) ['value' => '17.90', 'currency' => 'EUR']];
+
+    $reconciled = $support->reconcileWithPaidAmount($payment, $billable, $lines, 1500, 19.0);
+
+    expect($support->grossForLineItems($reconciled, 19.0))->toBe(1790);
+});

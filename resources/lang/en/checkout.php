@@ -111,6 +111,7 @@ return [
     'coupon_interval_mismatch' => 'This coupon does not apply to the selected billing interval.',
     'coupon_addon_mismatch' => 'This coupon does not apply to the selected add-ons.',
     'coupon_product_mismatch' => 'This coupon does not apply to the selected product.',
+    'coupon_usage_mismatch' => 'This coupon only applies to specific metered usage, which this order does not include.',
     'coupon_min_order' => 'The order does not meet the minimum amount for this coupon.',
     'coupon_requires_billable' => 'This coupon cannot be applied during checkout.',
     'coupon_requires_trial' => 'This coupon extends a trial, and the selected plan does not offer one.',

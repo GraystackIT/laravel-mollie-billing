@@ -111,6 +111,7 @@ return [
     'coupon_interval_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Abrechnungsintervall.',
     'coupon_addon_mismatch' => 'Dieser Gutschein gilt nicht für die gewählten Add-ons.',
     'coupon_product_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Produkt.',
+    'coupon_usage_mismatch' => 'Dieser Gutschein gilt nur für bestimmte verbrauchsabhängige Leistungen, die diese Bestellung nicht enthält.',
     'coupon_min_order' => 'Die Bestellung erreicht nicht den Mindestbetrag für diesen Gutschein.',
     'coupon_requires_billable' => 'Dieser Gutschein kann beim Checkout nicht angewendet werden.',
     'coupon_requires_trial' => 'Dieser Gutschein verlängert eine Testphase; der gewählte Plan bietet keine an.',
