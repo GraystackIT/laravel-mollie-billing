@@ -16,6 +16,8 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminRefundFailedNotification;
 use GraystackIT\MollieBilling\Notifications\RefundProcessedNotification;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Exceptions\RefundInProgressException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -101,12 +103,25 @@ class RefundInvoiceService
     }
 
     /**
-     * The transactional body of {@see refund()}.
+     * The body of {@see refund()}, in three phases with the Mollie call between them.
      *
-     * `$mollieFailure` is an out-parameter: when the Mollie refund call fails it
-     * receives the billable, the exception and the invoice the refund was posted
-     * against, so the caller can alert the admins after the rollback. The invoice
-     * has to travel with it — an operator diagnosing the failure needs the refund
+     * The whole thing used to be one transaction: row lock, validate, call Mollie, write the
+     * credit note (serial allocation, DOMPDF render, disk write), bump `refunded_net`, credit
+     * wallets. Two things followed from that. Anything throwing after the Mollie call rolled
+     * the credit note and the `refunded_net` increment back while the money had already left
+     * — and the admin's retry click then paid it out a second time, still inside the payment
+     * total, so Mollie accepted it. And the invoice row lock plus the serial range were held
+     * across an HTTP round trip and a PDF render, which is what made a lock-wait timeout
+     * against a concurrent refund realistic in the first place.
+     *
+     * So: validate under the row lock in a short transaction, call Mollie with nothing held,
+     * then persist in a second short transaction. A cache lock around all three serialises
+     * refunds of the same invoice — the double-click and the two-tabs case — without a
+     * database transaction spanning the network.
+     *
+     * `$mollieFailure` is an out-parameter: when the Mollie call fails it receives the
+     * billable, the exception and the invoice, so `refund()` can alert the admins. The
+     * invoice has to travel with it — an operator diagnosing the failure needs the refund
      * target, and the alert's own fallback can only guess at it.
      *
      * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
@@ -123,105 +138,144 @@ class RefundInvoiceService
         ?array $lineItems,
         ?array &$mollieFailure,
     ): BillingInvoice {
-        return DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems, &$mollieFailure): BillingInvoice {
-            $invoice = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
+        // Serialised per invoice with a cache lock rather than a transaction: a double-click
+        // or two tabs are the realistic concurrency here, and this keeps them apart without a
+        // database transaction spanning the Mollie round trip. Non-blocking on purpose — the
+        // loser is told to wait rather than sitting on a worker.
+        $lock = Cache::lock('billing:invoice-refund:'.$invoice->id, 120);
 
-            $refundAmountNet = $request['amount_net'] ?? $invoice->remainingRefundableNet();
+        if (! $lock->get()) {
+            throw new RefundInProgressException($invoice);
+        }
 
-            if ($refundAmountNet <= 0) {
-                throw new \InvalidArgumentException('Refund amount must be positive.');
-            }
+        try {
+            // ── Phase 1: decide, under the row lock, in a transaction of its own ──────────
+            /** @var array{net:int, gross:int, description:string, billable:Billable|null} $plan */
+            $plan = DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $lineItems): array {
+                $fresh = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
-            if ($refundAmountNet > $invoice->remainingRefundableNet()) {
-                throw new RefundExceedsInvoiceAmountException(
-                    "Refund of {$refundAmountNet} exceeds remaining refundable amount {$invoice->remainingRefundableNet()}."
-                );
-            }
+                $refundAmountNet = $request['amount_net'] ?? $fresh->remainingRefundableNet();
 
-            // Per-item VAT is the source of truth: the credit note taxes every
-            // original line at its own rate, so the gross we refund at Mollie has
-            // to be built the same way or bank and credit note drift apart on
-            // mixed-VAT invoices.
-            $refundVat = $this->invoices->creditNoteVat($invoice, $refundAmountNet, $lineItems);
-            $refundGross = $refundAmountNet + $refundVat;
+                if ($refundAmountNet <= 0) {
+                    throw new \InvalidArgumentException('Refund amount must be positive.');
+                }
 
-            /** @var Billable|null $billable */
-            $billable = $invoice->billable()->first();
+                if ($refundAmountNet > $fresh->remainingRefundableNet()) {
+                    throw new RefundExceedsInvoiceAmountException(
+                        "Refund of {$refundAmountNet} exceeds remaining refundable amount {$fresh->remainingRefundableNet()}."
+                    );
+                }
 
-            $description = 'Refund: '.$reasonCode->label();
-            if ($reasonText !== null && trim($reasonText) !== '') {
-                $description .= ' — '.$reasonText;
-            }
+                // Per-item VAT is the source of truth: the credit note taxes every
+                // original line at its own rate, so the gross we refund at Mollie has
+                // to be built the same way or bank and credit note drift apart on
+                // mixed-VAT invoices.
+                $refundVat = $this->invoices->creditNoteVat($fresh, $refundAmountNet, $lineItems);
 
+                $description = 'Refund: '.$reasonCode->label();
+                if ($reasonText !== null && trim($reasonText) !== '') {
+                    $description .= ' — '.$reasonText;
+                }
+
+                return [
+                    'net' => $refundAmountNet,
+                    'gross' => $refundAmountNet + $refundVat,
+                    'description' => $description,
+                    'billable' => $fresh->billable()->first(),
+                ];
+            });
+
+            // ── Phase 2: the money, with no lock and no transaction held ─────────────────
             try {
                 $mollieRefundId = $this->callMollieRefund(
                     $invoice->mollie_payment_id,
-                    $refundGross,
-                    $description,
+                    $plan['gross'],
+                    $plan['description'],
                     InvoiceService::normalizeCurrency($invoice->currency),
                 );
             } catch (\Throwable $e) {
                 Log::warning('Mollie refund failed for invoice '.$invoice->id, ['exception' => $e->getMessage()]);
 
-                if ($billable !== null) {
-                    $mollieFailure = ['billable' => $billable, 'exception' => $e, 'invoice' => $invoice];
+                if ($plan['billable'] !== null) {
+                    $mollieFailure = ['billable' => $plan['billable'], 'exception' => $e, 'invoice' => $invoice];
                 }
 
                 throw $e;
             }
 
-            // Snapshot what was effectively refunded BEFORE we persist the new
-            // credit note — otherwise effectiveRefundedNet() would already
-            // include the fresh credit note and double-count it on top of the
-            // increment below. The reconciliation closes the gap for legacy
-            // refunds (e.g. plan-change pro-rata) that historically wrote the
-            // credit note without touching the cache column.
-            $reconciledBaseNet = $invoice->effectiveRefundedNet();
+            // ── Phase 3: book it. The money has moved, so this stays short ───────────────
+            $creditNote = DB::transaction(function () use ($invoice, $plan, $lineItems, $reasonCode, $reasonText, $walletCredits, $mollieRefundId): BillingInvoice {
+                $fresh = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
-            $creditNote = $this->invoices->createCreditNote($invoice, $refundAmountNet, $lineItems, $reasonText);
-            $creditNote->refund_reason_code = $reasonCode;
-            // mollie_refund_id is the only key RefundHandler dedups on. Without it
-            // a webhook re-delivery (or replay tooling) treats this refund as
-            // unseen and books a second credit note for the same money.
-            $creditNote->line_items = self::stampRefundId((array) $creditNote->line_items, $mollieRefundId);
-            // Remember which wallet units this refund already credited so a later
-            // refundFully() does not hand them out a second time.
-            $creditNote->line_items = self::stampWalletCredits((array) $creditNote->line_items, $walletCredits);
-            $creditNote->save();
+                // Snapshot what was effectively refunded BEFORE we persist the new
+                // credit note — otherwise effectiveRefundedNet() would already
+                // include the fresh credit note and double-count it on top of the
+                // increment below. The reconciliation closes the gap for legacy
+                // refunds (e.g. plan-change pro-rata) that historically wrote the
+                // credit note without touching the cache column.
+                $reconciledBaseNet = $fresh->effectiveRefundedNet();
 
-            $invoice->refunded_net = $reconciledBaseNet + $refundAmountNet;
-            $invoice->save();
+                // `deferDocument`: the DOMPDF render and the disk write happen after this
+                // commits, so the row lock and the serial range are not held across them.
+                $creditNote = $this->invoices->createCreditNote(
+                    $fresh,
+                    $plan['net'],
+                    $lineItems,
+                    $reasonText,
+                    deferDocument: true,
+                );
+                $creditNote->refund_reason_code = $reasonCode;
+                // mollie_refund_id is the only key RefundHandler dedups on. Without it
+                // a webhook re-delivery (or replay tooling) treats this refund as
+                // unseen and books a second credit note for the same money.
+                $creditNote->line_items = self::stampRefundId((array) $creditNote->line_items, $mollieRefundId);
+                // Remember which wallet units this refund already credited so a later
+                // refundFully() does not hand them out a second time.
+                $creditNote->line_items = self::stampWalletCredits((array) $creditNote->line_items, $walletCredits);
+                $creditNote->save();
 
-            if ($billable !== null) {
-                // Wallet credits stay inside: units handed out without the credit note
-                // that justifies them would be free service.
-                foreach ($walletCredits as $usageType => $units) {
-                    $this->wallet->credit($billable, (string) $usageType, (int) $units);
+                // Clamped: between phase 1 and here another path (a plan-change prorata
+                // refund, which clamps against the same figure) may have credited part of
+                // this invoice. The money is out either way, so the document stands and the
+                // cache column just may not exceed what was charged.
+                $fresh->refunded_net = min((int) $fresh->amount_net, $reconciledBaseNet + $plan['net']);
+                $fresh->save();
+
+                if ($plan['billable'] !== null) {
+                    // Wallet credits stay inside: units handed out without the credit note
+                    // that justifies them would be free service.
+                    foreach ($walletCredits as $usageType => $units) {
+                        $this->wallet->credit($plan['billable'], (string) $usageType, (int) $units);
+                    }
                 }
 
-                // Announcements go after the commit. The money has already left Mollie by
-                // this point, so anything that throws here — an app listener on
-                // InvoiceRefunded pushing to a CRM, a queued-notification insert
-                // deadlocking — used to roll back the credit note and the `refunded_net`
-                // increment while the customer kept the refund. The admin then saw a 500,
-                // clicked Refund again, and the second call was still inside the payment
-                // total, so Mollie paid it out too.
-                DB::afterCommit(function () use ($billable, $invoice, $creditNote, $request, $notifyUser): void {
-                    event(new InvoiceRefunded($billable, $invoice, $creditNote, $request));
+                return $creditNote;
+            });
 
-                    if (! $notifyUser) {
-                        return;
-                    }
+            // ── Phase 4: the document, then the announcements ────────────────────────────
+            // Both outside every transaction. The money has left Mollie by now, so anything
+            // throwing here — a render failure, an app listener on InvoiceRefunded pushing to
+            // a CRM — must not be able to undo the booking. It used to roll back the credit
+            // note and the `refunded_net` increment while the customer kept the refund, and
+            // the admin's retry click then paid it out a second time.
+            $this->invoices->issueCreditNoteDocument($creditNote, $invoice->refresh());
 
-                    $recipients = MollieBilling::notifyBillingAdmins($billable);
+            if ($plan['billable'] !== null) {
+                event(new InvoiceRefunded($plan['billable'], $invoice, $creditNote, $request));
+
+                if ($notifyUser) {
+                    $recipients = MollieBilling::notifyBillingAdmins($plan['billable']);
+
                     if (! empty($recipients)) {
-                        Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $billable, $creditNote));
+                        Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $plan['billable'], $creditNote));
                     }
-                });
+                }
             }
 
             return $creditNote;
-        });
+        } finally {
+            $lock->release();
+        }
     }
 
     /**

@@ -320,3 +320,26 @@ Plan definitions, pricing, quotas, and addon compatibility all come from `Subscr
 | Paid extras on a Local subscription | Throws `LocalSubscriptionDoesNotSupportPaidExtrasException`. UI surfaces this as a callout that links to the plan-change page. |
 | Change onto a plan marked `hidden` | Throws `HiddenPlanNotSelectableException` — for immediate *and* scheduled (`apply_at => end_of_period`) changes, the latter before anything is stored. Staying on a hidden plan and changing interval within it are allowed. Deliberate programmatic moves pass a typed `SubscriptionUpdateRequest` with `allowHiddenPlan: true` — array payloads cannot enable the override. See [Hidden plans](configuration.md#hidden-plans). |
 | Second plan change while one is pending | `InvalidSubscriptionStateException` thrown. |
+
+## Transaction boundaries
+
+`UpdateSubscription::update()` reaches Mollie three times — `applyProrata()` creates payments
+and posts refunds, and the patcher cancels or PATCHes the subscription. None of those may sit
+inside a database transaction: a transaction can be rolled back, an HTTP call to a payment
+provider cannot, and a rollback after the money moved is exactly how a refund came to be paid
+out twice.
+
+So the method runs in three phases, with a **cache lock** (`billing:subscription-change:{id}`)
+providing the serialisation a long transaction used to:
+
+1. **Decide** — row lock in a short transaction: build the context, validate, resolve coupons.
+2. **Talk to Mollie** — nothing held.
+3. **Write** — a second short transaction that re-takes the row lock and re-reads
+   `subscription_meta`, because a job (a retry, the overage sweep) may have committed a key in
+   between and the write below replaces the whole column.
+
+A concurrent change to the same billable is refused with `SubscriptionChangeInProgressException`
+rather than queued: it would otherwise sit on a worker for the length of a payment plus a
+PATCH, and its seats, addons and prorata amounts are stale by the time it gets its turn.
+Events are dispatched through `DB::afterCommit()` for the same underlying reason — a throwing
+listener must not be able to undo settled money.

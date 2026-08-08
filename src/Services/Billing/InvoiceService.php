@@ -208,6 +208,7 @@ class InvoiceService
         ?array $lineItems = null,
         ?string $description = null,
         ?array $externalReference = null,
+        bool $deferDocument = false,
     ): BillingInvoice {
         if ($amountNet <= 0) {
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
@@ -291,15 +292,36 @@ class InvoiceService
         $creditNote->vat_validation_id = $original->vat_validation_id;
         $this->persistWithSerial($creditNote, 'refund');
 
-        /** @var Billable $billable */
-        $billable = $original->billable()->first();
-
-        if ($billable !== null) {
-            $this->generateAndStorePdf($creditNote, $billable);
-            event(new CreditNoteIssued($billable, $creditNote, $original));
+        // `$deferDocument` lets a caller inside a transaction hand the rendering and the
+        // announcement back out again: a DOMPDF render plus a disk write is the longest
+        // thing in any refund, and holding the invoice row lock and the serial range across
+        // it is what made a lock-wait timeout against a concurrent refund realistic. The
+        // caller then calls {@see issueCreditNoteDocument()} once it has committed.
+        if (! $deferDocument) {
+            $this->issueCreditNoteDocument($creditNote, $original);
         }
 
         return $creditNote;
+    }
+
+    /**
+     * Render a credit note's PDF and announce it.
+     *
+     * Split out of {@see createCreditNote()} so a caller can persist inside a transaction
+     * and do this after committing. Safe to call twice — `generateAndStorePdf()` overwrites
+     * the same deterministic path — but nothing calls it twice.
+     */
+    public function issueCreditNoteDocument(BillingInvoice $creditNote, BillingInvoice $original): void
+    {
+        /** @var Billable|null $billable */
+        $billable = $original->billable()->first();
+
+        if ($billable === null) {
+            return;
+        }
+
+        $this->generateAndStorePdf($creditNote, $billable);
+        event(new CreditNoteIssued($billable, $creditNote, $original));
     }
 
     /**

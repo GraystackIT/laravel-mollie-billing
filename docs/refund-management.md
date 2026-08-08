@@ -209,7 +209,7 @@ This makes refunds identifiable in the Mollie dashboard.
 
 | Flow | Protection |
 |------|------------|
-| `RefundInvoiceService::refund()` | `lockForUpdate` + `remainingRefundableNet()` check |
+| `RefundInvoiceService::refund()` | Cache lock per invoice (`billing:invoice-refund:{id}`, `RefundInProgressException` for the loser) + `lockForUpdate` and a `remainingRefundableNet()` check inside the short decide/write transactions. The Mollie call and the PDF render sit between them, with nothing held — a transaction across them could be rolled back after the money had moved, and the retry then refunded again. |
 | `InvoiceService::createRefund()` | Per-line idempotency token (stable across retries) + clamp against `effectiveRefundedNet()` |
 | Webhook sync | Deduplication by Mollie refund ID in `mollie_payment_id` |
 | Chargeback sync | Deduplication by Mollie chargeback ID in the credit note's `line_items` |
