@@ -13,7 +13,7 @@ Plan changes are handled by `UpdateSubscription::update()` and come in three fla
 | **Downgrade** (lower price) | User selects a cheaper plan | Immediate or scheduled to end of period |
 | **Mollie → Free downgrade** | Paid user selects a free plan | Cancels Mollie subscription, switches source to Local |
 | **Past-Due reset** | User on `past_due` selects any paid plan (same or different) | Charges the full first period of the new plan, resets the cycle |
-| **Zero-cost change** | Same price, different plan/interval | Immediate, booked as a saldo-zero switch invoice |
+| **Zero-cost change** | Same price, different plan/interval | Immediate, booked as a saldo-zero switch invoice settled against the paying one |
 | **Free → Free change** | Both source and target are free plans | Immediate, source stays Local |
 
 ### Two changes inside one period
@@ -31,13 +31,30 @@ recorded: the old plan line's remaining value now belongs to the new plan code, 
 longer refundable. `InvoiceService::createPlanSwitchInvoice()` writes them as one invoice whose
 header nets to zero and increments `refunded_net` on the invoices it credits.
 
-**Known limit.** That switch invoice has no `mollie_payment_id` — the new plan's days were paid
-for out of the *previous* invoice, not by a charge of their own — so it cannot serve as a refund
-source for a *third* change in the same period: `BillingInvoice::currentPeriodLines()` only
-offers invoices a refund can actually be posted against. A third change in one period after an
-equal-price switch therefore credits the components the switch consumed at 0. Resolving it
-properly means modelling "this charge was settled against that invoice", which the ledger does
-not currently express.
+That switch invoice has no `mollie_payment_id` of its own — the new plan's days were paid for
+out of the *previous* invoice, and `mollie_payment_id` is unique because that uniqueness is the
+webhook's idempotency guard. The settlement is therefore recorded as a relationship:
+`billing_invoices.settled_by_invoice_id` points at the invoice whose payment covers it, set only
+when there is exactly one such invoice and it covers the switch's charges in full.
+
+Everything that has to answer "can this be refunded, and against what" follows that pointer:
+
+- `BillingInvoice::currentPeriodLines()` offers an invoice as a refund candidate if it collected
+  a payment **or** is settled by one that did.
+- `refundableBaseNet()` / `refundableBaseGross()` read a settled invoice line by line (its own
+  charges, i.e. lines without a `parent_invoice_id`) rather than from its header, which nets to
+  zero by construction. Every other invoice is still measured by its header — that is the money
+  Mollie actually took, and lines can legitimately state something else.
+- `InvoiceService::createRefund()` posts to `refundablePaymentId()`, so the refund lands on the
+  payment that physically holds the money.
+
+The books stay balanced across the pair: a switch only gets the pointer when its charge is fully
+covered by credits booked against the source invoice, so the source's remaining refundable base
+drops by exactly what the switch's base gains. A 2900 renewal switched on day 11 leaves
+`935 + 1965 = 2900`, and a downgrade on day 20 credits `1965 × 12/21 = 1123` out of the switch.
+
+If the pointer cannot be set (several source invoices, or a charge larger than its credits) the
+switch stays unrefundable, exactly as before.
 
 ## Deferred Upgrade Flow
 

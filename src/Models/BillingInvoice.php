@@ -126,7 +126,119 @@ class BillingInvoice extends Model
 
     public function remainingRefundableNet(): int
     {
-        return max(0, $this->amount_net - $this->effectiveRefundedNet());
+        return max(0, $this->refundableBaseNet() - $this->effectiveRefundedNet());
+    }
+
+    /**
+     * The value this invoice itself holds, before anything was credited back out of it.
+     *
+     * Its own charges only — lines carrying a `parent_invoice_id` are credits *against
+     * another* invoice, not value this one collected. For an ordinary invoice that is
+     * every line, so this equals `amount_net` (a coupon line is negative and has no
+     * parent, so it still reduces the base exactly as it reduces the header).
+     *
+     * The difference is the saldo-zero plan-switch invoice
+     * ({@see InvoiceService::createPlanSwitchInvoice()}), which persists a charge for the
+     * new plan next to the credit that paid for it. Its header nets to zero because no new
+     * money moved — but the charge line is real, unused service the customer has paid for
+     * out of the previous invoice, and a later change in the same period has to be able to
+     * credit it. Read off the header, the pool was `max(0, 0 − 0)` and every candidate line
+     * from such an invoice was silently dropped, so a third change in one period credited
+     * the components the switch had consumed at 0.
+     *
+     * The books stay balanced across the two documents: the switch only exists when its
+     * charge is fully covered by credits booked against the source invoice, so the source's
+     * remaining base drops by exactly what the switch's base gains — together they never
+     * exceed what the payment collected.
+     */
+    /**
+     * The invoice whose payment settled this one's charges, if any.
+     *
+     * Set only by {@see InvoiceService::createPlanSwitchInvoice()}: an equal-price change
+     * mid-period charges the new plan and credits the old for the same amount, so the new
+     * plan's remaining days are paid for out of the invoice that collected the period. That
+     * relationship cannot be expressed by sharing `mollie_payment_id` — it is unique, and
+     * that uniqueness is the webhook's idempotency guard.
+     */
+    public function settledBy(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'settled_by_invoice_id');
+    }
+
+    /**
+     * The Mollie payment a refund of this invoice has to be posted against.
+     *
+     * Its own, or — for a settled document — the one that actually holds the money. Follows
+     * a single hop: a switch invoice always settles against an invoice that collected a
+     * payment, never against another switch.
+     */
+    public function refundablePaymentId(): ?string
+    {
+        if ($this->mollie_payment_id !== null) {
+            return (string) $this->mollie_payment_id;
+        }
+
+        if ($this->settled_by_invoice_id === null) {
+            return null;
+        }
+
+        return $this->settledBy?->mollie_payment_id !== null
+            ? (string) $this->settledBy->mollie_payment_id
+            : null;
+    }
+
+    public function refundableBaseNet(): int
+    {
+        // An invoice that collected its own payment is measured by its header, full stop:
+        // that is the money Mollie took, and the lines can legitimately state something
+        // else — a mismatch booked to the paid amount, VAT recomputed after the fact. Only
+        // a settled document has to be read line by line, and it is settled precisely
+        // because its header cannot describe it.
+        if ($this->settled_by_invoice_id === null) {
+            return (int) $this->amount_net;
+        }
+
+        return $this->ownChargeTotal('amount_net', (int) $this->amount_net);
+    }
+
+    /**
+     * `refundableBaseNet()`'s gross counterpart — the ceiling a refund of this invoice may
+     * not exceed at Mollie. Same rule, same reason: a settled plan-switch invoice's header
+     * gross is zero while the service its charge line paid for is real.
+     */
+    public function refundableBaseGross(): int
+    {
+        if ($this->settled_by_invoice_id === null) {
+            return (int) $this->amount_gross;
+        }
+
+        return $this->ownChargeTotal('amount_gross', (int) $this->amount_gross);
+    }
+
+    /**
+     * Sum one amount field over this invoice's own charge lines — the ones that do not carry
+     * a `parent_invoice_id`, i.e. are not credits against another invoice.
+     *
+     * @param  int  $fallback  used when the invoice has no line items at all
+     */
+    private function ownChargeTotal(string $field, int $fallback): int
+    {
+        $lines = (array) ($this->line_items ?? []);
+
+        if ($lines === []) {
+            return $fallback;
+        }
+
+        $total = 0;
+        foreach ($lines as $line) {
+            if (($line['parent_invoice_id'] ?? null) !== null) {
+                continue;
+            }
+
+            $total += (int) ($line[$field] ?? 0);
+        }
+
+        return $total;
     }
 
     /**
@@ -353,7 +465,13 @@ class BillingInvoice extends Model
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
             ->where('status', InvoiceStatus::Paid)
-            ->whereNotNull('mollie_payment_id')
+            ->where(function ($q): void {
+                // A candidate has to be an invoice a refund can actually be posted against.
+                // Either it collected a payment itself, or its charges were settled out of one
+                // that did — the saldo-zero plan-switch invoice is the second kind, and
+                // excluding it left a third change in one period crediting nothing.
+                $q->whereNotNull('mollie_payment_id')->orWhereNotNull('settled_by_invoice_id');
+            })
             ->whereIn('invoice_kind', [InvoiceKind::Subscription, InvoiceKind::OneTimeOrder, InvoiceKind::Overage])
             ->get();
 

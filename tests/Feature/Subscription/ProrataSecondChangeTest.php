@@ -345,7 +345,142 @@ it('does not offer a credit line as something further to credit', function (): v
             $line = $invoice->line_items[$candidate['line_index']];
 
             expect((int) $line['amount_net'])->toBeGreaterThanOrEqual(0, "{$kind} candidate is a credit line")
-                ->and($invoice->mollie_payment_id)->not->toBeNull("{$kind} candidate has no payment to refund against");
+                // Its own payment, or the one its charges were settled out of — either way a
+                // refund of this line can actually be posted.
+                ->and($invoice->refundablePaymentId())->not->toBeNull("{$kind} candidate has no payment to refund against");
         }
     }
+});
+
+it('credits a third change in one period after an equal-price switch', function (): void {
+    $this->travelTo(Carbon::parse('2026-01-11 00:00:00', 'UTC'));
+
+    $billable = secondChangeBillable('pro');
+    $renewal = secondChangeRenewalInvoice($billable, [
+        ['kind' => 'plan', 'code' => 'pro', 'label' => 'Pro', 'quantity' => 1, 'unit_price_net' => 2900, 'amount_net' => 2900],
+    ]);
+
+    $composer = app(ProrataComposer::class);
+
+    // Day 11: equal-price switch. 2900 × 21/31 = 1965 charged for pro-b, the same credited
+    // for pro. No money moves — the new plan's 21 days are paid for out of the renewal.
+    $switchLines = $composer->compose(new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'pro', newPlan: 'pro-b',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    ));
+
+    $switch = app(InvoiceService::class)->createPlanSwitchInvoice(
+        $billable,
+        array_values(array_filter($switchLines, fn ($l): bool => $l->direction === 'charge')),
+        array_values(array_filter($switchLines, fn ($l): bool => $l->direction === 'refund')),
+    );
+
+    // The switch carries no payment of its own — `mollie_payment_id` is unique and belongs to
+    // the webhook's idempotency — so the settlement is recorded as a relationship.
+    expect($switch->mollie_payment_id)->toBeNull()
+        ->and((int) $switch->settled_by_invoice_id)->toBe((int) $renewal->getKey())
+        ->and($switch->refundablePaymentId())->toBe((string) $renewal->mollie_payment_id)
+        // Its header nets to zero, but the value it holds is the new plan's 21 days.
+        ->and((int) $switch->amount_net)->toBe(0)
+        ->and($switch->refundableBaseNet())->toBe(1965)
+        ->and($switch->remainingRefundableNet())->toBe(1965);
+
+    // And the books balance across the two: the renewal's own base dropped by exactly what
+    // the switch gained, so together they never exceed what the payment collected.
+    expect($renewal->fresh()->remainingRefundableNet() + $switch->remainingRefundableNet())
+        ->toBe(2900);
+
+    $billable->forceFill(['subscription_plan_code' => 'pro-b'])->save();
+
+    // Day 20: downgrade to starter with 12 of those 21 days unused.
+    $this->travelTo(Carbon::parse('2026-01-20 00:00:00', 'UTC'));
+
+    $downgrade = $composer->compose(new PlanChangeIntent(
+        billable: $billable->fresh(),
+        currentPlan: 'pro-b', newPlan: 'starter',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    ));
+
+    $credits = array_values(array_filter($downgrade, fn ($l): bool => $l->direction === 'refund'));
+    $creditNet = array_sum(array_map(fn ($l): int => abs($l->amountNet), $credits));
+
+    // 1965 × 12/21 = 1123. The switch invoice used to be invisible to the composer — no
+    // payment to refund against and a header pool of zero — so this credited 0 and the
+    // customer was charged 348 for starter on top.
+    expect($creditNet)->toBe(1123)
+        ->and($credits[0]->originalInvoice?->getKey())->toBe($switch->getKey());
+});
+
+it('posts a refund of a settled switch invoice against the payment that holds the money', function (): void {
+    $this->travelTo(Carbon::parse('2026-01-11 00:00:00', 'UTC'));
+
+    $billable = secondChangeBillable('pro');
+    $renewal = secondChangeRenewalInvoice($billable, [
+        ['kind' => 'plan', 'code' => 'pro', 'label' => 'Pro', 'quantity' => 1, 'unit_price_net' => 2900, 'amount_net' => 2900],
+    ]);
+
+    $composer = app(ProrataComposer::class);
+
+    $switchLines = $composer->compose(new PlanChangeIntent(
+        billable: $billable,
+        currentPlan: 'pro', newPlan: 'pro-b',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 1, newSeats: 1,
+        currentAddons: [], newAddons: [],
+    ));
+
+    app(InvoiceService::class)->createPlanSwitchInvoice(
+        $billable,
+        array_values(array_filter($switchLines, fn ($l): bool => $l->direction === 'charge')),
+        array_values(array_filter($switchLines, fn ($l): bool => $l->direction === 'refund')),
+    );
+
+    $billable->forceFill(['subscription_plan_code' => 'pro-b'])->save();
+
+    $this->travelTo(Carbon::parse('2026-01-20 00:00:00', 'UTC'));
+
+    $credits = array_values(array_filter(
+        $composer->compose(new PlanChangeIntent(
+            billable: $billable->fresh(),
+            currentPlan: 'pro-b', newPlan: 'starter',
+            currentInterval: 'monthly', newInterval: 'monthly',
+            currentSeats: 1, newSeats: 1,
+            currentAddons: [], newAddons: [],
+        )),
+        fn ($l): bool => $l->direction === 'refund',
+    ));
+
+    $posted = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$posted) {
+        if ($request instanceof \Mollie\Api\Http\Requests\CreatePaymentRefundRequest) {
+            $posted[] = $request;
+        }
+
+        return (object) ['id' => 're_settled'];
+    });
+
+    $creditNote = app(InvoiceService::class)->createRefund($billable->fresh(), $credits);
+
+    // Not merely booked locally: the money leaves through the renewal's payment, which is
+    // where it physically sits. A switch invoice has no payment of its own, and this used to
+    // be rejected outright with "Missing original invoice or payment_id".
+    expect($posted)->toHaveCount(1)
+        ->and($creditNote)->not->toBeNull()
+        ->and(abs((int) $creditNote->amount_net))->toBe(1123);
+
+    // The request's own resource path names the payment it will be posted to.
+    expect($posted[0]->resolveResourcePath())
+        ->toContain((string) $renewal->mollie_payment_id);
+
+    // And nothing was refunded twice: the renewal's own remaining base plus what is left on
+    // the switch still adds up to what is refundable in total.
+    $switch = BillingInvoice::query()->whereNotNull('settled_by_invoice_id')->firstOrFail();
+    expect($renewal->fresh()->remainingRefundableNet() + $switch->fresh()->remainingRefundableNet())
+        ->toBe(2900 - 1123);
 });

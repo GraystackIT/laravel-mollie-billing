@@ -1929,7 +1929,12 @@ class InvoiceService
 
         foreach ($effective as $line) {
             $original = $line->originalInvoice;
-            if ($original === null || $original->mollie_payment_id === null) {
+            // A settled invoice (the saldo-zero plan switch) holds no payment of its own —
+            // its charges were paid for out of the invoice it settles against, and that is
+            // where the refund has to be posted.
+            $refundPaymentId = $original?->refundablePaymentId();
+
+            if ($original === null || $refundPaymentId === null) {
                 $failedLines[] = ['line' => $line->toArray(), 'error' => 'Missing original invoice or payment_id'];
                 continue;
             }
@@ -1983,18 +1988,24 @@ class InvoiceService
             // effectiveRefundedNet(), not the raw column: a credit note whose
             // `refunded_net` write was lost is still a refund that happened, and reading
             // the column alone reported the full amount as still refundable.
+            //
+            // Measured against the value the invoice itself holds, not its header. They are
+            // the same number for every invoice that collected a payment — but a settled
+            // plan-switch invoice nets to zero by construction, so the header said there was
+            // nothing to refund while its charge line was real, unused service. See
+            // BillingInvoice::refundableBaseNet().
             $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? $original->effectiveRefundedNet();
-            $restRefundableNet = max(0, (int) $original->amount_net - $alreadyRefundedNet);
+            $restRefundableNet = max(0, $original->refundableBaseNet() - $alreadyRefundedNet);
             $restRefundableGross = $restRefundableNet + ($restRefundableNet > 0 ? $this->creditNoteVat($original, $restRefundableNet) : 0);
 
-            $restRefundable = min((int) $original->amount_gross, $restRefundableGross);
+            $restRefundable = min($original->refundableBaseGross(), $restRefundableGross);
             $refundAmount = min($absGross, $restRefundable);
 
             if ($refundAmount < $absGross) {
                 Log::warning('Refund amount clamped below local gross', [
                     'billable' => $billable->getKey(),
                     'original_invoice_id' => $original->getKey(),
-                    'mollie_payment_id' => $original->mollie_payment_id,
+                    'mollie_payment_id' => $refundPaymentId,
                     'local_gross' => $absGross,
                     'rest_refundable' => $restRefundable,
                     'refund_sent' => $refundAmount,
@@ -2057,7 +2068,7 @@ class InvoiceService
             // and paid the customer twice.
             try {
                 $refund = Mollie::send(new CreatePaymentRefundRequest(
-                    paymentId: $original->mollie_payment_id,
+                    paymentId: $refundPaymentId,
                     description: $description ?? "Plan change refund: {$line->label}",
                     amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
                 ));
@@ -2190,10 +2201,43 @@ class InvoiceService
             $lineItemsForPersist[] = $line->toArray();
         }
 
+        // The payment this document's charge lines are settled out of, when there is exactly
+        // one and it covers them in full.
+        //
+        // No new money moves here — the new plan's remaining days are paid for by the credit
+        // booked against the invoice that collected it — so the switch used to carry no
+        // payment id at all. That made its charge line unrefundable: `currentPeriodLines()`
+        // only offers invoices a refund can actually be posted against, so a *third* change
+        // in the same period credited the components this switch consumed at 0. Inheriting
+        // the id makes the refund land where the money actually is.
+        //
+        // Guarded by "one source, fully covered", which is the same condition that keeps the
+        // books balanced: the source invoice's refundable base has already dropped by the
+        // credits below, so the two documents together can never exceed what that payment
+        // collected. Anything more complicated (several source invoices, or a charge larger
+        // than its credits) leaves the id null and the old, cautious behaviour stands.
+        $sourceInvoices = [];
+        $creditedNet = 0;
+
         foreach ($refundLines as $line) {
             if ($line->originalInvoice !== null) {
                 $currencyFromOriginal ??= (string) $line->originalInvoice->currency;
+                $sourceInvoices[(int) $line->originalInvoice->getKey()] = $line->originalInvoice;
+                $creditedNet += abs((int) $line->amountNet);
             }
+        }
+
+        $chargedNet = 0;
+        foreach ($chargeLines as $line) {
+            $chargedNet += (int) $line->amountNet;
+        }
+
+        $settledAgainst = count($sourceInvoices) === 1 && $chargedNet <= $creditedNet
+            ? reset($sourceInvoices)
+            : null;
+
+        if ($settledAgainst !== null && $settledAgainst->refundablePaymentId() === null) {
+            $settledAgainst = null;
         }
 
         $currency = self::normalizeCurrency($currencyFromOriginal);
@@ -2211,8 +2255,11 @@ class InvoiceService
         $invoice = new BillingInvoice;
         $invoice->billable_type = $billable->getMorphClass();
         $invoice->billable_id = $billable->getKey();
+        // Not `mollie_payment_id`: that column is unique, and its uniqueness is what keeps
+        // the webhook idempotent. The settlement is a relationship of its own.
         $invoice->mollie_payment_id = null;
-        $invoice->mollie_subscription_id = null;
+        $invoice->settled_by_invoice_id = $settledAgainst?->getKey();
+        $invoice->mollie_subscription_id = $settledAgainst?->mollie_subscription_id;
         $invoice->invoice_kind = InvoiceKind::Subscription;
         $invoice->status = InvoiceStatus::Paid;
         $invoice->country = strtoupper((string) ($billable->getBillingCountry() ?? ''));
