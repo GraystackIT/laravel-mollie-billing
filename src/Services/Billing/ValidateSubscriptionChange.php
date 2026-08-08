@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
+use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
@@ -56,6 +57,7 @@ class ValidateSubscriptionChange
     {
         $this->validateSubscriptionEstablished($billable);
         $this->validateTargetPlanNotHidden($billable, $context);
+        $this->validateTargetIsSold($billable, $context);
         $this->validateSeats($billable, $context);
         $this->validateAddons($billable, $context);
         $this->validateLocalSubscriptionExtras($billable, $context);
@@ -136,6 +138,37 @@ class ValidateSubscriptionChange
 
         if ($this->catalog->planIsHidden($targetPlanCode)) {
             throw new HiddenPlanNotSelectableException($billable, $targetPlanCode);
+        }
+    }
+
+    /**
+     * Refuse a target the catalog does not actually sell.
+     *
+     * `basePriceNet()` and `seatPriceNet()` cannot express "not offered" — they answer
+     * `0`/`null` for an unknown (plan, interval) pair, and every pricing path downstream
+     * reads that as *free*. `isFreePlan()` then becomes true, which takes the change into
+     * the free-downgrade branch: the Mollie subscription is cancelled and a real refund is
+     * issued, before the enum cast on `subscription_interval` rejects the value and rolls
+     * the local transaction back. The billable is left looking Active and subscribed while
+     * nothing bills it at Mollie any more.
+     *
+     * `StartSubscriptionCheckout` has guarded this since the interval toggle turned out to
+     * be enough to obtain a paid plan for nothing; the change path is the same kind of
+     * surface, since `SubscriptionUpdateRequest::from()` is documented as taking request
+     * input. Only checked when plan or interval actually move: an unchanged pair is already
+     * the billable's reality, and refusing to touch seats or addons because the catalog
+     * dropped an interval underneath an existing customer helps nobody.
+     *
+     * @throws IntervalNotOfferedException
+     */
+    protected function validateTargetIsSold(Billable $billable, SubscriptionChangeContext $context): void
+    {
+        if (! $context->planChanged && ! $context->intervalChanged) {
+            return;
+        }
+
+        if (! $this->catalog->planOffersInterval($context->newPlan, $context->newInterval)) {
+            throw new IntervalNotOfferedException($context->newPlan, $context->newInterval);
         }
     }
 
@@ -266,14 +299,28 @@ class ValidateSubscriptionChange
      */
     protected function validateAddons(Billable $billable, SubscriptionChangeContext $context): void
     {
-        if (! $context->planChanged) {
+        if ($context->planChanged) {
+            $context->newAddons = array_values(array_filter(
+                $context->newAddons,
+                fn (string $code) => $this->catalog->planAllowsAddon($context->newPlan, $code),
+            ));
+        }
+
+        // Same zero-price trap as the plan itself (see validateTargetIsSold): an addon
+        // the target interval does not sell prices at 0, so switching to yearly used to
+        // hand out a monthly-only addon for free, forever. Filtering it out silently
+        // would be the other kind of wrong — the customer asked for it and is willing to
+        // pay — so this refuses the change instead. Only when plan or interval move; an
+        // unchanged pair is what the billable already has.
+        if (! $context->planChanged && ! $context->intervalChanged) {
             return;
         }
 
-        $context->newAddons = array_values(array_filter(
-            $context->newAddons,
-            fn (string $code) => $this->catalog->planAllowsAddon($context->newPlan, $code),
-        ));
+        foreach ($context->newAddons as $code) {
+            if (! $this->catalog->addonOffersInterval($code, $context->newInterval)) {
+                throw new IntervalNotOfferedException($code, $context->newInterval, 'addon');
+            }
+        }
     }
 
     /**

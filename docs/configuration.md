@@ -375,6 +375,8 @@ Declaring only `monthly` (or only `yearly`) is valid — `billing:check-config` 
 
 This matters because the price getters cannot express "not sold": `basePriceNet()` and `addonPriceNet()` return `0` for an interval that has no block, exactly as they do for a genuinely free plan. Ask `SubscriptionCatalogInterface::planOffersInterval()` / `addonOffersInterval()` whenever the interval comes from user input — `StartSubscriptionCheckout` throws `IntervalNotOfferedException` rather than trusting a zero, because an unpriced pair used to be activated as a free plan.
 
+The change path enforces the same rule: `UpdateSubscription::update()` (via `ValidateSubscriptionChange`) and `ScheduleSubscriptionChange::schedule()` both throw `IntervalNotOfferedException` when the *target* plan or one of the target addons does not sell the target interval. It fires only when plan or interval actually move — an existing customer whose interval you later remove from the catalog can still change seats and addons.
+
 The same applies to addons: an addon whose `intervals` block omits an interval is not enabled on that interval.
 
 #### Declaring a quota with no overage
