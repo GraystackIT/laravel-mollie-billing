@@ -338,10 +338,22 @@ class BillingInvoice extends Model
 
         // 1. All charge invoices (Subscription/OneTimeOrder/Overage) for the billable with paid status,
         //    that have at least one line with (kind, optionally code) whose line.period contains now.
+        // A refund candidate has to be an invoice a refund can actually be paid out of, and
+        // `createRefund()` needs a `mollie_payment_id` to post one. The only document here
+        // without one is the saldo-zero plan-switch invoice
+        // ({@see InvoiceService::createPlanSwitchInvoice()}), which is a Subscription and is
+        // Paid, so it was offered — and since candidates are sorted newest-invoice-first, it
+        // won over the invoice that actually holds the money. Its header net is 0, so
+        // `applyRemainingRefundablePool()` read a budget of `max(0, 0 − 0)` and dropped every
+        // line it had just selected; on the seat and addon paths the loop had already
+        // decremented its remaining quantity for the discarded candidate, so the real
+        // invoice's line was never reached at all. A downgrade after an equally-priced
+        // sidegrade therefore credited nothing.
         $invoices = self::query()
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
             ->where('status', InvoiceStatus::Paid)
+            ->whereNotNull('mollie_payment_id')
             ->whereIn('invoice_kind', [InvoiceKind::Subscription, InvoiceKind::OneTimeOrder, InvoiceKind::Overage])
             ->get();
 
@@ -404,6 +416,16 @@ class BillingInvoice extends Model
                     continue;
                 }
                 if (abs($end->diffInDays($billablePeriodEnd, false)) > 1) {
+                    continue;
+                }
+
+                // Negative lines are credits, not charges. The plan-switch invoice persists
+                // its refund lines alongside its charge lines under the same `plan`/`seats`/
+                // `addon` kinds, so without this a credit already granted was offered up as
+                // something further to credit. Zero stays a candidate: a fully coupon-covered
+                // line has no cash to give back but still holds quantity, and dropping it
+                // would let the same unit be credited twice from an older invoice.
+                if ((int) ($line['amount_net'] ?? 0) < 0) {
                     continue;
                 }
 

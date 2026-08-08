@@ -13,8 +13,31 @@ Plan changes are handled by `UpdateSubscription::update()` and come in three fla
 | **Downgrade** (lower price) | User selects a cheaper plan | Immediate or scheduled to end of period |
 | **Mollie → Free downgrade** | Paid user selects a free plan | Cancels Mollie subscription, switches source to Local |
 | **Past-Due reset** | User on `past_due` selects any paid plan (same or different) | Charges the full first period of the new plan, resets the cycle |
-| **Zero-cost change** | Same price, different plan/interval | Immediate |
+| **Zero-cost change** | Same price, different plan/interval | Immediate, booked as a saldo-zero switch invoice |
 | **Free → Free change** | Both source and target are free plans | Immediate, source stays Local |
+
+### Two changes inside one period
+
+A mid-period change is *priced* against the whole period (`newNet × remaining / total`) but
+*buys* only the days that are left, and the line it writes is stamped with the window it
+actually bought — `[now, period_end]`, not `[period_start, period_end]`. That stamp is what a
+later change in the same period reads: `ProrataComposer` derives each credit from the line's
+own window, so an amount that bought 21 days is divided by 21 days, not by 31.
+
+A change whose two sides cancel out is still booked. `BillingPolicy::computeProrata()` nets
+charge against credit, so an equal-price plan switch reports 0/0 — but the composer produces a
+full charge for the new plan and a matching credit for the old one, and those have to be
+recorded: the old plan line's remaining value now belongs to the new plan code, so it is no
+longer refundable. `InvoiceService::createPlanSwitchInvoice()` writes them as one invoice whose
+header nets to zero and increments `refunded_net` on the invoices it credits.
+
+**Known limit.** That switch invoice has no `mollie_payment_id` — the new plan's days were paid
+for out of the *previous* invoice, not by a charge of their own — so it cannot serve as a refund
+source for a *third* change in the same period: `BillingInvoice::currentPeriodLines()` only
+offers invoices a refund can actually be posted against. A third change in one period after an
+equal-price switch therefore credits the components the switch consumed at 0. Resolving it
+properly means modelling "this charge was settled against that invoice", which the ledger does
+not currently express.
 
 ## Deferred Upgrade Flow
 

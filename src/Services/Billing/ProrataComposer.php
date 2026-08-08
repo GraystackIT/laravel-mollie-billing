@@ -397,6 +397,37 @@ class ProrataComposer
         return [$start, $end];
     }
 
+    /**
+     * The window a *charge* line is stamped with, as opposed to the one it is priced from.
+     *
+     * A mid-period change is priced against the whole period — `newNet × remaining/total` —
+     * but what it buys is only the remaining days. Stamping the line with the full window
+     * recorded a number that bought 21 days as if it had bought 31, and that stamp is what
+     * a *later* change in the same period reads: `buildRefundLine()` derives its credit as
+     * `amount_net × remaining/total` from the line's own period, so it divided a 21-day
+     * amount by 31 days. An upgrade on day 11 of 31 charged 3997; downgrading back on day
+     * 20 credited 1547 instead of 2284 — 737 net kept from the customer, and the same 737
+     * overcharged when the second change goes the other way.
+     *
+     * The interval-change path passes a window that already starts now, so it is
+     * unaffected; `ProrataChargeHandler` re-stamps only there, which is why the same-
+     * interval case had nothing to correct it.
+     *
+     * @return array{0: CarbonInterface, 1: array{total: int, remaining: int}}
+     */
+    private function chargeStamp(CarbonInterface $pricingStart, CarbonInterface $pricingEnd): array
+    {
+        $now = BillingTime::nowUtc();
+
+        $stampStart = $now->greaterThan($pricingStart) && $now->lessThan($pricingEnd)
+            ? $now
+            : $pricingStart;
+
+        ['days' => $days] = $this->periodMath($stampStart, $pricingEnd);
+
+        return [$stampStart, $days];
+    }
+
     private function planChargeLine(PlanChangeIntent $intent, CarbonInterface $periodStart, CarbonInterface $periodEnd): ?ProrataLine
     {
         $listPrice = $this->catalog->basePriceNet($intent->newPlan, $intent->newInterval);
@@ -415,6 +446,8 @@ class ProrataComposer
 
         $planName = $this->catalog->planName($intent->newPlan) ?? $intent->newPlan;
 
+        [$stampStart, $stampDays] = $this->chargeStamp($periodStart, $periodEnd);
+
         return new ProrataLine(
             originalInvoice: null,
             originalLineItemIndex: null,
@@ -426,10 +459,11 @@ class ProrataComposer
             vatRate: $vat['rate'],
             amountVat: $vat['amount'],
             amountGross: $chargeNet + $vat['amount'],
-            periodStart: $periodStart->copy(),
+            // Priced from the period, stamped from now — see chargeStamp().
+            periodStart: $stampStart->copy(),
             periodEnd: $periodEnd->copy(),
-            daysActive: $days['total'],
-            daysRemaining: $days['remaining'],
+            daysActive: $stampDays['total'],
+            daysRemaining: $stampDays['remaining'],
             isCouponCovered: false,
             direction: 'charge',
         );
@@ -537,10 +571,14 @@ class ProrataComposer
             $idx = $candidate['line_index'];
             $availableQty = (int) $candidate['remaining_quantity'];
             $takeQty = min($remaining, $availableQty);
-            $remaining -= $takeQty;
 
+            // Decremented only once a line exists. `buildRefundLine()` returns null for a
+            // candidate with nothing left to credit, and charging the reduction against it
+            // anyway meant the next candidate — the invoice that does hold the money — was
+            // never asked for those units.
             $line = $this->buildRefundLine($invoice, $idx, 'seats', null, $takeQty);
             if ($line !== null) {
+                $remaining -= $takeQty;
                 $lines[] = $line;
             }
         }
@@ -566,6 +604,8 @@ class ProrataComposer
 
         $planName = $this->catalog->planName($intent->newPlan) ?? $intent->newPlan;
 
+        [$stampStart, $stampDays] = $this->chargeStamp($periodStart, $periodEnd);
+
         return new ProrataLine(
             originalInvoice: null,
             originalLineItemIndex: null,
@@ -577,10 +617,11 @@ class ProrataComposer
             vatRate: $vat['rate'],
             amountVat: $vat['amount'],
             amountGross: $chargeNet + $vat['amount'],
-            periodStart: $periodStart->copy(),
+            // Priced from the period, stamped from now — see chargeStamp().
+            periodStart: $stampStart->copy(),
             periodEnd: $periodEnd->copy(),
-            daysActive: $days['total'],
-            daysRemaining: $days['remaining'],
+            daysActive: $stampDays['total'],
+            daysRemaining: $stampDays['remaining'],
             isCouponCovered: false,
             direction: 'charge',
         );
@@ -613,10 +654,11 @@ class ProrataComposer
             $idx = $candidate['line_index'];
             $availableQty = (int) $candidate['remaining_quantity'];
             $takeQty = min($remaining, $availableQty);
-            $remaining -= $takeQty;
 
+            // See seatsRefundLines(): the quantity is consumed only once a line exists.
             $line = $this->buildRefundLine($invoice, $idx, 'addon', $code, $takeQty);
             if ($line !== null) {
+                $remaining -= $takeQty;
                 $lines[] = $line;
             }
         }
@@ -643,6 +685,8 @@ class ProrataComposer
         $addonName = $this->catalog->addonName($code) ?? $code;
         $planName = $this->catalog->planName($intent->newPlan) ?? $intent->newPlan;
 
+        [$stampStart, $stampDays] = $this->chargeStamp($periodStart, $periodEnd);
+
         return new ProrataLine(
             originalInvoice: null,
             originalLineItemIndex: null,
@@ -654,10 +698,11 @@ class ProrataComposer
             vatRate: $vat['rate'],
             amountVat: $vat['amount'],
             amountGross: $chargeNet + $vat['amount'],
-            periodStart: $periodStart->copy(),
+            // Priced from the period, stamped from now — see chargeStamp().
+            periodStart: $stampStart->copy(),
             periodEnd: $periodEnd->copy(),
-            daysActive: $days['total'],
-            daysRemaining: $days['remaining'],
+            daysActive: $stampDays['total'],
+            daysRemaining: $stampDays['remaining'],
             isCouponCovered: false,
             direction: 'charge',
         );
@@ -724,9 +769,18 @@ class ProrataComposer
         // 1002. The per-invoice pool cap bounds the invoice total, not the single line,
         // so on a multi-line invoice those cents really do leave for Mollie and inflate
         // `refunded_net`.
+        // Capped at the share being refunded, not at the whole line. `periodMath()` clamps
+        // `remaining` at zero but never at the total, so a line whose `period_start` lies in
+        // the future yields a factor above 1 — and bounding one seat against all three let
+        // it be credited for more than it cost: quantity 3 at 1500, factor 30/27, one seat
+        // out came to 556 for a seat that was paid 500. The plan path already caps at the
+        // right granularity ({@see planRefundLine()}); the per-invoice pool bounds the
+        // invoice total, so it does not catch a single inflated unit either.
+        $refundableShare = (int) floor($originalCashNet * $quantity / $originalQty);
+
         $refundNet = min(
             (int) round($originalCashNet * $quantity / $originalQty * $factor),
-            $originalCashNet,
+            $refundableShare,
         );
         if ($refundNet <= 0) {
             return null;

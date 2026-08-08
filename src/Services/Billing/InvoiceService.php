@@ -2232,6 +2232,18 @@ class InvoiceService
         // later downgrade composed its refund against this switch invoice — which carries no
         // `mollie_payment_id` — and `createRefund()` could never pay it out, while the
         // invoice that actually holds the money still read as untouched.
+        //
+        // Accumulated per invoice id, not per line. The composer loads plan, seat and addon
+        // candidates through three separate `currentPeriodLines()` queries, so three lines
+        // crediting the same renewal invoice arrive holding three independent clones of that
+        // row — each with `refunded_net = 0`. Writing them in a loop meant every save()
+        // overwrote the previous increment, so only the last line was ever booked: a switch
+        // crediting 1965 + 339 + 610 recorded 610, and `remainingRefundableNet()` reported
+        // 3690 where 1386 was left. 2304 net of value already spent on the switch read as
+        // still refundable, and a later admin refund pays that out in real money. Same
+        // clobber `createRefund()` fixed with its own tracker.
+        $refundedNetPerInvoice = [];
+
         foreach ($refundLines as $line) {
             $original = $line->originalInvoice;
 
@@ -2239,10 +2251,15 @@ class InvoiceService
                 continue;
             }
 
-            $original->refunded_net = min(
-                (int) $original->amount_net,
-                (int) $original->refunded_net + abs((int) $line->amountNet),
-            );
+            $id = (int) $original->getKey();
+            $refundedNetPerInvoice[$id] ??= ['invoice' => $original, 'net' => (int) $original->refunded_net];
+            $refundedNetPerInvoice[$id]['net'] += abs((int) $line->amountNet);
+        }
+
+        foreach ($refundedNetPerInvoice as $entry) {
+            /** @var BillingInvoice $original */
+            $original = $entry['invoice'];
+            $original->refunded_net = min((int) $original->amount_net, (int) $entry['net']);
             $original->save();
         }
 

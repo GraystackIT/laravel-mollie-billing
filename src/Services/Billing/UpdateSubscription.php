@@ -173,8 +173,21 @@ class UpdateSubscription
 
         // Pro-rata: ProrataExecutor handles charge/refund/sidegrade + Mollie-Subscription-PATCH.
         // For Mollie → Free, the patcher cancels the subscription.
-        $hasProrata = ($context->prorataChargeNet > 0 || $context->prorataCreditNet > 0)
-            && $context->isMollie;
+        //
+        // The composer's own verdict, not just the aggregate. `BillingPolicy::computeProrata()`
+        // nets the two sides against each other, so an equal-price plan switch — a documented,
+        // supported flavour ("same price, different plan → immediate") — reported 0 charge and
+        // 0 credit and the executor never ran. The composer meanwhile produced a full charge
+        // line for the new plan and a matching credit for the old one, and both were thrown
+        // away: no invoice, no `refunded_net`, no quantity consumed. Nothing recorded that the
+        // old plan line's remaining value now belongs to the new plan code — so it read as
+        // fully refundable for the rest of the period, and a later refund would pay out value
+        // already spent, while the next change in that period found no line for the plan it is
+        // now on and credited nothing.
+        $hasProrata = $context->isMollie
+            && ($context->prorataChargeNet > 0
+                || $context->prorataCreditNet > 0
+                || $this->composerWouldBook($billable, $context));
 
         $prorataResult = null;
         // Whether Mollie has been dealt with by the pro-rata pipeline. `$hasProrata`
@@ -445,6 +458,27 @@ class UpdateSubscription
      *         prorata charge as additional negative lines (kind=coupon).
      * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
      */
+    /**
+     * Whether the composer has anything to book even though the aggregate nets to zero.
+     *
+     * Only asked when the aggregate says "nothing to do", so the extra compose() is paid for
+     * exactly on the change that would otherwise be dropped. `applyProrata()` composes again
+     * from its own intent — the lines are not threaded through, because that intent carries
+     * the resolved coupons and this one deliberately does not.
+     */
+    protected function composerWouldBook(Billable $billable, SubscriptionChangeContext $context): bool
+    {
+        $intent = $this->buildIntent($billable, $context, $context->newSeats, $context->newAddons);
+
+        foreach (app(ProrataComposer::class)->compose($intent) as $line) {
+            if ($line->amountNet !== 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     protected function applyProrata(Billable $billable, SubscriptionChangeContext $context, array $resolvedCoupons = []): array
     {
         $intent = $this->buildIntent(

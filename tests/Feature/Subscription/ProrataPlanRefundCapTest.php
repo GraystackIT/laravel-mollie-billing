@@ -173,3 +173,46 @@ it('still prorates the plan refund normally inside the period', function (): voi
     expect($refunds)->toHaveCount(1)
         ->and($refunds[0]->amountNet)->toBe(-2806);
 });
+
+it('never refunds one seat for more than one seat cost, even at a factor above 1', function (): void {
+    $billable = refundCapBillable();
+
+    // Three seats for 1500 on a line whose period starts three days from now: the same
+    // factor > 1 as above, applied to a quantity-scaled refund. The plan path caps at the
+    // right granularity; this one capped a single unit against all three, so a seat that
+    // cost 500 could be credited 556 — and the per-invoice pool bounds the invoice total,
+    // never a single inflated unit, so nothing downstream catches it.
+    $invoice = refundCapInvoice($billable);
+    $lineItems = $invoice->line_items;
+    $lineItems[1]['quantity'] = 3;
+    $lineItems[1]['amount_net'] = 1500;
+    $lineItems[1]['vat_amount'] = 285;
+    $lineItems[1]['amount_gross'] = 1785;
+    $lineItems[1]['period_start'] = Carbon::parse('2026-03-13 00:00:00', 'UTC')->toIso8601String();
+    $invoice->line_items = $lineItems;
+    $invoice->amount_net = 4400;
+    $invoice->amount_vat = 836;
+    $invoice->amount_gross = 5236;
+    $invoice->save();
+
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['seat_count'] = 4;
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    $lines = app(ProrataComposer::class)->compose(new PlanChangeIntent(
+        billable: $billable->fresh(),
+        currentPlan: 'pro', newPlan: 'pro',
+        currentInterval: 'monthly', newInterval: 'monthly',
+        currentSeats: 4, newSeats: 3,
+        currentAddons: [], newAddons: [],
+    ));
+
+    $refunds = array_values(array_filter($lines, fn ($line): bool => $line->direction === 'refund'));
+
+    expect($refunds)->toHaveCount(1)
+        ->and($refunds[0]->quantity)->toBe(1)
+        // Precondition: the factor really is above 1, or the cap is never exercised.
+        ->and($refunds[0]->daysRemaining)->toBeGreaterThan($refunds[0]->daysActive)
+        // 1500 / 3 = 500. Uncapped: round(1500 × 1/3 × 1.111111) = 556.
+        ->and($refunds[0]->amountNet)->toBe(-500);
+});
