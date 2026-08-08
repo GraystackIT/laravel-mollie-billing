@@ -840,7 +840,7 @@ Every state change dispatches a Laravel event so apps can react via listeners. N
 - `PlanChanged`, `SubscriptionUpdated`, `SubscriptionChangeScheduled`
 - `TrialStarted`, `TrialConverted`, `TrialExpired`, `TrialExtended`
 - `MandateUpdated`
-- `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`, `DuplicatePaymentReceived`
+- `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`, `DuplicatePaymentReceived`, `RenewalCollectedForEndedSubscription`
 - `InvoiceCreated`, `InvoiceRefunded`, `CreditNoteIssued`, `InvoicePdfRegenerated`
 - `OverageCharged`, `OverageChargeFailed`
 - `CouponRedeemed`, `GrantRevoked`

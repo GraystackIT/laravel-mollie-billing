@@ -107,6 +107,14 @@ final class BillingAuditMap
                     'reason' => self::truncate($e->reason),
                 ]),
 
+            Events\RenewalCollectedForEndedSubscription::class => self::make('renewal_collected_for_ended_subscription', AuditCategory::Payment,
+                fn (Events\RenewalCollectedForEndedSubscription $e): array => [
+                    'payment_id' => $e->paymentId,
+                    'invoice_id' => $e->invoiceId,
+                    'amount' => $e->amountGross,
+                    'status' => $e->status,
+                ]),
+
             Events\PlanChanged::class => self::make('plan_changed', AuditCategory::Subscription,
                 fn (Events\PlanChanged $e): array => [
                     'old_plan' => $e->oldPlan,

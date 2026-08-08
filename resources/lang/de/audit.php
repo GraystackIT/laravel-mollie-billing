@@ -55,6 +55,7 @@ return [
     // Zahlungen
     'payment_succeeded' => 'Zahlung eingegangen',
     'payment_failed' => 'Zahlung fehlgeschlagen: :reason',
+    'renewal_collected_for_ended_subscription' => 'Eine Verlängerung wurde für ein nicht mehr laufendes Abo eingezogen (:status) — muss erstattet werden',
     'payment_amount_mismatch' => 'Gezahlter Betrag weicht vom erwarteten Betrag ab',
     'duplicate_payment_received' => 'Doppelte Zahlung erhalten und ignoriert',
     'checkout_started' => 'Checkout begonnen',

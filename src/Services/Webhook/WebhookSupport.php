@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Webhook;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Events\PaymentAmountMismatch;
+use GraystackIT\MollieBilling\Events\RenewalCollectedForEndedSubscription;
 use GraystackIT\MollieBilling\Events\SubscriptionActivationFailed;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
@@ -398,6 +399,120 @@ class WebhookSupport
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
 
         return $subscriptionId !== '' && $billable->hasAccessibleBillingSubscription();
+    }
+
+    /**
+     * Report a recurring charge that arrived for a subscription which no longer runs.
+     *
+     * The invoice has been written — the money did arrive and the customer is entitled to
+     * a document, and an operator needs something to refund against — but nothing that
+     * treats the charge as a live renewal has run. Mollie keeps charging a subscription
+     * whose local cancel never landed, and until this existed every period was booked as
+     * an ordinary renewal: anchor advanced, wallets recharged, invoice mailed to somebody
+     * who cancelled.
+     */
+    public function reportRenewalForEndedSubscription(Billable $billable, object $payment, BillingInvoice $invoice): void
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        $status = $billable->getBillingSubscriptionStatus()->value;
+        $reason = 'A recurring charge was collected for a subscription that no longer runs (status '.$status.')';
+
+        Log::error('Recurring charge collected for an ended subscription', [
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+            'payment_id' => $paymentId,
+            'invoice_id' => $invoice->getKey(),
+            'status' => $status,
+        ]);
+
+        event(new RenewalCollectedForEndedSubscription(
+            $billable,
+            $paymentId,
+            (int) $invoice->getKey(),
+            (int) $invoice->amount_gross,
+            $status,
+        ));
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send(
+            $admins,
+            MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'Mollie collected a renewal for a subscription that no longer runs — it needs refunding and the Mollie subscription needs cancelling',
+                [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'payment_id' => $paymentId,
+                    'invoice_id' => $invoice->getKey(),
+                    'invoice_serial' => $invoice->serial_number,
+                    'amount_gross' => (int) $invoice->amount_gross,
+                    'status' => $status,
+                    'error' => $reason,
+                ],
+            ),
+        );
+    }
+
+    /**
+     * Report an activation the handler refused because the subscription is not in a state
+     * it may activate.
+     *
+     * By the time this is reachable the mandate has been saved, so the customer has
+     * handed over a payment method and received nothing for it. That was a `Log::info`
+     * and a return: no event, no alert, and a return page that span to a timeout. The
+     * cheapest fix for the customer is an operator who knows within seconds.
+     */
+    public function reportSkippedActivation(Billable $billable, object $payment, string $context): void
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
+        $status = $billable->getBillingSubscriptionStatus()->value;
+        $reason = 'Mandate captured but the subscription was not activated: status '.$status.' is not activatable';
+
+        Log::error('Mandate-only activation skipped', [
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+            'payment_id' => $paymentId,
+            'context' => $context,
+            'status' => $status,
+        ]);
+
+        event(new SubscriptionActivationFailed(
+            $billable,
+            $planCode,
+            $interval,
+            $paymentId,
+            null,
+            $reason,
+        ));
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send(
+            $admins,
+            MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'A mandate was captured but the subscription was not activated — the customer is left with nothing',
+                [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'payment_id' => $paymentId,
+                    'context' => $context,
+                    'plan_code' => $planCode,
+                    'interval' => $interval,
+                    'status' => $status,
+                    'error' => $reason,
+                ],
+            ),
+        );
     }
 
     /**

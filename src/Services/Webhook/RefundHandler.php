@@ -33,12 +33,24 @@ class RefundHandler
      */
     public function handle(object $payment, Billable $billable): void
     {
-        $refunds = [];
+        // Rethrown, not swallowed. `refunds()` is a live HTTP call against Mollie, and
+        // returning here let `__invoke()` record the outcome signature — which already
+        // encodes the refunded total — as processed and answer 200. Mollie then never
+        // calls again for that refund state: no credit note, `refunded_net` still 0, the
+        // invoice reading as fully paid, and the VAT on the refund declared in the OSS
+        // export. Nothing reconciles dashboard refunds afterwards. Both handlers here are
+        // idempotent (dedup on the refund/chargeback id), so a 503 and a re-delivery are
+        // strictly better than a lie.
         try {
             /** @phpstan-ignore-next-line — SDK magic. */
             $refunds = $payment->refunds();
-        } catch (\Throwable) {
-            return;
+        } catch (\Throwable $e) {
+            Log::error('Could not load refunds for a payment that reports some', [
+                'payment_id' => $payment->id ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw $e;
         }
 
         $original = BillingInvoice::query()

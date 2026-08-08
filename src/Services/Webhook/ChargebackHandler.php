@@ -55,12 +55,15 @@ class ChargebackHandler
             /** @phpstan-ignore-next-line — SDK magic. */
             $chargebacks = $payment->chargebacks();
         } catch (\Throwable $e) {
-            Log::warning('Could not load chargebacks for a payment that reports some', [
+            // Rethrown — see RefundHandler. Returning here made `__invoke()` answer 200
+            // for a delivery that booked nothing, and a chargeback that goes unnoticed
+            // leaves the customer subscribed on money the bank already pulled back.
+            Log::error('Could not load chargebacks for a payment that reports some', [
                 'payment_id' => $payment->id ?? null,
                 'error' => $e->getMessage(),
             ]);
 
-            return;
+            throw $e;
         }
 
         $original = BillingInvoice::query()

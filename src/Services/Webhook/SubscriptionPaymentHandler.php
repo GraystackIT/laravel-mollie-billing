@@ -77,6 +77,23 @@ class SubscriptionPaymentHandler
     }
 
     /**
+     * Whether a recurring charge — settled or failed — still relates to a running
+     * subscription.
+     *
+     * One predicate for both directions. `failed()` has refused non-billable states since
+     * a charge for a subscription that had ended could otherwise restart the dunning
+     * clock; `paid()` had no equivalent, which is the more expensive half.
+     */
+    protected function isBillableState(Billable $billable): bool
+    {
+        return in_array(
+            $billable->getBillingSubscriptionStatus(),
+            [SubscriptionStatus::Active, SubscriptionStatus::Trial, SubscriptionStatus::PastDue],
+            true,
+        );
+    }
+
+    /**
      * @param  array<string, mixed>  $metadata
      */
     public function paid(object $payment, Billable $billable, array $metadata): void
@@ -155,6 +172,26 @@ class SubscriptionPaymentHandler
         );
 
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
+
+        // The same state rule `failed()` applies, and for the same reason — except this is
+        // the side money actually arrives on. Nothing here stops Mollie from charging a
+        // subscription whose local cancel never landed: CancelSubscription writes the
+        // Cancelled status even when cancelAtMollie() fails (it leaves a
+        // `pending_subscription_cancel` marker), and RetrySubscriptionCancelJob gives up
+        // after 24h with a single admin mail. From then on every period was booked as an
+        // ordinary renewal: period anchor advanced, every wallet reset and recharged,
+        // "your invoice is ready" mailed to a customer who cancelled and has no access.
+        // Silently, forever.
+        //
+        // The invoice above is kept deliberately: the money did arrive and the customer is
+        // entitled to a document for it (and an operator needs something to refund
+        // against). Everything that would treat this as a live subscription is skipped,
+        // and the operators are told.
+        if (! $this->isBillableState($billable)) {
+            $this->support->reportRenewalForEndedSubscription($billable, $payment, $invoice);
+
+            return;
+        }
 
         if ($couponDiscountNet > 0) {
             try {
@@ -337,7 +374,7 @@ class SubscriptionPaymentHandler
         }
 
         $status = $billable->getBillingSubscriptionStatus();
-        if (! in_array($status, [SubscriptionStatus::Active, SubscriptionStatus::Trial, SubscriptionStatus::PastDue], true)) {
+        if (! $this->isBillableState($billable)) {
             Log::info('Recurring payment failure ignored — subscription is not in a billable state', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $payment->id ?? null,

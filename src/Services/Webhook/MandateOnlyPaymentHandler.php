@@ -46,6 +46,35 @@ class MandateOnlyPaymentHandler
         SubscriptionStatus::Cancelled,
     ];
 
+    /**
+     * Whether this billable may be activated by the payment we are holding.
+     *
+     * The enum list above is not the whole answer, and the docblock's claim that
+     * "anything still accessible was already caught by openGate()" is what hid the gap:
+     * `Active` with a past `subscription_ends_at` is *not* accessible — that is precisely
+     * the state an AccessGrant coupon and `ActivateLocalSubscription($durationDays)`
+     * leave behind once the grant lapses. The gate let it through, this list did not, and
+     * both activation bodies logged and returned.
+     *
+     * What that cost: the customer was routed into a trial checkout (StartSubscription-
+     * Checkout admits them, they have no mandate yet), the €0 mandate payment settled,
+     * the mandate was saved — and nothing else happened. No subscription, no invoice, no
+     * runAfterCheckout, and the return page span to a timeout. Worse, their second
+     * attempt now *had* a mandate, so the trial branch was skipped and they were charged
+     * full price for the trial they were offered.
+     *
+     * So the predicate is the gate's own question, with the enum list kept as the
+     * explicit statement of intent for the states that carry no `ends_at`.
+     */
+    protected function mayActivate(Billable $billable): bool
+    {
+        if (in_array($billable->getBillingSubscriptionStatus(), self::ACTIVATABLE_STATES, true)) {
+            return true;
+        }
+
+        return ! $billable->hasAccessibleBillingSubscription();
+    }
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly SubscriptionCatalogInterface $catalog,
@@ -245,12 +274,11 @@ class MandateOnlyPaymentHandler
     ): void {
         /** @var Model&Billable $billable */
 
-        if (! in_array($billable->getBillingSubscriptionStatus(), self::ACTIVATABLE_STATES, true)) {
-            Log::info('Mandate-only coupon activation skipped — subscription is not in an activatable state', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-                'current_status' => $billable->getBillingSubscriptionStatus()->value,
-            ]);
+        if (! $this->mayActivate($billable)) {
+            // A mandate has already been captured at this point, so a skip here is not a
+            // no-op — it is a customer who paid (or accepted a €0 authorisation) and got
+            // nothing. Reported, not just logged.
+            $this->support->reportSkippedActivation($billable, $payment, 'coupon');
 
             return;
         }
@@ -407,12 +435,8 @@ class MandateOnlyPaymentHandler
     ): void {
         /** @var Model&Billable $billable */
 
-        if (! in_array($billable->getBillingSubscriptionStatus(), self::ACTIVATABLE_STATES, true)) {
-            Log::info('Mandate-only trial activation skipped — subscription is not in an activatable state', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-                'current_status' => $billable->getBillingSubscriptionStatus()->value,
-            ]);
+        if (! $this->mayActivate($billable)) {
+            $this->support->reportSkippedActivation($billable, $payment, 'trial');
 
             return;
         }
