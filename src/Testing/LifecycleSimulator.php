@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Webhook\SubscriptionPaymentHandler;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -242,9 +243,17 @@ class LifecycleSimulator
         }
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
-        $gross = $amountGrossOverride
-            ?? $this->estimateRenewalGross($billable);
-        $amountValue = number_format($gross, 2, '.', '');
+
+        // Minor units all the way to the Mollie call, scaled by the configured
+        // currency. `number_format(…, 2)` sent a JPY renewal at 1/100 of its value and
+        // a KWD one at 10×, so the simulated renewal reconciled against nothing and
+        // fired PaymentAmountMismatch — which is exactly the signal the simulator
+        // exists to let an operator trust. The override stays a major-unit float
+        // because that is what `billing:simulate --gross=29.90` types.
+        $grossMinor = $amountGrossOverride !== null
+            ? (int) round($amountGrossOverride * BillingMoney::minorUnitFactor($currency))
+            : $this->estimateRenewalGrossMinor($billable);
+        $amountValue = BillingMoney::mollieAmount($grossMinor, $currency);
 
         $created = Mollie::send(new CreatePaymentRequest(
             description: 'Simulated subscription renewal',
@@ -334,7 +343,8 @@ class LifecycleSimulator
         return $payment;
     }
 
-    private function estimateRenewalGross(Billable $billable): float
+    /** Gross in integer minor units — what the VAT service already returns. */
+    private function estimateRenewalGrossMinor(Billable $billable): int
     {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $vatService = app(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class);
@@ -356,7 +366,7 @@ class LifecycleSimulator
             $billable,
         );
 
-        return ((int) $vat['gross']) / 100;
+        return (int) $vat['gross'];
     }
 
     private function force(Billable $billable, array $attributes): void

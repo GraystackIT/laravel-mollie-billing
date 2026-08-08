@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Vat;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 
@@ -85,8 +86,13 @@ class OssProtocolService
                     $row['currency'],
                     $row['country'],
                     $row['sales_count'],
-                    number_format($row['net_amount_cents'] / 100, 2, '.', ''),
-                    number_format($row['vat_amount_cents'] / 100, 2, '.', ''),
+                    // Scaled by the row's own currency, which the bucket key already
+                    // carries and which the column beside it declares. A hardcoded /100
+                    // exported JPY at 1/100 and KWD at 10× — an OSS protocol is a tax
+                    // filing, so the magnitude has to be right for every currency the
+                    // install accepts, not just the two-decimal ones.
+                    BillingMoney::mollieAmount((int) $row['net_amount_cents'], $row['currency']),
+                    BillingMoney::mollieAmount((int) $row['vat_amount_cents'], $row['currency']),
                     $row['vat_rate'],
                 ]);
             }

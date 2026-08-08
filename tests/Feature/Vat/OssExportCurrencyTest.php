@@ -96,6 +96,30 @@ it('groups amounts by currency instead of summing unlike currencies', function (
     expect($byCurrency['CHF'][5])->toBe('10.00');
 });
 
+it('writes each row at its own currency scale', function (): void {
+    // A JPY sale and a EUR sale in the same quarter. The number of decimals is a
+    // property of the currency the column beside it declares, so a hardcoded /100
+    // exported ¥3000 as "30.00" — an OSS protocol is a tax filing, and that is off by
+    // two orders of magnitude. KWD (three decimals) was wrong by 10× the other way.
+    ossInvoice($this->billable, 'JP', 'JPY', 3000, 10.0);
+    ossInvoice($this->billable, 'AT', 'EUR', 2000, 20.0);
+    ossInvoice($this->billable, 'KW', 'KWD', 1500, 0.0);
+
+    $result = (new OssProtocolService())->export(2026);
+    $rows = readOssCsv($result->path);
+
+    $byCurrency = [];
+    foreach (array_slice($rows, 1) as $row) {
+        $byCurrency[$row[1]] = $row;
+    }
+
+    expect($byCurrency['JPY'][4])->toBe('3000')
+        ->and($byCurrency['JPY'][5])->toBe('300')
+        ->and($byCurrency['EUR'][4])->toBe('20.00')
+        ->and($byCurrency['EUR'][5])->toBe('4.00')
+        ->and($byCurrency['KWD'][4])->toBe('1.500');
+});
+
 it('labels the amount columns with the currency for a single-currency export', function (): void {
     ossInvoice($this->billable, 'AT', 'EUR', 1000, 20.0);
 

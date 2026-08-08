@@ -54,13 +54,25 @@ new class extends Component {
     }
 
     /**
-     * Parse the decimal string entered in the modal to integer cents. Accepts both
-     * `.` and `,` as decimal separator plus the locale grouping characters the
+     * Parse the decimal string entered in the modal to integer minor units. Accepts
+     * both `.` and `,` as decimal separator plus the locale grouping characters the
      * formatter emits; anything else (including scientific notation, which would
      * silently inflate the amount) returns false so the caller can flash an error.
+     *
+     * Scaled by the invoice's own currency, not by a hardcoded 100. This is real
+     * money leaving the account: on a JPY install (`fractionDigits() === 0`) an
+     * operator typing `500` to refund ¥500 posted a ¥50 000 refund — a 100× over-
+     * refund — while every honest entry below ¥50 000 was rejected as "exceeds
+     * remaining". KWD (3 digits) was wrong by 10× in the other direction.
+     *
+     * Composed from the integer and fraction parts rather than by multiplying a
+     * float: `(float) '0.07' * 100` is 7.000000000000001, and round() only papers
+     * over that for as long as the factor stays small.
      */
-    private function parseAmountToCents(string $input): int|false
+    private function parseAmountToMinor(string $input, ?string $currency = null): int|false
     {
+        $digits = BillingMoney::fractionDigits($currency);
+
         // Strip thousands separators heuristically. We accept "1.234,56" and "1,234.56"
         // by removing every separator that is not the last decimal mark.
         $normalized = str_replace(self::GROUPING_CHARS, '', trim($input));
@@ -71,20 +83,29 @@ new class extends Component {
         if ($decimalPos >= 0) {
             $intPart = preg_replace('/[.,]/', '', substr($normalized, 0, $decimalPos));
             $fracPart = preg_replace('/[.,]/', '', substr($normalized, $decimalPos + 1));
-            if (strlen($fracPart) > 2) {
+            if (strlen($fracPart) > $digits) {
                 return false;
             }
             $normalized = $intPart.'.'.$fracPart;
         } else {
             $normalized = preg_replace('/[.,]/', '', $normalized);
+            $fracPart = '';
         }
 
-        // Digits only, optional 1–2 decimals. `is_numeric` would accept "1e3".
-        if (preg_match('/^\d+(?:\.\d{1,2})?$/', $normalized) !== 1) {
+        // Digits only, optional decimals up to what the currency has.
+        // `is_numeric` would accept "1e3".
+        $pattern = $digits === 0
+            ? '/^\d+$/'
+            : '/^\d+(?:\.\d{1,'.$digits.'})?$/';
+
+        if (preg_match($pattern, $normalized) !== 1) {
             return false;
         }
 
-        return (int) round(((float) $normalized) * 100);
+        $intPart = $decimalPos >= 0 ? (string) $intPart : $normalized;
+
+        return (int) $intPart * BillingMoney::minorUnitFactor($currency)
+            + (int) str_pad($fracPart, $digits, '0');
     }
 
     public function billable(): mixed
@@ -174,10 +195,12 @@ new class extends Component {
             return;
         }
 
-        $amountCents = $this->parseAmountToCents($raw);
+        $amountCents = $this->parseAmountToMinor($raw, $invoice->currency);
         if ($amountCents === false) {
             $this->error = __('billing::admin.billables.invoices.flash.invalid_amount', [
-                'example' => BillingMoney::number(10.5),
+                // The example the operator is meant to retype has to be typable: on a
+                // zero-decimal currency "10,50" is exactly what this parser rejects.
+                'example' => BillingMoney::number(10.5, $invoice->currency),
             ]);
             return;
         }
