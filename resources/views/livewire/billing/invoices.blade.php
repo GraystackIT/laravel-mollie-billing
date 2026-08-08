@@ -139,19 +139,19 @@ new class extends Component {
                             <flux:card class="p-5!">
                                 <flux:subheading>{{ __('billing::portal.invoice.total_spent') }}</flux:subheading>
                                 <div class="mt-3">
-                                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['spent'] }}</span>
+                                    <span dusk="stats-spent" class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['spent'] }}</span>
                                 </div>
                             </flux:card>
                             <flux:card class="p-5!">
                                 <flux:subheading>{{ __('billing::portal.invoice.total_paid') }}</flux:subheading>
                                 <div class="mt-3">
-                                    <span class="text-3xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{{ $stats['paid'] }}</span>
+                                    <span dusk="stats-paid" class="text-3xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{{ $stats['paid'] }}</span>
                                 </div>
                             </flux:card>
                             <flux:card class="p-5!">
                                 <flux:subheading>{{ __('billing::portal.invoice.total_credits') }}</flux:subheading>
                                 <div class="mt-3">
-                                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['credits'] }}</span>
+                                    <span dusk="stats-credits" class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['credits'] }}</span>
                                 </div>
                             </flux:card>
                         </div>
@@ -171,14 +171,14 @@ new class extends Component {
                             </flux:table.columns>
                             <flux:table.rows>
                                 @foreach ($invoices as $invoice)
-                                    <flux:table.row>
+                                    <flux:table.row dusk="invoice-row-{{ $invoice->id }}">
                                         <flux:table.cell class="tabular-nums">{{ BillingTime::display($invoice->created_at, $billable)->translatedFormat('d. M Y') }}</flux:table.cell>
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->invoice_kind?->color() ?? 'zinc'">{{ $invoice->invoice_kind?->label() ?? '—' }}</flux:badge>
                                         </flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums">{{ BillingMoney::format($invoice->amount_net, $invoice->currency) }}</flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums text-zinc-400">{{ BillingMoney::format($invoice->amount_vat, $invoice->currency) }}</flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums font-medium">{{ BillingMoney::format($invoice->amount_gross, $invoice->currency) }}</flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums"><span dusk="invoice-{{ $invoice->id }}-net">{{ BillingMoney::format($invoice->amount_net, $invoice->currency) }}</span></flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums text-zinc-400"><span dusk="invoice-{{ $invoice->id }}-vat">{{ BillingMoney::format($invoice->amount_vat, $invoice->currency) }}</span></flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums font-medium"><span dusk="invoice-{{ $invoice->id }}-gross">{{ BillingMoney::format($invoice->amount_gross, $invoice->currency) }}</span></flux:table.cell>
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->status->color()">{{ $invoice->status->label() }}</flux:badge>
                                         </flux:table.cell>

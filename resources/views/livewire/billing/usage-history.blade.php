@@ -282,7 +282,8 @@ new class extends Component {
                     :included="$meter['included']"
                     :balance="$meter['balance']"
                     :purchased-balance="$meter['purchased_balance']"
-                    :key="'history-meter-'.$meter['type']"
+                    {{-- Balances in the key — see the dashboard's meters for why. --}}
+                    :key="'history-meter-'.$meter['type'].'-'.$meter['balance'].'-'.$meter['purchased_balance']"
                 />
             @endforeach
         </div>

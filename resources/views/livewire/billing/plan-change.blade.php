@@ -919,17 +919,17 @@ new class extends Component {
                     <div class="text-sm mt-1 space-y-1">
                         <div class="flex justify-between">
                             <span class="text-zinc-600 dark:text-zinc-400">{{ $upgradePlanName }} ({{ __('billing::enums.subscription_interval.'.$selectedInterval) }})</span>
-                            <span>{{ BillingMoney::format($previewNet) }}</span>
+                            <span dusk="upgrade-net">{{ BillingMoney::format($previewNet) }}</span>
                         </div>
                         @if ($previewVat > 0)
                             <div class="flex justify-between">
                                 <span class="text-zinc-600 dark:text-zinc-400">{{ __('billing::portal.vat') }}</span>
-                                <span>{{ BillingMoney::format($previewVat) }}</span>
+                                <span dusk="upgrade-vat">{{ BillingMoney::format($previewVat) }}</span>
                             </div>
                         @endif
                         <div class="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-700 pt-1">
                             <span>{{ __('billing::portal.total') }}</span>
-                            <span>{{ BillingMoney::format($previewGross) }}</span>
+                            <span dusk="upgrade-total">{{ BillingMoney::format($previewGross) }}</span>
                         </div>
                     </div>
                 </div>
@@ -1731,7 +1731,7 @@ new class extends Component {
                                         <div class="mt-1 border-t border-zinc-200/70 pt-3 dark:border-zinc-700/60">
                                             <div class="flex items-baseline justify-between gap-3">
                                                 <span class="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.prorata_total') }}</span>
-                                                <span class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross > 0 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400' }}">
+                                                <span dusk="prorata-total" class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross > 0 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400' }}">
                                                     {{ $totalGross > 0 ? '+' : '' }}{{ BillingMoney::format($totalGross) }}
                                                 </span>
                                             </div>

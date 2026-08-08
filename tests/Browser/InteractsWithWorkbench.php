@@ -320,6 +320,30 @@ trait InteractsWithWorkbench
      * Full-height screenshot plus a manifest line for the HTML gallery. The
      * label reads as a step caption — write it for the human flipping through.
      */
+    /**
+     * Assert that a `dusk`-anchored amount on screen is exactly the minor-unit figure the
+     * books hold.
+     *
+     * Compared through `BillingMoney::format()` rather than against a literal, for two
+     * reasons: the locale decides whether the customer reads "2,48" or "2.48" (a hardcoded
+     * expectation passes or fails on the wrong thing), and formatting is the only step
+     * between the number that was computed and the number that was read. The sign is
+     * normalised away — a discount is rendered with a leading minus and stored as a
+     * positive amount to subtract.
+     */
+    protected function assertShownAmount(Browser $browser, string $dusk, int $minorUnits, string $what = ''): void
+    {
+        $shown = $browser->text('['.'dusk="'.$dusk.'"]');
+        $expected = \GraystackIT\MollieBilling\Support\BillingMoney::format(abs($minorUnits));
+
+        $normalise = static fn (string $value): string => str_replace(['−', '-', '+', ' ', "\u{00a0}", "\u{202f}"], '', trim($value));
+
+        expect($normalise($shown))->toBe(
+            $normalise($expected),
+            $what !== '' ? $what : $dusk.' on screen',
+        );
+    }
+
     protected function shot(Browser $browser, string $label): Browser
     {
         $scenario = str(static::class)->classBasename()->replaceLast('Test', '')->kebab()

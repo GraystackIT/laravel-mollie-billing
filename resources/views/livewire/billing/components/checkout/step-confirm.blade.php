@@ -136,7 +136,7 @@
             @if ($applied_coupon !== null)
                 <div class="flex items-baseline justify-between text-sm">
                     <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.subtotal') }}</span>
-                    <span class="tabular-nums">{{ $money($this->subtotalNet()) }}</span>
+                    <span dusk="confirm-subtotal" class="tabular-nums">{{ $money($this->subtotalNet()) }}</span>
                 </div>
                 {{-- A trial-extension coupon buys days, not money. Showing it as
                      "−0.00" made a valid coupon look like it had done nothing. --}}
@@ -151,7 +151,7 @@
                         <span class="text-emerald-700 dark:text-emerald-400">
                             {{ __('billing::checkout.discount', ['code' => $applied_coupon['code']]) }}
                         </span>
-                        <span class="tabular-nums text-emerald-700 dark:text-emerald-400">
+                        <span dusk="confirm-discount" class="tabular-nums text-emerald-700 dark:text-emerald-400">
                             −{{ $money($applied_coupon['discount_net'] ?? 0) }}
                         </span>
                     </div>
@@ -159,7 +159,7 @@
             @endif
             <div class="flex items-baseline justify-between text-sm">
                 <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.net') }}</span>
-                <span class="tabular-nums">{{ $money($totals['net']) }}</span>
+                <span dusk="confirm-net" class="tabular-nums">{{ $money($totals['net']) }}</span>
             </div>
             @if ($totals['reverseCharge'])
                 <div class="flex items-baseline justify-between text-sm">
@@ -171,14 +171,14 @@
                     <span class="text-zinc-500 dark:text-zinc-400">
                         {{ __('billing::checkout.vat_with_rate', ['rate' => rtrim(rtrim(number_format($totals['rate'], 1), '0'), '.')]) }}
                     </span>
-                    <span class="tabular-nums">{{ $money($totals['vat']) }}</span>
+                    <span dusk="confirm-vat" class="tabular-nums">{{ $money($totals['vat']) }}</span>
                 </div>
             @endif
             <div class="flex items-baseline justify-between border-t border-zinc-200 pt-3 dark:border-white/10">
                 <span class="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     {{ __('billing::checkout.total') }}
                 </span>
-                <span class="text-2xl font-semibold tracking-tight tabular-nums">
+                <span dusk="confirm-total" class="text-2xl font-semibold tracking-tight tabular-nums">
                     {{ $money($totals['gross']) }}
                 </span>
             </div>

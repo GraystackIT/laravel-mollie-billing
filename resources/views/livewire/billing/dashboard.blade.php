@@ -841,7 +841,13 @@ new class extends Component {
                             :included="$usage['included']"
                             :balance="$usage['balance']"
                             :purchased-balance="$usage['purchased_balance']"
-                            :key="'usage-'.$loop->index"
+                            {{-- The balances belong in the key. A child component keeps its own
+                                 state across a parent re-render, so with a fixed key the meter
+                                 kept showing the numbers it first mounted with: redeeming a
+                                 credits coupon reported success while the meter still displayed
+                                 the old balance, and only a full page load revealed the credits
+                                 the customer had just been told they received. --}}
+                            :key="'usage-'.$usage['type'].'-'.$usage['balance'].'-'.$usage['purchased_balance']"
                         />
                     @endforeach
                 </div>
