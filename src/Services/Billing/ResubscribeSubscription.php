@@ -76,7 +76,19 @@ class ResubscribeSubscription
                 $totalSeats,
                 $billable->getActiveBillingAddonCodes(),
             );
-            $recurringDiscountNet = $this->computeMarkerDiscount($marker, $baseNet);
+            // Through CouponService, which is the only place that knows whether the marker
+            // is still redeemable. The private mirror below read discount_type,
+            // discount_value and base_amount_net and nothing else — not the coupon's
+            // `active` flag (deactivating it is the documented way to resolve a
+            // recurring_conflict), not the marker's `valid_until`, and not the
+            // per-billable application count. The marker survives a cancellation and is
+            // only cleared on a renewal, which never happens during a grace period, so a
+            // resubscribe re-applied campaigns that had closed or been switched off: Mollie
+            // collected the discounted amount and the renewal handler — which does ask
+            // CouponService — then fired PaymentAmountMismatch on a payment nobody had
+            // asked to discount. MollieSubscriptionPatcher had the same mirror removed for
+            // exactly this reason.
+            $recurringDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $baseNet);
         }
 
         $spec = [
@@ -138,36 +150,5 @@ class ResubscribeSubscription
         return $recorded['ends_at'] !== null
             ? \Carbon\Carbon::parse((string) $recorded['ends_at'])
             : null;
-    }
-
-    /**
-     * Mirrors `CouponService::computeMarkerDiscount()` — the discount basis is
-     * the original recurring net the coupon was applied against, capped to the
-     * current charge so reductions are honored.
-     *
-     * @param  array<string,mixed>  $marker
-     */
-    private function computeMarkerDiscount(array $marker, int $netAmount): int
-    {
-        if ($netAmount <= 0) {
-            return 0;
-        }
-
-        $discountType = (string) ($marker['discount_type'] ?? '');
-        $discountValue = (int) ($marker['discount_value'] ?? 0);
-
-        $baseAmount = isset($marker['base_amount_net'])
-            ? min((int) $marker['base_amount_net'], $netAmount)
-            : $netAmount;
-
-        if ($discountType === 'percentage') {
-            return (int) round($baseAmount * $discountValue / 100);
-        }
-
-        if ($discountType === 'fixed') {
-            return min($discountValue, $baseAmount);
-        }
-
-        return 0;
     }
 }

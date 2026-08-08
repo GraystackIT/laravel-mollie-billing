@@ -46,14 +46,31 @@ class MollieSubscriptionPatcher
      */
     public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
     {
-        if ($this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
-            $this->cancelForFreeDowngrade($billable);
-            return;
-        }
-
         $extraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
         $totalSeats = $this->catalog->includedSeats($intent->newPlan) + $extraSeats;
         $newAddons = array_keys($intent->newAddons);
+
+        // Cancel only when the whole target configuration bills nothing — not merely when
+        // the plan's own base and seat prices are zero. `isFreePlan()` answers yes for a
+        // free plan that still carries a paid addon, so removing an *addon* from such a
+        // subscription cancelled it at Mollie while UpdateSubscription (which asks
+        // `planChanged && isFreePlan`) kept source Mollie, status Active and the
+        // subscription id: the customer kept the plan and was never billed again, and the
+        // next change patched a subscription that no longer existed.
+        $targetNet = SubscriptionAmount::net(
+            $this->catalog,
+            $billable,
+            $intent->newPlan,
+            $intent->newInterval,
+            $totalSeats,
+            $newAddons,
+        );
+
+        if ($targetNet <= 0) {
+            $this->cancelForFreeDowngrade($billable);
+
+            return;
+        }
 
         // Preserve any active recurring coupon discount across plan/seat/addon
         // changes — otherwise the PATCH would silently undo the campaign price.
@@ -68,15 +85,7 @@ class MollieSubscriptionPatcher
         $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
 
         if (is_array($marker)) {
-            $baseNet = SubscriptionAmount::net(
-                $this->catalog,
-                $billable,
-                $intent->newPlan,
-                $intent->newInterval,
-                $totalSeats,
-                $newAddons,
-            );
-            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $baseNet);
+            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $targetNet);
         }
 
         $this->updateRecurringAmount(

@@ -20,6 +20,7 @@ use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -65,7 +66,14 @@ class UpdateSubscription
         /** @var Model&Billable $billable */
         return DB::transaction(function () use ($billable, $dto): array {
             if ($billable instanceof Model) {
+                // Scope-free: with an app-defined applyBillingScope() the scoped query can
+                // match nothing, and then this looks like it worked — first() quietly
+                // returns null, no row is locked, refresh() still loads fresh data (it uses
+                // newQueryWithoutScopes()) and the read-modify-write below runs
+                // unserialised. Every other lock read in the package bypasses the scope for
+                // this reason.
                 $billable->newQuery()
+                    ->withoutGlobalScope(BillingScope::class)
                     ->whereKey($billable->getKey())
                     ->lockForUpdate()
                     ->first();
@@ -128,9 +136,13 @@ class UpdateSubscription
                 $remainingNet = max(0, $remainingNet - $thisDiscount);
             }
 
-            $downgradeToLocal = $context->isMollie
-                && $context->planChanged
-                && $this->catalog->isFreePlan($context->newPlan, $context->newInterval);
+            // The same predicate the patcher cancels on: "the target configuration bills
+            // nothing at all". Asking `planChanged && isFreePlan()` here while the patcher
+            // asked `isFreePlan()` alone is how the two came apart — a free plan with a
+            // paid addon had its Mollie subscription cancelled by the patcher while this
+            // kept source Mollie, status Active and the subscription id, so the customer
+            // kept the addon and was never billed again.
+            $downgradeToLocal = $context->isMollie && $context->newNet <= 0;
 
             // Pro-rata: ProrataExecutor handles charge/refund/sidegrade + Mollie-Subscription-PATCH.
             // For Mollie → Free, the patcher cancels the subscription.
@@ -604,7 +616,14 @@ class UpdateSubscription
 
         return DB::transaction(function () use ($billable, $pendingData, $pendingProrataChargeLines, $chargeInvoice): array {
             if ($billable instanceof Model) {
+                // Scope-free: with an app-defined applyBillingScope() the scoped query can
+                // match nothing, and then this looks like it worked — first() quietly
+                // returns null, no row is locked, refresh() still loads fresh data (it uses
+                // newQueryWithoutScopes()) and the read-modify-write below runs
+                // unserialised. Every other lock read in the package bypasses the scope for
+                // this reason.
                 $billable->newQuery()
+                    ->withoutGlobalScope(BillingScope::class)
                     ->whereKey($billable->getKey())
                     ->lockForUpdate()
                     ->first();
