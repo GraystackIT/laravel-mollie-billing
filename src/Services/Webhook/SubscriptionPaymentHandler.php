@@ -294,7 +294,10 @@ class SubscriptionPaymentHandler
             $this->clearPendingTrialCouponSlot($billable);
         }
 
-        if ($this->couponService->markerExpired($billable)) {
+        // Judged as of the *next* charge, not now — the PATCH is what stops the discount and
+        // Mollie charges what it holds, so a date-gated coupon reset a period too late runs
+        // one discounted period over. See CouponService::markerExpired().
+        if ($this->couponService->markerExpired($billable, $newPeriodEnd)) {
             try {
                 $this->patcher->updateRecurringAmount(
                     billable: $billable,

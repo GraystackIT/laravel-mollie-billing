@@ -155,6 +155,8 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
 
         if (($this->intentData['reason'] ?? null) === 'recurring_coupon_expiry_reset') {
             $this->resetRecurringAmount($patcher, $coupons);
+        } elseif (($this->intentData['reason'] ?? null) === 'next_charge_date') {
+            $this->applyNextChargeDate($patcher);
         } else {
             $intent = PlanChangeIntent::fromArray($this->intentData);
 
@@ -264,6 +266,29 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
         );
 
         ($coupons ?? app(CouponService::class))->clearActiveRecurringCouponMarker($billable);
+    }
+
+    /**
+     * The extension variant: a coupon (or an admin's trial extension) moved the next
+     * charge and the PATCH did not land.
+     *
+     * It carries an absolute `target`, not a number of days, and that is what makes it
+     * retryable at all: `pushNextChargeDate()` reads the current next-charge date and
+     * adds to it, so re-running it after a partial success would extend a second time.
+     * The local write already happened — the customer is being shown the later date —
+     * so all this has to do is make Mollie agree, and setting the same absolute date
+     * twice is harmless.
+     */
+    private function applyNextChargeDate(MollieSubscriptionPatcher $patcher): void
+    {
+        $billable = $this->resolveBillable();
+        $target = (string) ($this->intentData['target'] ?? '');
+
+        if ($billable === null || $target === '') {
+            return;
+        }
+
+        $patcher->setNextChargeDate($billable, \Carbon\Carbon::parse($target)->setTimezone('UTC'));
     }
 
     private function giveUp(): void

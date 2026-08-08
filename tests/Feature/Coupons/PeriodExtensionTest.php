@@ -93,14 +93,24 @@ it('pushes Mollie next charge date by N days when redeemed for a Mollie subscrip
 
     $service->redeem($coupon, $billable->fresh(), []);
 
+    // An absolute date, not "+7 days". The PATCH is posted after the redemption commits,
+    // so it has to be safe to re-send: a relative push re-run after a partial failure
+    // extends a second time. See MollieSubscriptionPatcher::deferNextChargeDate().
     $pushCalls = array_filter(
         SpyMollieSubscriptionPatcher::$calls,
-        fn (array $c): bool => $c[0] === 'push_next_charge_date',
+        fn (array $c): bool => $c[0] === 'set_next_charge_date',
     );
     expect($pushCalls)->toHaveCount(1);
 
     $first = array_values($pushCalls)[0];
-    expect($first[3]['days'] ?? null)->toBe(7);
+    $expected = BillingTime::nowUtc()->addMonthNoOverflow()->addDays(7);
+    expect(BillingTime::toUtc((string) $first[3]['target'])->diffInHours($expected, false))
+        ->toBeBetween(-1, 1);
+
+    // And the override the customer is shown was written by the redemption itself, so it
+    // cannot survive a rollback of the row that bought it.
+    expect($billable->fresh()->getBillingSubscriptionMeta()['next_charge_date_override'] ?? null)
+        ->not->toBeNull();
 });
 
 it('rejects period_extension when next charge is within 24 hours', function (): void {

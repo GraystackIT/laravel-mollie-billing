@@ -185,3 +185,75 @@ it('still writes the credit note PDF', function (): void {
 
     expect($creditNote->fresh()->pdf_path)->not->toBeNull();
 });
+
+it('posts a coupon period extension after the redemption commits', function (): void {
+    $billable = txBillable();
+
+    $coupon = app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->create([
+        'code' => 'PLUS7',
+        'name' => 'Plus 7 days',
+        'type' => \GraystackIT\MollieBilling\Enums\CouponType::PeriodExtension,
+        'grant_duration_days' => 7,
+    ]);
+
+    $levels = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$levels) {
+        if ($request instanceof \Mollie\Api\Http\Requests\UpdateSubscriptionRequest) {
+            $levels[] = DB::transactionLevel();
+        }
+
+        return (object) ['id' => 'sub_tx', 'status' => 'active'];
+    });
+
+    $baseline = DB::transactionLevel();
+
+    app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)
+        ->redeem($coupon, $billable->fresh(), []);
+
+    // `redeem()` wraps the redemption row, the incremented counter and the local dates in
+    // one transaction, and it dispatches CouponRedeemed inside it. A throw after this PATCH
+    // — a listener, the insert itself — undid every local trace while Mollie kept the later
+    // charge date: the customer got the free week, the campaign slot was still open, and
+    // re-applying the code pushed the date a second time.
+    expect($levels)->toBe([$baseline]);
+
+    // And the extension is booked.
+    expect((int) \GraystackIT\MollieBilling\Models\CouponRedemption::query()->count())->toBe(1)
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['next_charge_date_override'] ?? null)
+        ->not->toBeNull();
+});
+
+it('posts a trial extension PATCH after the redemption commits', function (): void {
+    $billable = txBillable();
+    $billable->forceFill([
+        'subscription_status' => SubscriptionStatus::Trial,
+        'trial_ends_at' => BillingTime::nowUtc()->addDays(3),
+    ])->save();
+
+    $coupon = app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->create([
+        'code' => 'TRIAL14',
+        'name' => 'Trial 14',
+        'type' => \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
+        'trial_extension_days' => 14,
+    ]);
+
+    $levels = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$levels) {
+        if ($request instanceof \Mollie\Api\Http\Requests\UpdateSubscriptionRequest) {
+            $levels[] = DB::transactionLevel();
+        }
+
+        return (object) ['id' => 'sub_tx', 'status' => 'active'];
+    });
+
+    $baseline = DB::transactionLevel();
+
+    app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)
+        ->redeem($coupon, $billable->fresh(), []);
+
+    expect($levels)->toBe([$baseline])
+        ->and($billable->fresh()->trial_ends_at->diffInDays(BillingTime::nowUtc()->addDays(17), false))
+        ->toBeBetween(-1, 1);
+});

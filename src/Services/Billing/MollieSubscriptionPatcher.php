@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Exceptions\ApiException;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use Mollie\Api\Http\Data\Date;
@@ -34,6 +35,8 @@ use Mollie\Laravel\Facades\Mollie;
  */
 class MollieSubscriptionPatcher
 {
+    use \GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -292,6 +295,66 @@ class MollieSubscriptionPatcher
      * After a successful PATCH an override is set in the subscription meta so
      * that `nextBillingDate()` returns the shifted value.
      */
+    /**
+     * Move the next charge to an absolute date: local write now, Mollie PATCH after the
+     * caller's transaction commits.
+     *
+     * The two coupon types that extend a period — PeriodExtension and TrialExtension —
+     * both used to PATCH Mollie from inside `CouponService::redeem()`'s transaction.
+     * Anything throwing afterwards (the redemption insert, a `CouponRedeemed` listener)
+     * rolled back the redemption row, the incremented `redemptions_count` and the local
+     * dates — while Mollie had already moved the charge. The customer kept the free
+     * period, the campaign slot was still free, and applying the code again extended a
+     * second time. Same rule as everywhere else: a transaction can be rolled back, an
+     * HTTP call to a payment provider cannot.
+     *
+     * The target is absolute on purpose. `pushNextChargeDate()` adds days to whatever
+     * Mollie is currently set to, so a retry after a partial failure extends twice; an
+     * absolute date can be re-sent as often as needed, which is what lets the failure
+     * path leave a `pending_subscription_patch` marker for the hourly sweep.
+     */
+    public function deferNextChargeDate(Billable $billable, \Carbon\CarbonInterface $target): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $utc = Carbon::instance($target)->setTimezone('UTC');
+
+        // Written inside the caller's transaction, so the date the customer is shown and
+        // the redemption that bought it stand or fall together.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($utc): array {
+            $meta['next_charge_date_override'] = $utc->toIso8601String();
+
+            return $meta;
+        });
+
+        DB::afterCommit(function () use ($billable, $utc): void {
+            try {
+                $this->setNextChargeDate($billable, $utc);
+            } catch (\Throwable $e) {
+                Log::warning('Mollie next-charge-date PATCH failed — queued for retry', [
+                    'billable' => $billable->getKey(),
+                    'target' => $utc->toIso8601String(),
+                    'error' => $e->getMessage(),
+                ]);
+
+                // Local state says the charge moved; Mollie still holds the old date and
+                // would collect early. SweepPendingRetriesJob picks this up hourly.
+                $this->mutateBillingMeta($billable, function (array $meta) use ($utc, $e): array {
+                    $meta['pending_subscription_patch'] = [
+                        'reason' => 'next_charge_date',
+                        'target' => $utc->toIso8601String(),
+                        'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                        'last_error' => $e->getMessage(),
+                    ];
+
+                    return $meta;
+                });
+            }
+        });
+    }
+
     public function pushNextChargeDate(Billable $billable, int $days): void
     {
         if (! ($billable instanceof Model) || $days <= 0) {

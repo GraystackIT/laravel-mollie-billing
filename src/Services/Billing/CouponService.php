@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
@@ -1270,8 +1271,14 @@ class CouponService
 
     /**
      * @param  array<string, mixed>  $marker
+     * @param  ?CarbonInterface  $asOf  The moment to judge the clock at. Defaults to now;
+     *                                  `markerExpired()` passes the *next* charge date so
+     *                                  the reset PATCH can be posted before that charge
+     *                                  leaves Mollie. The campaign count is deliberately
+     *                                  read as of now either way — the redemptions written
+     *                                  so far are the applications actually spent.
      */
-    private function isMarkerStillRedeemable(array $marker, ?Billable $billable = null): bool
+    private function isMarkerStillRedeemable(array $marker, ?Billable $billable = null, ?CarbonInterface $asOf = null): bool
     {
         $couponId = (int) ($marker['coupon_id'] ?? 0);
         $coupon = $couponId > 0 ? Coupon::query()->find($couponId) : null;
@@ -1279,11 +1286,11 @@ class CouponService
             return false;
         }
 
-        $now = BillingTime::nowUtc();
+        $at = $asOf !== null ? Carbon::instance($asOf) : BillingTime::nowUtc();
         $validUntil = isset($marker['valid_until']) && $marker['valid_until'] !== null
             ? Carbon::parse((string) $marker['valid_until'])
             : null;
-        if ($validUntil !== null && $validUntil->lessThanOrEqualTo($now)) {
+        if ($validUntil !== null && $validUntil->lessThanOrEqualTo($at)) {
             return false;
         }
 
@@ -1361,15 +1368,29 @@ class CouponService
      * Returns true if the marker has reached its limit (applied_count >= max_count
      * or valid_until <= now or coupon deactivated). Used by the Renewal-Webhook
      * AFTER a successful redeem to decide whether to PATCH Mollie back to full price.
+     *
+     * `$nextChargeAt` is what makes the reset land in time. The PATCH is what actually
+     * stops the discount — the marker only governs our own bookkeeping — and Mollie
+     * charges the amount it currently holds, so asking "is the marker expired *now*"
+     * one period too early is the difference between a discount ending and a discount
+     * running one period over. On the count axis the two coincide (the redemption for
+     * this period is already written when the caller asks, so the limit is reached at
+     * the same moment either way), but on the clock axis they do not: a coupon whose
+     * `valid_until` falls mid-period is still live at this webhook, so nothing was
+     * PATCHed, and the next charge left Mollie at the discounted amount. It arrived as
+     * an ordinary renewal, the marker was expired by then so no redemption was written,
+     * and the reset only happened afterwards. One free discounted period per campaign
+     * with a date gate, invisible in the redemption trail. Pass the end of the period
+     * this payment just bought and the reset is posted while it still matters.
      */
-    public function markerExpired(Billable $billable): bool
+    public function markerExpired(Billable $billable, ?CarbonInterface $nextChargeAt = null): bool
     {
         $marker = $this->getActiveRecurringCouponMarker($billable);
         if ($marker === null) {
             return false;
         }
 
-        return ! $this->isMarkerStillRedeemable($marker, $billable);
+        return ! $this->isMarkerStillRedeemable($marker, $billable, $nextChargeAt);
     }
 
     public function clearActiveRecurringCouponMarker(Billable $billable): void
@@ -1411,8 +1432,13 @@ class CouponService
 
             event(new SubscriptionExtended($billable, $currentEnd, $newEnd, $coupon));
         } elseif ($source === SubscriptionSource::Mollie->value) {
-            $patcher = app(MollieSubscriptionPatcher::class);
-            $patcher->pushNextChargeDate($billable, $days);
+            // Absolute target, computed here and PATCHed after this redemption commits —
+            // see MollieSubscriptionPatcher::deferNextChargeDate(). Posting it from inside
+            // the transaction meant a later throw rolled the redemption back while Mollie
+            // had already moved the charge: a free period, a campaign slot still open, and
+            // a second extension on the retry.
+            $target = ($billable->nextBillingDate() ?? BillingTime::nowUtc())->copy()->addDays($days);
+            app(MollieSubscriptionPatcher::class)->deferNextChargeDate($billable, $target);
         }
 
         $redemption->grant_days_added = $days;

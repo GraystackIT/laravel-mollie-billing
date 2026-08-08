@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Carbon\Carbon;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
@@ -838,4 +839,88 @@ it('does not redeem a recurring coupon twice when a seat change defers its charg
     // Which is the point: the discount still computes.
     expect(app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)
         ->computeMarkerDiscount($fresh, $basisAfterPhaseOne))->toBeGreaterThan(0);
+});
+
+it('resets Mollie to full price before a date-expiring coupon can buy one more period', function (): void {
+    // The renewal that is still covered, with the coupon expiring 19 days into the period
+    // it pays for. Frozen, because the marker's clock is real time.
+    Carbon::setTestNow('2026-02-01T09:04:00Z');
+
+    $billable = ledgerBillable();
+
+    $coupon = Coupon::create([
+        'code' => 'LONGRUN',
+        'name' => 'Long run',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 20,
+        'max_redemptions_per_billable' => 12,
+        'valid_until' => '2026-02-20T00:00:00Z',
+        'active' => true,
+    ]);
+
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['active_recurring_coupon'] = [
+        'coupon_id' => $coupon->id,
+        'code' => 'LONGRUN',
+        'discount_type' => DiscountType::Percentage->value,
+        'discount_value' => 20,
+        'valid_until' => '2026-02-20T00:00:00Z',
+        'base_amount_net' => 4300,
+        'first_applied_at' => '2026-01-01T09:00:00Z',
+    ];
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    // 4300 − 20% = 3440 net, 4128 gross. This period is legitimately discounted.
+    deliverLedgerRenewal($billable->refresh(), 'tr_expiring_1', '2026-02-01T09:04:00Z', '41.28');
+
+    $invoice = BillingInvoice::query()->where('mollie_payment_id', 'tr_expiring_1')->firstOrFail();
+    expect((int) $invoice->amount_net)->toBe(3440)
+        ->and(CouponRedemption::query()->where('coupon_id', $coupon->id)->count())->toBe(1);
+
+    // And the amount at Mollie is back to full price *now*. The count gate has 11 slots
+    // left, so nothing but the date ends this campaign — and the date falls on 20 February,
+    // inside the period just bought. Asking "expired?" as of this instant answered no, so
+    // Mollie kept the 41,28 and charged it again on 1 March: a fourth discounted period
+    // with no redemption row to show for it, reset only afterwards. 8,60 per subscriber,
+    // per date-gated campaign, and the redemption trail says it never happened.
+    $after = $billable->fresh()->getBillingSubscriptionMeta();
+    expect($after['active_recurring_coupon'] ?? null)->toBeNull()
+        ->and($after['pending_subscription_patch'] ?? null)->toBeNull();
+});
+
+it('keeps discounting while the coupon outlives the period it just paid for', function (): void {
+    // The other side of the same rule: a reset posted a period too early is money taken
+    // from a customer who was promised a discount.
+    Carbon::setTestNow('2026-02-01T09:04:00Z');
+
+    $billable = ledgerBillable();
+
+    $coupon = Coupon::create([
+        'code' => 'STILLGOOD',
+        'name' => 'Still good',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 20,
+        'max_redemptions_per_billable' => 12,
+        'valid_until' => '2026-12-31T00:00:00Z',
+        'active' => true,
+    ]);
+
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['active_recurring_coupon'] = [
+        'coupon_id' => $coupon->id,
+        'code' => 'STILLGOOD',
+        'discount_type' => DiscountType::Percentage->value,
+        'discount_value' => 20,
+        'valid_until' => '2026-12-31T00:00:00Z',
+        'base_amount_net' => 4300,
+        'first_applied_at' => '2026-01-01T09:00:00Z',
+    ];
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    deliverLedgerRenewal($billable->refresh(), 'tr_stillgood_1', '2026-02-01T09:04:00Z', '41.28');
+
+    $after = $billable->fresh()->getBillingSubscriptionMeta();
+    expect($after['active_recurring_coupon']['base_amount_net'] ?? null)->toBe(4300);
 });

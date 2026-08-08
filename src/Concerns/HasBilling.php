@@ -686,7 +686,10 @@ trait HasBilling
         $changed = $previous === null || ! $previous->equalTo($newEnd);
 
         if ($changed && $this->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
-            app(MollieSubscriptionPatcher::class)->setNextChargeDate($this, $newEnd);
+            // After the caller's transaction, not inside it: a TrialExtension coupon calls
+            // this from `CouponService::redeem()`, and a throw after the PATCH rolled back
+            // the redemption and `trial_ends_at` while Mollie held the later charge date.
+            app(MollieSubscriptionPatcher::class)->deferNextChargeDate($this, $newEnd);
         }
 
         event(new TrialExtended($this, $previous, $newEnd));
