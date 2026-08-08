@@ -35,6 +35,17 @@ it('hides the link rather than 500ing on a route that does not exist', function 
         ->and(BillingRoute::configuredUrl('route:'))->toBeNull();
 });
 
+it('hides the link rather than 500ing on a route whose parameters cannot be resolved', function (): void {
+    // The realistic version of the previous case: `route:tenant.dashboard` is the natural
+    // value for `dashboard_url` on a tenant-prefixed mount — the portal's own request fills
+    // `{organization}` in. The admin panel is mounted outside that prefix and inherits the
+    // value through the `admin_back_url` fallback, with nothing to fill it with.
+    Route::get('/{organization}/dashboard', fn () => 'ok')->name('tenant.dashboard');
+    app('router')->getRoutes()->refreshNameLookups();
+
+    expect(BillingRoute::configuredUrl('route:tenant.dashboard'))->toBeNull();
+});
+
 it('treats an unset or blank value as no link', function (): void {
     expect(BillingRoute::configuredUrl(null))->toBeNull()
         ->and(BillingRoute::configuredUrl(''))->toBeNull()
@@ -71,4 +82,17 @@ it('reports a misconfigured back URL through check-config', function (): void {
     $this->artisan('billing:check-config')
         ->expectsOutputToContain('admin_back_url names route [no.such.route]')
         ->assertExitCode(1);
+});
+
+it('reports a back URL the admin panel cannot build through check-config', function (): void {
+    // A hidden link is all the panel shows for this, and the value looks right in `.env` —
+    // so the command has to name it, or the fallback silently swallows the back link.
+    Route::get('/{organization}/dashboard', fn () => 'ok')->name('tenant.dashboard');
+    app('router')->getRoutes()->refreshNameLookups();
+
+    config()->set('mollie-billing.admin_back_url', null);
+    config()->set('mollie-billing.dashboard_url', 'route:tenant.dashboard');
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('admin_back_url resolves to route [tenant.dashboard]');
 });

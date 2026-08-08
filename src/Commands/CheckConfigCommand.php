@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Support\BillingAuditMap;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Console\Command;
+use Illuminate\Routing\Exceptions\UrlGenerationException;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 
@@ -157,6 +158,38 @@ class CheckConfigCommand extends Command
         $this->validateIpBlock($scope, $driver);
         $this->validateLegacyRolloverKeys($scope);
         $this->validateAudit($scope);
+    }
+
+    /**
+     * Warn when the admin panel's back link names a route it cannot build a URL for.
+     *
+     * `admin_back_url` falls back to `dashboard_url`, and on a tenant-prefixed mount that is
+     * typically `route:tenant.dashboard` — correct for the portal, where the current request
+     * supplies `{organization}`, but unbuildable from the admin panel, which is mounted
+     * outside that prefix. Console runs have no route parameters either, so generating the
+     * URL here reproduces exactly what the panel's layout faces.
+     *
+     * @param  string  $scope  Config file the issue is reported against
+     */
+    private function checkAdminBackUrlIsReachable(string $scope): void
+    {
+        $value = config('mollie-billing.admin_back_url') ?: config('mollie-billing.dashboard_url');
+
+        if (! is_string($value) || ! str_starts_with(trim($value), 'route:')) {
+            return;
+        }
+
+        $routeName = substr(trim($value), 6);
+
+        if ($routeName === '' || ! \Illuminate\Support\Facades\Route::has($routeName)) {
+            return;
+        }
+
+        try {
+            route($routeName);
+        } catch (UrlGenerationException) {
+            $this->addWarning($scope, "admin_back_url resolves to route [{$routeName}], which needs parameters the admin panel cannot supply — the back link will be hidden there. Point BILLING_ADMIN_BACK_URL at a parameterless route or a plain URL.");
+        }
     }
 
     private function validateAudit(string $scope): void
