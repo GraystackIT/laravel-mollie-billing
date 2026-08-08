@@ -208,3 +208,57 @@ it('still counts a purchase made after the renewal', function (): void {
 
     expect(WalletUsageService::getPurchasedBalance($billable->fresh()->getWallet('Tokens')))->toBe(300);
 });
+
+it('keeps a purchase the renewal carried forward', function (): void {
+    $billable = contractBillable([
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_source' => SubscriptionSource::Local,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subMonth(),
+    ]);
+
+    // Bought 5 000, used 60. `resetAndCredit()` carries the remaining 4 940 forward by
+    // re-persisting purchased_balance — with no transaction of its own in the new period.
+    app(WalletUsageService::class)->credit($billable, 'Tokens', 5000, 'one_time_order:token-pack');
+    // What StartOneTimeOrderCheckout records alongside the deposit: the units are paid for
+    // and therefore outlive every reset.
+    WalletUsageService::addPurchasedBalance($billable->fresh()->getWallet('Tokens'), 5000);
+    $billable->recordBillingUsage('Tokens', 60);
+    app(WalletUsageService::class)->resetAndCredit($billable, 'Tokens', 100);
+
+    // 60 of the 5 000 were used, so the renewal carries 4 940 forward.
+    expect(WalletUsageService::getPurchasedBalance($billable->fresh()->getWallet('Tokens')))->toBe(4940);
+
+    // A window over "purchases since the last renewal" finds none and wrote 0 here, after
+    // which the next renewal withdrew the whole balance and credited only the quota —
+    // 4 940 units the customer had paid for, gone, with the confirmation prompt reading
+    // exactly like the correction the command advertises.
+    app('Illuminate\Contracts\Console\Kernel')->call('billing:sync-purchased-balance', ['--force' => true]);
+
+    expect(WalletUsageService::getPurchasedBalance($billable->fresh()->getWallet('Tokens')))->toBe(4940);
+});
+
+it('reconciles a rollover wallet against its renewals, not its lifetime', function (): void {
+    config()->set('mollie-billing-plans.usage_types.Tokens.rollover', true);
+
+    $billable = contractBillable([
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_source' => SubscriptionSource::Local,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subMonth(),
+    ]);
+
+    // A rollover renewal writes `subscription_renewal_rollover`, which the old anchor list
+    // did not know — so the wallet was reconciled against its whole lifetime and long-spent
+    // purchases were relabelled onto plan units that then survived every reset.
+    app(WalletUsageService::class)->credit($billable, 'Tokens', 500, 'one_time_order:token-pack');
+    $billable->recordBillingUsage('Tokens', 500);
+    $billable->fresh()->getWallet('Tokens')->forceWithdraw(0, ['type' => 'Tokens', 'reason' => 'subscription_renewal_rollover']);
+    app(WalletUsageService::class)->credit($billable, 'Tokens', 100, 'period_credit');
+
+    app('Illuminate\Contracts\Console\Kernel')->call('billing:sync-purchased-balance', ['--force' => true]);
+
+    expect(WalletUsageService::getPurchasedBalance($billable->fresh()->getWallet('Tokens')))->toBe(0);
+});

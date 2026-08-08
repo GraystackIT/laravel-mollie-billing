@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
@@ -19,6 +20,8 @@ use Mollie\Laravel\Facades\Mollie;
 
 class ChargeUsageOverageDirectly
 {
+    use MutatesBillingMeta;
+
     /**
      * `subscription_meta.usage_overage_status` value meaning "a charge exists that
      * has not been confirmed yet". The daily PrepareUsageOverageJob sweep looks
@@ -276,48 +279,52 @@ class ChargeUsageOverageDirectly
             return;
         }
 
-        $meta = $billable->getBillingSubscriptionMeta();
-        $existing = (array) ($meta[self::META_KEY] ?? []);
+        // Through the locked mutator: the read below used to be a plain in-memory
+        // attribute read followed, after a Mollie round-trip, by a `forceFill` of the whole
+        // JSON column — so a renewal webhook or a retry job that committed a different key
+        // in between had its write reverted. `pending_refund_retries` is one of those keys,
+        // and a resurrected refund line is a second payout to the customer.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId, $lineItems, $vat): array {
+            $existing = (array) ($meta[self::META_KEY] ?? []);
 
-        // A snapshot left behind by a cycle that gave up is a spent cycle, not this
-        // one. Inheriting its `created_at` kept the cycle key identical, so
-        // `usage_overage_counted_payments` still listed the three payments that had
-        // already failed — and the new period's FIRST failure appended a fourth,
-        // exceeded the budget and went straight to past_due with customer and admin
-        // dunning mail, no retry ladder at all. Unsetting `usage_overage_attempts`
-        // (below) never helped: the budget is derived from that id list, and the list
-        // was still considered current.
-        //
-        // Within one cycle the inheritance is exactly right — p1 → p2 → p3 must keep
-        // accumulating — so this only fires when the previous cycle is finished.
-        $previousCycleSpent = ($meta['usage_overage_status'] ?? null) === self::STATUS_FAILED;
+            // A snapshot left behind by a cycle that gave up is a spent cycle, not this
+            // one. Inheriting its `created_at` kept the cycle key identical, so
+            // `usage_overage_counted_payments` still listed the three payments that had
+            // already failed — and the new period's FIRST failure appended a fourth,
+            // exceeded the budget and went straight to past_due with customer and admin
+            // dunning mail, no retry ladder at all. Unsetting `usage_overage_attempts`
+            // (below) never helped: the budget is derived from that id list, and the list
+            // was still considered current.
+            //
+            // Within one cycle the inheritance is exactly right — p1 → p2 → p3 must keep
+            // accumulating — so this only fires when the previous cycle is finished.
+            if (($meta['usage_overage_status'] ?? null) === self::STATUS_FAILED) {
+                $existing = [];
+                unset($meta[self::COUNTED_PAYMENTS_KEY], $meta['usage_overage_attempts']);
+            }
 
-        if ($previousCycleSpent) {
-            $existing = [];
-            unset($meta[self::COUNTED_PAYMENTS_KEY], $meta['usage_overage_attempts']);
-        }
+            $meta[self::META_KEY] = [
+                'payment_id' => $paymentId ?? ($existing['payment_id'] ?? null),
+                'line_items' => $lineItems,
+                'amount_net' => $vat['net'],
+                'amount_gross' => $vat['gross'],
+                'vat_amount' => $vat['vat'],
+                'vat_rate' => $vat['rate'],
+                'currency' => (string) config('mollie-billing.currency', 'EUR'),
+                'created_at' => $existing['created_at'] ?? BillingTime::nowUtc()->toIso8601String(),
+            ];
+            $meta['usage_overage_status'] = self::STATUS_PENDING;
 
-        $meta[self::META_KEY] = [
-            'payment_id' => $paymentId ?? ($existing['payment_id'] ?? null),
-            'line_items' => $lineItems,
-            'amount_net' => $vat['net'],
-            'amount_gross' => $vat['gross'],
-            'vat_amount' => $vat['vat'],
-            'vat_rate' => $vat['rate'],
-            'currency' => (string) config('mollie-billing.currency', 'EUR'),
-            'created_at' => $existing['created_at'] ?? BillingTime::nowUtc()->toIso8601String(),
-        ];
-        $meta['usage_overage_status'] = self::STATUS_PENDING;
+            // A new payment starts a new dunning cycle. The retry job leaves the counter at
+            // its maximum when it gives up, so without this reset the next period's first
+            // failure already exceeded the budget: PastDue plus customer and admin dunning
+            // after a single attempt, with no retry ladder ever again for that billable.
+            if ($paymentId !== null && $paymentId !== ($existing['payment_id'] ?? null)) {
+                unset($meta['usage_overage_attempts']);
+            }
 
-        // A new payment starts a new dunning cycle. The retry job leaves the counter at
-        // its maximum when it gives up, so without this reset the next period's first
-        // failure already exceeded the budget: PastDue plus customer and admin dunning
-        // after a single attempt, with no retry ladder ever again for that billable.
-        if ($paymentId !== null && $paymentId !== ($existing['payment_id'] ?? null)) {
-            unset($meta['usage_overage_attempts']);
-        }
-
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+            return $meta;
+        });
     }
 
     /**

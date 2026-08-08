@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
@@ -33,6 +34,7 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
     use InteractsWithQueue;
     use Queueable;
     use SerializesModels;
+    use MutatesBillingMeta;
     use UsesBillingQueue;
 
     /**
@@ -41,6 +43,14 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
      * pass on top of the first.
      */
     public int $uniqueFor = 10800;
+
+    /**
+     * TTL of the lock `billing:prepare-overage` takes around a manual run. Same budget as
+     * `$uniqueFor`, because it protects against the same thing: `dispatchSync()` bypasses
+     * ShouldBeUnique (the lock lives in PendingDispatch), so a hand-started pass used to
+     * walk the table alongside the scheduled one.
+     */
+    public const COMMAND_LOCK_SECONDS = 10800;
 
     /**
      * Every pass is idempotent on a second run — the in-flight guard in safeCharge()
@@ -411,10 +421,21 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             // from charging the same overage a second time.
             $chargeService->handle($billable);
         } catch (Throwable $e) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_PENDING;
-            $meta['usage_overage_attempts'] = (int) ($meta['usage_overage_attempts'] ?? 0);
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            // Through the locked mutator, and touching only the one key. This wrote the
+            // whole `subscription_meta` blob from a model hydrated when its 200-row chunk
+            // was fetched — and pass 2 then works through up to 199 other billables, each
+            // with a synchronous Mollie call, before reaching this one. A renewal webhook
+            // that committed `seat_count` in between was reverted, and a cleared dunning
+            // episode resurrected, which is the exact race
+            // SubscriptionPaymentHandler documents as fixed on its side.
+            //
+            // The `usage_overage_attempts` line that used to sit here assigned the key to
+            // its own value — it never counted anything, while a test comment described it
+            // as recording a fresh attempt.
+            $this->mutateBillingMeta($billable, fn (array $meta): array => [
+                ...$meta,
+                'usage_overage_status' => ChargeUsageOverageDirectly::STATUS_PENDING,
+            ]);
 
             Log::warning('PrepareUsageOverageJob: overage charge failed (will retry)', [
                 'billable_id' => $billable->getKey(),

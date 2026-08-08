@@ -28,6 +28,19 @@ class SyncPurchasedBalanceCommand extends Command
 
     protected $description = 'Backfill purchased_balance on all wallets from transaction history (one-time orders + coupon credits).';
 
+    /**
+     * Every transaction a renewal writes. `period_reset` is the withdrawal (absent when the
+     * balance was already zero), `period_credit` the deposit, and
+     * `subscription_renewal_rollover` what a rollover usage type writes — the last of which
+     * was missing from the old anchor list entirely, so those wallets were reconciled
+     * against their whole lifetime.
+     */
+    private const RENEWAL_MARKER_REASONS = [
+        'period_reset',
+        WalletUsageService::PERIOD_CREDIT_REASON,
+        'subscription_renewal_rollover',
+    ];
+
     public function handle(): int
     {
         $dryRun = (bool) $this->option('dry-run');
@@ -36,15 +49,12 @@ class SyncPurchasedBalanceCommand extends Command
         foreach (Wallet::all() as $wallet) {
             $current = WalletUsageService::getPurchasedBalance($wallet);
 
-            $purchasedThisPeriod = $this->purchasedSinceLastRenewal($wallet);
-            $target = WalletUsageService::computePurchasedRemaining(
-                $purchasedThisPeriod,
-                (int) $wallet->balanceInt,
-            );
+            $target = $this->purchasedFromHistory($wallet);
 
-            // No early-out on "no purchases": a wallet whose purchases predate the
-            // last reset but still carries a positive purchased_balance is exactly the
-            // row that needs correcting down to 0.
+            // No early-out on "no purchases": a wallet whose purchases were fully consumed
+            // but still carries a positive purchased_balance is exactly the row that needs
+            // correcting down to 0. The replay distinguishes that from a purchase the last
+            // renewal legitimately carried forward, which has no transaction of its own.
             if ($current === $target) {
                 continue;
             }
@@ -88,48 +98,57 @@ class SyncPurchasedBalanceCommand extends Command
     }
 
     /**
-     * Purchase deposits (one-time orders + coupon credits) made since the wallet's
-     * last renewal. Anything older was already accounted for by that renewal's own
-     * carry-over computation.
+     * Replay the wallet's whole transaction history to work out how much of its current
+     * balance was paid for.
      *
-     * The anchor is the latest of the two markers a renewal can leave, not
-     * `period_reset` alone: that transaction is only written when the balance was
-     * non-zero, so a wallet that renewed at exactly 0 had no anchor at all and the
-     * window reached back into earlier periods — resurrecting purchased credits the
-     * customer had long consumed, which every later `resetAndCredit()` then
-     * re-credited on top of the new quota. `period_credit` is written whenever there
-     * is any quota to deposit, which is the ordinary case.
+     * A window ("purchases since the last renewal") cannot answer this, because
+     * `resetAndCredit()` deliberately *carries* an unconsumed purchase forward by
+     * re-persisting `purchased_balance` — so a pack bought in June and still unused in
+     * July has no transaction in July at all. Summing the window then produced 0 and this
+     * command wrote it, after which the next renewal withdrew the whole balance and
+     * credited only the plan quota: credits the customer had paid for, gone. The mirror
+     * failure was a rollover wallet, whose renewal writes `subscription_renewal_rollover`
+     * and so matched no anchor at all, leaving a lifetime sum that relabelled plan units
+     * as purchased.
+     *
+     * The replay is exact instead: purchases add, and every renewal clamps the running
+     * total against the balance it found, which is precisely what `resetAndCredit()` does.
      */
-    private function purchasedSinceLastRenewal(Wallet $wallet): int
+    private function purchasedFromHistory(Wallet $wallet): int
     {
-        $query = Transaction::query()
+        $purchased = 0;
+        $balance = 0;
+        $clampedForThisRenewal = false;
+
+        Transaction::query()
             ->where('wallet_id', $wallet->getKey())
-            ->where('type', 'deposit')
             ->where('confirmed', true)
-            ->where(function ($q): void {
-                $q->where('meta->reason', 'like', 'one_time_order:%')
-                    ->orWhere('meta->reason', 'coupon_credit');
+            ->orderBy('created_at')
+            ->orderBy('id')
+            ->each(function (Transaction $transaction) use (&$purchased, &$balance, &$clampedForThisRenewal): void {
+                $reason = $transaction->meta['reason'] ?? null;
+                $amount = (int) $transaction->amount;
+                $isRenewalMarker = is_string($reason) && in_array($reason, self::RENEWAL_MARKER_REASONS, true);
+
+                // A renewal is where the carry-over is decided: what survives is what the
+                // balance at that moment could still cover. Once per renewal, though — the
+                // withdrawal and the deposit are one event, and clamping again after the
+                // withdrawal would measure against a balance of zero and discard what the
+                // renewal had just legitimately carried forward.
+                if ($isRenewalMarker && ! $clampedForThisRenewal) {
+                    $purchased = max(0, min($purchased, $balance));
+                    $clampedForThisRenewal = true;
+                } elseif (! $isRenewalMarker) {
+                    $clampedForThisRenewal = false;
+                }
+
+                $balance += $amount;
+
+                if (is_string($reason) && (str_starts_with($reason, 'one_time_order:') || $reason === 'coupon_credit')) {
+                    $purchased += $amount;
+                }
             });
 
-        $lastReset = Transaction::query()
-            ->where('wallet_id', $wallet->getKey())
-            ->whereIn('meta->reason', ['period_reset', WalletUsageService::PERIOD_CREDIT_REASON])
-            ->orderByDesc('created_at')
-            ->orderByDesc('id')
-            ->first();
-
-        if ($lastReset !== null) {
-            // Ties on created_at are broken by id: reset and purchase can land in the
-            // same second, and a purchase recorded before the reset must not count.
-            $query->where(function ($q) use ($lastReset): void {
-                $q->where('created_at', '>', $lastReset->created_at)
-                    ->orWhere(function ($q2) use ($lastReset): void {
-                        $q2->where('created_at', $lastReset->created_at)
-                            ->where('id', '>', $lastReset->getKey());
-                    });
-            });
-        }
-
-        return (int) $query->sum('amount');
+        return max(0, min($purchased, (int) $wallet->balanceInt));
     }
 }

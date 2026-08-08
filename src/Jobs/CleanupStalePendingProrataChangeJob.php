@@ -94,9 +94,16 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                         continue;
                     }
 
+                    // A marker with no `created_at` is treated as older than the hard limit,
+                    // which is what processBillable() already assumes and logs about.
+                    // Defaulting to now() meant it was never `lessThan($threshold)`, so the
+                    // recovery branch written for it could not be reached — and
+                    // ValidateSubscriptionChange refuses every money-moving plan change
+                    // while the marker is set, so the customer stayed locked out forever
+                    // with no log line and no alert.
                     $createdAt = isset($pending['created_at'])
                         ? \Carbon\Carbon::parse((string) $pending['created_at'])->setTimezone('UTC')
-                        : BillingTime::nowUtc();
+                        : BillingTime::nowUtc()->subDays(self::HARD_LIMIT_DAYS + 1);
 
                     if (! $createdAt->lessThan($threshold)) {
                         continue;

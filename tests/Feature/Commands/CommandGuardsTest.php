@@ -66,8 +66,18 @@ it('fails loudly when no billable model is configured', function (): void {
 });
 
 it('reports which billable model it prepared overage for', function (): void {
-    $this->artisan('billing:prepare-overage')
+    // --force skips the confirmation the command grew: the five passes create real
+    // recurring payments, cancel Mollie subscriptions and apply scheduled changes, which
+    // is not something a bare invocation should start.
+    $this->artisan('billing:prepare-overage --force')
         ->expectsOutputToContain(TestBillable::class)
+        ->assertSuccessful();
+});
+
+it('asks before charging overage for every billable', function (): void {
+    $this->artisan('billing:prepare-overage')
+        ->expectsConfirmation('This charges overage, cancels past-due subscriptions and applies scheduled changes for every ['.TestBillable::class.']. Continue?', 'no')
+        ->expectsOutputToContain('Aborted')
         ->assertSuccessful();
 });
 

@@ -39,6 +39,21 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
 
     public int $uniqueFor = 900;
 
+    /**
+     * One attempt, never the worker's `--tries` default — the same reason
+     * ApplyScheduledChangesJob states: handle() runs UpdateSubscription, which creates
+     * Mollie prorata payments and PATCHes the subscription inside a transaction, so a
+     * transient failure after the money moved rolls the local seat count back while the
+     * charge stands. A second attempt would charge again — and in byDelta() mode it is
+     * worse than a repeat, because the delta is re-resolved from the rolled-back row: the
+     * retry adds *another* seat. Uniqueness cannot catch it either, since a delta job's
+     * uniqueId() is deliberately per-dispatch.
+     */
+    public int $tries = 1;
+
+    /** Long enough for the Mollie round-trips of one seat change. */
+    public int $timeout = 120;
+
     /** Distinguishes otherwise identical delta jobs — see uniqueId(). */
     public readonly string $token;
 
