@@ -283,6 +283,34 @@ class VatCalculationService
     }
 
     /**
+     * Whether the *countries* alone would permit reverse charge — i.e. the supply is
+     * cross-border within the EU rather than domestic.
+     *
+     * Deliberately says nothing about whether a VAT number exists or has been verified;
+     * that is the caller's half. It exists because `reverseChargeApplies()` reads the
+     * *persisted* validation, which is not available while a number is still being typed
+     * into a form — and every place that answered the country question for itself is a
+     * second copy of the seller-country policy. One of them showed "reverse charge applies"
+     * next to a gross total on a domestic supply: a valid Austrian VAT number on an
+     * Austrian customer of an Austrian seller is an ordinary domestic sale that carries
+     * 20 % VAT, and telling the customer otherwise is a tax statement that is simply wrong.
+     */
+    public function reverseChargeCountriesQualify(?string $customerCountry): bool
+    {
+        $sellerCountry = $this->sellerCountry();
+
+        if ($sellerCountry === null) {
+            return $this->reverseChargePolicyWithoutSellerCountry();
+        }
+
+        if ($customerCountry === null || $customerCountry === '') {
+            return false;
+        }
+
+        return ! CountryResolver::sameCountry($customerCountry, $sellerCountry);
+    }
+
+    /**
      * Live VIES validation without persistence. For Livewire form feedback.
      *
      * A VIES outage is never reported as "invalid": it raises

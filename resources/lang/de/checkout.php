@@ -42,6 +42,7 @@ return [
     'vies_unavailable' => 'VIES ist gerade nicht erreichbar. Bitte versuchen Sie es in ein paar Minuten erneut.',
     'vies_validation_failed' => 'Die USt-IdNr. ist in VIES nicht als gültig registriert. Bitte prüfen Sie die Eingabe und versuchen Sie es erneut.',
     'vat_verified' => 'USt-IdNr. verifiziert — Reverse-Charge wird angewendet.',
+    'vat_verified_domestic' => 'USt-IdNr. verifiziert. Inlandsleistung — die USt. wird berechnet.',
     'vat_correct_or_clear' => 'Bitte korrigieren Sie die USt-IdNr. oder lassen Sie das Feld leer.',
 
     // Step 2: plan

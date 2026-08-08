@@ -42,6 +42,7 @@ return [
     'vies_unavailable' => 'VIES is currently unreachable. Please try again in a few minutes.',
     'vies_validation_failed' => 'The VAT number is not registered as valid in VIES. Please check your input and try again.',
     'vat_verified' => 'VAT number verified — reverse-charge applies.',
+    'vat_verified_domestic' => 'VAT number verified. This is a domestic supply, so VAT is charged.',
     'vat_correct_or_clear' => 'Please correct the VAT number or leave it blank.',
 
     // Step 2: plan

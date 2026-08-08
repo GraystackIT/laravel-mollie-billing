@@ -795,20 +795,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
         // Cannot delegate wholesale to reverseChargeApplies(): it reads the *persisted*
         // validation, and during checkout the number being entered is not saved until
-        // submit() — so a legitimate B2B customer would be shown and charged gross.
-        // The seller-country policy is asked of the service rather than reimplemented:
-        // a local copy of it read a malformed `vat.seller_country` (`AUT`, `Austria`) as
-        // "no seller country" and granted reverse charge, while the service refuses it —
-        // net displayed and collected against an invoice that owes VAT.
-        $vatService = app(VatCalculationService::class);
-        $seller = $vatService->sellerCountry();
-
-        if ($seller === null) {
-            return $vatService->reverseChargePolicyWithoutSellerCountry();
-        }
-
-        // A valid VAT number is not enough — a domestic B2B supply carries domestic VAT.
-        return ! CountryResolver::sameCountry($this->taxCountry(), $seller);
+        // submit() — so a legitimate B2B customer would be shown and charged gross. The
+        // country half is asked of the service, which owns the seller-country policy and the
+        // domestic-supply rule; a local copy of it read a malformed `vat.seller_country`
+        // (`AUT`, `Austria`) as "no seller country" and granted reverse charge on an invoice
+        // that owes VAT.
+        return app(VatCalculationService::class)->reverseChargeCountriesQualify($this->taxCountry());
     }
 
     public function vatRate(VatCalculationService $vat): float

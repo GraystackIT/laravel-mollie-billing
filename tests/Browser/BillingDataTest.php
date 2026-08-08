@@ -137,4 +137,34 @@ class BillingDataTest extends BrowserTestCase
             ->and(\Illuminate\Support\Facades\Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path))
             ->toBeTrue();
     }
+
+    /**
+     * A VIES-valid business in a *different* EU country: a cross-border supply, where reverse
+     * charge really does apply — so the message says so and the prices are shown net.
+     *
+     * Its counterpart (a valid number from the seller's own country, which is verified but
+     * NOT reverse-charged) is pinned in `tests/Unit/Support/ValidatesVatNumberTraitTest.php`
+     * instead: the workbench's fake VIES does not answer for an AT number inside the Dusk
+     * server process, and the assertion is about which message the trait picks, not about the
+     * browser.
+     */
+    public function test_a_cross_border_vat_number_does_promise_reverse_charge(): void
+    {
+        $billable = $this->makeBillable();
+
+        $this->browse(function (Browser $browser) use ($billable): void {
+            $this->actAs($browser, $billable, '/billing/checkout');
+
+            $this->fillBillingStep($browser, 'DE', 'DE129273398');
+            $this->waitForPresence($browser, '.text-emerald-700, .dark\\:text-emerald-400', 15);
+
+            $browser->assertSee(__('billing::checkout.vat_verified'));
+
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitForText('Starter', 10)
+                ->assertSee(__('billing::checkout.prices_net'));
+
+            $this->shot($browser, 'Grenzüberschreitend: Reverse Charge, Preise netto');
+        });
+    }
 }

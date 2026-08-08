@@ -71,6 +71,15 @@ trait ValidatesVatNumber
         }
 
         $this->vatNumberValid = true;
-        $this->vatStatusMessage = __('billing::checkout.vat_verified');
+
+        // Verified is not the same as reverse-charged. Reverse charge is for a cross-border
+        // B2B supply inside the EU; a customer in the seller's own country is an ordinary
+        // domestic sale that carries domestic VAT, however valid their VAT number is. The
+        // message used to promise reverse charge unconditionally, so an Austrian business
+        // buying from an Austrian seller read "reverse-charge applies" directly above a gross
+        // total that correctly included 20 % — a tax statement the invoice then contradicted.
+        $this->vatStatusMessage = $vat->reverseChargeCountriesQualify($this->billing_country)
+            ? __('billing::checkout.vat_verified')
+            : __('billing::checkout.vat_verified_domestic');
     }
 }
