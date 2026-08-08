@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
 use GraystackIT\MollieBilling\Events\AddonEnabled;
 use GraystackIT\MollieBilling\Events\PlanChanged;
@@ -18,6 +19,7 @@ use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -264,17 +266,41 @@ class UpdateSubscription
                 $meta = $billable->getBillingSubscriptionMeta();
 
                 if ($downgradeToLocal) {
+                    // Whether the subscription is definitively gone at Mollie. Dropping
+                    // the id on a failed cancel orphaned a live subscription that kept
+                    // charging the old price with nothing able to target it any more.
+                    $cancelledAtMollie = true;
+
                     if (! $prorataHandledByExecutor) {
-                        $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
+                        $cancelledAtMollie = $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
+                        // The patcher writes `pending_subscription_cancel` on failure, so
+                        // re-read before this method's own meta edits overwrite it.
+                        $billable->refresh();
+                        $meta = $billable->getBillingSubscriptionMeta();
                     }
-                    // Free downgrade tears down the Mollie subscription — any active
-                    // recurring-coupon marker no longer applies (no future charges).
-                    unset(
-                        $meta['mollie_subscription_id'],
-                        $meta['pending_amount_net'],
-                        $meta['pending_amount_recorded_at'],
-                        $meta['active_recurring_coupon'],
-                    );
+
+                    // The same hygiene ActivateLocalSubscription performs — this is the
+                    // other way onto a Local subscription, and it used to clear three
+                    // keys where its sibling cleared ten. What survived was not inert:
+                    //
+                    // - `past_due_since` + a PastDue status that the write below never
+                    //   normalised. `guardPeriodNotLapsed` exempts PastDue and a free
+                    //   target prices at 0, so the downgrade went through, the source
+                    //   flipped to Local and the status stayed PastDue — which
+                    //   `hasAccessibleBillingSubscription()` refuses, and no renewal will
+                    //   ever come to recover a Local subscription. The stale dunning clock
+                    //   then auto-cancelled and expired the row.
+                    // - `scheduled_change` / `scheduled_change_at`: the daily dispatcher
+                    //   kept applying an upgrade the validator refuses for a Local plan,
+                    //   and `apply()` re-threw without clearing the column, so it failed
+                    //   every night forever.
+                    // - `next_charge_date_override`: outranks the period anchor in
+                    //   `nextBillingDate()`, deferring the free plan's quota recharge.
+                    $meta = SubscriptionMetaHygiene::forFreshSubscription($meta);
+
+                    if ($cancelledAtMollie) {
+                        unset($meta['mollie_subscription_id']);
+                    }
                 } elseif ($context->isMollie && ! $prorataHandledByExecutor && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
                     // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
                     // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
@@ -316,6 +342,14 @@ class UpdateSubscription
                         'subscription_source' => SubscriptionSource::Local,
                         'subscription_period_starts_at' => BillingTime::nowUtc(),
                         'subscription_ends_at' => null,
+                        // Normalised, like ActivateLocalSubscription does. A PastDue or
+                        // Trial status carried into a Local free plan is unrecoverable:
+                        // access is refused and no renewal will ever arrive to clear it.
+                        'subscription_status' => SubscriptionStatus::Active,
+                        'trial_ends_at' => null,
+                        // Cleared with the meta entry above — the period-end dispatcher
+                        // keys off this column alone.
+                        'scheduled_change_at' => null,
                     ] : []),
                 ])->save();
             }

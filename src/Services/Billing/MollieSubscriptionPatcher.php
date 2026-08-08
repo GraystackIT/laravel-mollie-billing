@@ -10,6 +10,11 @@ use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Jobs\RetrySubscriptionCancelJob;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
+use Illuminate\Support\Facades\Notification;
+use Mollie\Api\Exceptions\ApiException;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -352,23 +357,87 @@ class MollieSubscriptionPatcher
     /**
      * Cancels the Mollie subscription on a free downgrade. Tolerant of API failures.
      */
-    public function cancelForFreeDowngrade(Billable $billable): void
+    /**
+     * Cancel the Mollie subscription a downgrade to a free plan makes obsolete.
+     *
+     * Returns whether the subscription is definitively gone at Mollie. The caller must
+     * keep `mollie_subscription_id` when it is not: this used to swallow every failure
+     * and log, while `UpdateSubscription` dropped the id regardless — so with Mollie
+     * unreachable for that one call the subscription stayed active, charged the old
+     * plan's price every period against a now-free billable, and with the id gone no
+     * later cancel could target it. Same failure mode `CancelSubscription` was given a
+     * `pending_subscription_cancel` marker and a retry job for; this path had neither.
+     */
+    public function cancelForFreeDowngrade(Billable $billable): bool
     {
         $customerId = $billable->getMollieCustomerId();
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
 
         if ($customerId === null || $subscriptionId === '') {
-            return;
+            return true;
         }
 
         try {
             Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
+
+            return true;
+        } catch (ApiException $e) {
+            // Already gone is the outcome we wanted.
+            if (in_array($e->getCode(), [404, 410], true)) {
+                return true;
+            }
+
+            $error = $e->getMessage();
         } catch (\Throwable $e) {
-            Log::warning('Mollie subscription cancel during free-downgrade failed', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'subscription_id' => $subscriptionId,
-                'error' => $e->getMessage(),
-            ]);
+            $error = $e->getMessage();
         }
+
+        Log::error('Mollie subscription cancel during free-downgrade failed — it may keep charging', [
+            'billable' => $billable instanceof Model ? $billable->getKey() : null,
+            'subscription_id' => $subscriptionId,
+            'error' => $error,
+        ]);
+
+        if (! ($billable instanceof Model)) {
+            return false;
+        }
+
+        $marker = [
+            'mollie_customer_id' => $customerId,
+            'mollie_subscription_id' => $subscriptionId,
+            'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+            'last_error' => $error,
+        ];
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['pending_subscription_cancel'] = $marker;
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        // Dispatched as well as marked: the marker alone is only read by the hourly
+        // sweep, and every period until then is a period the customer is charged for a
+        // plan they no longer have.
+        RetrySubscriptionCancelJob::dispatch(
+            (string) config('mollie-billing.billable_model'),
+            $billable->getKey(),
+            $customerId,
+            $subscriptionId,
+            $marker['first_attempt_at'],
+        );
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins !== []) {
+            Notification::send($admins, MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'Mollie subscription cancel failed during a downgrade to a free plan — it may still be charging',
+                $marker + [
+                    'billable_type' => $billable->getMorphClass(),
+                    'billable_id' => $billable->getKey(),
+                ],
+            ));
+        }
+
+        return false;
     }
 }

@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
@@ -169,7 +170,15 @@ class CreateSubscription
             webhookUrl: route(BillingRoute::webhook()),
         ));
 
-        $meta = $billable->getBillingSubscriptionMeta();
+        // A fresh subscription starts a fresh dunning clock. `past_due_since` used to
+        // survive a cancellation, so months later ONE failed renewal was measured
+        // against the old date and the nightly pass auto-cancelled the same night —
+        // a zero-day dunning window, before Mollie had even retried the payment.
+        //
+        // Only the dunning keys: pricing and scheduling belong to the caller here. The
+        // 100 %-coverage coupon path sets `active_recurring_coupon` before this call
+        // precisely so the start date below can be deferred past the free periods.
+        $meta = SubscriptionMetaHygiene::withoutDunningEpisode($billable->getBillingSubscriptionMeta());
         $meta['seat_count'] = $totalSeats;
         $meta['mollie_subscription_id'] = (string) ($subscription->id ?? '');
 

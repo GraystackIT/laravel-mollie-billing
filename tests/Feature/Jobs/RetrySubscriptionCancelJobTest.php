@@ -31,18 +31,13 @@ afterEach(function (): void {
     $prop->setValue(null, null);
 });
 
-/** Minimal Mollie Response double — ApiException requires a real one. */
+/**
+ * Delegates to the shared factory — the Response double it needs is fiddly enough that
+ * two copies had already started to drift.
+ */
 function cancelApiException(string $message, int $code): ApiException
 {
-    $stream = M::mock(PsrStream::class);
-    $stream->shouldReceive('__toString')->andReturn('');
-    $psrRequest = M::mock(PsrRequest::class);
-    $psrRequest->shouldReceive('getBody')->andReturn($stream);
-    $response = M::mock(MollieResponse::class);
-    $response->shouldReceive('json')->andReturn((object) []);
-    $response->shouldReceive('getPsrRequest')->andReturn($psrRequest);
-
-    return new ApiException($response, $message, $code);
+    return \GraystackIT\MollieBilling\Tests\Support\MollieApiExceptionFactory::withStatus($code, $message);
 }
 
 function cancelMarkerBillable(?array $marker = null): TestBillable

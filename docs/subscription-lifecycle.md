@@ -13,6 +13,24 @@ This document provides an overview of the subscription states and transitions in
 | `cancelled` | User-initiated cancellation, active until end of period |
 | `expired` | Subscription ended (trial expired or cancellation period over) |
 
+### What a transition must clear
+
+`subscription_meta` carries clocks, schedules and pricing that belong to *one* subscription. A transition that leaves them behind does not leave something inert — the next unattended pass acts on them:
+
+| Key | What reads it, if it survives |
+|---|---|
+| `past_due_since`, `payment_failure` | The auto-cancel clock. A stale date meant one later failed renewal was cancelled the same night, with a zero-day dunning window. |
+| `scheduled_change`, `scheduled_change_at` | The period-end dispatcher, which keys off the column alone. |
+| `next_charge_date_override` | `nextBillingDate()`, outranking the period anchor — it defers a free plan's quota recharge. |
+| `active_recurring_coupon` | `CreateSubscription` on a later upgrade, granting a discount campaign nobody applied. |
+
+`Support\SubscriptionMetaHygiene` holds these lists so a new transition cannot forget one:
+
+- `forFreshSubscription()` — everything above. Used by `ActivateLocalSubscription` and the downgrade to a free plan, i.e. wherever a *new* subscription begins.
+- `withoutDunningEpisode()` — the dunning keys only. Used by `CreateSubscription` (pricing and scheduling belong to its caller there: the 100 %-coverage coupon path writes `active_recurring_coupon` *before* the call so the Mollie start date can be deferred past the free periods) and by a payment that clears while the billable is PastDue.
+
+Identity keys are never cleared. `mollie_subscription_id` and `pending_subscription_cancel` are the only handles on a subscription that may still be live at Mollie — dropping either orphans it, and it keeps charging with nothing able to target it.
+
 ## Subscription Sources
 
 | Source | Description |

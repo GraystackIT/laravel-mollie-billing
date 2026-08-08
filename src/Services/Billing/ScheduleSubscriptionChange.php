@@ -13,6 +13,10 @@ use GraystackIT\MollieBilling\Events\SubscriptionChangeRescheduled;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeScheduled;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
+use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
+use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
@@ -227,8 +231,42 @@ class ScheduleSubscriptionChange
                 // ignore
             }
 
+            // A change the validator will refuse for the same reason tomorrow is dropped
+            // rather than retried. `isApplicable()` above only screens on status, so a
+            // change that survived a downgrade to free passed it (a Local free plan is
+            // Active) and then threw LocalSubscriptionUpgradeRequiresMolliePathException
+            // — and re-throwing without clearing `scheduled_change_at` made the daily
+            // dispatcher fail on that billable every night, indefinitely.
+            //
+            // Transient failures still propagate, so the queue's own retry can have them.
+            if ($this->isPermanentApplyFailure($e)) {
+                Log::warning('Dropping a scheduled change its own validation permanently refuses', [
+                    'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                    'reason' => $e->getMessage(),
+                ]);
+
+                $this->cancel($billable);
+
+                return;
+            }
+
             throw $e;
         }
+    }
+
+    /**
+     * Whether this failure will recur identically on the next run.
+     *
+     * Deliberately a whitelist of *domain* refusals rather than "anything that is not a
+     * network error": a stored change is real customer intent, and dropping it because
+     * of a transient fault would lose it silently. Everything not listed here is
+     * re-thrown so the queue can retry.
+     */
+    private function isPermanentApplyFailure(\Throwable $e): bool
+    {
+        return $e instanceof LocalSubscriptionUpgradeRequiresMolliePathException
+            || $e instanceof HiddenPlanNotSelectableException
+            || $e instanceof IntervalNotOfferedException;
     }
 
     /**

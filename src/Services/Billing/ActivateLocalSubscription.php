@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 
 class ActivateLocalSubscription
@@ -43,19 +44,11 @@ class ActivateLocalSubscription
         // for the same reason. Identity keys (Mollie ids, checkout handles) are kept:
         // clearing `mollie_subscription_id` would orphan a subscription nobody can
         // cancel afterwards.
-        $meta = $billable->getBillingSubscriptionMeta();
-        unset(
-            $meta['active_recurring_coupon'],
-            $meta['scheduled_change'],
-            $meta['pending_plan_change'],
-            $meta['pending_prorata_change'],
-            $meta['prorata_pending_payment_id'],
-            $meta['pending_subscription_patch'],
-            $meta['pending_amount_net'],
-            $meta['pending_amount_recorded_at'],
-            $meta['next_charge_date_override'],
-            $meta['cancelled_from'],
-        );
+        // One list, in SubscriptionMetaHygiene — this one had grown by hand while the
+        // webhook activation paths cleared nothing at all, and it was still missing the
+        // dunning keys, so a stale `past_due_since` could auto-cancel a brand-new
+        // subscription the first time a renewal failed.
+        $meta = SubscriptionMetaHygiene::forFreshSubscription($billable->getBillingSubscriptionMeta());
         $meta['seat_count'] = $this->catalog->includedSeats($planCode);
 
         $billable->forceFill([

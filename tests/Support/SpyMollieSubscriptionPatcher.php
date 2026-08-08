@@ -18,6 +18,12 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
     /** @var array<int, array<int, mixed>> */
     public static array $calls = [];
 
+    /**
+     * @var bool Flip to false to simulate an unreachable Mollie — the caller must then
+     *           keep `mollie_subscription_id` rather than orphaning a live subscription.
+     */
+    public static bool $cancelSucceeds = true;
+
     public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
     {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
@@ -44,12 +50,14 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
         SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];
     }
 
-    public function cancelForFreeDowngrade(Billable $billable): void
+    public function cancelForFreeDowngrade(Billable $billable): bool
     {
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
         self::$calls[] = ['cancel', $customerId, $subscriptionId];
         SpyUpdateSubscription::$calls[] = ['cancel', $customerId, $subscriptionId];
+
+        return self::$cancelSucceeds;
     }
 
     public function updateRecurringAmount(
