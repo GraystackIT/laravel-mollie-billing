@@ -118,7 +118,7 @@ class MollieSubscriptionPatcher
         }
 
         return new Date(
-            $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth()
+            BillingTime::addInterval(BillingTime::nowUtc(), $interval)
         );
     }
 
@@ -223,7 +223,7 @@ class MollieSubscriptionPatcher
         $startDate = match (true) {
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
             $intervalChanged || $forceResetStartDate => new Date(
-                $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth()
+                BillingTime::addInterval(BillingTime::nowUtc(), $interval)
             ),
             default => null,
         };

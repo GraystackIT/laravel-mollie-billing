@@ -60,6 +60,34 @@ class BillingTime
     }
 
     /**
+     * One billing interval after `$at`, clamped to the end of a shorter month.
+     *
+     * `addMonth()` overflows: 31 January plus one month is 3 March, not 28 February. That is
+     * PHP's calendar arithmetic and it is wrong for billing in three ways at once.
+     *
+     * Mollie charges a monthly subscription on the last day of a month that has no 31st, so
+     * a customer whose period starts on the 31st was told their next charge was 3 March while
+     * Mollie collected on 28 February — a three-day gap in the wrong direction. From that
+     * follow the two that cost money: `PrepareUsageOverageJob` charges a period's overage on
+     * the day *before* `nextBillingDate()`, which by then is after Mollie has renewed and
+     * moved the anchor, so that period's overage is never charged separately at all; and the
+     * prorata window is 31 days long for a 28-day period, so a mid-period upgrade of 3000 net
+     * on 14 February was priced at 17/31 (1645) instead of 14/28 (1500) — and a downgrade
+     * over-credits by the same arithmetic.
+     *
+     * Every "one interval later" in the package goes through here so the three cannot drift
+     * apart again.
+     */
+    public static function addInterval(CarbonInterface $at, ?string $interval): CarbonImmutable
+    {
+        $next = CarbonImmutable::instance($at);
+
+        return $interval === 'yearly'
+            ? $next->addYearNoOverflow()
+            : $next->addMonthNoOverflow();
+    }
+
+    /**
      * The later of two moments, compared in UTC.
      *
      * Both are normalised through toUtc() first, so a CarbonImmutable and an

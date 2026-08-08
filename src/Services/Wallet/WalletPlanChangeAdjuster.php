@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
@@ -175,8 +176,8 @@ class WalletPlanChangeAdjuster
         }
 
         return strtolower($oldInterval) === SubscriptionInterval::Yearly->value
-            ? $periodStart->copy()->addYear()
-            : $periodStart->copy()->addMonth();
+            ? BillingTime::addInterval($periodStart, 'yearly')
+            : BillingTime::addInterval($periodStart, 'monthly');
     }
 
     /**

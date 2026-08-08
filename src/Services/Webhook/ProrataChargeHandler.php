@@ -143,8 +143,8 @@ class ProrataChargeHandler
         $paidAt = $payment->paidAt ?? null;
         $newPeriodStart = $paidAt ? Carbon::parse((string) $paidAt)->setTimezone('UTC') : BillingTime::nowUtc();
         $newPeriodEnd = $newIntervalCode === 'yearly'
-            ? $newPeriodStart->copy()->addYear()
-            : $newPeriodStart->copy()->addMonth();
+            ? BillingTime::addInterval($newPeriodStart, 'yearly')
+            : BillingTime::addInterval($newPeriodStart, 'monthly');
 
         $invoicePeriodStart = $startsNewPeriod ? $newPeriodStart : $billable->getBillingPeriodStartsAt();
         $invoicePeriodEnd = $startsNewPeriod ? $newPeriodEnd : $billable->nextBillingDate();

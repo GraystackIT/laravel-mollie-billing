@@ -392,3 +392,41 @@ it('ends a subscription at the period boundary and stops billing it', function (
         ->and($billable->fresh()->subscription_period_starts_at->toIso8601String())
         ->toBe('2026-01-01T09:00:00+00:00');
 });
+
+it('ends a monthly period on the last day of a shorter month, not three days into the next', function (): void {
+    // 31 January plus one calendar month is 3 March in PHP. Mollie charges a monthly
+    // subscription on the last day of a month that has no 31st, so the two disagreed by
+    // three days — in the direction that costs money twice over.
+    $billable = ledgerBillable('2026-01-31T09:00:00Z');
+
+    expect($billable->nextBillingDate()->toIso8601String())->toBe('2026-02-28T09:00:00+00:00');
+
+    // The prorata window is the period, not a calendar month: 28 days, not 31.
+    $days = \GraystackIT\MollieBilling\Support\BillingPolicy::prorataPeriodDays(
+        $billable->getBillingPeriodStartsAt(),
+        $billable->nextBillingDate(),
+    );
+
+    expect($days['total'])->toBe(28);
+
+    // Which is what the prorata factor is measured against. On 14 February, 14 of 28 days
+    // remain: a 3000 net delta is 1500, where the overflowing window priced it at 17/31 =
+    // 1645 (and over-credited a downgrade by the same arithmetic).
+    $this->travelTo(BillingTime::toUtc('2026-02-14T12:00:00Z'));
+
+    expect(\GraystackIT\MollieBilling\Support\BillingPolicy::computeProrata(
+        4300,
+        7300,
+        false,
+        $billable->getBillingPeriodStartsAt(),
+        $billable->nextBillingDate(),
+    )['charge_net'])->toBe(1500);
+});
+
+it('ends a yearly period on 28 February when it started on a leap day', function (): void {
+    $billable = ledgerBillable('2024-02-29T09:00:00Z');
+    $billable->forceFill(['subscription_interval' => SubscriptionInterval::Yearly])->save();
+
+    // 29 February plus a year overflowed to 1 March.
+    expect($billable->fresh()->nextBillingDate()->toIso8601String())->toBe('2025-02-28T09:00:00+00:00');
+});

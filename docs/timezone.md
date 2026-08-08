@@ -128,3 +128,21 @@ For consumers who are already running the package in production:
 - Trial creation at 23:30 UTC: the database stores `2026-05-02 23:30:00`, the portal with `BILLING_TIMEZONE=Europe/Berlin` displays `03. May 2026, 01:30`, and the admin shows `2026-05-02 23:30 UTC`.
 - The OSS export for a previous year under `APP_TIMEZONE=Pacific/Auckland` produces a CSV identical to the run under `APP_TIMEZONE=UTC`.
 - `BillingPolicy::prorataPeriodDays()` returns the same result for UTC and non-UTC Carbon inputs.
+
+## Period arithmetic: one interval later
+
+`BillingTime::addInterval()` is the single place that answers "one billing interval after
+this moment", and it clamps rather than overflows: 31 January plus one month is 28 February,
+not 3 March, and 29 February plus one year is 28 February, not 1 March.
+
+That matches what Mollie does — a monthly subscription is charged on the last day of a month
+that has no 31st — and it has to, because three things key off the answer:
+
+- the "next billing" date the portal and the admin panel show,
+- the day `PrepareUsageOverageJob` charges the period's metered overage (the day *before* it),
+- and the window every prorata factor is measured against (`BillingPolicy::prorataPeriodDays()`).
+
+With calendar overflow those three drifted apart from Mollie by up to three days for every
+customer billed on the 29th, 30th or 31st: the overage pass fired after Mollie had already
+renewed and moved the anchor, so that period's overage was never charged, and a 28-day period
+was prorated as if it had 31 days.

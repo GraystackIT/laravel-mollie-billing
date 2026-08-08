@@ -447,8 +447,8 @@ class ProrataComposer
     {
         $periodStart = BillingTime::nowUtc();
         $periodEnd = $intent->newInterval === 'yearly'
-            ? $periodStart->copy()->addYear()
-            : $periodStart->copy()->addMonth();
+            ? BillingTime::addInterval($periodStart, 'yearly')
+            : BillingTime::addInterval($periodStart, 'monthly');
 
         $charges = [];
 
@@ -493,7 +493,7 @@ class ProrataComposer
 
         return [
             $start,
-            $intent->newInterval === 'yearly' ? $start->copy()->addYear() : $start->copy()->addMonth(),
+            BillingTime::addInterval($start, $intent->newInterval),
         ];
     }
 
@@ -684,7 +684,7 @@ class ProrataComposer
         /** @var Billable&\Illuminate\Database\Eloquent\Model $billable */
         $billable = $invoice->billable()->first();
         $billableStart = $billable?->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
-        $billableEnd = $billable?->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
+        $billableEnd = $billable?->nextBillingDate() ?? BillingTime::addInterval(BillingTime::nowUtc(), 'monthly');
         [$lineStart, $lineEnd] = $this->resolveLinePeriod($line, $invoice, $billableStart, $billableEnd);
 
         ['days' => $days, 'factor' => $factor] = $this->periodMath($lineStart, $lineEnd);

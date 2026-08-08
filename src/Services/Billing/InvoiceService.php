@@ -113,7 +113,7 @@ class InvoiceService
         // (so currentPeriodLines() can later locate them for refunds), else fall back
         // to "now → now+1 month" as a defensive default for one-off charges.
         $linePeriodStart = $billable->getBillingPeriodStartsAt() ?? BillingTime::nowUtc();
-        $linePeriodEnd = $billable->nextBillingDate() ?? BillingTime::nowUtc()->addMonth();
+        $linePeriodEnd = $billable->nextBillingDate() ?? BillingTime::addInterval(BillingTime::nowUtc(), 'monthly');
 
         $normalizedLines = array_map(function (array $line) use ($rate, $zeroRated, $linePeriodStart, $linePeriodEnd): array {
             // Normalize legacy kind alias.

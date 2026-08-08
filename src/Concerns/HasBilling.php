@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Support\BillingAuditEntry;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
@@ -738,9 +739,14 @@ trait HasBilling
             return null;
         }
 
-        return $this->subscription_interval === SubscriptionInterval::Yearly
-            ? $this->subscription_period_starts_at->copy()->addYear()
-            : $this->subscription_period_starts_at->copy()->addMonth();
+        // Clamped, not overflowing — see BillingTime::addInterval(). This value drives the
+        // dashboard's "next billing", the overage pass's trigger day and every prorata
+        // window, and for a period starting on the 31st it used to land three days after
+        // Mollie's actual charge.
+        return BillingTime::addInterval(
+            $this->subscription_period_starts_at,
+            $this->subscription_interval === SubscriptionInterval::Yearly ? 'yearly' : 'monthly',
+        );
     }
 
     /**

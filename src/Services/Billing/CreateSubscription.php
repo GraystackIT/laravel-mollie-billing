@@ -151,8 +151,7 @@ class CreateSubscription
             $isTrial => $trialEndsAt,
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
             $paidPeriodEndsAt !== null => $paidPeriodEndsAt,
-            $interval === 'yearly' => BillingTime::nowUtc()->addYear(),
-            default => BillingTime::nowUtc()->addMonth(),
+            default => BillingTime::addInterval(BillingTime::nowUtc(), $interval),
         };
 
         // The mandate all four activation paths already hand us. Without it Mollie binds
@@ -229,6 +228,6 @@ class CreateSubscription
             return $validUntil->copy()->addDay();
         }
 
-        return $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth();
+        return BillingTime::addInterval(BillingTime::nowUtc(), $interval);
     }
 }
