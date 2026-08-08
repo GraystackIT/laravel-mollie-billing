@@ -993,7 +993,7 @@ class UpdateSubscription
         $hasChanges = $planChanged || $intervalChanged || $newSeats !== $currentSeats
             || array_diff($newAddons, $currentAddons) || array_diff($currentAddons, $newAddons);
 
-        $isPastDueReset = $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+        $isPastDueReset = BillingPolicy::isPastDueReset($billable, $planChanged, $intervalChanged);
 
         if ($isPastDueReset) {
             // Past-Due: the current period was never paid (last charge failed).

@@ -42,12 +42,14 @@ beforeEach(function (): void {
             $app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class),
             $app->make(InvoiceNumberGenerator::class),
         ) extends InvoiceService {
-            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): void
+            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): bool
             {
                 $invoice->pdf_disk = 'local';
                 $invoice->pdf_path = 'billing/invoices/test/'.$invoice->serial_number.'.pdf';
                 $invoice->save();
                 Storage::disk('local')->put($invoice->pdf_path, 'fake-pdf');
+
+                return true;
             }
         };
     });

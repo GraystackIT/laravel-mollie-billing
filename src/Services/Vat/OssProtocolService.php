@@ -216,16 +216,25 @@ class OssProtocolService
             return 'non_eu';
         }
 
+        $seller = app(VatCalculationService::class)->sellerCountry();
+        $isDomestic = $seller !== null && $country !== '' && strtoupper($seller) === $country;
+
+        // Domestic is decided first. A validated VAT number alone does not make a supply
+        // reverse-charged: `VatCalculationService::reverseChargeApplies()` — the rule the
+        // charge itself used — also requires the customer country to differ from the
+        // seller's, so a domestic business customer pays full domestic VAT. Asking about
+        // the validation first labelled those rows `reverse_charge`, which sent real
+        // domestic turnover and its collected VAT into the EC Sales List and out of the
+        // national return entirely — with a non-zero VAT amount on a line the list says
+        // is zero-rated.
+        if ($isDomestic) {
+            return 'domestic';
+        }
+
         $validation = $invoice->vatValidation;
 
         if ($validation !== null && (bool) $validation->valid) {
             return 'reverse_charge';
-        }
-
-        $seller = app(VatCalculationService::class)->sellerCountry();
-
-        if ($seller !== null && $country !== '' && strtoupper($seller) === $country) {
-            return 'domestic';
         }
 
         return 'oss';

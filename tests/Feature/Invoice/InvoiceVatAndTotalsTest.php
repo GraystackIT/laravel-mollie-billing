@@ -23,11 +23,13 @@ function totalsInvoiceService(): InvoiceService
 {
     return new class (app(VatCalculationService::class), app(InvoiceNumberGenerator::class)) extends InvoiceService
     {
-        protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): void
+        protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): bool
         {
             $invoice->pdf_disk = 'local';
             $invoice->pdf_path = 'billing/invoices/test/'.$invoice->serial_number.'.pdf';
             $invoice->save();
+
+            return true;
         }
 
         public function pdfFor(BillingInvoice $invoice, Billable $billable): PdfInvoice

@@ -204,7 +204,7 @@ class PreviewService
         $prorataCreditNet = 0;
         $prorataRemainingDays = 0;
         $prorataTotalDays = 0;
-        $isPastDueReset = $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+        $isPastDueReset = BillingPolicy::isPastDueReset($billable, $planChanged, $intervalChanged);
 
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
@@ -403,7 +403,14 @@ class PreviewService
             $proratedOldQuota = 0;
             $actuallyUsed = max(0, $currentQuota - $planOnlyBalance);
 
-            if ($periodStart !== null && $periodEnd !== null && $currentQuota > 0 && $planChanged) {
+            // No `$planChanged` here: included quotas are keyed by (plan, interval), so an
+            // interval switch changes the quota exactly as much as a plan switch does.
+            // `WalletPlanChangeAdjuster` and `validateWalletUsage()` both gate on the old
+            // quota alone and both run for interval-only changes — so the preview was the
+            // one path that skipped the calculation, and it is the only one that has to
+            // tell the customer. It quoted €0.00 for usage and the change then charged the
+            // prorated excess.
+            if ($periodStart !== null && $periodEnd !== null && $currentQuota > 0) {
                 $usageProrata = BillingPolicy::computeUsageOverageForPlanChange(
                     $currentQuota,
                     $planOnlyBalance,

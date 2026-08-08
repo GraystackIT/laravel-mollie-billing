@@ -25,11 +25,13 @@ beforeEach(function (): void {
 
     $this->app->bind(InvoiceService::class, fn ($app): InvoiceService => new class ($app->make(VatCalculationService::class), $app->make(InvoiceNumberGenerator::class)) extends InvoiceService
     {
-        protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): void
+        protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): bool
         {
             $invoice->pdf_disk = 'local';
             $invoice->pdf_path = 'billing/invoices/test/'.$invoice->serial_number.'.pdf';
             $invoice->save();
+
+            return true;
         }
     });
 

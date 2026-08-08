@@ -31,6 +31,24 @@ final class ProrataLine
      */
     public ?array $refundCapNote = null;
 
+    /**
+     * Idempotency token for this line's Mollie refund, minted once and then carried
+     * through every retry.
+     *
+     * Mollie deduplicates refunds on (payment_id, amount) unless an explicit key is
+     * supplied, which would reject two legitimately identical refunds on one payment
+     * (reduce a seat, re-add it, reduce it again) as duplicates. The key used to end in
+     * fresh randomness on every attempt instead, which solved that and broke the other
+     * half: a refund whose HTTP response was lost is created at Mollie but throws here,
+     * so the line goes to `pending_refund_retries` and the retry arrives with a new key —
+     * a second payout rather than a replay of the first.
+     *
+     * A token that lives on the line, is serialised with it and survives the round trip
+     * through the retry marker gives both: distinct refunds get distinct keys, retries of
+     * one refund replay.
+     */
+    public ?string $refundToken = null;
+
     public function __construct(
         public readonly ?BillingInvoice $originalInvoice,
         public readonly ?int $originalLineItemIndex,
@@ -85,6 +103,7 @@ final class ProrataLine
             'parent_line_item_index' => $this->originalLineItemIndex,
             'mollie_refund_id' => $this->mollieRefundId,
             'refund_cap_note' => $this->refundCapNote,
+            'refund_token' => $this->refundToken,
         ];
     }
 
@@ -145,6 +164,10 @@ final class ProrataLine
 
         if (isset($data['refund_cap_note']) && is_array($data['refund_cap_note'])) {
             $line->refundCapNote = $data['refund_cap_note'];
+        }
+
+        if (isset($data['refund_token']) && is_string($data['refund_token'])) {
+            $line->refundToken = $data['refund_token'];
         }
 
         return $line;

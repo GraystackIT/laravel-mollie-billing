@@ -37,7 +37,7 @@ beforeEach(function (): void {
     // Use a subclass that skips actual PDF generation to avoid DOMPDF dependency in tests.
     $this->app->bind(InvoiceService::class, function ($app): InvoiceService {
         return new class ($app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class), $app->make(InvoiceNumberGenerator::class), $app->make(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class)) extends InvoiceService {
-            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): void
+            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): bool
             {
                 // Simulate successful PDF storage without actually generating a PDF.
                 $invoice->pdf_disk = 'local';
@@ -45,6 +45,8 @@ beforeEach(function (): void {
                 $invoice->save();
 
                 Storage::disk('local')->put($invoice->pdf_path, 'fake-pdf-content');
+
+                return true;
             }
         };
     });

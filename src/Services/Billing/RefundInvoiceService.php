@@ -193,23 +193,31 @@ class RefundInvoiceService
             $invoice->save();
 
             if ($billable !== null) {
+                // Wallet credits stay inside: units handed out without the credit note
+                // that justifies them would be free service.
                 foreach ($walletCredits as $usageType => $units) {
                     $this->wallet->credit($billable, (string) $usageType, (int) $units);
                 }
 
-                event(new InvoiceRefunded($billable, $invoice, $creditNote, $request));
+                // Announcements go after the commit. The money has already left Mollie by
+                // this point, so anything that throws here — an app listener on
+                // InvoiceRefunded pushing to a CRM, a queued-notification insert
+                // deadlocking — used to roll back the credit note and the `refunded_net`
+                // increment while the customer kept the refund. The admin then saw a 500,
+                // clicked Refund again, and the second call was still inside the payment
+                // total, so Mollie paid it out too.
+                DB::afterCommit(function () use ($billable, $invoice, $creditNote, $request, $notifyUser): void {
+                    event(new InvoiceRefunded($billable, $invoice, $creditNote, $request));
 
-                if ($notifyUser) {
-                    // Safe inside the transaction only because the credit note is
-                    // already saved above AND UsesBillingQueue sets
-                    // $afterCommit — a worker that dequeued before the commit
-                    // would fail to resolve the serialized credit note. Keep both
-                    // conditions if this block ever moves.
+                    if (! $notifyUser) {
+                        return;
+                    }
+
                     $recipients = MollieBilling::notifyBillingAdmins($billable);
                     if (! empty($recipients)) {
                         Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $billable, $creditNote));
                     }
-                }
+                });
             }
 
             return $creditNote;

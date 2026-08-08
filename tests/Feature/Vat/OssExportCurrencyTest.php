@@ -217,6 +217,34 @@ it('marks which filing each row belongs to', function (): void {
     ]);
 });
 
+it('calls a domestic business customer domestic, not reverse charge', function (): void {
+    config()->set('mollie-billing.vat.seller_country', 'AT');
+
+    // An Austrian business customer of an Austrian seller pays full Austrian VAT —
+    // `reverseChargeApplies()` requires the countries to differ, which is the rule that
+    // priced this invoice at 20 %. Asking about the validation first labelled the row
+    // `reverse_charge`, so €29.00 of turnover and €5.80 of collected Austrian VAT went
+    // into the EC Sales List instead of the national return, on a line that list says is
+    // zero-rated.
+    $invoice = ossInvoice($this->billable, 'AT', 'EUR', 2900, 20.0);
+
+    $validation = new GraystackIT\MollieBilling\Models\BillingVatValidation;
+    $validation->billable_type = $this->billable->getMorphClass();
+    $validation->billable_id = $this->billable->getKey();
+    $validation->vat_number = 'ATU12345678';
+    $validation->country_code = 'AT';
+    $validation->valid = true;
+    $validation->vies_response = [];
+    $validation->checked_at = now();
+    $validation->save();
+    $invoice->forceFill(['vat_validation_id' => $validation->getKey()])->save();
+
+    $rows = readOssCsv((new OssProtocolService())->export(2026)->path);
+
+    expect($rows[1][7])->toBe('domestic')
+        ->and($rows[1][5])->toBe('5.80');
+});
+
 it('keeps a domestic and a cross-border row apart even at the same rate', function (): void {
     config()->set('mollie-billing.vat.seller_country', 'AT');
 

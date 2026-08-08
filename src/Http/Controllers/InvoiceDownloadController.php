@@ -44,13 +44,14 @@ class InvoiceDownloadController extends Controller
         $isAuthorizedTenant = MollieBilling::authorizes($request, $billable);
 
         abort_unless($isAdmin || $isAuthorizedTenant, 403);
-        abort_unless($invoice->hasPdf(), 404);
 
         // The DB may reference a PDF that no longer exists on the disk (bucket
-        // switched, database copied between environments, blob deleted). Without
-        // this check an S3 disk would redirect the user straight into a raw
-        // NoSuchKey XML error page — regenerate the PDF instead.
-        if (! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
+        // switched, database copied between environments, blob deleted), or carry no
+        // pointer at all — which is what `generateAndStorePdf()` leaves behind when a
+        // render fails, a state its own comment calls a compliance problem. Both are
+        // regenerable, so both take the same path; a `hasPdf()` guard before this block
+        // 404ed the second case forever, for an invoice the customer had paid.
+        if (! $invoice->hasPdf() || ! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
             // Serialised per invoice: a double-click (or several tabs) would
             // otherwise regenerate the same PDF concurrently, and each run deletes
             // the file the other just wrote.

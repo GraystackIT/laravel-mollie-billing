@@ -640,7 +640,7 @@ class InvoiceService
      * document regenerated later — e.g. by InvoiceDownloadController when the blob
      * went missing — comes back in the language and number format of the original.
      */
-    protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): void
+    protected function generateAndStorePdf(BillingInvoice $invoice, Billable $billable): bool
     {
         $locale = $this->pdfLocale($invoice);
 
@@ -650,7 +650,7 @@ class InvoiceService
             if ($pdfContent === null) {
                 Log::warning('PDF invoice generation returned null', ['invoice_id' => $invoice->id]);
 
-                return;
+                return false;
             }
 
             $disk = (string) config('mollie-billing.invoices.disk', 'local');
@@ -664,6 +664,8 @@ class InvoiceService
             $invoice->pdf_path = $path;
             $this->rememberPdfLocale($invoice, $locale);
             $invoice->save();
+
+            return true;
         } catch (\Throwable $e) {
             // An invoice without a document is a compliance problem, not a hiccup:
             // log at error level with everything needed to reproduce it (a
@@ -676,6 +678,8 @@ class InvoiceService
                 'exception' => $e::class,
                 'error' => $e->getMessage(),
             ]);
+
+            return false;
         }
     }
 
@@ -756,25 +760,36 @@ class InvoiceService
             throw new \LogicException("Cannot regenerate PDF: invoice {$invoice->id} has no billable.");
         }
 
-        if ($invoice->pdf_path !== null && $invoice->pdf_disk !== null) {
+        // Render first, delete afterwards. This used to delete the blob and null the
+        // pointer *before* rendering, and `generateAndStorePdf()` swallows every failure —
+        // so a bad currency code, a font error or an S3 hiccup left the invoice with no
+        // document at all and no copy anywhere. On the normal path there is nothing to
+        // clean up either: the target path is derived from serial number and created_at,
+        // so the new render overwrites the very file that was being deleted.
+        $previousDisk = $invoice->pdf_disk;
+        $previousPath = $invoice->pdf_path;
+
+        // The renderer's own verdict, not `hasPdf()`: with the old document left in place
+        // a failed render still answers "has a PDF", and reporting that as a successful
+        // regeneration would hide exactly the failure an operator clicked to fix.
+        $success = $this->generateAndStorePdf($invoice, $billable) && $invoice->fresh()?->hasPdf() === true;
+
+        if ($success && $previousPath !== null && $previousDisk !== null
+            && ($previousDisk !== $invoice->pdf_disk || $previousPath !== $invoice->pdf_path)
+        ) {
+            // Only when the new document actually landed somewhere else — otherwise this
+            // would delete what was just written.
             try {
-                Storage::disk($invoice->pdf_disk)->delete($invoice->pdf_path);
+                Storage::disk($previousDisk)->delete($previousPath);
             } catch (\Throwable $e) {
-                Log::warning('Could not delete previous invoice PDF before regeneration', [
+                Log::warning('Could not delete the superseded invoice PDF after regeneration', [
                     'invoice_id' => $invoice->id,
-                    'disk' => $invoice->pdf_disk,
-                    'path' => $invoice->pdf_path,
+                    'disk' => $previousDisk,
+                    'path' => $previousPath,
                     'error' => $e->getMessage(),
                 ]);
             }
-            $invoice->pdf_disk = null;
-            $invoice->pdf_path = null;
-            $invoice->save();
         }
-
-        $this->generateAndStorePdf($invoice, $billable);
-
-        $success = $invoice->fresh()?->hasPdf() === true;
 
         if ($success) {
             event(new InvoicePdfRegenerated($billable, $invoice->fresh() ?? $invoice));
@@ -1914,7 +1929,10 @@ class InvoiceService
                 ]);
             }
 
-            $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? (int) $original->refunded_net;
+            // effectiveRefundedNet(), not the raw column: a credit note whose
+            // `refunded_net` write was lost is still a refund that happened, and reading
+            // the column alone reported the full amount as still refundable.
+            $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? $original->effectiveRefundedNet();
             $restRefundableNet = max(0, (int) $original->amount_net - $alreadyRefundedNet);
             $restRefundableGross = $restRefundableNet + ($restRefundableNet > 0 ? $this->creditNoteVat($original, $restRefundableNet) : 0);
 
@@ -1952,12 +1970,18 @@ class InvoiceService
                 continue;
             }
 
-            // Without an explicit idempotency key, Mollie deduplicates
-            // refund requests against (payment_id, amount) — so two legitimate
-            // refunds for identical amounts on the same payment (e.g. seat
-            // reduce → re-add → reduce again) get rejected with 409
-            // "duplicate refund". A unique key per refund line marks each
+            // Without an explicit idempotency key, Mollie deduplicates refund requests
+            // against (payment_id, amount) — so two legitimate refunds for identical
+            // amounts on the same payment (e.g. seat reduce → re-add → reduce again) get
+            // rejected with 409 "duplicate refund". A token per refund line marks each
             // call as a distinct operation so Mollie processes them all.
+            //
+            // The token is minted once and then carried by the line, rather than being
+            // fresh randomness per attempt: a refund whose HTTP response is lost has
+            // already been created at Mollie, and the retry that follows must replay it
+            // instead of paying the customer a second time.
+            $line->refundToken ??= bin2hex(random_bytes(4));
+
             $idempotencyKey = sprintf(
                 'refund:%s:%s:%s:%d:%d:%s',
                 $billable->getMorphClass(),
@@ -1965,7 +1989,7 @@ class InvoiceService
                 (string) $original->getKey(),
                 (int) ($line->originalLineItemIndex ?? 0),
                 (int) $refundAmount,
-                bin2hex(random_bytes(4)),
+                $line->refundToken,
             );
 
             // Mollie's SDK auto-resets the key on response (ResetIdempotencyKey
@@ -1973,31 +1997,56 @@ class InvoiceService
             // to clean up explicitly.
             Mollie::setIdempotencyKey($idempotencyKey);
 
+            // The try covers the Mollie call and nothing else. It used to wrap the
+            // bookkeeping below as well, so a failing `save()` — a lock-wait timeout
+            // against a concurrent admin refund is enough — filed the line in
+            // `$persistedLines` *and* in `$failedLines`: the credit note was written and a
+            // retry marker queued for a refund Mollie had already paid out. The retry then
+            // read `refunded_net` (whose write had just failed) as the remaining headroom
+            // and paid the customer twice.
             try {
                 $refund = Mollie::send(new CreatePaymentRefundRequest(
                     paymentId: $original->mollie_payment_id,
                     description: $description ?? "Plan change refund: {$line->label}",
                     amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
                 ));
-                $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
-                $persistedLines[] = $line;
+            } catch (\Throwable $e) {
+                $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
 
-                // Keep `refunded_net` on the original in sync with what we just
-                // refunded at Mollie. Without this, a subsequent admin-initiated
-                // refund on the same invoice would compute remainingRefundableNet()
-                // against a stale base and either offer a refund that's already
-                // exhausted or accept an amount that gets rejected by Mollie.
-                //
-                // Drive the new value off the running tracker (not $original->refunded_net)
-                // because $original may be a stale clone whose in-memory attribute hasn't
-                // been refreshed after an earlier iteration saved a different clone of the
-                // same DB row.
-                $newRefundedNet = $alreadyRefundedNet + (int) abs($line->amountNet);
-                $refundedNetPerInvoice[$originalKey] = $newRefundedNet;
+                continue;
+            }
+
+            $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
+            $persistedLines[] = $line;
+
+            // Keep `refunded_net` on the original in sync with what we just
+            // refunded at Mollie. Without this, a subsequent admin-initiated
+            // refund on the same invoice would compute remainingRefundableNet()
+            // against a stale base and either offer a refund that's already
+            // exhausted or accept an amount that gets rejected by Mollie.
+            //
+            // Drive the new value off the running tracker (not $original->refunded_net)
+            // because $original may be a stale clone whose in-memory attribute hasn't
+            // been refreshed after an earlier iteration saved a different clone of the
+            // same DB row.
+            $newRefundedNet = $alreadyRefundedNet + (int) abs($line->amountNet);
+            $refundedNetPerInvoice[$originalKey] = $newRefundedNet;
+
+            // Logged, never retried: the money has moved and the credit note carries the
+            // line, so `effectiveRefundedNet()` derives the amount from the credit note
+            // even when this cache write is lost. Queueing a retry here is what turned a
+            // lost write into a second payout.
+            try {
                 $original->refunded_net = $newRefundedNet;
                 $original->save();
             } catch (\Throwable $e) {
-                $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+                Log::error('Refund booked at Mollie but refunded_net could not be updated', [
+                    'billable' => $billable->getKey(),
+                    'original_invoice_id' => $originalKey,
+                    'mollie_refund_id' => $line->mollieRefundId,
+                    'refunded_net' => $newRefundedNet,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
 

@@ -53,7 +53,15 @@ class ProrataComposer
         // of the new plan, refund nothing (nothing was paid that could be
         // refunded). Period window is `now → now + 1 interval` so the
         // existing chargeLine helpers compute factor=1.0 automatically.
-        if ($billable->isBillingPastDue() && ! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
+        //
+        // The plan/interval condition is what makes this a *reset*, and it lives in
+        // BillingPolicy because buildContext() and the preview decide it too. This copy
+        // used to omit it, so a past-due customer adding one seat was charged the full
+        // list price of plan + seats + addons instead of the prorated delta — while the
+        // preview, which had the condition, quoted the delta.
+        if (BillingPolicy::isPastDueReset($billable, $intent->currentPlan !== $intent->newPlan, $intent->currentInterval !== $intent->newInterval)
+            && ! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)
+        ) {
             return $this->composePastDueReset($intent);
         }
 
