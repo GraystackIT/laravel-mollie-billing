@@ -167,6 +167,12 @@ When refunds are initiated directly in the Mollie dashboard, `MollieWebhookContr
 - Sets reason to `RefundReasonCode::Other` with text `'synced from Mollie dashboard'`
 - Dispatches `InvoiceRefunded` event
 
+### When a refund has to be reduced
+
+Mollie only knows the original payment's gross — it has no concept of the local net/VAT split — so a refund can never exceed what Mollie collected minus what has already been returned. When a composed line does not fit (typically because something else refunded part of the same invoice between a plan change's Phase 1 and its Phase 2, which for SEPA is days apart), the line is **rebuilt** at the reduced amount rather than only the API call being clamped: net resolved through the invoice's own line composition, VAT proportional to the line's rate, and a `refund_cap_note` on the line recording the uncapped and capped figures.
+
+Clamping only the API call meant the credit note — a tax document — stated more than Mollie returned, `refunded_net` could exceed `amount_net`, and `creditedPerOriginalLine()` / `derivedRefundedNet()` were inflated for every later refund decision.
+
 ## Chargebacks
 
 A chargeback is money the customer's bank pulls back after a payment has already settled — for SEPA Direct Debit an eight-week, no-questions right, so a routine event rather than an exotic one.
@@ -207,6 +213,8 @@ This makes refunds identifiable in the Mollie dashboard.
 | `refundProrataCredit()` | 409 error handling + credit note existence check |
 | Webhook sync | Deduplication by Mollie refund ID in `mollie_payment_id` |
 | Chargeback sync | Deduplication by Mollie chargeback ID in the credit note's `line_items` |
+
+Both dedup keys are stamped onto the credit note's lines **before the row is committed** (`createCreditNote(..., externalReference: …)`). They used to be written in a second save, after the row existed and after the synchronous `CreditNoteIssued` event had run — a throwing app listener or a DB blip in that window produced a 500, and the re-delivery found no stamp and wrote a second credit note for the same refund.
 
 ## Events
 

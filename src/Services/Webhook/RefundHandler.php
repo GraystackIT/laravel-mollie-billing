@@ -91,16 +91,20 @@ class RefundHandler
             // legacy path that never touched the cache.
             $reconciledBaseNet = $original->effectiveRefundedNet();
 
-            $creditNote = $this->salesInvoiceService->createCreditNote($original, $netAmount);
-            // Stamp every line, not just the first: a mixed-rate credit note has
-            // one line per credited original line and the dedup check scans them
-            // all, so a partially stamped note would still be re-created if the
-            // unstamped line were ever read on its own.
-            $lines = (array) $creditNote->line_items;
-            foreach (array_keys($lines) as $index) {
-                $lines[$index]['mollie_refund_id'] = $refundId;
-            }
-            $creditNote->line_items = $lines;
+            // The refund id goes in BEFORE the row is committed. Stamping it in a second
+            // save left a window — the note was already persisted and the synchronous
+            // `CreditNoteIssued` event had run — in which a throwing app listener or a DB
+            // blip produced a 500, and the re-delivery then found no stamp and wrote a
+            // SECOND credit note for the same refund: `refunded_net` double-booked, local
+            // VAT under-declared, later legitimate refunds refused as "exceeds remaining".
+            // Every line is stamped, not just the first: a mixed-rate note has one line
+            // per credited original line and the dedup check scans them all.
+            $creditNote = $this->salesInvoiceService->createCreditNote(
+                $original,
+                $netAmount,
+                externalReference: ['key' => 'mollie_refund_id', 'value' => $refundId],
+            );
+
             $creditNote->refund_reason_code = RefundReasonCode::Other;
             $creditNote->refund_reason_text = 'synced from Mollie dashboard';
             $creditNote->save();

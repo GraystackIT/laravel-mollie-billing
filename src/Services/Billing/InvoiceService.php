@@ -191,8 +191,24 @@ class InvoiceService
      *
      * @throws RefundExceedsInvoiceAmountException  when more net is credited than the original charged.
      */
-    public function createCreditNote(BillingInvoice $original, int $amountNet, ?array $lineItems = null, ?string $description = null): BillingInvoice
-    {
+    /**
+     * @param  array{key:string,value:string}|null  $externalReference
+     *   The id of the Mollie refund or chargeback this note reverses, stamped onto every
+     *   line BEFORE the row is committed. Callers used to stamp it in a second save, but
+     *   between the two the row was already persisted and the synchronous
+     *   `CreditNoteIssued` event had run: a throwing app listener or a DB blip there
+     *   produced a 500, and the re-delivery found no stamp — so it created a SECOND
+     *   credit note for the same refund. `effectiveRefundedNet()` counts the orphan's
+     *   lines, so `refunded_net` double-booked, local VAT was under-declared and later
+     *   legitimate refunds were refused as "exceeds remaining".
+     */
+    public function createCreditNote(
+        BillingInvoice $original,
+        int $amountNet,
+        ?array $lineItems = null,
+        ?string $description = null,
+        ?array $externalReference = null,
+    ): BillingInvoice {
         if ($amountNet <= 0) {
             throw new \InvalidArgumentException('Credit-note net amount must be positive.');
         }
@@ -242,8 +258,15 @@ class InvoiceService
                     'period_end' => $periodEnd,
                     'parent_invoice_id' => $original->id,
                     'parent_line_item_index' => $part['index'],
-                    'mollie_refund_id' => null, // set by the caller if the Mollie refund ID is known
+                    // Stamped here, not afterwards — see the constructor docblock.
+                    'mollie_refund_id' => ($externalReference['key'] ?? null) === 'mollie_refund_id'
+                        ? $externalReference['value']
+                        : null,
                 ];
+
+                if (($externalReference['key'] ?? null) !== null && $externalReference['key'] !== 'mollie_refund_id') {
+                    $resolvedLineItems[count($resolvedLineItems) - 1][$externalReference['key']] = $externalReference['value'];
+                }
             }
         }
 
@@ -1756,6 +1779,62 @@ class InvoiceService
      * @param  list<ProrataLine>  $refundLines  all direction='refund'
      * @return BillingInvoice|null  null when all lines are coupon-covered or failed
      */
+    /**
+     * A copy of a refund line reduced to what Mollie will actually return.
+     *
+     * `ProrataLine`'s amounts are readonly, so this builds a new instance — the same
+     * thing {@see ProrataComposer} does when a line does not fit the invoice's remaining
+     * refundable budget.
+     */
+    private function cappedRefundLine(
+        ProrataLine $line,
+        BillingInvoice $original,
+        int $cappedGross,
+        int $uncappedGross,
+    ): ProrataLine {
+        // Net from the gross through the invoice's own line composition, never one
+        // line's rate applied to the whole amount — that is what creditNetForGross()
+        // is for, and it is what keeps a mixed-rate invoice's books straight.
+        $cappedNet = $this->creditNetForGross($original, $cappedGross);
+
+        if ($cappedNet <= 0) {
+            $rate = $line->vatRate;
+            $cappedNet = $rate > 0 ? (int) round($cappedGross / (1 + $rate / 100)) : $cappedGross;
+        }
+
+        $cappedVat = max(0, $cappedGross - $cappedNet);
+
+        $capped = new ProrataLine(
+            originalInvoice: $line->originalInvoice,
+            originalLineItemIndex: $line->originalLineItemIndex,
+            kind: $line->kind,
+            code: $line->code,
+            label: $line->label,
+            quantity: $line->quantity,
+            amountNet: -$cappedNet,
+            vatRate: $line->vatRate,
+            amountVat: -$cappedVat,
+            amountGross: -$cappedGross,
+            periodStart: $line->periodStart,
+            periodEnd: $line->periodEnd,
+            daysActive: $line->daysActive,
+            daysRemaining: $line->daysRemaining,
+            isCouponCovered: $line->isCouponCovered,
+            direction: $line->direction,
+        );
+
+        $capped->refundCapNote = [
+            'alreadyRefundedNet' => (int) $original->effectiveRefundedNet(),
+            'originalAmountNet' => (int) $original->amount_net,
+            'uncappedRefundNet' => abs($line->amountNet),
+            'cappedRefundNet' => $cappedNet,
+            'uncappedRefundGross' => $uncappedGross,
+            'cappedRefundGross' => $cappedGross,
+        ];
+
+        return $capped;
+    }
+
     public function createRefund(
         Billable $billable,
         array $refundLines,
@@ -1851,6 +1930,21 @@ class InvoiceService
                     'rest_refundable' => $restRefundable,
                     'refund_sent' => $refundAmount,
                 ]);
+
+                // The clamp used to affect the API call ONLY. The line was persisted
+                // unchanged and `refunded_net` incremented by the full net, so the credit
+                // note — a tax document — stated more than Mollie returned, `refunded_net`
+                // could exceed `amount_net`, and every later refund decision read an
+                // inflated base. The customer was short the difference with a log line as
+                // the only trace. Reached whenever something else refunded part of the same
+                // invoice between a plan change's Phase 1 and its Phase 2, which for SEPA
+                // is days apart.
+                //
+                // Rebuilt exactly as ProrataComposer caps a line: net from the clamped
+                // gross via the invoice's own line composition, VAT proportional to the
+                // line's own rate, and a `refundCapNote` so the reduction is visible
+                // rather than inferred.
+                $line = $this->cappedRefundLine($line, $original, $refundAmount, $absGross);
             }
 
             if ($refundAmount <= 0) {

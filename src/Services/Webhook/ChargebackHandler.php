@@ -120,13 +120,15 @@ class ChargebackHandler
             // RefundHandler.
             $reconciledBaseNet = $original->effectiveRefundedNet();
 
-            $creditNote = $this->salesInvoiceService->createCreditNote($original, $netAmount);
+            // Stamped before the row is committed — same reasoning as RefundHandler: the
+            // dedup key has to exist by the time the synchronous CreditNoteIssued event
+            // can throw, or a re-delivery writes a second note for the same chargeback.
+            $creditNote = $this->salesInvoiceService->createCreditNote(
+                $original,
+                $netAmount,
+                externalReference: ['key' => 'mollie_chargeback_id', 'value' => $chargebackId],
+            );
 
-            $lines = (array) $creditNote->line_items;
-            foreach (array_keys($lines) as $index) {
-                $lines[$index]['mollie_chargeback_id'] = $chargebackId;
-            }
-            $creditNote->line_items = $lines;
             $creditNote->refund_reason_code = RefundReasonCode::Chargeback;
             $creditNote->refund_reason_text = 'chargeback reported by Mollie';
             $creditNote->save();
