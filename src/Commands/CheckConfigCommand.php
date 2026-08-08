@@ -36,6 +36,24 @@ class CheckConfigCommand extends Command
     {
         $scope = 'mollie-billing';
 
+        // Both accept `route:some.name`, and both are read from a layout — where a route that
+        // does not exist would be a 500 on every page rather than a missing link.
+        // BillingRoute::configuredUrl() degrades to null for exactly that reason, which makes
+        // this the only place the typo is visible.
+        foreach (['dashboard_url', 'admin_back_url'] as $urlKey) {
+            $value = config('mollie-billing.'.$urlKey);
+
+            if (! is_string($value) || ! str_starts_with(trim($value), 'route:')) {
+                continue;
+            }
+
+            $routeName = substr(trim($value), 6);
+
+            if ($routeName === '' || ! \Illuminate\Support\Facades\Route::has($routeName)) {
+                $this->addError($scope, "{$urlKey} names route [{$routeName}], which is not registered — the link will be hidden.");
+            }
+        }
+
         $billableModel = config('mollie-billing.billable_model');
         if (! is_string($billableModel) || $billableModel === '') {
             $this->addError($scope, 'billable_model is not set. Set BILLING_BILLABLE_MODEL in your .env or config/mollie-billing.php.');

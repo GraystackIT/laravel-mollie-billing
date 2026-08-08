@@ -17,6 +17,12 @@ return [
     // route via the 'route:' prefix, e.g. 'route:dashboard'.
     'dashboard_url' => env('BILLING_DASHBOARD_URL'),
 
+    // Where the admin panel's "Back" link in the sidebar leads. Same two forms as
+    // `dashboard_url` — a plain URL or `route:some.name`. Left unset it falls back to
+    // `dashboard_url`, so a single-app install configures one value; set it explicitly when
+    // staff administer from somewhere other than where customers land.
+    'admin_back_url' => env('BILLING_ADMIN_BACK_URL'),
+
     // Livewire components rendered in the portal header (left of the theme
     // switcher), in the checkout header (left of the "Back" link) and in the
     // admin header — e.g. a language switcher. Resolved by the consuming app, so

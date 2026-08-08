@@ -128,6 +128,43 @@ class BillingRoute
     }
 
     /** Reset cached prefixes (for testing). */
+    /**
+     * Resolve a configured URL that may name a route instead of spelling out a path.
+     *
+     * `BILLING_DASHBOARD_URL` and `BILLING_ADMIN_BACK_URL` both accept either a plain URL or
+     * `route:some.name`, and both layouts used to expand that themselves — two copies of the
+     * same three lines, which is how the portal and the admin panel would drift.
+     *
+     * A named route that does not exist returns null rather than throwing. It is read from a
+     * layout, so an `UrlGenerationException` there is a 500 on every page of the panel; a
+     * missing back link is a typo an operator can see and fix. `billing:check-config` reports
+     * the same mistake as an error, which is where it should stop you.
+     */
+    public static function configuredUrl(?string $value): ?string
+    {
+        if ($value === null || trim($value) === '') {
+            return null;
+        }
+
+        $value = trim($value);
+
+        if (! str_starts_with($value, 'route:')) {
+            return $value;
+        }
+
+        $name = substr($value, 6);
+
+        if ($name === '' || ! \Illuminate\Support\Facades\Route::has($name)) {
+            \Illuminate\Support\Facades\Log::warning('Configured URL names a route that does not exist', [
+                'value' => $value,
+            ]);
+
+            return null;
+        }
+
+        return route($name);
+    }
+
     public static function flush(): void
     {
         self::$dashboardPrefix = null;

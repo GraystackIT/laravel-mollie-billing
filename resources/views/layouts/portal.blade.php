@@ -27,10 +27,7 @@
         }
     }
 
-    $dashboardUrl = config('mollie-billing.dashboard_url');
-    if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
-        $dashboardUrl = route(substr($dashboardUrl, 6));
-    }
+    $dashboardUrl = BillingRoute::configuredUrl(config('mollie-billing.dashboard_url'));
 @endphp
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="h-full">

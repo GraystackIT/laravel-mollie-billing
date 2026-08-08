@@ -17,6 +17,7 @@ return [
         'refunds' => 'Refunds',
         'oss' => 'OSS export',
         'bulk' => 'Bulk actions',
+        'back_to_app' => 'Back to app',
     ],
 
     'theme' => [

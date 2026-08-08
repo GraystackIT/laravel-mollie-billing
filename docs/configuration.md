@@ -24,7 +24,8 @@ Global settings. Most values can be overridden via ENV variables — the default
 | `favicon_url` | `BILLING_FAVICON_URL` | URL of the favicon used by the portal views. |
 | `primary_color` | `BILLING_PRIMARY_COLOR` | Flux/Tailwind color name (`teal`, `indigo`, …). Default: `teal`. |
 | `company_name` | — | Default: `APP_NAME`. Used in mails and views. |
-| `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard. |
+| `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link and of the portal sidebar's "Back to dashboard" item. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard and the sidebar item is hidden. |
+| `admin_back_url` | `BILLING_ADMIN_BACK_URL` | Target of the **admin panel** sidebar's "Back to app" item. Same two forms. Unset falls back to `dashboard_url`, so a single-app install configures one value; set it explicitly when staff administer from somewhere other than where customers land. Both are resolved by `BillingRoute::configuredUrl()`, which returns `null` for a `route:` name that is not registered — a missing link rather than a 500 on every page of the panel. `billing:check-config` reports that as an **error**. |
 | `checkout_back_url` | `BILLING_CHECKOUT_BACK_URL` | Default target of the "Back" link in the checkout when no explicit `$backUrl` is set. |
 | `header_components` | — | Array of Livewire component aliases rendered in the portal, checkout and admin headers (e.g. a language switcher). Default: `[]`. See below. |
 | `admin_locale` | `BILLING_ADMIN_LOCALE` | Locale the admin panel renders in. `null` (default) follows the application locale. Set a fixed locale (e.g. `en`) to pin the panel. See below. |

@@ -17,6 +17,7 @@ return [
         'refunds' => 'Rückerstattungen',
         'oss' => 'OSS-Export',
         'bulk' => 'Massenaktionen',
+        'back_to_app' => 'Zurück zur App',
     ],
 
     'theme' => [
