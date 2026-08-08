@@ -235,6 +235,7 @@ See [configuration.md](configuration.md) for details.
 
 ## Operational notes
 
+- **Verified is not the same as reverse-charged.** A VIES-valid number from your own country is a domestic business customer: they owe domestic VAT, and `reverseChargeApplies()` refuses reverse charge for them. The form's verification message follows the same rule via `reverseChargeCountriesQualify()` and says *"VAT number verified. This is a domestic supply, so VAT is charged."* rather than promising a treatment the invoice will not use.
 - **VIES outage handling.** `validateVatNumber()` throws `ViesUnavailableException` when VIES is unreachable. `ValidatesVatNumber::validateVatNumberLive()` treats this as "unknown" and shows a status message; the form does not block. The actual `VatCalculationService::calculate()` re-runs the VIES check at invoice time — if it still fails, reverse-charge is *not* applied (gross VAT is collected) and the customer can dispute via the resolution flow.
 - **Webhook idempotency.** `MollieWebhookController` is deduped via `BillingProcessedWebhook`. A single Mollie payment cannot trigger two reconciliation rows even if Mollie retries the webhook.
 - **Signed webhooks.** Mollie does not sign legacy webhooks. The `BillingProcessedWebhook` dedup table plus the round-trip `GetPaymentRequest` against the Mollie API (which fails for spoofed IDs) are the integrity guarantees. See [CLAUDE.md](../CLAUDE.md).
