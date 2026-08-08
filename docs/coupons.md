@@ -52,9 +52,18 @@ Every coupon can be restricted to a subset of plans, intervals, addons, or produ
 |---|---|---|
 | `applicable_plans` | `array<string>` | Coupon only applies when `planCode` is in the list. |
 | `applicable_intervals` | `array<string>` | Coupon only applies for `monthly` and/or `yearly`. |
-| `applicable_addons` | `array<string>` | Coupon only applies when at least one of the listed addons is being acquired. |
+| `applicable_addons` | `array<string>` | Coupon only applies when every addon being acquired is in the list — and at least one is. |
 | `applicable_products` | `array<string>` | Coupon only applies for the listed one-time-order products. |
 | `minimum_order_amount_net` | `int` (cents) | Coupon requires the order to be at least this big. |
+
+**A set filter is a requirement, not a conditional.** If a filter is non-empty and the order
+carries nothing of that dimension, the coupon is rejected — it is not silently skipped.
+This matters because the entry points do not overlap: subscription checkout passes no
+`productCodes`, a one-time-order purchase passes no `planCode`. A coupon restricted to
+`applicable_products` is therefore unusable at subscription checkout, and a coupon
+restricted to `applicable_plans` is unusable on a product purchase. The rejection reason
+names the dimension (`product_not_applicable`, `plan_not_applicable`, …), so an operator
+can tell "wrong plan" from "not usable here at all".
 
 ## Validity & redemption limits
 
@@ -85,7 +94,7 @@ A discount coupon that reduces the charge to zero would normally crash at the pa
 
 - **`single_payment` 100 % on Subscription Checkout** — *allowed via the Mandate-Only path.* When the checkout total drops to 0 €, `StartSubscriptionCheckout` routes to `StartMandateCheckout`, which creates a 0-EUR mandate-collection payment with the subscription spec embedded in metadata (`pending_subscription_*` keys). Once the mandate is captured, the webhook (`MollieWebhookController::handleMandateOnlyPaid`) activates the Mollie subscription with the default `startDate = now + 1 interval`, writes a local 0-EUR audit invoice, redeems the coupon, and hydrates wallets. The customer pays nothing on the first period and is billed at full price from period 2 onwards. This is the right shape for "first month free, then keep paying" promotions.
 
-- **`single_payment` 100 % on One-Time-Order** — *allowed via the inline 0-EUR path.* When all coupons together cover the product price, `StartOneTimeOrderCheckout` skips Mollie entirely: it writes a local 0-EUR invoice (`mollie_payment_id = null`), redeems the coupon, credits the wallet, and dispatches `OneTimeOrderCompleted`. There is no webhook for this flow because there is no Mollie payment.
+- **`single_payment` 100 % on One-Time-Order** — *allowed via the inline 0-EUR path.* When all coupons together cover the product price, `StartOneTimeOrderCheckout` skips Mollie entirely: it writes a local 0-EUR invoice (`mollie_payment_id = null`), redeems the coupon, credits the wallet, and dispatches `OneTimeOrderCompleted`. There is no webhook for this flow because there is no Mollie payment. Invoice and redemptions share one transaction, and a refused redemption aborts the order — on the inline path the coupon *is* the consideration, so fulfilling without recording the redemption would hand out the goods for free. The Mollie-paid path keeps logging a failed redemption instead: there the money genuinely cleared, and withholding delivery would take the payment and give nothing back.
 
 - **`single_payment` 100 % on Plan change / Seat sync / Addon enable** — *not allowed.* These updates change the price of an existing Mollie subscription. A one-shot discount that fully covered the prorata charge would leave the local plan switched while Mollie kept charging the old amount on the next renewal. Use `recurring` for these flows — its deferred-startDate trick keeps Mollie's recurring amount in sync with what the customer actually pays.
 

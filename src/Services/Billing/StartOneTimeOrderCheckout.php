@@ -17,6 +17,8 @@ use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Str;
@@ -299,32 +301,45 @@ class StartOneTimeOrderCheckout
             ];
         }
 
-        $invoice = $this->invoiceService->createInvoice(
-            billable: $billable,
-            kind: InvoiceKind::OneTimeOrder,
-            molliePaymentId: null,
-            mollieSubscriptionId: null,
-            lineItems: $lineItems,
-            periodStart: $now,
-            periodEnd: $now,
-        );
+        // Invoice and redemptions in one transaction, and a refused redemption aborts the
+        // whole thing.
+        //
+        // Inline means no money changed hands: the coupons ARE the consideration. So
+        // logging a failed redeem and delivering anyway gave the goods away — two tabs on
+        // a `max_redemptions_per_billable = 1` coupon both passed the lock-free validate(),
+        // both wrote a 0-EUR invoice, one redeem() won the coupon lock and the other's
+        // exception was swallowed, and the wallet was credited twice. Two token packs, one
+        // redemption on record. Same for a `max_redemptions` race against another billable.
+        //
+        // The Mollie-paid path deliberately keeps logging instead: there the money really
+        // cleared, so refusing to fulfil would take the customer's payment and give
+        // nothing back.
+        $invoice = DB::transaction(function () use (
+            $billable, $productCode, $priceNet, $resolvedCoupons, $lineItems, $now
+        ): BillingInvoice {
+            $invoice = $this->invoiceService->createInvoice(
+                billable: $billable,
+                kind: InvoiceKind::OneTimeOrder,
+                molliePaymentId: null,
+                mollieSubscriptionId: null,
+                lineItems: $lineItems,
+                periodStart: $now,
+                periodEnd: $now,
+            );
 
-        foreach ($resolvedCoupons as $entry) {
-            try {
+            foreach ($resolvedCoupons as $entry) {
+                // Not caught: a redemption that cannot be recorded is a coupon that was
+                // not available, and this order has nothing else paying for it.
                 $this->couponService->redeem($entry['coupon'], $billable, [
                     'productCodes' => [$productCode],
                     'orderAmountNet' => $priceNet,
                     'discount_amount_net' => (int) $entry['discount'],
                     'invoice_id' => (int) $invoice->id,
                 ]);
-            } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::warning('One-time order inline coupon redemption failed', [
-                    'product_code' => $productCode,
-                    'coupon_code' => $entry['coupon']->code,
-                    'error' => $e->getMessage(),
-                ]);
             }
-        }
+
+            return $invoice;
+        });
 
         $usageType = $this->catalog->productUsageType($productCode);
         $quantity = $this->catalog->productQuantity($productCode);

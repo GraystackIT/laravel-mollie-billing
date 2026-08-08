@@ -377,23 +377,39 @@ class CouponService
         $orderAmount = (int) ($context['orderAmountNet'] ?? 0);
         $existingCouponIds = (array) ($context['existingCouponIds'] ?? []);
 
-        if (
-            ! empty($coupon->applicable_plans)
-            && $planCode !== null
-            && ! in_array($planCode, (array) $coupon->applicable_plans, true)
-        ) {
-            throw new InvalidCouponException($billable, $code, 'plan_not_applicable');
+        $productCodes = (array) ($context['productCodes'] ?? []);
+
+        // A set filter is a positive requirement, not a filter that only applies when the
+        // caller happens to describe the thing it restricts.
+        //
+        // These all used to be skipped when the corresponding context key was absent, and
+        // the entry points do not overlap: subscription checkout passes no `productCodes`
+        // and a product purchase passes no `planCode`. So a coupon restricted to
+        // `token-pack` halved a €500/yr signup, and a coupon restricted to plan `pro`
+        // took 50 % off any product — both from customer-facing coupon fields.
+        //
+        // The message names the missing dimension, so an operator reading a rejected
+        // coupon can tell "wrong plan" from "not usable here at all".
+        if (! empty($coupon->applicable_plans)) {
+            if ($planCode === null || ! in_array($planCode, (array) $coupon->applicable_plans, true)) {
+                throw new InvalidCouponException($billable, $code, 'plan_not_applicable');
+            }
         }
 
-        if (
-            ! empty($coupon->applicable_intervals)
-            && $interval !== null
-            && ! in_array($interval, (array) $coupon->applicable_intervals, true)
-        ) {
-            throw new InvalidCouponException($billable, $code, 'interval_not_applicable');
+        if (! empty($coupon->applicable_intervals)) {
+            if ($interval === null || ! in_array($interval, (array) $coupon->applicable_intervals, true)) {
+                throw new InvalidCouponException($billable, $code, 'interval_not_applicable');
+            }
         }
 
-        if (! empty($coupon->applicable_addons) && $addonCodes !== []) {
+        if (! empty($coupon->applicable_addons)) {
+            // Addons are the one dimension where "none selected" is a legitimate order
+            // rather than a missing context key — a plan can be bought without addons —
+            // but a coupon restricted to addons still has nothing to apply to then.
+            if ($addonCodes === []) {
+                throw new InvalidCouponException($billable, $code, 'addon_not_applicable');
+            }
+
             $allowed = (array) $coupon->applicable_addons;
             foreach ($addonCodes as $addon) {
                 if (! in_array($addon, $allowed, true)) {
@@ -402,8 +418,11 @@ class CouponService
             }
         }
 
-        $productCodes = (array) ($context['productCodes'] ?? []);
-        if (! empty($coupon->applicable_products) && $productCodes !== []) {
+        if (! empty($coupon->applicable_products)) {
+            if ($productCodes === []) {
+                throw new InvalidCouponException($billable, $code, 'product_not_applicable');
+            }
+
             $allowedProducts = (array) $coupon->applicable_products;
             foreach ($productCodes as $product) {
                 if (! in_array($product, $allowedProducts, true)) {
