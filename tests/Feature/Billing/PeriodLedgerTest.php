@@ -979,3 +979,48 @@ it('does not inherit the per-line VAT drift when reconciling a many-line invoice
 
     expect($support->grossForLineItems($reconciled, 19.0))->toBe(1790);
 });
+
+it('quotes the usage-overage gross the charge will actually collect', function (): void {
+    // Two metered types, 3 cents of overage each. At 19% a 3-cent line rounds its 0,57 up to
+    // 1, so per line the VAT is 2 — grossing the summed 6 gives 1. One cent, and it is the
+    // number on the confirm screen against the number that leaves the account:
+    // `ChargeUsageOverageDirectly` builds its amount one line per usage type, so the preview
+    // has to as well. With more types the gap grows.
+    config()->set('mollie-billing.vat_rate_overrides', ['AT' => 19]);
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', ['Tokens' => 1000, 'Sms' => 1000]);
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.usage_overage_prices', ['Tokens' => 1, 'Sms' => 1]);
+    config()->set('mollie-billing-plans.plans.starter', [
+        'name' => 'Starter', 'tier' => 1, 'included_seats' => 1,
+        'feature_keys' => [], 'allowed_addons' => [],
+        'intervals' => ['monthly' => ['base_price_net' => 900, 'seat_price_net' => 500, 'included_usages' => []]],
+    ]);
+    config()->set('mollie-billing-plans.usage_types', ['Tokens' => ['rollover' => false], 'Sms' => ['rollover' => false]]);
+
+    // One second into the period: nothing is prorated away yet, so the excess is exactly
+    // what was spent.
+    $this->travelTo(Carbon::parse('2026-01-01 09:00:01', 'UTC'));
+
+    $billable = ledgerBillable();
+    $walletService = app(\GraystackIT\MollieBilling\Services\Wallet\WalletUsageService::class);
+
+    foreach (['Tokens', 'Sms'] as $type) {
+        $walletService->credit($billable, $type, 1000, 'plan_quota');
+        $walletService->debit($billable, $type, 3);
+    }
+
+    $preview = \GraystackIT\MollieBilling\Facades\MollieBilling::preview()
+        ->previewUpdate($billable->fresh(), ['plan_code' => 'starter']);
+
+    $lineNets = array_values(array_filter(array_map(
+        fn (array $c): int => (int) ($c['overage_total_net'] ?? 0),
+        (array) $preview['usageChanges'],
+    ), fn (int $n): bool => $n > 0));
+
+    expect($lineNets)->not->toBeEmpty()
+        ->and(array_sum($lineNets))->toBe((int) $preview['usageOverageChargeNet'])
+        ->and((int) $preview['usageOverageChargeGross'])
+        ->toBe(\GraystackIT\MollieBilling\Support\BillingMoney::grossWithLineVat($lineNets, 19.0))
+        // And that really is a different number from grossing the total.
+        ->and((int) $preview['usageOverageChargeGross'])
+        ->not->toBe(array_sum($lineNets) + (int) round(array_sum($lineNets) * 0.19));
+});

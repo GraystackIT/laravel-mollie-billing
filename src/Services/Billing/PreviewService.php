@@ -436,11 +436,22 @@ class PreviewService
             ];
         }
 
-        // VAT on usage overage
+        // VAT on usage overage — per line, exactly as the charge that follows builds it.
+        // `ChargeUsageOverageDirectly` grosses one line per metered usage type through
+        // BillingMoney::grossWithLineVat(), so grossing the summed net here quoted a figure
+        // the customer would not be charged: with several usage types the per-line residuals
+        // add up, and the preview is what the confirm screen shows before the money moves.
         $usageOverageChargeGross = 0;
         if ($usageOverageChargeNet > 0) {
             try {
-                $usageOverageChargeGross = (int) $this->vatService->calculate($country, $usageOverageChargeNet, $billable)['gross'];
+                $rate = (float) $this->vatService->calculate($country, $usageOverageChargeNet, $billable)['rate'];
+
+                $overageLineNets = array_values(array_filter(
+                    array_map(static fn (array $change): int => (int) ($change['overage_total_net'] ?? 0), $usageChanges),
+                    static fn (int $net): bool => $net > 0,
+                ));
+
+                $usageOverageChargeGross = BillingMoney::grossWithLineVat($overageLineNets, $rate);
             } catch (\Throwable) {
                 $usageOverageChargeGross = $usageOverageChargeNet;
             }
