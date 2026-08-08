@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Support;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\MollieBilling;
+use Illuminate\Routing\Exceptions\UrlGenerationException;
 
 class BillingRoute
 {
@@ -139,6 +140,12 @@ class BillingRoute
      * layout, so an `UrlGenerationException` there is a 500 on every page of the panel; a
      * missing back link is a typo an operator can see and fix. `billing:check-config` reports
      * the same mistake as an error, which is where it should stop you.
+     *
+     * A route that *does* exist but needs parameters we cannot supply degrades the same way,
+     * and that is the more likely mistake: `route:tenant.dashboard` is the natural value for
+     * `dashboard_url` on a tenant-prefixed mount, where the portal's own route parameters fill
+     * `{organization}` in. The admin panel is mounted outside that prefix, so the same value —
+     * inherited by `admin_back_url` through its fallback — has nothing to fill it with.
      */
     public static function configuredUrl(?string $value): ?string
     {
@@ -162,7 +169,16 @@ class BillingRoute
             return null;
         }
 
-        return route($name);
+        try {
+            return route($name);
+        } catch (UrlGenerationException $e) {
+            \Illuminate\Support\Facades\Log::warning('Configured URL names a route whose parameters cannot be resolved here', [
+                'value' => $value,
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 
     public static function flush(): void

@@ -54,6 +54,8 @@ class CheckConfigCommand extends Command
             }
         }
 
+        $this->checkAdminBackUrlIsReachable($scope);
+
         $billableModel = config('mollie-billing.billable_model');
         if (! is_string($billableModel) || $billableModel === '') {
             $this->addError($scope, 'billable_model is not set. Set BILLING_BILLABLE_MODEL in your .env or config/mollie-billing.php.');
