@@ -319,6 +319,12 @@ new class extends Component {
                         <flux:table.column class="w-40"></flux:table.column>
                     </flux:table.columns>
                     <flux:table.rows>
+                        {{-- One credit-note lookup for the whole page: effectiveRefundedNet()
+                             is called per row and each call used to load every credit note of
+                             this billable again. --}}
+                        @php
+                            \GraystackIT\MollieBilling\Models\BillingInvoice::shareRefundChildren($invoices);
+                        @endphp
                         @foreach ($invoices as $inv)
                             @php
                                 $isPaid = (optional($inv->status)->value ?? $inv->status) === 'paid';

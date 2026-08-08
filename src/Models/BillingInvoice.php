@@ -58,6 +58,44 @@ class BillingInvoice extends Model
     }
 
     /**
+     * Share one credit-note lookup across a page of invoices of the same billable.
+     *
+     * `effectiveRefundedNet()` is called once per row by the admin invoice tab, and each call
+     * loaded every credit note of the billable again — 100 invoices meant 100 identical
+     * queries. They all want the same answer, so hand it to them once.
+     *
+     * @param  iterable<self>  $invoices
+     */
+    public static function shareRefundChildren(iterable $invoices): void
+    {
+        $first = null;
+
+        foreach ($invoices as $invoice) {
+            $first ??= $invoice;
+        }
+
+        if ($first === null) {
+            return;
+        }
+
+        $children = self::query()
+            ->where('billable_type', $first->billable_type)
+            ->where('billable_id', $first->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($invoices as $invoice) {
+            // Only for rows of the billable the set was loaded for — a mixed collection
+            // would otherwise be told about somebody else's credit notes.
+            if ((string) $invoice->billable_id === (string) $first->billable_id
+                && $invoice->billable_type === $first->billable_type
+            ) {
+                $invoice->refundChildren = $children;
+            }
+        }
+    }
+
+    /**
      * Every credit note of this invoice's billable, loaded once per instance.
      *
      * The three readers below each ran the same query, and `creditNetForGross()` calls into

@@ -339,37 +339,31 @@ class PreviewService
             (float) $vat['rate'],
         );
 
-        // VAT on prorata amount (due now). Always derived from the invoice that
-        // paid for the current period — see UpdateSubscription::prorataVat().
-        // Falls back to the live billable VAT only when no period invoice exists
-        // yet (e.g. local→Mollie upgrade where no payment has been made).
-        $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $vat['rate']];
-        // The charge side wins the probe when both are positive — an interval change
-        // produces a charge *and* a credit — so the resulting figures describe the
-        // charge only. `prorataCreditGross` is therefore derived from the resolved rate
-        // further down rather than reusing this gross, which would report the charge's
-        // amount as the credit.
-        $prorataNet = $prorataChargeNet > 0 ? $prorataChargeNet : ($prorataCreditNet > 0 ? $prorataCreditNet : 0);
-        if ($prorataNet > 0) {
-            // VAT-Rate aus dem Plan-Line-Item der laufenden Periode (Per-Item-VAT).
-            $candidates = BillingInvoice::currentPeriodLines($billable, 'plan', $currentPlan);
-            if (! empty($candidates)) {
-                $first = $candidates[0];
-                $line = $first['invoice']->lineItem($first['line_index']) ?? [];
-                $rate = (float) ($line['vat_rate'] ?? 0);
-                $vatAmount = (int) round($prorataNet * $rate / 100);
-                $prorataVat = [
-                    'net' => $prorataNet,
-                    'vat' => $vatAmount,
-                    'gross' => $prorataNet + $vatAmount,
-                    'rate' => $rate,
-                ];
-            } else {
-                try {
-                    $prorataVat = $this->vatService->calculate($country, $prorataNet, $billable);
-                } catch (\Throwable) {
-                    $prorataVat = ['net' => $prorataNet, 'vat' => 0, 'gross' => $prorataNet, 'rate' => 0.0];
-                }
+        // Two rates, because the two sides of a prorata are two different supplies.
+        //
+        // The credit reverses part of an invoice that was already issued, so it carries that
+        // invoice's line rate — a customer who has since become reverse-charge-eligible still
+        // gets back the VAT they actually paid. The charge is a *new* supply and is priced by
+        // `ProrataComposer::planChargeLine()` through `liveVat()`, i.e. the billable's
+        // current country and reverse-charge state. Applying the old invoice's rate to it
+        // reported VAT on a supply that carries none (and the wrong amount whenever a rate
+        // changed), which the aggregate figures rendered as "due now".
+        $creditRate = (float) $vat['rate'];
+        $candidates = BillingInvoice::currentPeriodLines($billable, 'plan', $currentPlan);
+
+        if (! empty($candidates)) {
+            $first = $candidates[0];
+            $line = $first['invoice']->lineItem($first['line_index']) ?? [];
+            $creditRate = (float) ($line['vat_rate'] ?? 0);
+        }
+
+        $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $creditRate];
+
+        if ($prorataChargeNet > 0) {
+            try {
+                $prorataVat = $this->vatService->calculate($country, $prorataChargeNet, $billable);
+            } catch (\Throwable) {
+                $prorataVat = ['net' => $prorataChargeNet, 'vat' => 0, 'gross' => $prorataChargeNet, 'rate' => 0.0];
             }
         }
 
@@ -484,14 +478,18 @@ class PreviewService
             'prorataChargeGross' => $prorataChargeNet > 0 ? (int) $prorataVat['gross'] : 0,
             'prorataChargeVat' => $prorataChargeNet > 0 ? (int) $prorataVat['vat'] : 0,
             'prorataCreditNet' => $prorataCreditNet,
-            'prorataCreditVat' => $prorataCreditNet > 0 ? (int) round($prorataCreditNet * (float) $prorataVat['rate'] / 100) : 0,
+            'prorataCreditVat' => $prorataCreditNet > 0 ? (int) round($prorataCreditNet * $creditRate / 100) : 0,
             'prorataCreditGross' => $prorataCreditNet > 0
-                ? $prorataCreditNet + (int) round($prorataCreditNet * (float) $prorataVat['rate'] / 100)
+                ? $prorataCreditNet + (int) round($prorataCreditNet * $creditRate / 100)
                 : 0,
             'isPastDueReset' => $isPastDueReset,
-            'currentPeriodCredit' => $periodStart !== null && $periodEnd !== null
+            // The credit that is actually being given, not "what a full period would be
+            // worth". On a past-due reset the factor is forced to 1.0 while
+            // `prorataCreditNet` is deliberately 0 — nothing was paid — so this reported a
+            // full-period credit in the one case where there is none.
+            'currentPeriodCredit' => $isPastDueReset ? 0 : ($periodStart !== null && $periodEnd !== null
                 ? (int) round($currentNet * $prorataFactor)
-                : 0,
+                : 0),
             'usageOverageChargeNet' => $usageOverageChargeNet,
             'usageOverageChargeGross' => $usageOverageChargeGross,
             'couponDiscountNet' => $couponDiscountNet,

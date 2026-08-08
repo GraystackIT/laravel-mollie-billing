@@ -220,14 +220,32 @@ class MollieWebhookController extends Controller
         // Same reasoning as the activation claim's TTL takeover, which was given one
         // for this failure mode; the reservation was not.
         if ($this->reservationIsAbandoned($reservation)) {
+            // Conditional on the value we read, so exactly one delivery wins. `firstOrCreate`
+            // is race-safe (the loser gets `wasRecentlyCreated === false` and a 503), but the
+            // takeover was not: two deliveries could both see the same stale row, both call
+            // it abandoned and both proceed. The activation claim and the
+            // `billing_invoices.mollie_payment_id` unique index absorb that for the
+            // activation and invoicing paths — but a credit note carries
+            // `mollie_payment_id = null`, so nothing stopped the refund handler from writing
+            // two for one refund, after which `effectiveRefundedNet()` read the invoice as
+            // fully refunded and refused every later legitimate refund.
+            $previous = $reservation->received_at;
+
+            $won = $reservation->newQuery()
+                ->whereKey($reservation->getKey())
+                ->where('received_at', $previous)
+                ->update(['received_at' => BillingTime::nowUtc()]);
+
+            if ($won === 0) {
+                return null;
+            }
+
             Log::warning('Reclaiming an abandoned webhook reservation — a previous delivery died without unwinding it', [
                 'payment_id' => $paymentId,
-                'received_at' => (string) ($reservation->received_at ?? ''),
+                'received_at' => (string) ($previous ?? ''),
             ]);
 
-            $reservation->forceFill(['received_at' => BillingTime::nowUtc()])->save();
-
-            return $reservation;
+            return $reservation->refresh();
         }
 
         return null;

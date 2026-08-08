@@ -575,11 +575,37 @@ class UpdateSubscription
             newInterval: $context->newInterval,
             currentSeats: $context->currentSeats,
             newSeats: $newSeats,
-            currentAddons: array_fill_keys($context->currentAddons, 1),
-            newAddons: array_fill_keys(array_values($newAddons), 1),
-            forceResetStartDate: $billable->isBillingPastDue()
-                && ($context->planChanged || $context->intervalChanged),
+            // Real quantities, not 1. `SubscriptionAmount::net()`/`lineItems()` read
+            // `getBillingAddonQuantity()` — their docblock promises apps overriding it are
+            // honoured "consistently in every place where pricing is calculated" — and the
+            // composer multiplies by the intent's quantity. Hardcoding 1 here priced the
+            // prorata window for one unit while the recurring window billed three: the
+            // preview quoted 27,00 for the addon, Mollie was asked for 9,00, and two thirds
+            // of the old addon were never credited.
+            currentAddons: $this->addonQuantities($billable, $context->currentAddons),
+            newAddons: $this->addonQuantities($billable, array_values($newAddons)),
+            forceResetStartDate: BillingPolicy::isPastDueReset($billable, $context->planChanged, $context->intervalChanged),
         );
+    }
+
+    /**
+     * Map addon codes to the quantity the app actually bills them at.
+     *
+     * Mirrors `PreviewService::currentAddonQuantities()`, which has read the real value all
+     * along — the divergence between the two is what made preview and charge disagree.
+     *
+     * @param  array<int, string>  $codes
+     * @return array<string, int>
+     */
+    private function addonQuantities(Billable $billable, array $codes): array
+    {
+        $out = [];
+
+        foreach ($codes as $code) {
+            $out[(string) $code] = $billable->getBillingAddonQuantity((string) $code) ?: 1;
+        }
+
+        return $out;
     }
 
     public function cancelScheduledChange(Billable $billable): void
@@ -611,6 +637,28 @@ class UpdateSubscription
         $pendingProrataChargeLines = (array) ($meta['pending_prorata_change']['charge_lines'] ?? []);
 
         if ($pendingData === null) {
+            return [];
+        }
+
+        // The same state rule ProrataChargeHandler::APPLICABLE_STATES enforces, and for the
+        // reason its comment gives: force-filling plan/interval/addon fields onto a Cancelled
+        // or Expired row resurrects the plan-scoped fields the expiry pass wipes, which hands
+        // `@planFeature` and the `billing.feature` middleware back to a subscription that has
+        // ended. This path is the legacy twin of that handler — reached from
+        // SingleChargeHandler for `type` metadata the package no longer emits — and it never
+        // had the guard.
+        // Phrased as the states that are *out* rather than the ones that are in: this path
+        // is also reached for a billable whose status has not been written yet, which is not
+        // an ended subscription and must keep working.
+        if (in_array($billable->getBillingSubscriptionStatus(), [
+            SubscriptionStatus::Cancelled,
+            SubscriptionStatus::Expired,
+        ], true)) {
+            Log::warning('Pending plan change not applied — the subscription no longer runs', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'status' => $billable->getBillingSubscriptionStatus()?->value,
+            ]);
+
             return [];
         }
 
@@ -1071,24 +1119,34 @@ class UpdateSubscription
     ): array {
         $events = [];
 
+        // Dispatched after the commit, never inside it. `update()` wraps the whole change —
+        // including applyProrata(), which creates real Mollie payments and posts real
+        // refunds — in one transaction, and events are the documented extension seam. A
+        // synchronous app listener that threw therefore rolled back the credit note, the
+        // `refunded_net` increment and the seat count while Mollie had already paid the
+        // customer; the user retried, the composer saw `refunded_net = 0` and the refund
+        // went out a second time. `DB::afterCommit()` runs immediately when no transaction
+        // is open, so the direct callers are unaffected.
+        $announce = function (object $event) use (&$events): void {
+            $events[] = $event::class;
+
+            DB::afterCommit(fn () => event($event));
+        };
+
         if ($context->planChanged || $context->intervalChanged) {
-            event(new PlanChanged($billable, $context->currentPlan ?: null, $context->newPlan, $context->newInterval));
-            $events[] = PlanChanged::class;
+            $announce(new PlanChanged($billable, $context->currentPlan ?: null, $context->newPlan, $context->newInterval));
         }
 
         if ($seatsChanged) {
-            event(new SeatsChanged($billable, $context->currentSeats, $newSeats));
-            $events[] = SeatsChanged::class;
+            $announce(new SeatsChanged($billable, $context->currentSeats, $newSeats));
         }
 
         foreach ($addonsAdded as $code) {
-            event(new AddonEnabled($billable, (string) $code));
-            $events[] = AddonEnabled::class;
+            $announce(new AddonEnabled($billable, (string) $code));
         }
 
         foreach ($addonsRemoved as $code) {
-            event(new AddonDisabled($billable, (string) $code));
-            $events[] = AddonDisabled::class;
+            $announce(new AddonDisabled($billable, (string) $code));
         }
 
         $diff = [
@@ -1099,8 +1157,7 @@ class UpdateSubscription
             'addonsRemoved' => $addonsRemoved,
         ];
 
-        event(new SubscriptionUpdated($billable, $dto->toArray(), $diff));
-        $events[] = SubscriptionUpdated::class;
+        $announce(new SubscriptionUpdated($billable, $dto->toArray(), $diff));
 
         return [
             'planChanged' => $context->planChanged,
