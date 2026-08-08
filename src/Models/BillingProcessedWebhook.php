@@ -41,11 +41,29 @@ class BillingProcessedWebhook extends Model
      * payment whenever a refund is created (the status stays `paid`), and that
      * re-delivery carries new information which has to be processed.
      */
-    public static function outcomeSignature(string $paymentId, string $status, int $refundedCents = 0): string
-    {
-        return $refundedCents > 0
-            ? $paymentId.':'.$status.':refunded:'.$refundedCents
-            : $paymentId.':'.$status;
+    public static function outcomeSignature(
+        string $paymentId,
+        string $status,
+        int $refundedCents = 0,
+        int $chargedBackCents = 0,
+    ): string {
+        $signature = $paymentId.':'.$status;
+
+        if ($refundedCents > 0) {
+            $signature .= ':refunded:'.$refundedCents;
+        }
+
+        // Chargebacks need their own component. A chargeback leaves the status at `paid`
+        // and touches only `amountChargedBack`, so without this the re-delivery's
+        // signature was byte-identical to the paid one already on record and the money
+        // leaving went unnoticed: invoice still fully paid, VAT and OSS over-declared,
+        // customer still subscribed. Separate from the refund total rather than summed,
+        // so a refund and a chargeback of equal value cannot mask one another.
+        if ($chargedBackCents > 0) {
+            $signature .= ':chargedback:'.$chargedBackCents;
+        }
+
+        return $signature;
     }
 
     /**

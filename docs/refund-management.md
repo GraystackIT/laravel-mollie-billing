@@ -167,6 +167,26 @@ When refunds are initiated directly in the Mollie dashboard, `MollieWebhookContr
 - Sets reason to `RefundReasonCode::Other` with text `'synced from Mollie dashboard'`
 - Dispatches `InvoiceRefunded` event
 
+## Chargebacks
+
+A chargeback is money the customer's bank pulls back after a payment has already settled — for SEPA Direct Debit an eight-week, no-questions right, so a routine event rather than an exotic one.
+
+Mollie reports it on the **same payment**, and in the v2 payments API the status stays `paid`: only `amountChargedBack` and `_links.chargebacks` change. That is why the webhook's dedup signature carries the charged-back total as its own component (`…:paid:chargedback:2380`) — without it the re-delivery was byte-identical to the paid one already on record and was skipped, leaving the money gone while the invoice still claimed it: output VAT and the OSS return over-declared by that amount, no credit note, and the customer still subscribed.
+
+`ChargebackHandler` mirrors the refund sync, because a chargeback *is* a refund the bank made on the customer's behalf:
+
+- Deduplicated by Mollie chargeback ID (`chb_xxx`) — Mollie can report several against one payment, and each arrives as its own delivery
+- Net resolved against the original invoice's line composition (`creditNetForGross()`), not one line's rate applied to the whole gross
+- Reason `RefundReasonCode::Chargeback`, text `'chargeback reported by Mollie'`
+- Dispatches `InvoiceRefunded`
+
+Two behaviours are deliberate:
+
+- **The subscription becomes `past_due`.** Money collected and taken back is a failed payment, so the existing ladder owns what follows — dunning, then the auto-cancel after `past_due_max_days`. An already-past-due billable keeps its original `past_due_since`: the clock belongs to the episode, and restarting it would extend the grace period every time the bank pulled more money back.
+- **The Mollie subscription is *not* cancelled here.** That decision belongs to the past-due ladder and to the operator. A chargeback on one period is not necessarily the end of the relationship, and cancelling is irreversible — a Mollie subscription can only be recreated, never resumed.
+
+A chargeback on a `cancelled` or `expired` subscription still books its credit note (the money did leave) but does not change the status: forcing `past_due` there would feed an ended subscription back into the auto-cancel ladder.
+
 ## Mollie API Description
 
 The refund description sent to Mollie includes the reason code label and optional text:
@@ -186,6 +206,7 @@ This makes refunds identifiable in the Mollie dashboard.
 | `RefundInvoiceService::refund()` | `lockForUpdate` + `remainingRefundableNet()` check |
 | `refundProrataCredit()` | 409 error handling + credit note existence check |
 | Webhook sync | Deduplication by Mollie refund ID in `mollie_payment_id` |
+| Chargeback sync | Deduplication by Mollie chargeback ID in the credit note's `line_items` |
 
 ## Events
 

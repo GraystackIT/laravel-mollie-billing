@@ -92,6 +92,33 @@ class WebhookSupport
     }
 
     /**
+     * Total charged back on this payment, in the payment's own minor units.
+     *
+     * Monotonic per payment like the refunded total, which is what makes it usable in
+     * the dedup signature. A chargeback does not change the payment's status — it only
+     * appears here — so this value is the only thing that distinguishes a chargeback
+     * delivery from the paid delivery that preceded it.
+     */
+    public function chargedBackAmount(object $payment): int
+    {
+        $chargedBack = $payment->amountChargedBack ?? null;
+
+        if (! is_object($chargedBack)) {
+            return 0;
+        }
+
+        return abs(BillingMoney::minorFromMollieAmount(
+            $chargedBack->value ?? null,
+            $chargedBack->currency ?? $payment->amount->currency ?? null,
+        ));
+    }
+
+    public function hasChargebacks(object $payment): bool
+    {
+        return $this->chargedBackAmount($payment) > 0;
+    }
+
+    /**
      * Reconcile webhook-built line items with the amount Mollie actually
      * collected. Handlers that rebuild their line items from the catalog at
      * webhook time can drift from the checkout: a coupon that expired in the

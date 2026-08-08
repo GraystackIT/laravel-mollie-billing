@@ -18,6 +18,7 @@ use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentHandler;
 use GraystackIT\MollieBilling\Services\Webhook\LocalToMollieUpgradeHandler;
 use GraystackIT\MollieBilling\Services\Webhook\MandateOnlyPaymentHandler;
 use GraystackIT\MollieBilling\Services\Webhook\OneTimeOrderHandler;
+use GraystackIT\MollieBilling\Services\Webhook\ChargebackHandler;
 use GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler;
 use GraystackIT\MollieBilling\Services\Webhook\RefundHandler;
 use GraystackIT\MollieBilling\Services\Webhook\SingleChargeHandler;
@@ -49,6 +50,7 @@ class MollieWebhookController extends Controller
         protected readonly FirstPaymentCouponPricing $firstPaymentCouponPricing,
         protected readonly OneTimeOrderHandler $oneTimeOrderHandler,
         protected readonly RefundHandler $refundHandler,
+        protected readonly ChargebackHandler $chargebackHandler,
         protected readonly CountryCorrectionHandler $countryCorrectionHandler,
         protected readonly ProrataChargeHandler $prorataChargeHandler,
         protected readonly SingleChargeHandler $singleChargeHandler,
@@ -270,6 +272,10 @@ class MollieWebhookController extends Controller
             $paymentId,
             $status,
             $this->refundedAmount($payment),
+            // A chargeback leaves the status at `paid` and shows up nowhere else, so
+            // without this component its delivery was byte-identical to the paid one
+            // already on record and was deduped away.
+            $this->support->chargedBackAmount($payment),
         );
     }
 
@@ -359,26 +365,20 @@ class MollieWebhookController extends Controller
 
             if ($type === 'one_time_order') {
                 $this->handleOneTimeOrderPaid($payment, $billable, $metadata);
-                if ($this->hasRefunds($payment)) {
-                    $this->handleRefundWebhook($payment, $billable);
-                }
+                $this->syncMollieCredits($payment, $billable);
                 return;
             }
 
             // Neuer Plan-Change-Pfad (Multi-VAT-Sammel-Charge).
             if ($type === 'prorata_charge') {
                 $this->handleProrataChargePaid($payment, $billable, $metadata);
-                if ($this->hasRefunds($payment)) {
-                    $this->handleRefundWebhook($payment, $billable);
-                }
+                $this->syncMollieCredits($payment, $billable);
                 return;
             }
 
             if ($type === 'country_correction') {
                 $this->handleCountryCorrectionPaid($payment, $billable, $metadata);
-                if ($this->hasRefunds($payment)) {
-                    $this->handleRefundWebhook($payment, $billable);
-                }
+                $this->syncMollieCredits($payment, $billable);
                 return;
             }
 
@@ -396,9 +396,7 @@ class MollieWebhookController extends Controller
             // Sync any refunds that were issued via the Mollie dashboard.
             // This runs *after* the normal paid-flow so that a payment that
             // is both paid and partially refunded is fully processed.
-            if ($this->hasRefunds($payment)) {
-                $this->handleRefundWebhook($payment, $billable);
-            }
+            $this->syncMollieCredits($payment, $billable);
 
             return;
         }
@@ -561,6 +559,29 @@ class MollieWebhookController extends Controller
     protected function handleRefundWebhook(object $payment, Billable $billable): void
     {
         $this->refundHandler->handle($payment, $billable);
+    }
+
+    protected function handleChargebackWebhook(object $payment, Billable $billable): void
+    {
+        $this->chargebackHandler->handle($payment, $billable);
+    }
+
+    /**
+     * Book whatever money has left this payment since it settled.
+     *
+     * Both kinds arrive as a re-delivery of the *same* payment, and both can be present
+     * at once (a partial refund and then a chargeback of the rest), so they are checked
+     * independently rather than as an either/or.
+     */
+    protected function syncMollieCredits(object $payment, Billable $billable): void
+    {
+        if ($this->hasRefunds($payment)) {
+            $this->handleRefundWebhook($payment, $billable);
+        }
+
+        if ($this->support->hasChargebacks($payment)) {
+            $this->handleChargebackWebhook($payment, $billable);
+        }
     }
 
     protected function resolveBillableFromMetadata(object $payment): ?Billable
