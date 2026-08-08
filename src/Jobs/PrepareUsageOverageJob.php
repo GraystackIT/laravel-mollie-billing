@@ -10,6 +10,8 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionExpired;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminOverageSweepFailedNotification;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
@@ -26,6 +28,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
 use Throwable;
 
 class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
@@ -391,6 +394,16 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         // silence every future overage for this billable. RetryUsageOverageChargeJob
         // leaves the snapshot behind when it gives up, precisely so the amount stays
         // auditable.
+        //
+        // Re-read before deciding. Pass 2 hydrates a 200-row chunk and then makes one
+        // synchronous Mollie call per row, so by the time a later row is reached its attributes
+        // are up to 199 round trips old — and anything that claimed the slot in that window
+        // (RetryUsageOverageChargeJob, a plan change's handleExplicit(), a second pass) is
+        // invisible. The result was a second recurring payment against the same mandate for the
+        // same debt: two invoices, the wallet credited twice, and the first payment orphaned in
+        // the snapshot so a lost webhook for it is never reconciled.
+        $billable->refresh();
+
         $meta = $billable->getBillingSubscriptionMeta();
         $inFlight = ($meta['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_PENDING;
 
@@ -475,5 +488,30 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                 'subscription_period_starts_at' => $tomorrowStart,
             ])->save();
         });
+    }
+
+    /**
+     * A pass that exhausts its attempts must not end as a `failed_jobs` row and nothing else.
+     *
+     * This is the job that collects every metered overage there is. Every sibling money job
+     * notifies an operator when it gives up; this one was silent, so a pass failing three
+     * nights in a row looked exactly like a night with nothing to bill.
+     */
+    public function failed(?Throwable $exception): void
+    {
+        Log::error('PrepareUsageOverageJob: the overage pass failed and will not be retried', [
+            'error' => $exception?->getMessage(),
+        ]);
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send($admins, new AdminOverageSweepFailedNotification(
+            $exception?->getMessage() ?? 'The pass failed without reaching its end.',
+        ));
     }
 }

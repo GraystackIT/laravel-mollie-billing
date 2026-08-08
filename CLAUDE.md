@@ -83,7 +83,7 @@ Apps wire these in `AppServiceProvider`:
 
 ```php
 MollieBilling::resolveBillableUsing(fn () => auth()->user()?->currentOrganization);
-MollieBilling::authUsing(fn () => auth()->check());
+MollieBilling::authUsing(fn (Request $r, Billable $b) => $r->user()?->belongsToBillable($b) ?? false);
 MollieBilling::notifyBillingAdminsUsing(...);
 MollieBilling::notifyAdminUsing(...);
 MollieBilling::ipGeolocation(...);

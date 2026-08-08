@@ -96,9 +96,25 @@ class SweepPendingRetriesJob implements ShouldQueue, ShouldBeUnique
 
                     $meta = $billable->getBillingSubscriptionMeta();
 
-                    $this->sweepSubscriptionPatch($billable, $meta);
-                    $this->sweepSubscriptionCancel($billableClass, $billable, $meta);
-                    $this->sweepRefundLines($billableClass, $billable, $meta);
+                    // Guarded per row, like every pass in PrepareUsageOverageJob. `chunkById`
+                    // walks ascending ids, so one unusable marker on a low id aborted the sweep
+                    // for every billable above it — and this job is the *only* reader for
+                    // `pending_subscription_cancel`, the coupon-expiry PATCH and every
+                    // `pending_refund_retries` line. A marker holding an array where a string
+                    // belongs is enough (Laravel promotes "Array to string conversion" to an
+                    // ErrorException), and `tries = 2` sends the retry straight back into it: an
+                    // hourly no-op forever, while Mollie keeps charging cancelled subscriptions
+                    // and rejected refunds never reach their customers.
+                    try {
+                        $this->sweepSubscriptionPatch($billable, $meta);
+                        $this->sweepSubscriptionCancel($billableClass, $billable, $meta);
+                        $this->sweepRefundLines($billableClass, $billable, $meta);
+                    } catch (\Throwable $e) {
+                        Log::error('SweepPendingRetriesJob: skipping a billable whose markers could not be swept', [
+                            'billable_id' => $billable->getKey(),
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
                 }
             });
     }

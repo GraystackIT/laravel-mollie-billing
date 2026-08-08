@@ -46,21 +46,26 @@ class SyncPurchasedBalanceCommand extends Command
         $dryRun = (bool) $this->option('dry-run');
         $changes = [];
 
-        foreach (Wallet::all() as $wallet) {
-            $current = WalletUsageService::getPurchasedBalance($wallet);
+        // Chunked, not `all()`. Every wallet's transaction history is replayed here, and the
+        // cleanup jobs already record what loading a whole table into a worker costs — the
+        // backfill died before writing anything, with no partial progress to show.
+        Wallet::query()->chunkById(200, function ($wallets) use (&$changes): void {
+            foreach ($wallets as $wallet) {
+                $current = WalletUsageService::getPurchasedBalance($wallet);
 
-            $target = $this->purchasedFromHistory($wallet);
+                $target = $this->purchasedFromHistory($wallet);
 
-            // No early-out on "no purchases": a wallet whose purchases were fully consumed
-            // but still carries a positive purchased_balance is exactly the row that needs
-            // correcting down to 0. The replay distinguishes that from a purchase the last
-            // renewal legitimately carried forward, which has no transaction of its own.
-            if ($current === $target) {
-                continue;
+                // No early-out on "no purchases": a wallet whose purchases were fully consumed
+                // but still carries a positive purchased_balance is exactly the row that needs
+                // correcting down to 0. The replay distinguishes that from a purchase the last
+                // renewal legitimately carried forward, which has no transaction of its own.
+                if ($current === $target) {
+                    continue;
+                }
+
+                $changes[] = [$wallet, $current, $target];
             }
-
-            $changes[] = [$wallet, $current, $target];
-        }
+        });
 
         if ($changes === []) {
             $this->info('All wallets are already in sync.');

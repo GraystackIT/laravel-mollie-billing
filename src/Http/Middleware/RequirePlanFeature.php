@@ -20,7 +20,7 @@ class RequirePlanFeature
         }
 
         if ($request->expectsJson()) {
-            return response()->json(['message' => 'Upgrade required.'], 403);
+            return response()->json(['message' => __('billing::portal.upgrade_required')], 403);
         }
 
         $urlParams = MollieBilling::resolveUrlParameters($billable);

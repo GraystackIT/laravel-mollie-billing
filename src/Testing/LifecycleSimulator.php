@@ -165,14 +165,13 @@ class LifecycleSimulator
 
         $billable->recordBillingUsage($usageType, $units, 'lifecycle_simulator');
 
-        // Pass 1 Case A requires nextBillingDate() to fall inside tomorrow's window,
-        // and nextBillingDate() is period_starts_at + one interval. Backing up by a
-        // full interval and adding a day therefore lands it on tomorrow. Yearly
-        // billables need subYear(), not subMonth() — otherwise the pass never fires.
+        // Pass 1 Case A requires nextBillingDate() to fall inside tomorrow's window, and
+        // nextBillingDate() is period_starts_at + one interval — so the anchor is tomorrow
+        // minus one interval, subtracted with the same clamping the forward step uses. Plain
+        // subMonth() overflows: run on 31 March or 31 May the window missed entirely, and the
+        // simulator reported the overage pipeline as broken when it was not.
         $interval = $billable->getBillingSubscriptionInterval();
-        $periodStart = $interval === SubscriptionInterval::Yearly->value
-            ? BillingTime::nowUtc()->subYear()->addDay()
-            : BillingTime::nowUtc()->subMonth()->addDay();
+        $periodStart = BillingTime::subInterval(BillingTime::nowUtc()->addDay(), $interval);
 
         $this->force($billable, [
             'subscription_period_starts_at' => $periodStart,

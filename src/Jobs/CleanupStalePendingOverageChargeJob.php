@@ -122,7 +122,7 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
         $snapshot = (array) ($meta[ChargeUsageOverageDirectly::META_KEY] ?? []);
         $paymentId = (string) ($snapshot['payment_id'] ?? '');
 
-        if ($paymentId === '' || ($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
+        if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
             return;
         }
 
@@ -133,6 +133,27 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
             : BillingTime::nowUtc()->subDays(self::HARD_LIMIT_DAYS + 1);
 
         if ($createdAt->diffInHours(BillingTime::nowUtc()) < self::STALE_AFTER_HOURS) {
+            return;
+        }
+
+        // Pending with no payment id at all: `CreatePaymentRequest` itself kept failing, which
+        // is what Mollie answers once the mandate behind a recurring payment is gone (revoked
+        // SEPA mandate, expired card). That state had no terminal path anywhere — the dunning
+        // budget is only charged when a previous payment id exists, so `giveUp()` never ran and
+        // the billable never reached PastDue; this job returned immediately, so the write-off
+        // was unreachable; and `safeCharge()` skips a billable whose status is still `pending`,
+        // so *every later period's overage was silenced too*. The debt was carried forward by
+        // `preserveDebt`, shrinking the customer's usable quota each period while they were
+        // billed nothing and kept full access, and pass 3 re-dispatched the retry ladder daily
+        // — three failed Mollie calls and one admin mail per day, indefinitely.
+        //
+        // There is nothing to poll here, so the hard limit is the only sensible gate: past it,
+        // write the debt off, which alerts an operator and frees the next cycle to charge again.
+        if ($paymentId === '') {
+            if ($createdAt->diffInDays(BillingTime::nowUtc()) >= self::HARD_LIMIT_DAYS) {
+                $this->writeOff($billable, '', 'no payment could be created for over '.self::HARD_LIMIT_DAYS.' days — the mandate is most likely gone');
+            }
+
             return;
         }
 

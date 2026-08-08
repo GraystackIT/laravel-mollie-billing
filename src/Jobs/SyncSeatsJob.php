@@ -94,7 +94,19 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
         /** @var class-string $class */
         $class = $this->billableClass;
 
-        DB::transaction(function () use ($class, $service): void {
+        // Decide under the row lock, then act outside it. `SyncSeats` goes on to
+        // `UpdateSubscription::update()`, which posts a prorata payment and a Mollie PATCH —
+        // and CLAUDE.md's rule is general: a transaction can be rolled back, an HTTP call to a
+        // payment provider cannot. Wrapping the whole thing meant a throw after the payment
+        // (the PATCH failing, the invoice write, a DB error) rolled back the seat count and the
+        // invoice while the money stood at Mollie, collected and unbooked, with `tries = 1` and
+        // no marker to retry from. It also degraded update()'s own three-phase transactions to
+        // savepoints of one long one and held the row lock across two HTTP round trips,
+        // blocking every concurrent writer including the webhook handlers.
+        //
+        // Nothing is lost by dropping the outer transaction: `update()` serialises on its own
+        // `billing:subscription-change:{id}` cache lock.
+        $target = DB::transaction(function () use ($class): ?int {
             // Scope-free — see ApplyScheduledChangesJob.
             /** @var (Billable&Model)|null $billable */
             $billable = $class::withoutGlobalScope(BillingScope::class)
@@ -103,14 +115,27 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
                 ->first();
 
             if ($billable === null) {
-                return;
+                return null;
             }
 
-            $target = $this->delta === null
+            return max(0, $this->delta === null
                 ? $this->seats
-                : $billable->getBillingSeatCount() + $this->delta;
-
-            $service->handle($billable, max(0, $target));
+                : $billable->getBillingSeatCount() + $this->delta);
         });
+
+        if ($target === null) {
+            return;
+        }
+
+        /** @var (Billable&Model)|null $billable */
+        $billable = $class::withoutGlobalScope(BillingScope::class)
+            ->whereKey($this->billableId)
+            ->first();
+
+        if ($billable === null) {
+            return;
+        }
+
+        $service->handle($billable, $target);
     }
 }

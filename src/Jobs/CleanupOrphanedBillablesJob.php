@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Database\Eloquent\Builder;
@@ -58,6 +59,8 @@ use Mollie\Laravel\Facades\Mollie;
  */
 class CleanupOrphanedBillablesJob implements ShouldQueue
 {
+    use MutatesBillingMeta;
+
     use Dispatchable;
     use InteractsWithQueue;
     use Queueable;
@@ -270,9 +273,13 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
     private function markVetoed(Model $billable): void
     {
         try {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta[self::VETOED_KEY] = BillingTime::nowUtc()->toIso8601String();
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            // Key-scoped: the veto decision came after a Mollie poll, so writing back the whole
+            // blob read before it would revert whatever another process committed meanwhile —
+            // `pending_refund_retries` above all, whose only reader is the hourly sweep.
+            $this->mutateBillingMeta($billable, fn (array $meta): array => [
+                ...$meta,
+                self::VETOED_KEY => BillingTime::nowUtc()->toIso8601String(),
+            ]);
         } catch (\Throwable $e) {
             Log::warning('CleanupOrphanedBillablesJob: failed to record the cleanup veto', [
                 'billable_id' => $billable->getKey(),

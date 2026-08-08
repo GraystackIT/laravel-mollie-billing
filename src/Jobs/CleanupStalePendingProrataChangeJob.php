@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -40,6 +41,8 @@ use Mollie\Laravel\Facades\Mollie;
  */
 class CleanupStalePendingProrataChangeJob implements ShouldQueue
 {
+    use MutatesBillingMeta;
+
     use Dispatchable;
     use InteractsWithQueue;
     use Queueable;
@@ -124,8 +127,19 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         $paymentId = (string) ($pending['charge_payment_id'] ?? '');
         if ($paymentId === '') {
             // Pending without payment ID — old and useless, delete it.
-            unset($meta['pending_prorata_change']);
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            //
+            // Key-scoped, not blob-scoped: everything below this line spans a synchronous
+            // GetPaymentRequest, so writing back the snapshot read before it reverted whatever
+            // another process committed in between. The costly one is `pending_refund_retries`
+            // — this sweep's sibling is its only reader, so a line erased here is money that
+            // never reaches the customer and never raises a dead letter, and a line resurrected
+            // here is a second payout.
+            $this->mutateBillingMeta($billable, function (array $current): array {
+                unset($current['pending_prorata_change']);
+
+                return $current;
+            });
+
             return;
         }
 
@@ -157,8 +171,11 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             // Only give up once Mollie has been unreachable past the hard limit — that
             // is the case this limit exists for.
             if ($pastHardLimit) {
-                unset($meta['pending_prorata_change']);
-                $billable->forceFill(['subscription_meta' => $meta])->save();
+                $this->mutateBillingMeta($billable, function (array $current): array {
+                    unset($current['pending_prorata_change']);
+
+                    return $current;
+                });
 
                 $this->notifyAdmins(
                     'pending_prorata_change was dropped after '.self::HARD_LIMIT_DAYS.' days because Mollie stayed unreachable — the payment outcome is unknown and needs checking in the Mollie dashboard',
@@ -178,15 +195,22 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             // unblock the customer's future plan changes and the payment is recorded as
             // an orphan for manual reconciliation — the same marker
             // ProrataChargeHandler uses for a payment that outlived its plan change.
-            unset($meta['pending_prorata_change']);
-            $meta['orphaned_prorata_payment'] = [
+            $orphan = [
                 'payment_id' => $paymentId,
                 'reason' => 'charge paid but its webhook never arrived',
                 'cancelled_at' => BillingTime::nowUtc()->toIso8601String(),
                 'pending_plan_change' => $meta['pending_plan_change'] ?? null,
                 'prorata_charge_lines' => $pending['charge_lines'] ?? null,
             ];
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            $this->mutateBillingMeta($billable, function (array $current) use ($orphan): array {
+                unset($current['pending_prorata_change']);
+                $current['orphaned_prorata_payment'] = $orphan;
+
+                return $current;
+            });
+
+            $meta['orphaned_prorata_payment'] = $orphan;
 
             Log::error('CleanupStalePendingProrataChangeJob: prorata charge was paid but no webhook ever arrived', [
                 'billable_id' => $billable->getKey(),
@@ -207,10 +231,13 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         }
 
         if (in_array($status, ['failed', 'canceled', 'expired'], true)) {
-            unset($meta['pending_prorata_change']);
-            $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
-            $meta['plan_change_failed_reason'] = "Charge {$status}";
-            $billable->forceFill(['subscription_meta' => $meta])->save();
+            $this->mutateBillingMeta($billable, function (array $current) use ($status): array {
+                unset($current['pending_prorata_change']);
+                $current['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
+                $current['plan_change_failed_reason'] = "Charge {$status}";
+
+                return $current;
+            });
             return;
         }
 

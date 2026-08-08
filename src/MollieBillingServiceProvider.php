@@ -199,9 +199,22 @@ class MollieBillingServiceProvider extends ServiceProvider
         // those defaults, so on a multi-tenant mount the first Livewire interaction threw
         // UrlGenerationException — a 500 on the first click.
         if (class_exists(Livewire::class)) {
+            // Every gate a portal page is mounted behind has to be re-applied, because a
+            // Livewire page never navigates again: it keeps answering `/livewire/update` for as
+            // long as its snapshot verifies. A gate applied only to the initial GET is a
+            // durable bypass for exactly as long as the tab stays open.
+            //
+            // The country gate matters most here and was missing: the mismatch is opened by a
+            // *webhook* while the customer's tab is already sitting on the plan or seats page,
+            // so booking through an unresolved mismatch was the ordinary timeline rather than
+            // an attack — and every invoice issued in that window carries a VAT treatment the
+            // correction flow then has to refund and reissue. The feature gate was missing for
+            // the same reason: a downgrade or a revoked grant left the paid screen driveable.
             Livewire::addPersistentMiddleware([
                 PropagateRouteDefaults::class,
                 RequireActiveSubscription::class,
+                RequireResolvedCountryMismatch::class,
+                RequirePlanFeature::class,
                 AuthorizeBillingPortal::class,
                 AuthorizeBillingAdmin::class,
             ]);
@@ -270,6 +283,21 @@ class MollieBillingServiceProvider extends ServiceProvider
         ]);
     }
 
+    /**
+     * `->onOneServer()` on every entry that is not `ShouldBeUnique`.
+     *
+     * `Schedule::dispatchToQueue()` applies a `UniqueLock` only to jobs implementing
+     * `ShouldBeUnique` — PrepareUsageOverageJob, ProcessTrialLifecycleJob and
+     * SweepPendingRetriesJob. The rest had nothing at all, so on a multi-host deployment each
+     * host's `schedule:run` dispatched its own copy: N× the Mollie polling, N copies of every
+     * dead-letter admin mail, and two concurrent cleanups racing each other's
+     * `subscription_meta` writes. Two of them additionally invoke webhook handlers directly,
+     * bypassing `MollieWebhookController::reserve()`, so nothing else serialises two hosts
+     * replaying the same payment.
+     *
+     * `onOneServer()` needs a shared cache store (redis/memcached/database); with a per-host
+     * store it degrades to today's behaviour rather than breaking anything.
+     */
     private function registerScheduledJobs(): void
     {
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
@@ -283,24 +311,28 @@ class MollieBillingServiceProvider extends ServiceProvider
 
             $schedule->job(PruneProcessedWebhooksJob::class)
                 ->monthlyOn(1, '03:00')
-                ->timezone('UTC');
+                ->timezone('UTC')
+                ->onOneServer();
 
             if (config('mollie-billing.audit.retention_days') !== null) {
                 $schedule->job(PruneBillingAuditJob::class)
                     ->monthlyOn(1, '03:30')
-                    ->timezone('UTC');
+                    ->timezone('UTC')
+                    ->onOneServer();
             }
 
             $schedule->job(CleanupStalePendingCountryCorrectionJob::class)
                 ->hourly()
-                ->timezone('UTC');
+                ->timezone('UTC')
+                ->onOneServer();
 
             // Without this, a prorata charge whose webhook never arrives leaves
             // `pending_prorata_change` set forever and ValidateSubscriptionChange
             // rejects every later plan change for that billable.
             $schedule->job(CleanupStalePendingProrataChangeJob::class)
                 ->dailyAt('03:45')
-                ->timezone('UTC');
+                ->timezone('UTC')
+                ->onOneServer();
 
             // The same for an overage charge. A `pending` snapshot carrying a payment id is
             // skipped by both of PrepareUsageOverageJob's own passes — correct while the
@@ -309,7 +341,8 @@ class MollieBillingServiceProvider extends ServiceProvider
             // future overage for that billable is silenced.
             $schedule->job(CleanupStalePendingOverageChargeJob::class)
                 ->dailyAt('04:15')
-                ->timezone('UTC');
+                ->timezone('UTC')
+                ->onOneServer();
 
             // Safety net for the retry markers. UpdateSubscription and ProrataExecutor
             // do dispatch their `pending_subscription_patch` retry, but the coupon-expiry
@@ -324,7 +357,8 @@ class MollieBillingServiceProvider extends ServiceProvider
             if ((bool) config('mollie-billing.cleanup.enabled', true)) {
                 $schedule->job(CleanupOrphanedBillablesJob::class)
                     ->cron((string) config('mollie-billing.cleanup.cron_expression', '*/15 * * * *'))
-                    ->timezone('UTC');
+                    ->timezone('UTC')
+                    ->onOneServer();
             }
         });
     }

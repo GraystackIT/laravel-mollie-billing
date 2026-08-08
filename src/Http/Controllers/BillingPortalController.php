@@ -20,6 +20,21 @@ class BillingPortalController extends Controller
     {
         $billable = MollieBilling::resolveBillable($request);
 
+        // A billable that came from the query-parameter guess has to be authorized before it
+        // decides anything. On this route the app's own resolver returns null by design
+        // (checkout is mounted outside tenant context), so the guess is what usually answers —
+        // and it matches any unreserved parameter against the billable's route key. Without the
+        // gate the status code itself was an oracle: 302 meant "that tenant has a live
+        // subscription", 200 meant it does not, for any key a stranger cared to try. The Mollie
+        // lookup below made it worse by firing an outbound API call per probe on behalf of
+        // someone else's subscription. The checkout component gates its own prefill exactly
+        // this way ({@see checkout.blade.php}); the controller above it did not.
+        if ($billable !== null
+            && MollieBilling::resolveBillableFromCallback($request) === null
+            && ! MollieBilling::authorizes($request, $billable)) {
+            $billable = null;
+        }
+
         // Local PastDue + still-live Mollie subscription can coexist (e.g. trial
         // expired before Mollie's first charge fell due). Re-entering checkout
         // would 422 on CreateSubscriptionRequest with "same description already

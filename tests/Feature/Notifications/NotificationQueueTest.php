@@ -6,6 +6,7 @@ use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Notifications\AdminOverageBillingFailedNotification;
+use GraystackIT\MollieBilling\Notifications\AdminOverageSweepFailedNotification;
 use GraystackIT\MollieBilling\Notifications\AdminPaidWithoutBillableNotification;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\AdminRefundFailedNotification;
@@ -52,6 +53,8 @@ function everyBillingNotification(): array
 
     return [
         AdminOverageBillingFailedNotification::class => new AdminOverageBillingFailedNotification($billable, $exception),
+        // Not about one billable: the pass walks the whole table, so it reports the pass.
+        AdminOverageSweepFailedNotification::class => new AdminOverageSweepFailedNotification('probe'),
         AdminPaidWithoutBillableNotification::class => new AdminPaidWithoutBillableNotification('tr_x', 'Org', '1', 1000, 'EUR'),
         AdminPlanChangeFailedNotification::class => new AdminPlanChangeFailedNotification('patch failed', ['payment_id' => 'tr_x']),
         AdminRefundFailedNotification::class => new AdminRefundFailedNotification($billable, $exception),

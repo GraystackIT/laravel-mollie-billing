@@ -96,9 +96,15 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
         // Belt to the timeout's braces: a re-delivery that arrives anyway waits for the
         // in-flight run instead of racing it to Mollie. Mirrors RetryRefundLineJob,
         // which protects the same class of hazard on the refund side.
+        // `dontRelease()` rather than `releaseAfter()`: every release consumes one of the three
+        // attempts, so a job blocked for 90 seconds burned its whole budget without ever
+        // reaching Mollie and landed in `failed()` — an admin dead-letter mail for a charge that
+        // was never attempted. Dropping the blocked delivery is safe here because the run
+        // holding the lock is charging the same debt for the same billable; if it fails, its own
+        // retry ladder continues, and pass 3 re-dispatches nightly regardless.
         return [
             (new WithoutOverlapping($this->billableClass.':'.$this->billableId.':overage'))
-                ->releaseAfter(30)
+                ->dontRelease()
                 ->expireAfter(600),
         ];
     }
@@ -304,13 +310,22 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
      */
     private function giveUp(Model $billable, array $meta, Throwable $reason): void
     {
-        $meta['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_FAILED;
-        $meta['past_due_since'] = $meta['past_due_since']
-            ?? BillingTime::nowUtc()->toIso8601String();
-        $billable->forceFill([
-            'subscription_meta' => $meta,
-            'subscription_status' => SubscriptionStatus::PastDue,
-        ])->save();
+        // Key-scoped, like every other write in this job. `$meta` was read before the Mollie
+        // attempts that led here, so persisting the whole blob reverted anything another
+        // process committed in between — `pending_refund_retries` above all, whose only reader
+        // is the hourly sweep. `mutateBillingMeta()` re-reads under the row lock and writes the
+        // status column in the same save.
+        $this->mutateBillingMeta(
+            $billable,
+            function (array $current): array {
+                $current['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_FAILED;
+                $current['past_due_since'] = $current['past_due_since']
+                    ?? BillingTime::nowUtc()->toIso8601String();
+
+                return $current;
+            },
+            ['subscription_status' => SubscriptionStatus::PastDue],
+        );
 
         event(new OverageChargeFailed($billable, (int) ($meta['usage_overage_attempts'] ?? 0), $reason));
 

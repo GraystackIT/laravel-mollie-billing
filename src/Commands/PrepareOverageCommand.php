@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Commands;
 
 use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
+use Illuminate\Bus\UniqueLock;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Support\Facades\Bus;
 
 class PrepareOverageCommand extends Command
 {
@@ -38,23 +40,30 @@ class PrepareOverageCommand extends Command
             return self::SUCCESS;
         }
 
-        // dispatchSync() bypasses ShouldBeUnique — the lock lives in PendingDispatch — so
-        // the manual run neither took nor respected the lock the job declares. Two passes
-        // walking the same table issue two CreatePaymentRequests for the same negative
-        // balance, and each `paid` webhook books its own invoice and credits the quantity
-        // again. Taken explicitly here instead.
-        $lock = Cache::lock('billing:prepare-overage-command', PrepareUsageOverageJob::COMMAND_LOCK_SECONDS);
+        // The job's OWN unique lock, not a private one. `dispatchSync()` bypasses
+        // ShouldBeUnique (the lock lives in PendingDispatch), so a manual run neither took nor
+        // respected what the scheduled pass holds — and a key of our own guarded
+        // command-against-command only, which is not the dangerous pair: two passes walking the
+        // same table issue two CreatePaymentRequests for the same negative balance, and each
+        // `paid` webhook books its own invoice and credits the quantity again.
+        //
+        // Worse, `dispatchSync()` routes through CallQueuedHandler, which calls
+        // `UniqueLock::release()` → `forceRelease()` on the way out: the manual run *destroyed*
+        // the lock the in-flight scheduled pass was relying on, regardless of ownership. So the
+        // body runs through `Bus::dispatchNow()`, which does not pass through that handler.
+        $job = new PrepareUsageOverageJob;
+        $uniqueLock = new UniqueLock(app(CacheRepository::class));
 
-        if (! $lock->get()) {
+        if (! $uniqueLock->acquire($job)) {
             $this->error('Another overage run is still in progress — refusing to start a second one.');
 
             return self::FAILURE;
         }
 
         try {
-            PrepareUsageOverageJob::dispatchSync();
+            Bus::dispatchNow($job);
         } finally {
-            $lock->release();
+            $uniqueLock->release($job);
         }
 
         $this->info("Overage preparation finished for [{$billableClass}].");

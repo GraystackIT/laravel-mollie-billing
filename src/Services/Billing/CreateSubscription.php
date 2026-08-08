@@ -193,8 +193,14 @@ class CreateSubscription
 
         // With an anchor the local period must line up with Mollie's schedule: the
         // period that ends at the anchor started one interval before it, not now.
+        // Clamped, because the forward direction is: `nextBillingDate()` derives from this
+        // anchor with addMonthNoOverflow(), and plain subMonth() overflows — a 29/30/31 March
+        // anchor was back-dated to 1/2/3 March, which reads forward as 1/2/3 April while
+        // Mollie charges on the 29th/30th/31st. Three days of disagreement between what the
+        // dashboard promises and what is collected, and the overage pass's "renews tomorrow"
+        // window matches neither date, so that period's overage is never collected.
         $periodStartsAt = $paidPeriodEndsAt !== null && ! $isTrial
-            ? ($interval === 'yearly' ? $paidPeriodEndsAt->copy()->subYear() : $paidPeriodEndsAt->copy()->subMonth())
+            ? BillingTime::subInterval($paidPeriodEndsAt, $interval)
             : BillingTime::nowUtc();
 
         $billable->forceFill([

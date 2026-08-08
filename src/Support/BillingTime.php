@@ -88,6 +88,26 @@ class BillingTime
     }
 
     /**
+     * One billing interval earlier, clamped the same way {@see addInterval()} clamps forward.
+     *
+     * Month arithmetic is not invertible — `31 March − 1 month + 1 month` is 1 April with
+     * plain Carbon, because `subMonth()` overflows 31 February down to 3 March and
+     * `addMonthNoOverflow()` does not undo it. Anywhere a period anchor is derived *backwards*
+     * from a known charge date, that asymmetry puts `nextBillingDate()` up to three days past
+     * the date Mollie will actually charge on, and `PrepareUsageOverageJob`'s "renews
+     * tomorrow" window then matches neither the real day before nor the drifted one — so that
+     * period's overage is never collected separately at all.
+     */
+    public static function subInterval(CarbonInterface $at, ?string $interval): CarbonImmutable
+    {
+        $previous = CarbonImmutable::instance($at);
+
+        return $interval === 'yearly'
+            ? $previous->subYearNoOverflow()
+            : $previous->subMonthNoOverflow();
+    }
+
+    /**
      * The later of two moments, compared in UTC.
      *
      * Both are normalised through toUtc() first, so a CarbonImmutable and an

@@ -16,6 +16,22 @@ new class extends Component {
     public ?string $dateFrom = null;
     public ?string $dateTo = null;
 
+    /**
+     * A `Y-m-d` day from client input, or null. Never throws.
+     */
+    private static function parseDay(?string $value): ?\Carbon\Carbon
+    {
+        if ($value === null || trim($value) === '') {
+            return null;
+        }
+
+        try {
+            return \Carbon\Carbon::createFromFormat('Y-m-d', trim($value)) ?: null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
@@ -131,8 +147,10 @@ new class extends Component {
 
         $baseQuery = Transaction::query()
             ->whereIn('wallet_id', $walletIds)
-            ->when($this->dateFrom, fn ($q) => $q->whereDate('created_at', '>=', $this->dateFrom))
-            ->when($this->dateTo, fn ($q) => $q->whereDate('created_at', '<=', $this->dateTo));
+            // Through the same parser the chart uses, so the table and the graph cannot end up
+            // describing different ranges.
+            ->when(self::parseDay($this->dateFrom), fn ($q, $from) => $q->whereDate('created_at', '>=', $from->toDateString()))
+            ->when(self::parseDay($this->dateTo), fn ($q, $to) => $q->whereDate('created_at', '<=', $to->toDateString()));
 
         $query = (clone $baseQuery)->latest();
 
@@ -159,8 +177,12 @@ new class extends Component {
             ->mapWithKeys(fn ($r) => [(string) $r->day => abs((int) $r->amt)])
             ->all();
 
-        $rangeStart = $this->dateFrom ? \Carbon\Carbon::parse($this->dateFrom)->startOfDay() : null;
-        $rangeEnd = $this->dateTo ? \Carbon\Carbon::parse($this->dateTo)->endOfDay() : null;
+        // Parsed defensively: both are plain `wire:model` properties, so anything the input
+        // (or a client) sends arrives here verbatim, and `Carbon::parse()` throws on what it
+        // cannot read — in the render path, which turns the customer's own usage page into a
+        // 500 they cannot navigate out of.
+        $rangeStart = self::parseDay($this->dateFrom)?->startOfDay();
+        $rangeEnd = self::parseDay($this->dateTo)?->endOfDay();
         $series = [];
         if ($rangeStart && $rangeEnd && $rangeEnd->gte($rangeStart)) {
             $cursor = $rangeStart->copy();

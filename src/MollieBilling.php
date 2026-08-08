@@ -188,6 +188,17 @@ class MollieBilling
             if (! is_string($value) || $value === '') {
                 continue;
             }
+
+            // A value that cannot be this key is not worth a query. With the default integer
+            // key, `where('id', 'newsletter')` is a hard error on PostgreSQL (22P02, invalid
+            // input syntax for type integer) — an unhandled QueryException, i.e. a 500 on
+            // /billing/checkout for any URL carrying `?utm_source=`, `?fbclid=` or `?gclid=`,
+            // which is how marketing traffic actually arrives at a checkout. Where it does not
+            // error it is still one wasted query per unreserved parameter.
+            if ($key === $model->getKeyName() && $model->getKeyType() === 'int' && ! ctype_digit($value)) {
+                continue;
+            }
+
             $found = $model->newQuery()->where($key, $value)->first();
             if ($found instanceof Billable) {
                 return $found;

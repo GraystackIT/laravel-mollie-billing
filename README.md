@@ -190,10 +190,21 @@ If your billable model needs custom logic beyond the global resolver, you can st
 Tell the facade how to resolve the current billable for the authenticated user — usually in `AppServiceProvider::boot()`:
 
 ```php
+use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use Illuminate\Http\Request;
 
 MollieBilling::resolveBillableUsing(fn () => auth()->user()?->currentOrganization);
-MollieBilling::authUsing(fn () => auth()->check());
+
+// The second argument is the point: this callback is asked "may THIS requester act on THIS
+// billable", and every cross-tenant defence in the package delegates to it — the portal
+// middleware, the invoice download, the checkout's prefill gate. A closure that ignores
+// `$billable` and only checks `auth()->check()` answers yes for every tenant, which turns the
+// checkout route's query-parameter fallback (documented below) into a read of any tenant's
+// billing data by route key. Compare the billable against the requester.
+MollieBilling::authUsing(
+    fn (Request $request, Billable $billable): bool => $request->user()?->belongsToBillable($billable) ?? false,
+);
 ```
 
 > **Checkout-route fallback:** the checkout route is mounted outside any tenant prefix, so a typical `resolveBillableUsing` closure that reads from a tenant context returns `null` there. When that happens the package falls back to looking up the billable from the request's query parameters, matching against the billable model's `getRouteKeyName()`. A returning customer hitting `/billing/checkout?organization=acme-corp` therefore re-uses the existing billable instead of being asked for the company details again. Reserved query keys (`back`, `plan`, `interval`, `redirect`, `token`) are skipped. That fallback is a *guess*, so it is gated: the checkout adopts the resolved billable's billing data only when `authUsing()` authorizes the requester for it. Without that, `?organization=<someone-else>` disclosed their address and VAT number. A billable named by your own `resolveBillableUsing()` closure is treated differently — the request genuinely belongs to it, so a refused authorization answers 403 instead of quietly starting a fresh checkout.

@@ -40,6 +40,16 @@ class ApplyScheduledChangesJob implements ShouldQueue, ShouldBeUnique
     public int $tries = 1;
 
     /**
+     * A ceiling, like every other Mollie-calling job has.
+     *
+     * `UpdateSubscription` posts a payment and a PATCH from here, and an HTTP call with no
+     * timeout above it is a worker that can sit on a socket indefinitely — with `tries = 1`
+     * that is one scheduled change that never completes and never fails, so nothing clears
+     * `scheduled_change_at` and nothing tells an operator.
+     */
+    public int $timeout = 900;
+
+    /**
      * Long enough to cover the Mollie round-trips of one apply(). The dispatching pass
      * finds the row for as long as `scheduled_change_at` is set, so without uniqueness a
      * retried or manually re-run pass would queue a second apply() for a billable whose
