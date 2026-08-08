@@ -430,3 +430,53 @@ it('ends a yearly period on 28 February when it started on a leap day', function
     // 29 February plus a year overflowed to 1 March.
     expect($billable->fresh()->nextBillingDate()->toIso8601String())->toBe('2025-02-28T09:00:00+00:00');
 });
+
+it('books a reverse-charge renewal at zero VAT with net equal to gross', function (): void {
+    $billable = ledgerBillable();
+
+    // A validated VAT number in another member state: the supply is zero-rated and the
+    // customer accounts for the tax. The invoice must say so, not carry 20% at 0.
+    $billable->forceFill(['billing_country' => 'DE', 'tax_country_user' => 'DE', 'vat_number' => 'DE129273398'])->save();
+
+    $validation = new \GraystackIT\MollieBilling\Models\BillingVatValidation;
+    $validation->billable_type = $billable->getMorphClass();
+    $validation->billable_id = $billable->getKey();
+    $validation->vat_number = 'DE129273398';
+    $validation->country_code = 'DE';
+    $validation->valid = true;
+    $validation->vies_response = [];
+    $validation->checked_at = BillingTime::nowUtc();
+    $validation->save();
+
+    deliverLedgerRenewal($billable->fresh(), 'tr_ledger_rc', '2026-02-01T09:00:05Z', '43.00');
+
+    $invoice = BillingInvoice::query()->latest('id')->first();
+
+    expect((int) $invoice->amount_net)->toBe(4300)
+        ->and((int) $invoice->amount_vat)->toBe(0)
+        ->and((int) $invoice->amount_gross)->toBe(4300)
+        // And the invoice records which validation it relied on — a tax auditor's question.
+        ->and((int) $invoice->vat_validation_id)->toBe((int) $validation->getKey());
+
+    assertInvoicesInternallyConsistent();
+});
+
+it('books what Mollie actually collected when the amount differs, and says so', function (): void {
+    \Illuminate\Support\Facades\Event::fake([\GraystackIT\MollieBilling\Events\PaymentAmountMismatch::class]);
+
+    $billable = ledgerBillable();
+
+    // Expected 51.60; Mollie collected 51.00 — a stale amount at Mollie, say, after a
+    // catalog price change that never reached the subscription.
+    deliverLedgerRenewal($billable, 'tr_ledger_mismatch', '2026-02-01T09:00:05Z', '51.00');
+
+    $invoice = BillingInvoice::query()->latest('id')->first();
+
+    // The paid amount is the source of truth for the document — an invoice may not state
+    // more than was collected — and the discrepancy is surfaced rather than smoothed over.
+    expect((int) $invoice->amount_gross)->toBe(5100);
+
+    \Illuminate\Support\Facades\Event::assertDispatched(\GraystackIT\MollieBilling\Events\PaymentAmountMismatch::class);
+
+    assertInvoicesInternallyConsistent();
+});
