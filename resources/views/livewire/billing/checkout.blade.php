@@ -149,9 +149,22 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             $existing = null;
         }
 
-        if ($existing !== null && $this->hasPersistedBillingData($existing)) {
+        // Identity first, and unconditionally — see the note above. Adopting it only
+        // together with the prefill made one predicate answer two questions, and an
+        // authorized billable without a complete address (a fresh signup, an org whose
+        // access grant just lapsed) fell through to `createBillable()` in submit(): the
+        // customer paid, a *second* organisation was created to hold the subscription, and
+        // their own one stayed unsubscribed — bounced back to checkout by
+        // RequireActiveSubscription and eligible for orphan cleanup.
+        if ($existing !== null) {
+            /** @var Model&Billable $existing */
             $this->billableId = (string) $existing->getKey();
             $this->billableClass = $existing->getMorphClass();
+        }
+
+        // The prefill, the lock and the step skip are the address question, and they stay
+        // gated on actually having an address to show.
+        if ($existing !== null && $this->hasPersistedBillingData($existing)) {
             $this->company_name = $existing->getBillingName();
             $this->billing_street = (string) $existing->getBillingStreet();
             $this->billing_postal_code = (string) $existing->getBillingPostalCode();
@@ -1573,6 +1586,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 if (! empty($result['payment_id'])) {
                     $billable->recordPendingFirstPayment((string) $result['payment_id']);
                 }
+
+                // Stamp the subject into this browser's session so the return page can
+                // recognise it. An anonymous signup has no owner yet, so `authorizes()`
+                // — which fails closed — answers false for the very customer who just
+                // paid, and the return page polled itself into a 90-second timeout with a
+                // Logout button. The session is bound to this browser, which is exactly
+                // the claim the return page needs and the one thing a `?org=` query
+                // parameter cannot forge.
+                session([StartSubscriptionCheckout::CHECKOUT_SUBJECT_SESSION_KEY => [
+                    'class' => $billable->getMorphClass(),
+                    'id' => (string) $billable->getKey(),
+                ]]);
             } catch (\Throwable $e) {
                 report($e);
                 try {

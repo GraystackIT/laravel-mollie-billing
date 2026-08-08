@@ -23,6 +23,18 @@ use Mollie\Laravel\Facades\Mollie;
 
 class StartSubscriptionCheckout
 {
+    /**
+     * Session key naming the billable this browser checked out for.
+     *
+     * Written by the checkout component, read by the return page. An anonymous signup's
+     * billable has no owner yet, so `MollieBilling::authorizes()` — which fails closed —
+     * answers false for the customer who just paid; the return page needs some claim
+     * about who it is showing, and a session entry is bound to this browser in a way a
+     * `?organization=` query parameter is not. Mirrors ORDER_TOKEN_PARAM, which does the
+     * same job for one-time orders through the URL.
+     */
+    public const CHECKOUT_SUBJECT_SESSION_KEY = 'billing.checkout_subject';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly MollieCustomerResolver $customerResolver,

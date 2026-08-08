@@ -664,8 +664,9 @@ new class extends Component {
         // returns null and reverse-charge silently stops applying.
         try {
             \Illuminate\Support\Facades\DB::transaction(function () use ($billable, $newVatNumber, $vat): void {
+                // Through the setter — see billing-data.blade.php and checkout.blade.php.
+                $billable->setBillingName($this->company_name);
                 $billable->forceFill([
-                    'name' => $this->company_name,
                     'billing_street' => $this->billing_street,
                     'billing_postal_code' => $this->billing_postal_code,
                     'billing_city' => $this->billing_city,

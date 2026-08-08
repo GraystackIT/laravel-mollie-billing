@@ -19,12 +19,6 @@ new class extends Component {
     use InteractsWithFluxUi;
     use ValidatesVatNumber;
 
-    private const EU_COUNTRIES = [
-        'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR',
-        'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
-        'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE',
-    ];
-
     /** Mandate id at the time the user landed on the page — used to detect the webhook update. */
     public ?string $initialMandateId = null;
 
@@ -169,8 +163,13 @@ new class extends Component {
         try {
             \Illuminate\Support\Facades\DB::transaction(function () use ($billable, $vat): void {
                 /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
+                // Through the setter, like checkout does: a User-as-billable persists the
+                // company name into its own attribute (e.g. `practice_name`), and writing
+                // `name` directly clobbered the person's own name while leaving the
+                // billing name untouched — so the save read as a no-op and corrupted an
+                // unrelated column at the same time.
+                $billable->setBillingName($this->company_name);
                 $billable->forceFill([
-                    'name' => $this->company_name,
                     'billing_street' => $this->billing_street,
                     'billing_postal_code' => $this->billing_postal_code,
                     'billing_city' => $this->billing_city,
@@ -261,13 +260,21 @@ new class extends Component {
     // one, and Flux Pro is absent from this package's own test environment.
 
     /**
-     * Reverse-charge applies when a valid EU VAT number is set
-     * and the destination country is also EU.
+     * Whether this billable's supplies are reverse-charged.
+     *
+     * Asks `VatCalculationService`, like every other portal component does. The local
+     * copy of the rule here was "valid EU VAT number and an EU country", which omits the
+     * seller-country test — so a domestic business customer was shown the lime "Reverse
+     * charge" badge on the very page that explains their VAT treatment, while every
+     * invoice they received carried full domestic VAT. A configured-but-malformed seller
+     * country inverted it the other way.
+     *
+     * Reads the *persisted* state, not the form: a number typed but not yet saved has no
+     * validation behind it, and the badge describes what will be invoiced.
      */
     public function isReverseCharge(): bool
     {
-        return $this->vatNumberValid === true
-            && in_array(strtoupper($this->billing_country), self::EU_COUNTRIES, true);
+        return $this->readableBillable()?->usesReverseCharge() ?? false;
     }
 
     /**

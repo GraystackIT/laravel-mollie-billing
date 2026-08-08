@@ -376,9 +376,10 @@ new class extends Component {
         $interval = $b->getBillingSubscriptionInterval();
         $addonCodes = $b->getActiveBillingAddonCodes();
 
+        $catalog = app(SubscriptionCatalogInterface::class);
+
         $usageTypes = [];
         if ($planCode) {
-            $catalog = app(SubscriptionCatalogInterface::class);
             foreach ($catalog->includedUsages($planCode, $interval) as $type => $included) {
                 $wallet = $b->getWallet((string) $type);
                 $usageTypes[] = [
@@ -407,8 +408,12 @@ new class extends Component {
             'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
         ])->all();
 
+        // Through the catalog, never the config file: apps may rebind
+        // SubscriptionCatalogInterface to a DB-backed catalog (where this config is empty),
+        // and addonName() also prefers the `billing::addons.{code}.name` translation. This
+        // was the one screen that rendered raw codes and untranslated names.
         $addonLabels = array_map(
-            fn (string $code) => config("mollie-billing-plans.addons.{$code}.name", $code),
+            fn (string $code) => $catalog->addonName($code) ?? $code,
             $addonCodes,
         );
 

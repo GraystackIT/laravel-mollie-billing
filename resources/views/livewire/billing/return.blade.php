@@ -2,8 +2,12 @@
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
+use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Log;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
@@ -68,9 +72,55 @@ new class extends Component {
     {
         $billable = MollieBilling::resolveBillable(request());
 
-        return $billable !== null && MollieBilling::authorizes(request(), $billable)
-            ? $billable
-            : null;
+        if ($billable !== null && MollieBilling::authorizes(request(), $billable)) {
+            return $billable;
+        }
+
+        // An anonymous signup has no owner yet, so `authorizes()` fails closed for the
+        // very customer who just paid — which is why routes/web.php deliberately keeps
+        // this route out of the `billing.portal` group. Applying the same gate here undid
+        // that exemption silently: the page polled, found nothing, and after ~90 seconds
+        // showed "this is taking longer than expected" plus a Logout button, seconds after
+        // the webhook had activated the subscription.
+        //
+        // The claim used instead is the session stamp the checkout wrote for this browser.
+        return $this->checkoutSubject($billable);
+    }
+
+    /**
+     * The billable this browser checked out for, if the request does not contradict it.
+     *
+     * Deliberately narrow: the stamp is only honoured when the resolver either agrees or
+     * resolved nothing at all, so a `?organization=<stranger>` guess still cannot make
+     * this page report someone else's activation state.
+     */
+    private function checkoutSubject(?Billable $resolved): ?Billable
+    {
+        $stamp = session(StartSubscriptionCheckout::CHECKOUT_SUBJECT_SESSION_KEY);
+
+        if (! is_array($stamp) || ! isset($stamp['class'], $stamp['id'])) {
+            return null;
+        }
+
+        $class = (string) $stamp['class'];
+        $class = Relation::getMorphedModel($class) ?? $class;
+
+        if (! is_a($class, Billable::class, true) || ! is_a($class, Model::class, true)) {
+            return null;
+        }
+
+        /** @var (Billable&Model)|null $subject */
+        $subject = $class::withoutGlobalScope(BillingScope::class)->find($stamp['id']);
+
+        if ($subject === null) {
+            return null;
+        }
+
+        if ($resolved !== null && (string) $resolved->getKey() !== (string) $subject->getKey()) {
+            return null;
+        }
+
+        return $subject;
     }
 
     public function checkStatus(): void
