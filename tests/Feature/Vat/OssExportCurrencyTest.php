@@ -83,7 +83,7 @@ it('groups amounts by currency instead of summing unlike currencies', function (
 
     $rows = readOssCsv($result->path);
 
-    expect($rows[0])->toBe(['quarter', 'currency', 'country', 'sales_count', 'net_amount', 'vat_amount', 'vat_rate']);
+    expect($rows[0])->toBe(['quarter', 'currency', 'country', 'sales_count', 'net_amount', 'vat_amount', 'vat_rate', 'scope']);
 
     $byCurrency = [];
     foreach (array_slice($rows, 1) as $row) {
@@ -126,7 +126,7 @@ it('labels the amount columns with the currency for a single-currency export', f
     $result = (new OssProtocolService())->export(2026);
     $rows = readOssCsv($result->path);
 
-    expect($rows[0])->toBe(['quarter', 'currency', 'country', 'sales_count', 'net_amount_eur', 'vat_amount_eur', 'vat_rate']);
+    expect($rows[0])->toBe(['quarter', 'currency', 'country', 'sales_count', 'net_amount_eur', 'vat_amount_eur', 'vat_rate', 'scope']);
     expect($result->currencies)->toBe(['EUR']);
 });
 
@@ -169,6 +169,85 @@ it('buckets per quarter, currency, country and rate', function (): void {
     $result = (new OssProtocolService())->export(2026);
 
     expect($result->rows)->toBe(4);
+});
+
+it('marks which filing each row belongs to', function (): void {
+    // OSS covers cross-border B2C supplies inside the EU. These four rows used to be
+    // aggregated together unmarked, so a CSV filed verbatim over-declared OSS turnover
+    // by everything that is not actually OSS.
+    config()->set('mollie-billing.vat.seller_country', 'AT');
+
+    // Cross-border EU consumer — the only genuine OSS row.
+    ossInvoice($this->billable, 'DE', 'EUR', 1000, 19.0);
+
+    // The seller's own country: domestic VAT, declared in the national return.
+    ossInvoice($this->billable, 'AT', 'EUR', 1000, 20.0);
+
+    // Outside the EU: outside the scope of OSS entirely.
+    ossInvoice($this->billable, 'US', 'EUR', 1000, 0.0);
+
+    // A validated EU business customer: zero-rated here, declared by the customer.
+    // It belongs in the EC Sales List — and it shares country and rate with nothing
+    // else, so only the validation row tells it apart.
+    $b2b = ossInvoice($this->billable, 'FR', 'EUR', 1000, 0.0);
+    $validation = new GraystackIT\MollieBilling\Models\BillingVatValidation;
+    $validation->billable_type = $this->billable->getMorphClass();
+    $validation->billable_id = $this->billable->getKey();
+    $validation->vat_number = 'FR12345678901';
+    $validation->country_code = 'FR';
+    $validation->valid = true;
+    $validation->vies_response = [];
+    $validation->checked_at = now();
+    $validation->save();
+    $b2b->forceFill(['vat_validation_id' => $validation->getKey()])->save();
+
+    $result = (new OssProtocolService())->export(2026);
+    $rows = readOssCsv($result->path);
+
+    $byCountry = [];
+    foreach (array_slice($rows, 1) as $row) {
+        $byCountry[$row[2]] = $row[7];
+    }
+
+    expect($byCountry)->toBe([
+        'AT' => 'domestic',
+        'DE' => 'oss',
+        'FR' => 'reverse_charge',
+        'US' => 'non_eu',
+    ]);
+});
+
+it('keeps a domestic and a cross-border row apart even at the same rate', function (): void {
+    config()->set('mollie-billing.vat.seller_country', 'AT');
+
+    // Austria and Bulgaria both charge 20 %. Without `scope` in the bucket key these
+    // two would have merged into one row and the domestic turnover would have been
+    // filed as OSS.
+    ossInvoice($this->billable, 'AT', 'EUR', 1000, 20.0);
+    ossInvoice($this->billable, 'BG', 'EUR', 1000, 20.0);
+
+    $result = (new OssProtocolService())->export(2026);
+
+    expect($result->rows)->toBe(2);
+
+    $scopes = array_map(fn (array $r) => $r[7], array_slice(readOssCsv($result->path), 1));
+    sort($scopes);
+
+    expect($scopes)->toBe(['domestic', 'oss']);
+});
+
+it('leaves everything as oss when no seller country is configured', function (): void {
+    // `domestic` cannot be decided without one, and inventing an answer would be worse
+    // than the pre-existing behaviour. sellerCountry() warns about that separately.
+    config()->set('mollie-billing.vat.seller_country', null);
+    config()->set('mollie-billing.invoices.seller.address.country', null);
+
+    ossInvoice($this->billable, 'AT', 'EUR', 1000, 20.0);
+    ossInvoice($this->billable, 'DE', 'EUR', 1000, 19.0);
+
+    $rows = readOssCsv((new OssProtocolService())->export(2026)->path);
+
+    expect(array_map(fn (array $r) => $r[7], array_slice($rows, 1)))->toBe(['oss', 'oss']);
 });
 
 it('falls back to the configured currency for rows without one', function (): void {

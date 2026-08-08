@@ -1004,11 +1004,22 @@ class CouponService
         if ($discountType instanceof DiscountType) {
             $discountType = $discountType->value;
         }
+
+        $discountValue = (int) ($attributes['discount_value'] ?? 0);
+
+        // Checked for both discount types, because the sign is what matters and the
+        // pricing services subtract it unexamined. A Fixed `discount_value = -500`
+        // *increased* the charge by €5 — a coupon that costs the customer money —
+        // and a 0 is a coupon that does nothing while consuming a redemption slot.
+        if ($discountValue <= 0) {
+            throw new \InvalidArgumentException(
+                'A discount value must be greater than zero.'
+            );
+        }
+
         if ($discountType !== DiscountType::Percentage->value) {
             return;
         }
-
-        $discountValue = (int) ($attributes['discount_value'] ?? 0);
 
         if ($discountValue > 100) {
             throw new \InvalidArgumentException(

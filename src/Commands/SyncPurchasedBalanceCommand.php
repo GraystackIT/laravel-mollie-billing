@@ -13,7 +13,7 @@ use Illuminate\Console\Command;
  * Backfills `purchased_balance` in the wallet meta from transaction history.
  *
  * Purchase deposits are only counted for the **current** billing period, i.e. since
- * the wallet's most recent `period_reset` transaction. Summing them over the wallet's
+ * the wallet's most recent renewal bookkeeping transaction. Summing them over the wallet's
  * lifetime resurrected long-consumed credits: with quota 100 000/month and
  * rollover=false, a customer who bought and used 5 000 extra units six months ago got
  * `purchased_balance = 5 000` written right after a renewal (balance 100 000 >= 5 000),
@@ -36,7 +36,7 @@ class SyncPurchasedBalanceCommand extends Command
         foreach (Wallet::all() as $wallet) {
             $current = WalletUsageService::getPurchasedBalance($wallet);
 
-            $purchasedThisPeriod = $this->purchasedSinceLastReset($wallet);
+            $purchasedThisPeriod = $this->purchasedSinceLastRenewal($wallet);
             $target = WalletUsageService::computePurchasedRemaining(
                 $purchasedThisPeriod,
                 (int) $wallet->balanceInt,
@@ -89,10 +89,18 @@ class SyncPurchasedBalanceCommand extends Command
 
     /**
      * Purchase deposits (one-time orders + coupon credits) made since the wallet's
-     * last period reset. Anything older was already accounted for by that reset's own
+     * last renewal. Anything older was already accounted for by that renewal's own
      * carry-over computation.
+     *
+     * The anchor is the latest of the two markers a renewal can leave, not
+     * `period_reset` alone: that transaction is only written when the balance was
+     * non-zero, so a wallet that renewed at exactly 0 had no anchor at all and the
+     * window reached back into earlier periods — resurrecting purchased credits the
+     * customer had long consumed, which every later `resetAndCredit()` then
+     * re-credited on top of the new quota. `period_credit` is written whenever there
+     * is any quota to deposit, which is the ordinary case.
      */
-    private function purchasedSinceLastReset(Wallet $wallet): int
+    private function purchasedSinceLastRenewal(Wallet $wallet): int
     {
         $query = Transaction::query()
             ->where('wallet_id', $wallet->getKey())
@@ -105,7 +113,7 @@ class SyncPurchasedBalanceCommand extends Command
 
         $lastReset = Transaction::query()
             ->where('wallet_id', $wallet->getKey())
-            ->where('meta->reason', 'period_reset')
+            ->whereIn('meta->reason', ['period_reset', WalletUsageService::PERIOD_CREDIT_REASON])
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->first();

@@ -169,13 +169,28 @@ The admin modal additionally **requires** a free-text justification (max 500 cha
 
 ## OSS quarterly export
 
-`OssProtocolService::export(int $year)` generates a CSV file aggregating all invoices in the given calendar year by `(quarter, country, vat_rate)`:
+`OssProtocolService::export(int $year)` generates a CSV file aggregating all invoices in the given calendar year by `(quarter, currency, country, vat_rate, scope)`:
 
 ```
-quarter, country, sales_count, net_amount_eur, vat_amount_eur, vat_rate
+quarter, currency, country, sales_count, net_amount_eur, vat_amount_eur, vat_rate, scope
 ```
 
-Quarter boundaries are computed in **UTC** so the export is deterministic regardless of `app.timezone`. Multi-VAT invoices contribute one bucket entry per distinct VAT rate.
+Quarter boundaries are computed in **UTC** so the export is deterministic regardless of `app.timezone`. Multi-VAT invoices contribute one bucket entry per distinct VAT rate. Amounts are scaled by the row's own currency, so a JPY install exports `3000`, not `30.00`.
+
+### What `scope` means — read this before filing
+
+OSS covers cross-border **B2C** supplies inside the EU. The export contains every invoice, because turnover that silently disappears from a report is harder to notice than turnover in a column that says what it is — so each row declares which filing it belongs to:
+
+| `scope` | What it is | Where it belongs |
+|---|---|---|
+| `oss` | Cross-border EU consumer supply | **The OSS return.** These rows, and only these. |
+| `domestic` | Customer is in the seller's own country (`vat.seller_country`) | The ordinary national VAT return. |
+| `reverse_charge` | Validated EU business customer (`vat_validation_id`, VIES-accepted) | The EC Sales List. Zero-rated here; declared by the customer. |
+| `non_eu` | Customer outside the EU | Outside the scope of OSS. |
+
+`scope` is part of the bucket key, so a domestic and a cross-border supply at the same rate (Austria and Bulgaria are both 20 %) never merge into one row.
+
+When `vat.seller_country` resolves to nothing, `domestic` cannot be decided and those rows stay `oss` — configure it (see [Configuration](configuration.md#vat--oss)) if you sell in your own country.
 
 Run via:
 

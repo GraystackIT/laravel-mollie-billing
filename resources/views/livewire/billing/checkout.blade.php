@@ -15,10 +15,14 @@ use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\Sanitize;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
+use Mollie\Api\Http\Requests\GetPaymentRequest;
+use Mollie\Laravel\Facades\Mollie;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     use ValidatesVatNumber;
@@ -1004,6 +1008,52 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     }
 
     /**
+     * The hosted checkout URL of a first payment that is still awaiting the customer,
+     * or null when there is nothing to return to.
+     *
+     * A payment Mollie still reports as `open` (or `pending`, for a method that has
+     * left the browser) is this checkout, not a new one. Minting a second
+     * `sequenceType: first` payment for the same intent means two payments that can
+     * both be paid — the second one is caught by the activation gate, but only as a
+     * duplicate, after the money moved.
+     *
+     * Every failure mode falls through to null: a Mollie hiccup must not block a
+     * customer from checking out, and the activation gate is still behind us.
+     */
+    private function reusablePendingCheckoutUrl(mixed $billable): ?string
+    {
+        $paymentId = $billable->getPendingFirstPaymentId();
+
+        if ($paymentId === null || $paymentId === '') {
+            return null;
+        }
+
+        try {
+            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+        } catch (\Throwable $e) {
+            Log::warning('Checkout could not probe the pending first payment', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        if (! in_array((string) ($payment->status ?? ''), ['open', 'pending'], true)) {
+            return null;
+        }
+
+        $url = method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null;
+
+        // A `pending` payment has already left the hosted page (SEPA, vouchers), so it
+        // carries no checkout link — there is nothing to send the customer back to, but
+        // there is also nothing to charge them for twice. Send them to the return page,
+        // which is what polls this payment to completion.
+        return $url ?: BillingRoute::url('return', $billable);
+    }
+
+    /**
      * Re-validate the currently applied coupon against the live form state
      * (plan, interval, addons, extra seats). Returns null on success, or a
      * reason string when the coupon no longer fits — in which case the
@@ -1477,7 +1527,38 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 return null;
             }
 
+            // Serialised per billable. `$processing` is component state, so two
+            // `/livewire/update` POSTs each replaying their own snapshot never see the
+            // other's flag: both reached this call and both created a
+            // `sequenceType: first` payment. `recordPendingFirstPayment()` keeps only
+            // the last id, so the return page then polled the payment the customer did
+            // *not* pay, and the second one settling later was only caught by the
+            // activation gate — as a duplicate, after the money moved.
+            //
+            // Non-blocking on purpose: the loser must not sit on a worker until the
+            // winner has finished talking to Mollie. It re-enters through the
+            // still-open-payment branch below on the next attempt.
+            $submitLock = Cache::lock('billing:checkout-submit:'.$billable->getKey(), 60);
+
+            if (! $submitLock->get()) {
+                $this->errorMessage = __('billing::checkout.error_already_in_progress');
+
+                return null;
+            }
+
             try {
+                // A first payment still open at Mollie is the same checkout, not a new
+                // one. Sending the customer back to it keeps one payment per intent
+                // even when the two submits are seconds apart and the lock has already
+                // been released — a second `sequenceType: first` payment on the same
+                // mandate-to-be is exactly what the activation gate has to clean up
+                // afterwards, and it charges the customer twice if both are paid.
+                $reusable = $this->reusablePendingCheckoutUrl($billable);
+
+                if ($reusable !== null) {
+                    return $this->redirect($reusable, navigate: false);
+                }
+
                 $result = $checkout->handle($billable, [
                     'plan_code' => $this->plan_code,
                     'interval' => $this->interval,
@@ -1486,6 +1567,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     'coupon_code' => $this->applied_coupon['code'] ?? null,
                     'amount_gross' => $this->totals($vat)['gross'],
                 ]);
+
+                // Inside the lock: the marker is what the reuse branch above reads, so
+                // it has to be visible before another submit can win.
+                if (! empty($result['payment_id'])) {
+                    $billable->recordPendingFirstPayment((string) $result['payment_id']);
+                }
             } catch (\Throwable $e) {
                 report($e);
                 try {
@@ -1496,10 +1583,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 $this->errorMessage = __('billing::checkout.error_payment_creation');
 
                 return null;
-            }
-
-            if (! empty($result['payment_id'])) {
-                $billable->recordPendingFirstPayment((string) $result['payment_id']);
+            } finally {
+                $submitLock->release();
             }
 
             if (! empty($result['checkout_url'])) {

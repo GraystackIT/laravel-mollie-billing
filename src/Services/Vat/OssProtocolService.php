@@ -8,6 +8,7 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Support\BillingMoney;
+use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 
@@ -32,7 +33,10 @@ class OssProtocolService
      * still contribute their negative net/VAT so the totals net out, but they
      * are not sales and must not inflate the count.
      *
-     * Columns: quarter, currency, country, sales_count, net_amount[_cur], vat_amount[_cur], vat_rate
+     * `scope` says which filing each row belongs to — only `oss` rows belong in the OSS
+     * return. See {@see scopeFor()}.
+     *
+     * Columns: quarter, currency, country, sales_count, net_amount[_cur], vat_amount[_cur], vat_rate, scope
      */
     public function export(int $year): OssExportResult
     {
@@ -46,7 +50,11 @@ class OssProtocolService
 
         BillingInvoice::query()
             ->whereBetween('created_at', [$start, $end])
-            ->select(['id', 'country', 'currency', 'invoice_kind', 'line_items', 'created_at'])
+            // `vat_validation_id` is selected and the relation eager-loaded because
+            // scopeFor() classifies on it. Left out of the select it reads as null on
+            // every row, and every reverse-charged B2B supply would be filed as OSS.
+            ->select(['id', 'country', 'currency', 'invoice_kind', 'line_items', 'created_at', 'vat_validation_id'])
+            ->with('vatValidation')
             ->chunkById(500, function ($invoices) use (&$buckets): void {
                 foreach ($invoices as $invoice) {
                     $this->collectBuckets($buckets, $invoice);
@@ -78,6 +86,10 @@ class OssProtocolService
                 'net_amount'.$suffix,
                 'vat_amount'.$suffix,
                 'vat_rate',
+                // Trailing, so the existing column positions are unchanged for anything
+                // already reading this file. See scopeFor(): only `oss` rows belong in
+                // the OSS return.
+                'scope',
             ]);
 
             foreach ($buckets as $row) {
@@ -94,6 +106,7 @@ class OssProtocolService
                     BillingMoney::mollieAmount((int) $row['net_amount_cents'], $row['currency']),
                     BillingMoney::mollieAmount((int) $row['vat_amount_cents'], $row['currency']),
                     $row['vat_rate'],
+                    $row['scope'],
                 ]);
             }
 
@@ -124,7 +137,7 @@ class OssProtocolService
     }
 
     /**
-     * @param  array<string, array{quarter: int, currency: string, country: string, sales_count: int, net_amount_cents: int, vat_amount_cents: int, vat_rate: string}>  $buckets
+     * @param  array<string, array{quarter: int, currency: string, country: string, sales_count: int, net_amount_cents: int, vat_amount_cents: int, vat_rate: string, scope: string}>  $buckets
      */
     private function collectBuckets(array &$buckets, BillingInvoice $invoice): void
     {
@@ -139,6 +152,7 @@ class OssProtocolService
         $country = strtoupper((string) $invoice->country);
         $currency = strtoupper((string) ($invoice->currency ?: config('mollie-billing.currency', 'EUR')));
         $isSale = $invoice->invoice_kind !== InvoiceKind::Refund;
+        $scope = $this->scopeFor($invoice, $country);
 
         // Collect lines by VAT rate so an invoice counts exactly once as a sale per rate.
         $linesByRate = [];
@@ -152,7 +166,9 @@ class OssProtocolService
         }
 
         foreach ($linesByRate as $rate => $totals) {
-            $key = "{$quarter}|{$currency}|{$country}|{$rate}";
+            // `scope` is part of the key, so the three filings never merge into one
+            // bucket even where quarter, currency, country and rate coincide.
+            $key = "{$quarter}|{$currency}|{$country}|{$rate}|{$scope}";
 
             if (! isset($buckets[$key])) {
                 $buckets[$key] = [
@@ -163,6 +179,7 @@ class OssProtocolService
                     'net_amount_cents' => 0,
                     'vat_amount_cents' => 0,
                     'vat_rate' => $rate,
+                    'scope' => $scope,
                 ];
             }
 
@@ -172,6 +189,46 @@ class OssProtocolService
             $buckets[$key]['net_amount_cents'] += $totals['net'];
             $buckets[$key]['vat_amount_cents'] += $totals['vat'];
         }
+    }
+
+    /**
+     * Which filing a supply belongs to.
+     *
+     * OSS covers cross-border **B2C** supplies inside the EU. Three kinds of row do not
+     * belong in it and used to be aggregated into the OSS buckets unmarked, so a CSV
+     * filed verbatim over-declared OSS turnover:
+     *
+     *  - `reverse_charge` — a validated EU business customer. Zero-rated here and
+     *    declared by the customer; it belongs in the EC Sales List.
+     *  - `domestic` — the customer is in the seller's own country. Domestic VAT,
+     *    declared in the ordinary national return.
+     *  - `non_eu` — outside the EU altogether. Outside the scope of OSS.
+     *
+     * Marked rather than dropped: turnover that silently vanishes from an export is
+     * harder to notice than turnover in a column that says what it is. When the seller
+     * country is not configured, `domestic` cannot be decided at all — those rows stay
+     * `oss`, which is the pre-existing behaviour, and `sellerCountry()`'s own warning
+     * covers the misconfiguration.
+     */
+    private function scopeFor(BillingInvoice $invoice, string $country): string
+    {
+        if ($country !== '' && ! in_array($country, CountryResolver::euCountryCodes(), true)) {
+            return 'non_eu';
+        }
+
+        $validation = $invoice->vatValidation;
+
+        if ($validation !== null && (bool) $validation->valid) {
+            return 'reverse_charge';
+        }
+
+        $seller = app(VatCalculationService::class)->sellerCountry();
+
+        if ($seller !== null && $country !== '' && strtoupper($seller) === $country) {
+            return 'domestic';
+        }
+
+        return 'oss';
     }
 
     public function disk(): string

@@ -347,7 +347,9 @@ Non-usage reasons are listed in `WalletUsageService::NON_USAGE_REASONS`; dynamic
 php artisan billing:sync-purchased-balance
 ```
 
-Backfills `purchased_balance` on all wallets from transaction history (one-time orders + coupon credits). Run once after upgrading to a version that tracks purchased credits separately. Safe to re-run.
+Backfills `purchased_balance` on all wallets from transaction history (one-time orders + coupon credits). Run once after upgrading to a version that tracks purchased credits separately. Safe to re-run — `--dry-run` shows what would change, `--force` skips the prompt.
+
+Only purchases made **since the last renewal** count; anything older was already accounted for by that renewal's own carry-over computation. The period boundary is the latest `period_reset` *or* `period_credit` transaction: `period_reset` is only written when the balance was non-zero, so a wallet that renewed at exactly 0 had no anchor at all and the window reached back into earlier periods, resurrecting purchased credits the customer had long consumed — which every later reset then re-credited on top of the new quota.
 
 ## Extension Points
 

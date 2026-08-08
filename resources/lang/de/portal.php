@@ -441,6 +441,7 @@ return [
         'plan_change_reset' => 'Planwechsel (Reset)',
         'plan_change_credit' => 'Planwechsel (Gutschrift)',
         'coupon_credit' => 'Gutschein-Gutschrift',
+        'period_credit' => 'Periodengutschrift',
         'period_reset' => 'Periodenreset',
         'plan_change_upgrade' => 'Plan-Upgrade',
         'plan_change_downgrade' => 'Plan-Downgrade',

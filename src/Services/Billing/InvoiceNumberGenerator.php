@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Support\Facades\DB;
 
 class InvoiceNumberGenerator
@@ -40,7 +41,12 @@ class InvoiceNumberGenerator
             'refund', 'credit_note' => $prefixes['refund'] ?? $prefixes['credit_note'] ?? 'CR',
             default => $prefixes[$invoiceKind] ?? $prefixes['invoice'] ?? 'IN',
         };
-        $year = (int) date('y'); // 2-digit year
+        // UTC, like every other timestamp in the package. `date('y')` reads the server
+        // timezone, so a serial minted in the hours around New Year could carry the
+        // neighbouring year's digits while `created_at` — which the OSS export and the
+        // invoice PDF both use — said otherwise. Sequence integrity was never at risk;
+        // the document just contradicted itself.
+        $year = (int) BillingTime::nowUtc()->format('y');
 
         $allocate = function () use ($format, $prefix, $year): string {
             $prefixLen = substr_count($format, 'P');
@@ -102,36 +108,6 @@ class InvoiceNumberGenerator
         };
 
         return DB::transactionLevel() > 0 ? $allocate() : DB::transaction($allocate);
-    }
-
-    private function buildSearchPattern(string $format, string $prefix, string $year): string
-    {
-        $result = '';
-        $i = 0;
-        $len = strlen($format);
-
-        while ($i < $len) {
-            $char = $format[$i];
-
-            if ($char === 'P') {
-                $count = $this->countConsecutive($format, $i, 'P');
-                $result .= $prefix;
-                $i += $count;
-            } elseif ($char === 'Y') {
-                $count = $this->countConsecutive($format, $i, 'Y');
-                $result .= $year;
-                $i += $count;
-            } elseif ($char === 'C') {
-                $count = $this->countConsecutive($format, $i, 'C');
-                $result .= str_repeat('_', $count); // SQL single-char wildcard
-                $i += $count;
-            } else {
-                $result .= $char; // literal separator (e.g. '-')
-                $i++;
-            }
-        }
-
-        return $result;
     }
 
     private function extractCounter(string $format, string $serialNumber): int

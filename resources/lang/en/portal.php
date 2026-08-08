@@ -441,6 +441,7 @@ return [
         'plan_change_reset' => 'Plan change (reset)',
         'plan_change_credit' => 'Plan change (credit)',
         'coupon_credit' => 'Coupon credit',
+        'period_credit' => 'Period credit',
         'period_reset' => 'Period reset',
         'plan_change_upgrade' => 'Plan upgrade',
         'plan_change_downgrade' => 'Plan downgrade',

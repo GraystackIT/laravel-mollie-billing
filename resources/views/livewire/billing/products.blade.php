@@ -94,9 +94,12 @@ new class extends Component {
                 'productCodes' => [$productCode],
                 'orderAmountNet' => $remainingNet,
                 'existingCouponIds' => $this->resolveAppliedCouponIds($current),
+                // SinglePayment only. A one-time order has no recurring charge for a
+                // Recurring coupon to discount, and StartOneTimeOrderCheckout rejects
+                // one — so offering it here accepted a code at the field and then
+                // failed the purchase it was entered for.
                 'allowed_types' => [
                     \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
-                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                 ],
             ]);
         } catch (InvalidCouponException $e) {

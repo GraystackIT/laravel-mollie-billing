@@ -74,7 +74,7 @@ it('quartile boundaries are computed in UTC regardless of app.timezone', functio
         $rows = array_map('str_getcsv', explode("\n", trim((string) $disk->get($result->path))));
         // Header + 1 data row: invoice fell into Q4 2025 (UTC quarter).
         expect(count($rows))->toBe(2);
-        expect($rows[0])->toBe(['quarter', 'currency', 'country', 'sales_count', 'net_amount_eur', 'vat_amount_eur', 'vat_rate']);
+        expect($rows[0])->toBe(['quarter', 'currency', 'country', 'sales_count', 'net_amount_eur', 'vat_amount_eur', 'vat_rate', 'scope']);
         expect($rows[1][0])->toBe('4'); // quarter
         expect($rows[1][1])->toBe('EUR'); // currency
         expect($rows[1][2])->toBe('AT'); // country

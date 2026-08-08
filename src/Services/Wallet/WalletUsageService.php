@@ -194,7 +194,15 @@ class WalletUsageService
             $newBalance = $quota + $purchasedRemaining;
 
             if ($newBalance > 0) {
-                $wallet->deposit($newBalance, ['type' => $type, 'reason' => 'credit']);
+                // `period_credit`, not the generic `credit` that `credit()` also writes.
+                // SyncPurchasedBalanceCommand anchors its "purchases this period" window
+                // on the renewal's own bookkeeping, and a wallet that renews at exactly
+                // balance 0 leaves no `period_reset` — the branch above only fires for a
+                // non-zero balance. The window then reached back into earlier periods and
+                // resurrected long-consumed purchased credits, which every later reset
+                // re-credited. This deposit always happens when there is anything to
+                // credit, so it is the marker that is actually there.
+                $wallet->deposit($newBalance, ['type' => $type, 'reason' => self::PERIOD_CREDIT_REASON]);
             }
 
             self::setPurchasedBalance($wallet, $purchasedRemaining);
@@ -212,10 +220,18 @@ class WalletUsageService
     // shows up as "consumption".
 
     /**
+     * The renewal's own quota deposit. Distinct from the generic `credit`, so the
+     * period boundary is identifiable in the transaction log even when the balance
+     * happened to be exactly zero and no `period_reset` was written.
+     */
+    public const PERIOD_CREDIT_REASON = 'period_credit';
+
+    /**
      * Transaction reasons that represent bookkeeping, not real consumption.
      */
     public const NON_USAGE_REASONS = [
         'credit',
+        self::PERIOD_CREDIT_REASON,
         'period_reset',
         'plan_change',
         'plan_change_reset',
