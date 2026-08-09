@@ -87,3 +87,22 @@ it('prices no discount for a coupon type that moves no money', function (): void
         ->and($applied)->not->toBeNull()
         ->and((int) ($applied['discount_net'] ?? -1))->toBe(0);
 });
+
+it('refuses a programmatic checkout that omits the price', function (): void {
+    // `handle()` is a documented entry point and its signature says `amount_gross` is
+    // required — but it was read straight out of the array. A caller that omits it gets
+    // `(int) null`, which is 0, and 0 on a *paid* plan falls through to the €0 mandate-only
+    // branch: a mandate is captured, the subscription is activated, and the first period is
+    // never charged. A missing price has to be an error, not a free month.
+    $billable = \GraystackIT\MollieBilling\Testing\TestBillable::create([
+        'name' => 'Programmatic Co',
+        'email' => 'programmatic@example.test',
+    ]);
+    $billable->forceFill(['billing_country' => 'AT'])->save();
+
+    expect(fn () => app(\GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout::class)
+        ->handle($billable->refresh(), [
+            'plan_code' => 'solo',
+            'interval' => 'monthly',
+        ]))->toThrow(\InvalidArgumentException::class);
+});

@@ -315,6 +315,24 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
      * when Mollie is unreachable as well: "unknown" must never authorise a delete,
      * and the next run (every 15 minutes) retries.
      */
+    /**
+     * Refuse the cleanup because Mollie could not answer — as opposed to answering "gone".
+     *
+     * Split out so the two catch arms above share one wording and one decision: an
+     * unanswered question is not evidence of absence, and deleting a billable that may have
+     * paid is not recoverable.
+     */
+    private function refuseCleanupAfterMollieFailure(Model $billable, string $customerId, \Throwable $e): bool
+    {
+        Log::warning('CleanupOrphanedBillablesJob: Mollie unreachable for customer, skipping cleanup', [
+            'billable_id' => $billable->getKey(),
+            'customer_id' => $customerId,
+            'error' => $e->getMessage(),
+        ]);
+
+        return true;
+    }
+
     private function mollieMayHavePaid(Model $billable): bool
     {
         $customerId = (string) ($billable->mollie_customer_id ?? '');
@@ -325,14 +343,27 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
 
         try {
             $payments = MollieCall::send(new GetPaginatedCustomerPaymentsRequest($customerId, limit: 50));
-        } catch (\Throwable $e) {
-            Log::warning('CleanupOrphanedBillablesJob: Mollie unreachable for customer, skipping cleanup', [
-                'billable_id' => $billable->getKey(),
-                'customer_id' => $customerId,
-                'error' => $e->getMessage(),
-            ]);
+        } catch (\Mollie\Api\Exceptions\ApiException $e) {
+            // "Gone" and "never existed" are answers, not failures. Mollie says 404 for an
+            // id it does not know and **410 Gone** once the customer has been deleted, and
+            // both mean the same thing here: there is no customer, so there are no payments
+            // to protect. Answering "maybe" to those — as the blanket catch below does, and
+            // correctly does for a timeout — meant an orphan whose Mollie customer was gone
+            // could never be cleaned up, and every nightly sweep logged the same warning
+            // about it forever.
+            if (in_array($e->getCode(), [404, 410], true)) {
+                Log::info('CleanupOrphanedBillablesJob: Mollie customer no longer exists, nothing to protect', [
+                    'billable_id' => $billable->getKey(),
+                    'customer_id' => $customerId,
+                    'status' => $e->getCode(),
+                ]);
 
-            return true;
+                return false;
+            }
+
+            return $this->refuseCleanupAfterMollieFailure($billable, $customerId, $e);
+        } catch (\Throwable $e) {
+            return $this->refuseCleanupAfterMollieFailure($billable, $customerId, $e);
         }
 
         foreach ($payments ?? [] as $payment) {

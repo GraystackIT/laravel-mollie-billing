@@ -86,6 +86,20 @@ class StartSubscriptionCheckout
             }
         }
 
+        // Stated, not inferred. `handle()` is a documented entry point and its signature
+        // says this key is required — but reading it straight out of the array turned a
+        // caller's omission into `(int) null`, which is 0, and 0 on a *paid* plan falls
+        // through to the €0 mandate-only branch below: a mandate is captured, the
+        // subscription is activated, and the first period is never charged. A price that
+        // was never supplied is not a price of zero.
+        if (! array_key_exists('amount_gross', $request) || ! is_numeric($request['amount_gross'])) {
+            throw new \InvalidArgumentException(
+                'StartSubscriptionCheckout::handle() requires an `amount_gross` (in minor units) — '
+                .'it is what Mollie collects. Compute it from the catalog, including seats, addons, '
+                .'the coupon and VAT, the way the checkout component does.'
+            );
+        }
+
         $amountGross = (int) $request['amount_gross'];
 
         $couponCode = $request['coupon_code'] ?? null;

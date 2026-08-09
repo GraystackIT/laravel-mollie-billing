@@ -68,6 +68,7 @@
     "scripts": {
         "test": "pest --compact",
         "test:browser": "@php vendor/bin/pest --compact --configuration=phpunit.dusk.xml",
+        "test:sandbox": "@php vendor/bin/pest --configuration=phpunit.sandbox.xml",
         "browser:assets": "npm run build",
         "browser:driver": "@php vendor/bin/dusk-updater detect --auto-update",
         "browser:gallery": "@php tests/Browser/gallery.php"

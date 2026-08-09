@@ -251,6 +251,20 @@ can interleave on the same wallet — and that balance is what this package bill
 directly, only through bavix's own `deposit`/`withdraw`/`forceWithdraw`, so bavix's
 invalidation applies whichever driver is configured. See the refuted finding below.
 
+### Mollie says 410 Gone, not 404, for something that was removed
+
+Measured against the sandbox, not inferred: an unknown id answers **404**, while a revoked
+mandate, a deleted customer, that customer's payment list and a subscription whose customer
+was deleted all answer **410**. Revoking an already-revoked mandate throws rather than
+being idempotent.
+
+They are different questions — "never existed" versus "existed and is gone" — and both are
+definitive. Any code that treats only one of them as final leaves a stale id or a permanent
+"maybe" behind, which is exactly what `MollieSubscriptionGate` and
+`CleanupOrphanedBillablesJob` did. `tests/Feature/Billing/MollieGoneResourceTest.php` pins
+both, and pins the other half too: a 503 must *not* be read as "gone", or one bad night
+orphans a live subscription.
+
 ## Refuted findings
 
 Reported, investigated, and **not** changed. Listed with what the investigation showed, so

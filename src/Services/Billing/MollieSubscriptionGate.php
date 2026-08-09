@@ -60,8 +60,16 @@ class MollieSubscriptionGate
         try {
             $subscription = MollieCall::send(new GetSubscriptionRequest($customerId, $subscriptionId));
         } catch (ApiException $e) {
-            if ($e->getCode() === 404) {
-                $this->clearStaleId($billable, 'not_found');
+            // 410 as well as 404, because they are different answers to the same question
+            // and both are definitive. Mollie says 404 for an id that never existed and
+            // **410 Gone** for one that did and was removed — which is what a lookup returns
+            // once the customer has been deleted at Mollie, whether by an operator tidying
+            // the dashboard or by a GDPR erasure. Treating only 404 as final left the stale
+            // id on the billable forever while `hasLiveMollieSubscription()` answered false:
+            // unreachable, un-cancellable, and unable to start a replacement — the exact
+            // state this gate exists to prevent, reached from the other direction.
+            if (in_array($e->getCode(), [404, 410], true)) {
+                $this->clearStaleId($billable, $e->getCode() === 410 ? 'gone' : 'not_found');
                 return null;
             }
 

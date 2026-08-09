@@ -1009,6 +1009,24 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Browser Testing](docs/browser-testing.md) — the Chrome end-to-end suite: workbench app, fake Mollie, writing scenarios, screenshot gallery
 - [Decisions](docs/decisions.md) — behaviour that looks like a defect and is not: enforced invariants, deliberate choices, and findings that were investigated and refuted
 
+### Testing against Mollie for real
+
+```bash
+composer test:sandbox     # needs MOLLIE_KEY=test_… and a network
+```
+
+The feature suite fakes the Mollie facade and the browser suite fakes the SDK's HTTP
+adapter, so both answer with whatever they were told. The sandbox suite sends the requests
+this package builds to the real API and checks the responses carry the fields the code
+reads — including the €0 mandate capture a trial signup depends on, which the API accepts
+only under conditions no fake can enforce.
+
+It refuses any key that is not `test_`, and cancels every subscription it creates by
+sweeping the customers it created rather than by remembering ids a failing test never
+reached. It cannot cover webhook *delivery* (Mollie needs a public URL), a settled payment
+(a test-mode direct debit stays `pending`), or a real renewal (Mollie's scheduler runs
+daily).
+
 ## Architecture
 
 This package wraps `mollie/laravel-mollie` ^4 and adds a VAT/OSS layer (`mpociot/vat-calculator` plus VIES), a wallet layer for metered billing (`bavix/laravel-wallet`), a coupon engine, a built-in first-checkout wizard, an admin panel and a Livewire 4 customer portal. Subscription lifecycle is split into single-purpose service classes per action (Start, Create, Activate, Change, Cancel, Resubscribe, EnableAddon, DisableAddon, SyncSeats) — the `HasBilling` trait delegates to them via the container, so apps customize behavior by rebinding services rather than subclassing models. Extension points are provided via facade callbacks (`createBillableUsing`, `beforeCheckoutUsing`, `afterCheckoutUsing`, `resolveBillableUsing`, etc.) and events.
