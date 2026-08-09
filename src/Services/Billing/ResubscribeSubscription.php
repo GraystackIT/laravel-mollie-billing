@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionResumed;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -46,6 +47,14 @@ class ResubscribeSubscription
         if ($isLocal) {
             $restoredEndsAt = $this->endsAtBeforeCancel($meta, $endsAt);
             unset($meta['cancelled_from']);
+
+            // Same reason CreateSubscription does it on the Mollie side, and this branch
+            // is the one place that was still missing it. A free plan with metered usage
+            // does go past due — the overage charge is real money even when the plan is
+            // not — and resuming with the old `past_due_since` still in the meta measured
+            // the next failed charge against a months-old date, so the nightly pass
+            // auto-cancelled the same night with no dunning window at all.
+            $meta = SubscriptionMetaHygiene::withoutDunningEpisode($meta);
 
             $billable->forceFill([
                 'subscription_status' => SubscriptionStatus::Active,

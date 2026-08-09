@@ -30,6 +30,15 @@ class AdminKpiService
      * depends on the period each invoice covers, and a single yearly customer summed
      * unnormalised reported twelve times the recurring revenue it actually represents
      * — with `arr()` multiplying that by twelve again.
+     *
+     * **What this measures, and what it does not.** The window is *invoiced revenue*, so a
+     * customer contributes only in the 30 days around their own renewal. On a yearly base
+     * that means the tile reads near zero for eleven months of the year — it is not the
+     * contract-value MRR of the active subscription base. Changing that would mean pricing
+     * every Active billable from the catalog instead, which is a different metric with a
+     * different meaning for prorata and mid-cycle charges; the two-way split below is the
+     * deliberate counterpart of this choice. Bind your own `AdminKpiService` if you want
+     * the contract-value definition.
      */
     public function mrr(): int
     {
@@ -92,10 +101,17 @@ class AdminKpiService
             }
 
             return $this->safely(function () use ($billableClass, $days): float {
-                $since = BillingTime::nowUtc()->subDays($days);
+                $now = BillingTime::nowUtc();
+                $since = $now->copy()->subDays($days);
+
+                // Bounded on both sides. With only a lower bound this counted every
+                // cancellation whose grace period ends in the FUTURE — a yearly customer
+                // who cancelled eleven months ago and keeps access until next month was
+                // churn today, and the number never decayed. A cancellation counts when
+                // the access it was paid for actually ended, inside the window.
                 $cancelled = (int) $billableClass::query()
                     ->where('subscription_status', SubscriptionStatus::Cancelled)
-                    ->where('subscription_ends_at', '>=', $since)
+                    ->whereBetween('subscription_ends_at', [$since, $now])
                     ->count();
 
                 $active = (int) $billableClass::query()
@@ -130,12 +146,30 @@ class AdminKpiService
 
             return $this->safely(function () use ($billableClass, $days): float {
                 $now = BillingTime::nowUtc();
-                $cohort = fn () => $billableClass::query()
-                    ->whereNotNull('trial_ends_at')
-                    ->whereBetween('trial_ends_at', [$now->subDays($days), $now]);
+                $since = $now->copy()->subDays($days);
 
-                $total = (int) $cohort()->count();
-                $converted = (int) $cohort()->whereNotNull('mollie_mandate_id')->count();
+                // Trials that ran out. Converting a trial nulls `trial_ends_at` (both
+                // conversion paths do), so this set holds only the ones that did NOT
+                // convert — which is why keying the whole cohort on this column reported
+                // 0 % for every healthy business: the numerator could never be filled.
+                $lapsed = (int) $billableClass::query()
+                    ->whereNotNull('trial_ends_at')
+                    ->whereBetween('trial_ends_at', [$since, $now])
+                    ->count();
+
+                // The conversions themselves, from the marker the two conversion paths
+                // stamp. A fact rather than the old "has a mandate" proxy, which also
+                // matched a customer who converted a year ago and cancelled since.
+                // ISO-8601 UTC strings share one offset, so they order lexicographically.
+                $converted = (int) $billableClass::query()
+                    ->whereNotNull('subscription_meta->trial_converted_at')
+                    ->whereBetween('subscription_meta->trial_converted_at', [
+                        $since->toIso8601String(),
+                        $now->toIso8601String(),
+                    ])
+                    ->count();
+
+                $total = $lapsed + $converted;
 
                 return $total === 0 ? 0.0 : round($converted / $total, 4);
             }, 0.0);
@@ -210,7 +244,7 @@ class AdminKpiService
             ->where('invoice_kind', InvoiceKind::Subscription)
             ->where('status', InvoiceStatus::Paid)
             ->whereBetween('created_at', [$from, $to])
-            ->select(['amount_net', 'period_start', 'period_end'])
+            ->select(['amount_net', 'refunded_net', 'period_start', 'period_end'])
             ->cursor()
             ->each(function (BillingInvoice $invoice) use (&$sum): void {
                 $sum += $this->monthlyShareOf($invoice);
@@ -231,7 +265,12 @@ class AdminKpiService
      */
     private function monthlyShareOf(BillingInvoice $invoice): int
     {
-        $net = (int) $invoice->amount_net;
+        // Net of what was given back. A fully refunded invoice — a billing error corrected
+        // the same week — kept contributing its full value to MRR and ARR for the rest of
+        // the window: revenue the customer no longer has. The cached column is used rather
+        // than `effectiveRefundedNet()`, which would read every credit note's line items
+        // once per invoice in a cursor that already grows with the customer base.
+        $net = max(0, (int) $invoice->amount_net - (int) $invoice->refunded_net);
         $start = $invoice->period_start;
         $end = $invoice->period_end;
 

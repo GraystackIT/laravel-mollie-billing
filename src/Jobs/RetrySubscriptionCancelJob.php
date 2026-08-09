@@ -21,8 +21,8 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
 use Throwable;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Retries a Mollie subscription cancellation that could not be delivered.
@@ -99,7 +99,7 @@ class RetrySubscriptionCancelJob implements ShouldQueue, ShouldBeUnique
         }
 
         try {
-            Mollie::send(new CancelSubscriptionRequest($this->mollieCustomerId, $this->mollieSubscriptionId));
+            MollieCall::send(new CancelSubscriptionRequest($this->mollieCustomerId, $this->mollieSubscriptionId));
         } catch (ApiException $e) {
             if (! in_array($e->getCode(), [404, 410], true)) {
                 throw $e;

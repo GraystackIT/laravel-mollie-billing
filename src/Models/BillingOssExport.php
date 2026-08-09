@@ -41,10 +41,54 @@ class BillingOssExport extends Model
         ];
     }
 
+    /**
+     * How long a run may claim to be in flight before it is treated as abandoned.
+     *
+     * A `queued`/`processing` row is only ever cleared by the process that wrote it, and
+     * that process can stop existing: a deploy mid-run, the OOM killer, Ctrl-C on
+     * `billing:oss-export`. The queue's own `failed()` hook does not fire when the worker
+     * is killed outright, and the command writes `processing` before it starts work. The
+     * admin screen reads any such row as "a run is in flight" and refuses to start
+     * another, so one dead run blocked every future export — in the one part of the
+     * package whose output goes to a tax authority on a deadline. Generously past the
+     * job's own 600s timeout, so a slow but living run is never mistaken for a dead one.
+     */
+    public const STALE_AFTER_MINUTES = 60;
+
     public function isReady(): bool
     {
         return $this->status === OssExportStatus::Ready
             && $this->disk !== null
             && $this->path !== null;
+    }
+
+    /**
+     * Runs that still claim to be in flight and plausibly still are.
+     */
+    public function scopeRunning(\Illuminate\Database\Eloquent\Builder $query): \Illuminate\Database\Eloquent\Builder
+    {
+        return $query
+            ->whereIn('status', [OssExportStatus::Queued, OssExportStatus::Processing])
+            ->where('updated_at', '>=', \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->subMinutes(self::STALE_AFTER_MINUTES));
+    }
+
+    /**
+     * Record abandoned runs as the failures they are, and report how many were found.
+     *
+     * Called from the operator's own action rather than from a render pass: it writes,
+     * and the screen polls.
+     */
+    public static function reclaimAbandonedRuns(): int
+    {
+        $cutoff = \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->subMinutes(self::STALE_AFTER_MINUTES);
+
+        return self::query()
+            ->whereIn('status', [OssExportStatus::Queued, OssExportStatus::Processing])
+            ->where('updated_at', '<', $cutoff)
+            ->update([
+                'status' => OssExportStatus::Failed,
+                'failure_reason' => 'The run never reported back — the worker or the command most likely died.',
+                'completed_at' => \GraystackIT\MollieBilling\Support\BillingTime::nowUtc(),
+            ]);
     }
 }

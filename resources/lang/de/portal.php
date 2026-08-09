@@ -362,6 +362,7 @@ return [
         'trial_ended' => 'Testphase beendet. Dein Abo wurde gekündigt.',
         'resubscribed' => 'Abo reaktiviert.',
         'plan_changed' => 'Plan geändert.',
+        'upgrade_single_coupon_only' => 'Beim Wechsel auf einen kostenpflichtigen Tarif kann nur ein Rabattcode eingelöst werden. Bitte entferne die anderen und versuche es erneut.',
         'plan_scheduled' => 'Planwechsel geplant für :date.',
         'scheduled_cancelled' => 'Geplante Änderung wurde abgebrochen.',
         'plan_change_pending_payment' => 'Dein Abonnement wird aktualisiert. Wir bestätigen, sobald die Transaktion abgeschlossen ist.',

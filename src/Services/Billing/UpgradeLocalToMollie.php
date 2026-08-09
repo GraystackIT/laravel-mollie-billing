@@ -14,7 +14,7 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Convert a local (free / coupon-granted) subscription into a Mollie subscription.
@@ -66,7 +66,7 @@ class UpgradeLocalToMollie
         $amountGross = (int) $request['amount_gross'];
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: "Upgrade to {$request['plan_code']}",
             amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),

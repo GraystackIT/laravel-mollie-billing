@@ -210,3 +210,35 @@ it('refuses to resubscribe once the grace period has ended', function (): void {
     expect(fn () => app(ResubscribeSubscription::class)->handle($billable->refresh()))
         ->toThrow(\RuntimeException::class);
 });
+
+it('starts a fresh dunning clock when a free plan is resumed', function (): void {
+    // A free plan with metered usage does go past due — the overage charge is real money
+    // even when the plan is not. Resuming inside the grace period kept `past_due_since`
+    // from that old episode, so the first failed overage charge afterwards was measured
+    // against a months-old date and the nightly pass auto-cancelled the same night, with
+    // no dunning window at all. Every other path back into a live state clears it; this
+    // branch wrote the meta through untouched.
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Dunning Co', 'email' => 'dunning@example.test']);
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Local,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => now()->subDays(5),
+        'subscription_status' => SubscriptionStatus::Cancelled,
+        'subscription_ends_at' => now()->addDays(10),
+        'subscription_meta' => [
+            'seat_count' => 1,
+            'past_due_since' => now()->subMonths(4)->toIso8601String(),
+            'payment_failure' => ['count' => 3, 'last_error' => 'insufficient funds'],
+        ],
+    ])->save();
+
+    app(\GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription::class)->handle($billable->refresh());
+
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Active)
+        ->and($meta)->not->toHaveKey('past_due_since')
+        ->and($meta)->not->toHaveKey('payment_failure');
+});

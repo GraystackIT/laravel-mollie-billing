@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
@@ -83,6 +84,16 @@ new class extends Component {
         $chosen = strtoupper(trim((string) $this->resolvingChosen));
         if (strlen($chosen) !== 2) {
             $this->resolvingError = __('billing::admin.mismatches.modal.invalid_country');
+            return;
+        }
+
+        // Refused here as well as in the service, so the operator reads a translated
+        // sentence instead of the service's untranslated exception. Resolving refunds
+        // every linked invoice before it tries to re-issue, and a country the VAT
+        // calculator cannot price makes the re-issue impossible — the customer would be
+        // left fully refunded and never re-charged.
+        if (! app(VatCalculationService::class)->isInvoiceable($chosen)) {
+            $this->resolvingError = __('billing::admin.mismatches.modal.country_not_invoiceable', ['country' => $chosen]);
             return;
         }
 

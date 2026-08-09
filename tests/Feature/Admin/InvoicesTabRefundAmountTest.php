@@ -250,3 +250,24 @@ it('clears the pending refund target when the modal is closed from the client', 
         ->assertSet('refundInvoiceId', null)
         ->assertSet('refundAmount', null);
 });
+
+it('offers no refund control for an invoice that cannot be refunded', function (): void {
+    // The button was shown for anything Paid that is not itself a refund. A saldo-zero
+    // plan-switch invoice and a locally booked one (a fully coupon-covered order, a
+    // zero-amount audit document) are both Paid and neither can be refunded: the service
+    // rejects them for having nothing refundable, or no Mollie payment to refund against.
+    // So the operator got a button that only ever produced an error.
+    $billable = refundTabBillable();
+
+    $zero = refundTabInvoice($billable, net: 0);
+
+    $local = refundTabInvoice($billable, net: 5000);
+    $local->forceFill(['mollie_payment_id' => null])->save();
+
+    $normal = refundTabInvoice($billable, net: 5000);
+
+    Livewire::test('mollie-billing::admin.billables.invoices-tab', ['billableId' => $billable->getKey()])
+        ->assertDontSeeHtml('wire:click="openRefund('.$zero->id.')"')
+        ->assertDontSeeHtml('wire:click="openRefund('.$local->id.')"')
+        ->assertSeeHtml('wire:click="openRefund('.$normal->id.')"');
+});

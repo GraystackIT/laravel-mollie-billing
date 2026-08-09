@@ -12,7 +12,7 @@ use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreateCustomerRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class StartMandateCheckout
 {
@@ -62,7 +62,7 @@ class StartMandateCheckout
             }
         }
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: 'Payment method authorisation',
             // Zero still has to be spelled with the currency's own number of
             // decimals — Mollie rejects "0.00" for a 0-decimal currency like JPY.
@@ -90,7 +90,7 @@ class StartMandateCheckout
             return $existing;
         }
 
-        $customer = Mollie::send(new CreateCustomerRequest(
+        $customer = MollieCall::send(new CreateCustomerRequest(
             name: $billable->getBillingName(),
             email: $billable->getBillingEmail(),
             metadata: [

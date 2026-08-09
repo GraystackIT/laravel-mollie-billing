@@ -484,3 +484,104 @@ it('posts a refund of a settled switch invoice against the payment that holds th
     expect($renewal->fresh()->remainingRefundableNet() + $switch->fresh()->remainingRefundableNet())
         ->toBe(2900 - 1123);
 });
+
+it('keeps a third plan switch in one period refundable', function (): void {
+    // `createPlanSwitchInvoice()` guarded its settlement target with
+    // `refundablePaymentId()`, which resolves the chain — so a switch invoice (no payment
+    // of its own) passed the guard and became the target. The document written against it
+    // then had no payment and a parent with none either: `refundablePaymentId()` returned
+    // null and the refund path had nothing to pay out from. The settlement now points at
+    // the invoice that actually collected the money.
+    $renewal = new BillingInvoice;
+    $renewal->billable_type = 'App\\Models\\Org';
+    $renewal->billable_id = 1;
+    $renewal->mollie_payment_id = 'tr_root';
+    $renewal->invoice_kind = InvoiceKind::Subscription;
+    $renewal->status = InvoiceStatus::Paid;
+    $renewal->country = 'AT';
+    $renewal->currency = 'EUR';
+    $renewal->amount_net = 2900;
+    $renewal->amount_vat = 580;
+    $renewal->amount_gross = 3480;
+    $renewal->line_items = [];
+    $renewal->save();
+
+    $switchTwo = new BillingInvoice;
+    $switchTwo->billable_type = 'App\\Models\\Org';
+    $switchTwo->billable_id = 1;
+    $switchTwo->mollie_payment_id = null;
+    $switchTwo->settled_by_invoice_id = $renewal->id;
+    $switchTwo->invoice_kind = InvoiceKind::Subscription;
+    $switchTwo->status = InvoiceStatus::Paid;
+    $switchTwo->country = 'AT';
+    $switchTwo->currency = 'EUR';
+    $switchTwo->amount_net = 0;
+    $switchTwo->amount_vat = 0;
+    $switchTwo->amount_gross = 0;
+    $switchTwo->line_items = [];
+    $switchTwo->save();
+
+    // A switch settled against a switch — the shape rows written before the fix carry.
+    $switchThree = new BillingInvoice;
+    $switchThree->billable_type = 'App\\Models\\Org';
+    $switchThree->billable_id = 1;
+    $switchThree->mollie_payment_id = null;
+    $switchThree->settled_by_invoice_id = $switchTwo->id;
+    $switchThree->invoice_kind = InvoiceKind::Subscription;
+    $switchThree->status = InvoiceStatus::Paid;
+    $switchThree->country = 'AT';
+    $switchThree->currency = 'EUR';
+    $switchThree->amount_net = 0;
+    $switchThree->amount_vat = 0;
+    $switchThree->amount_gross = 0;
+    $switchThree->line_items = [];
+    $switchThree->save();
+
+    // Walking the chain finds the payment that actually holds the money.
+    expect($switchThree->fresh()->refundablePaymentId())->toBe('tr_root');
+});
+
+it('reports no refundable payment when the settlement chain leads nowhere', function (): void {
+    $orphan = new BillingInvoice;
+    $orphan->billable_type = 'App\\Models\\Org';
+    $orphan->billable_id = 1;
+    $orphan->mollie_payment_id = null;
+    $orphan->invoice_kind = InvoiceKind::Subscription;
+    $orphan->status = InvoiceStatus::Paid;
+    $orphan->country = 'AT';
+    $orphan->currency = 'EUR';
+    $orphan->amount_net = 0;
+    $orphan->amount_vat = 0;
+    $orphan->amount_gross = 0;
+    $orphan->line_items = [];
+    $orphan->save();
+
+    expect($orphan->fresh()->refundablePaymentId())->toBeNull();
+});
+
+it('refuses an equal-price plan switch while another change is still awaiting its payment', function (): void {
+    // The one-pending-change rule was scoped to changes that "move money", derived from
+    // the aggregate prorata charge and credit. Both are 0 for a switch between two plans
+    // at the same price — so exactly that switch walked past the guard while another
+    // change's prorata payment was still in flight. That is the failure the guard was
+    // written for: the executor reports `in_flight`, update() attaches this change to the
+    // other one's payment id, and when that payment settles the other intent is applied
+    // and this one evaporates without a trace.
+    Carbon::setTestNow(Carbon::parse('2026-01-15 12:00:00', 'UTC'));
+
+    $billable = secondChangeBillable('pro');
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['pending_prorata_change'] = [
+        'payment_id' => 'tr_inflight',
+        'intent' => ['plan_code' => 'enterprise', 'interval' => 'monthly'],
+    ];
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 'tr_unused', 'status' => 'open']);
+
+    expect(fn () => app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
+        ->update($billable->refresh(), ['plan_code' => 'pro-b']))
+        ->toThrow(\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException::class);
+
+    Carbon::setTestNow();
+});

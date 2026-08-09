@@ -45,7 +45,18 @@ Defined per plan per interval inside `intervals.{monthly|yearly}`:
 
 Note: usage quotas are plan-scoped only. Addons do not contribute `included_usages`. See `SubscriptionCatalogInterface::includedUsage()` for details.
 
-The `included_usages` and `usage_overage_prices` keys must line up — a quota without a price is hard-capped at the quota (nothing could be collected past it), and a price without a quota means the wallet starts at 0. Run `php artisan billing:check-config` to detect such mismatches (it also verifies that any `products.*.usage_type` exists in some plan's usage types).
+The two maps combine, and every combination means something:
+
+| `included_usages` | `usage_overage_prices` | Behaviour |
+|---|---|---|
+| `100` | `5` | Allowance of 100, then 5 cents per unit. The wallet goes negative and the period-end pass charges it. |
+| `100` | absent or `false` | **Hard cap.** `debit()` refuses to go past the allowance and raises `UsageLimitReached` / throws — nothing could collect a negative balance, so none is created. |
+| absent or `0` | `5` | **Pay-per-use.** No allowance; every unit is billed. The wallet only ever goes negative, and the period-end charge, the dunning ladder and the plan-change rebalance all handle it — they iterate wallets, not quotas. |
+| absent | absent | The type is not sold on this plan. Debits are capped at whatever balance exists (purchased credits only). |
+
+Run `php artisan billing:check-config` to check them: it reports a quota without a price, a price without a quota (naming both readings), and a type declared on one interval of a plan but not the other. It also verifies that any `products.*.usage_type` exists in some plan's usage types.
+
+**Quotas are per (plan, interval) with no fallback**, deliberately — a yearly allowance is not twelve monthly ones. The cost is a config shape with no symptom until somebody switches interval: a type declared under `monthly` and forgotten under `yearly` resolves to quota 0 there, and with no overage price on that side the hard cap turns the customer's next metered call into an exception. `check-config` warns about exactly this shape.
 
 When a quota is *meant* to have no overage (typical for internal and supplier plans), declare it as `'Tokens' => false` in `usage_overage_prices` rather than leaving the key out. Runtime behaviour is identical — `usageOveragePrice()` returns `null` either way, and the quota is hard-capped — but the explicit `false` tells `check-config` that the missing price is deliberate, so it stops warning. See [Declaring a quota with no overage](configuration.md#declaring-a-quota-with-no-overage).
 
@@ -358,6 +369,28 @@ It replays the wallet's whole transaction history rather than summing a window: 
 - **Custom validation:** Bind your own `ValidateSubscriptionChange` to customize overage handling during plan changes
 - **Event listeners:** React to `WalletReset`, `WalletCredited`, `OverageCharged` for logging, notifications, etc.
 - **Usage type names:** Add translations to `resources/lang/{locale}/usages.php` or override `usageTypeName()` in a custom catalog
+
+### Only one overage charge at a time
+
+`subscription_meta.usage_overage` is a **single slot**, and the wallets deliberately stay
+negative until the charge covering them settles — with SEPA that is days, not seconds. So
+every entry point that rebuilds line items from the wallets has to ask first whether a
+payment is already in flight, or the same debt goes to Mollie twice: each settles into its
+own invoice (the webhook's idempotency is per payment id) and each credits the units again,
+while the second charge's snapshot *overwrites* the first — inheriting its `created_at`, its
+dunning cycle and its counted-payments list, and leaving the overwritten payment invisible to
+`CleanupStalePendingOverageChargeJob`, which only ever polls the id currently in the slot.
+
+`ChargeUsageOverageDirectly::handle()`, `handleExplicit()` (the plan-change path) and
+`PrepareUsageOverageJob::safeCharge()` all carry that guard. The one exception is
+`retry()`: it is driven by the very snapshot the guard keys off, so applying it there would
+make every retry a permanent no-op. The guard releases on settlement, not on a timer — an
+invoice for the pending payment id means the money arrived and whatever debt is left is new.
+
+The path this used to be missing on is the ordinary one: the nightly period-end sweep creates
+the charge, the customer cancels immediately the next morning
+(`CancelSubscription::handle(immediately: true)`, reached from the portal *and* from the
+past-due auto-cancel in `PrepareUsageOverageJob`), and Mollie collected both.
 
 ### A charge whose webhook never arrived
 

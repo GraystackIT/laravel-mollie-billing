@@ -190,3 +190,31 @@ it('shows the frozen-VAT hint while a country mismatch is open', function (): vo
         ->assertSee(__('billing::portal.billing_data.vat_locked_by_mismatch'))
         ->assertDontSee(__('billing::portal.billing_data.vat_number_help'));
 });
+
+it('pushes a changed company name to the Mollie customer record', function (): void {
+    // The plan-change screen's identical form syncs; this one did not. So a customer who
+    // renamed their company in the portal kept the old name on the Mollie customer — which
+    // is what Mollie's own dashboard, its mails and its exports show, and what an operator
+    // reconciling a payment reads. Same data, same form, two different outcomes depending
+    // on which screen it was typed into.
+    $billable = mismatchBillable(withOpenMismatch: false);
+
+    $captured = [];
+    \Mollie\Laravel\Facades\Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$captured) {
+        $captured[] = $request;
+
+        return (object) ['id' => 'cst_test'];
+    });
+
+    Livewire::test('mollie-billing::billing-data')
+        ->set('company_name', 'Renamed GmbH')
+        ->set('billing_street', 'Acme Street 1')
+        ->set('billing_postal_code', '1010')
+        ->set('billing_city', 'Vienna')
+        ->set('billing_country', 'AT')
+        ->call('save')
+        ->assertHasNoErrors();
+
+    expect($billable->refresh()->getBillingName())->toBe('Renamed GmbH')
+        ->and(collect($captured)->contains(fn ($r) => $r instanceof \Mollie\Api\Http\Requests\UpdateCustomerRequest))->toBeTrue();
+});

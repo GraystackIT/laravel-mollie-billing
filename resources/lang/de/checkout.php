@@ -68,6 +68,7 @@ return [
     'addons_heading' => 'Add-ons',
     'addons_description' => 'Zusätzliche Funktionen, die Sie zu Ihrem Plan hinzufügen können.',
     'extra_seats' => 'Zusätzliche Plätze',
+    'seats_not_available' => 'Dieser Tarif bietet im gewählten Abrechnungsintervall keine zusätzlichen Sitzplätze an.',
     'extra_seat_price' => 'Jeder zusätzliche Platz:',
 
     // Step 4: confirm

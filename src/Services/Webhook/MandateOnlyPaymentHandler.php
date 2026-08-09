@@ -303,6 +303,23 @@ class MandateOnlyPaymentHandler
                 'order_amount_net' => $pricedCoupon['order_amount_net'] ?? null,
             ]);
 
+            // Reported, for the same reason the status skip above is: the mandate has been
+            // captured, so this is a customer who completed a €0 checkout and got nothing.
+            // The coupon can lose its cover between checkout and webhook — its redemption
+            // cap fills up, an operator deactivates it, `valid_until` passes — and a log
+            // line is not something anybody is watching when that happens.
+            $this->support->reportSkippedActivation(
+                $billable,
+                $payment,
+                'coupon',
+                sprintf(
+                    'Mandate captured but the subscription was not activated: coupon [%s] no longer covers the full price (%d of %d net)',
+                    $couponCode,
+                    (int) ($pricedCoupon['discount_net'] ?? 0),
+                    (int) ($pricedCoupon['order_amount_net'] ?? 0),
+                ),
+            );
+
             return;
         }
 

@@ -7,7 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Support\MandateSummary;
 use Mollie\Api\Http\Requests\GetMandateRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Single source of truth for "what does this billable's active payment method
@@ -36,7 +36,7 @@ class MollieMandateInspector
         }
 
         try {
-            $mandate = Mollie::send(new GetMandateRequest($customerId, $mandateId));
+            $mandate = MollieCall::send(new GetMandateRequest($customerId, $mandateId));
         } catch (\Throwable) {
             return null;
         }

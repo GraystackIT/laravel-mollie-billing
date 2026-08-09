@@ -168,23 +168,37 @@ class BillingInvoice extends Model
     /**
      * The Mollie payment a refund of this invoice has to be posted against.
      *
-     * Its own, or — for a settled document — the one that actually holds the money. Follows
-     * a single hop: a switch invoice always settles against an invoice that collected a
-     * payment, never against another switch.
+     * Its own, or — for a settled document — the one that actually holds the money.
+     *
+     * Follows the chain rather than a single hop. `createPlanSwitchInvoice()` now points a
+     * settlement at the invoice that really collected the payment, but rows written before
+     * that fix can carry a switch→switch link: the guard there tested this accessor, which
+     * resolved one hop and therefore accepted a switch invoice as a target. The resulting
+     * document answered null here and was unrefundable — a third change in one period could
+     * never be paid out. Walking the chain repairs those rows too. The `seen` set is not
+     * paranoia: a corrupted cycle would otherwise loop forever inside a webhook.
      */
     public function refundablePaymentId(): ?string
     {
-        if ($this->mollie_payment_id !== null) {
-            return (string) $this->mollie_payment_id;
+        $invoice = $this;
+        $seen = [];
+
+        while ($invoice !== null) {
+            if ($invoice->mollie_payment_id !== null) {
+                return (string) $invoice->mollie_payment_id;
+            }
+
+            $key = (int) $invoice->getKey();
+
+            if ($invoice->settled_by_invoice_id === null || isset($seen[$key])) {
+                return null;
+            }
+
+            $seen[$key] = true;
+            $invoice = $invoice->settledBy;
         }
 
-        if ($this->settled_by_invoice_id === null) {
-            return null;
-        }
-
-        return $this->settledBy?->mollie_payment_id !== null
-            ? (string) $this->settledBy->mollie_payment_id
-            : null;
+        return null;
     }
 
     public function refundableBaseNet(): int
@@ -349,10 +363,12 @@ class BillingInvoice extends Model
 
     public function getDownloadUrl(): ?string
     {
-        if (! $this->hasPdf()) {
-            return null;
-        }
-
+        // Deliberately NOT gated on `hasPdf()`. A render that failed — a transient disk
+        // outage, a DOMPDF font error, a currency the renderer refused — leaves the row
+        // with no `pdf_path`, and the invoice then had no link at all: the customer could
+        // see the charge and never obtain the document, permanently, with no way to ask for
+        // it. `InvoiceDownloadController` regenerates on demand and 404s only when that
+        // fails too, which is the honest outcome to show.
         $billable = $this->billable()->first();
         if (! $billable) {
             return null;

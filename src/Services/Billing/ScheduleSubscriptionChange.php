@@ -376,7 +376,7 @@ class ScheduleSubscriptionChange
      * it from raising the very prorata charge the customer had scheduled the change to
      * avoid.
      */
-    private function periodEndFor(Billable $billable): \Carbon\CarbonInterface
+    public function periodEndFor(Billable $billable): \Carbon\CarbonInterface
     {
         $next = $billable->nextBillingDate();
         $trialEnd = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial

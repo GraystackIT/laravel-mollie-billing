@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class CancelSubscription
 {
@@ -99,9 +99,7 @@ class CancelSubscription
                 'scheduled_change_at' => null,
             ])->save();
 
-            $this->announceCancelledScheduledChange($billable, $scheduledChange);
-
-            SubscriptionCancelled::dispatch($billable, $immediately, $reason);
+            $this->announce($billable, $immediately, $reason, $scheduledChange);
 
             return;
         }
@@ -131,6 +129,21 @@ class CancelSubscription
             }
         }
 
+        $this->announce($billable, $immediately, $reason, $scheduledChange);
+    }
+
+    /**
+     * The tail both branches share.
+     *
+     * It is one method precisely because it used to be two: the Local branch returned
+     * early and skipped the admin notification, so an operator reading the package's own
+     * mail saw paid churn and never free-plan churn. A cancellation is the same act
+     * whichever side it happened on, and it is reported the same way.
+     *
+     * @param  array<string, mixed>|null  $scheduledChange
+     */
+    private function announce(Billable $billable, bool $immediately, ?string $reason, ?array $scheduledChange): void
+    {
         $this->announceCancelledScheduledChange($billable, $scheduledChange);
 
         SubscriptionCancelled::dispatch($billable, $immediately, $reason);
@@ -158,7 +171,14 @@ class CancelSubscription
             return $default;
         }
 
-        return $trialEndsAt->lessThan($default) ? $trialEndsAt->copy() : $default;
+        // The trial end, not the earlier of the two. `trial_days` is per-interval config
+        // with no upper bound and a 45-day trial on a monthly plan is an ordinary thing to
+        // sell — taking the minimum then handed such a customer 30 of the 45 free days they
+        // were promised. The cap this method exists for is against `$default`, which during
+        // a trial is a *fiction*: `subscription_period_starts_at` is the mandate-capture
+        // time, so it describes an interval nobody has paid for. Whichever way the two
+        // compare, the entitlement while a trial is running is the trial.
+        return $trialEndsAt->copy();
     }
 
     /**
@@ -178,7 +198,7 @@ class CancelSubscription
     private function cancelAtMollie(Billable $billable, array $meta, string $customerId, string $subscriptionId): array
     {
         try {
-            Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
+            MollieCall::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
 
             unset($meta['pending_subscription_cancel']);
 

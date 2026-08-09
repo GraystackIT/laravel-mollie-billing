@@ -22,7 +22,7 @@ use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     use ValidatesVatNumber;
@@ -943,11 +943,24 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
      */
     private function dropAddonsNotSoldInSelection(): void
     {
+        $plan = $this->selectedPlan();
+
+        // Seats the new selection does not sell, for the same reason as the addons below:
+        // picking a seat count on one plan and then switching to a plan without a
+        // `seat_price_net` left the count in place, priced at 0 — free capacity on the
+        // confirm step, and `validateStep3()` would refuse the order the customer had
+        // already been shown.
+        if ($this->extra_seats > 0
+            && ($plan['intervals'][$this->interval]['seat_price_net'] ?? null) === null
+        ) {
+            $this->extra_seats = 0;
+        }
+
         if ($this->addon_codes === []) {
             return;
         }
 
-        $allowed = (array) ($this->selectedPlan()['allowed_addons'] ?? []);
+        $allowed = (array) ($plan['allowed_addons'] ?? []);
 
         $this->addon_codes = array_values(array_filter(
             $this->addon_codes,
@@ -1065,7 +1078,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         }
 
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('Checkout could not probe the pending first payment', [
                 'billable_id' => $billable->getKey(),
@@ -1158,6 +1171,19 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant) {
             return $this->calculateAccessGrantDiscount($coupon);
+        }
+
+        // Only the two types that actually move money. A TrialExtension or PeriodExtension
+        // coupon can still carry a `discount_value` — the admin form keeps the property
+        // when the operator switches the type selector after typing one — and
+        // `computeRecurringDiscount()` reads it regardless. The checkout then showed a
+        // discount no webhook path honours: the customer was quoted a reduced total and
+        // charged the full one.
+        if (! in_array($coupon->type, [
+            \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+            \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+        ], true)) {
+            return 0;
         }
 
         return MollieBilling::coupons()->computeRecurringDiscount($coupon, $this->subtotalNet());
@@ -1418,6 +1444,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'addon_codes.*' => ['string', 'in:' . ($allowed === [] ? 'none' : implode(',', $allowed))],
             'extra_seats' => ['integer', 'min:0', 'max:100'],
         ]);
+
+        // A plan whose interval sells no extra seats must not be given any. The catalog
+        // prices them at 0 there, so an unchecked value was capacity handed out for free —
+        // and the seat step is not even rendered for such a plan, so the only way to hold a
+        // non-zero value is a crafted payload or a selection changed after the fact.
+        if ($this->extra_seats > 0
+            && ($plan['intervals'][$this->interval]['seat_price_net'] ?? null) === null
+        ) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'extra_seats' => __('billing::checkout.seats_not_available'),
+            ]);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1523,11 +1561,27 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // Validation runs BEFORE setting processing=true. ValidationException is
         // re-thrown so Livewire can render field errors; processing stays false
         // so the submit button doesn't lock up on a recoverable input error.
+        // Every custom step, not just the ones the customer walked through.
+        //
+        // `$step` is a plain public property: a crafted Livewire payload can set it past
+        // the custom steps and submit, and `next()` — which is where their validators
+        // normally run — is never called. An app's step is exactly where the README tells
+        // it to enforce things `createBillableUsing()` then trusts (a confirmed email, an
+        // accepted agreement), so skipping them is not a UI nicety.
+        foreach (array_keys($this->customSteps()) as $index) {
+            $this->validateCustomStep($index + 1);
+        }
+
         $this->validateStep1();
         $this->validateStep2();
-        if ($this->hasAddonsOrSeatsStep()) {
-            $this->validateStep3();
-        }
+        // Unconditional. Gating this on `hasAddonsOrSeatsStep()` meant that for a plan
+        // with no allowed addons and no seat price — where the step is not rendered at
+        // all — `addon_codes` and `extra_seats` reached the order completely unchecked.
+        // A crafted Livewire payload could therefore buy 500 free seats and switch on an
+        // addon reserved for another tier, whose features `FeatureAccess` then granted.
+        // With an empty allow-list the `in:none` rule refuses every code, so this is also
+        // the right check for exactly that plan.
+        $this->validateStep3();
 
         $this->processing = true;
 

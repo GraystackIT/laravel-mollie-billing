@@ -176,3 +176,37 @@ it('tells the admins when the retries run out without ever reaching Mollie', fun
         ->toBe(ChargeUsageOverageDirectly::STATUS_PENDING);
     expect($b->fresh()->subscription_status)->toBe(SubscriptionStatus::Active);
 });
+
+it('does not resurrect a cancelled billable into the dunning ladder', function (): void {
+    // The customer has left; the grace period is running out on its own. Forcing PastDue
+    // here undoes the cancellation: `subscription_ends_at` no longer means what it did,
+    // ResubscribeSubscription refuses ("not in a cancelled state") so the customer cannot
+    // resume, and the auto-cancel pass later re-cancels — recomputing the grace boundary
+    // and handing out access the customer had already given up. ChargebackHandler and
+    // SubscriptionPaymentHandler both guard this write; this one did not.
+    Notification::fake();
+
+    $b = dunningBillable('tr_gone');
+    $b->forceFill([
+        'subscription_status' => SubscriptionStatus::Cancelled,
+        'subscription_ends_at' => BillingTime::nowUtc()->addDays(9),
+    ])->save();
+
+    $service = bindChargeService(fn () => UsageOverageChargeResult::charged('tr_next', [], 50, 60));
+
+    foreach (['tr_gone', 'tr_gone_2', 'tr_gone_3'] as $paymentId) {
+        $meta = $b->fresh()->getBillingSubscriptionMeta();
+        $meta['usage_overage']['payment_id'] = $paymentId;
+        $b->forceFill(['subscription_meta' => $meta])->save();
+
+        (new RetryUsageOverageChargeJob(TestBillable::class, $b->getKey()))->handle($service);
+    }
+
+    // The debt is still recorded and the admins still hear about it — only the status
+    // of a subscription that has already ended is left alone.
+    expect($b->fresh()->subscription_status)->toBe(SubscriptionStatus::Cancelled)
+        ->and($b->fresh()->getBillingSubscriptionMeta()['usage_overage_status'])
+        ->toBe(RetryUsageOverageChargeJob::OVERAGE_FAILED);
+
+    Notification::assertSentTo($b, OverageBillingFailedNotification::class);
+});

@@ -9,8 +9,11 @@ use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
+use Livewire\WithPagination;
 
 new class extends Component {
+    use WithPagination;
+
     /** Locked: every action below is scoped to this billable's invoices. */
     #[Locked]
     public mixed $billableId = null;
@@ -125,7 +128,11 @@ new class extends Component {
 
         return [
             'billable' => $billable,
-            'invoices' => $billable ? $billable->billingInvoices()->limit(20)->get() : collect(),
+            // Paginated, not capped. `limit(20)` silently hid everything older than the
+            // twentieth invoice with no control to reach it — so a customer disputing a
+            // charge from two years ago could not be refunded from the panel at all, and
+            // the tab looked complete while it was not.
+            'invoices' => $billable ? $billable->billingInvoices()->paginate(20) : null,
             'refundInvoice' => $refundInvoice,
         ];
     }
@@ -298,7 +305,7 @@ new class extends Component {
     <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
 
     @if ($billable)
-        @if ($invoices->isEmpty())
+        @if (! $invoices || $invoices->isEmpty())
             <flux:card>
                 <x-mollie-billing::admin.empty
                     icon="document-text"
@@ -329,7 +336,17 @@ new class extends Component {
                             @php
                                 $isPaid = (optional($inv->status)->value ?? $inv->status) === 'paid';
                                 $isRefundKind = (optional($inv->invoice_kind)->value ?? $inv->invoice_kind) === 'refund';
-                                $refundable = $isPaid && ! $isRefundKind;
+                                // What the refund service actually accepts, not just "paid
+                                // and not itself a refund". A saldo-zero plan-switch
+                                // invoice and a locally booked one (a fully coupon-covered
+                                // order, a zero-amount audit document) are both Paid, and
+                                // both are rejected — for having nothing refundable, or no
+                                // Mollie payment to refund against. The button was offered
+                                // for them anyway and could only ever produce an error.
+                                $refundable = $isPaid
+                                    && ! $isRefundKind
+                                    && $inv->refundableBaseNet() > 0
+                                    && $inv->refundablePaymentId() !== null;
                                 $effectiveRefundedNet = $refundable ? $inv->effectiveRefundedNet() : 0;
                                 $fullyRefunded = $refundable && $inv->isFullyRefunded();
                                 $partiallyRefunded = $refundable && $effectiveRefundedNet > 0 && ! $fullyRefunded;
@@ -390,6 +407,10 @@ new class extends Component {
                         @endforeach
                     </flux:table.rows>
                 </flux:table>
+
+                @if ($invoices && $invoices->hasPages())
+                    <div class="pt-2">{{ $invoices->links() }}</div>
+                @endif
             </flux:card>
         @endif
 

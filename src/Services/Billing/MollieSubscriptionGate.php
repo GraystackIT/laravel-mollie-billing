@@ -15,7 +15,7 @@ use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Requests\GetSubscriptionRequest;
 use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Read-side companion to MollieSubscriptionPatcher: looks up the live state of
@@ -58,7 +58,7 @@ class MollieSubscriptionGate
         }
 
         try {
-            $subscription = Mollie::send(new GetSubscriptionRequest($customerId, $subscriptionId));
+            $subscription = MollieCall::send(new GetSubscriptionRequest($customerId, $subscriptionId));
         } catch (ApiException $e) {
             if ($e->getCode() === 404) {
                 $this->clearStaleId($billable, 'not_found');
@@ -85,10 +85,17 @@ class MollieSubscriptionGate
             return null;
         }
 
+        // Only the two terminal statuses drop the id. `suspended` is NOT one of them:
+        // Mollie has merely paused charging after repeated failures and hands the
+        // subscription straight back from `GetSubscriptionRequest` — it resumes on its own
+        // once a usable mandate exists again. Forgetting its id made it unreachable
+        // forever: nothing could cancel or PATCH it, the documented past-due recovery had
+        // no target, and `hasLiveMollieSubscription()` answering false let the customer
+        // back into checkout, where `CreateSubscriptionRequest` 422s with "same description
+        // already exists" — the very collision that guard exists to prevent.
         if (in_array($status, [
             MollieSubscriptionStatus::Canceled,
             MollieSubscriptionStatus::Completed,
-            MollieSubscriptionStatus::Suspended,
         ], true)) {
             $this->clearStaleId($billable, $status->value);
             return null;
@@ -110,9 +117,12 @@ class MollieSubscriptionGate
     }
 
     /**
-     * True when Mollie still considers the subscription alive (active or pending).
-     * Use this to gate the checkout entry: a live Mollie sub means a new
+     * True when the subscription still exists at Mollie under its current description.
+     *
+     * Use this to gate the checkout entry: a subscription Mollie still holds means a new
      * `CreateSubscriptionRequest` would 422 with "same description already exists".
+     * `suspended` counts — Mollie kept the subscription and will resume it once a usable
+     * mandate exists, so a second one would collide exactly like an active one.
      */
     public function hasLiveMollieSubscription(Billable $billable): bool
     {
@@ -121,6 +131,7 @@ class MollieSubscriptionGate
         return $snapshot !== null && in_array($snapshot->status, [
             MollieSubscriptionStatus::Active,
             MollieSubscriptionStatus::Pending,
+            MollieSubscriptionStatus::Suspended,
         ], true);
     }
 
@@ -143,7 +154,7 @@ class MollieSubscriptionGate
         }
 
         try {
-            Mollie::send(new MollieUpdateSubscriptionRequest(
+            MollieCall::send(new MollieUpdateSubscriptionRequest(
                 customerId: $customerId,
                 subscriptionId: $subscriptionId,
                 startDate: new Date(CarbonImmutable::now('UTC')),

@@ -540,6 +540,7 @@ return [
             'justification_too_long' => 'Die Begründung darf maximal :max Zeichen lang sein.',
             'confirm' => 'Auflösung bestätigen',
             'invalid_country' => 'Bitte vor dem Bestätigen einen gültigen zweistelligen Ländercode wählen oder eingeben.',
+            'country_not_invoiceable' => 'Für :country lässt sich keine Umsatzsteuer berechnen, die korrigierten Rechnungen könnten also nie ausgestellt werden. Hinterlege das Land unter additional_countries oder wähle ein anderes.',
             'unresolvable' => 'Der Konflikt konnte nicht aufgelöst werden. Prüfe den Fehler und versuche es erneut.',
             'resolved' => 'Konflikt aufgelöst. Erstattungen und Neuausstellungen wurden bei Mollie eingereiht — die Rechnungen erscheinen, sobald Mollie die Zahlungen bestätigt.',
         ],

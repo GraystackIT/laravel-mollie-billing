@@ -19,7 +19,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Session;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class StartSubscriptionCheckout
 {
@@ -222,7 +222,7 @@ class StartSubscriptionCheckout
         $customerId = $this->customerResolver->resolve($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: "Subscription {$request['plan_code']}",
             amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),

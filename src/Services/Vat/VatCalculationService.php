@@ -522,6 +522,22 @@ class VatCalculationService
         ));
     }
 
+    /**
+     * Whether this country can be priced at all — i.e. whether {@see calculate()}
+     * would return instead of throwing {@see NonEuCountryException}.
+     *
+     * Exposed so a screen can drop a country from a selector before the customer picks
+     * it. The country-mismatch modal offers the mismatch's own payment/IP signals, and
+     * those routinely include a non-EU country (a UK-issued card, a Swiss IP); resolving
+     * to one refunded every invoice and then failed to re-charge, silently.
+     */
+    public function isInvoiceable(string $country): bool
+    {
+        $country = strtoupper(trim($country));
+
+        return $this->vatCalculator->shouldCollectVAT($country) || $this->hasAdditionalCountry($country);
+    }
+
     private function hasAdditionalCountry(string $country): bool
     {
         return config('mollie-billing.additional_countries.'.$country) !== null;

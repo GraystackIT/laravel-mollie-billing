@@ -278,3 +278,35 @@ it('self-heals and reports when the coupon redemption fails after the subscripti
 
     Notification::assertSentTo($billable, AdminPlanChangeFailedNotification::class);
 });
+
+it('reports a mandate-only signup whose coupon stopped covering the full price', function (): void {
+    // The customer went through a €0 checkout, a mandate was captured and the coupon was
+    // exhausted (or switched off, or expired) between the checkout and the webhook. The
+    // handler logged a warning and answered 200: no subscription, no event, no mail —
+    // a customer left with nothing and nobody who knows. The sibling skip two blocks up
+    // reports exactly this situation; this branch did not.
+    Event::fake([\GraystackIT\MollieBilling\Events\SubscriptionActivationFailed::class]);
+    Notification::fake();
+    MollieBilling::notifyAdminUsing(fn (): array => [new \Illuminate\Notifications\AnonymousNotifiable]);
+
+    app(CouponService::class)->create([
+        'code' => 'HALFOFF',
+        'name' => 'Half off',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+    ]);
+
+    $billable = mandateOnlyCouponBillable();
+
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 'sub_unused']);
+
+    MandateOnlyCouponFakeWebhookController::$nextPayment = mandateOnlyCouponPayment($billable, 'tr_halfoff', 'HALFOFF');
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_halfoff'])->assertStatus(200);
+
+    expect($billable->refresh()->subscription_status)->not->toBe(SubscriptionStatus::Active);
+
+    Event::assertDispatched(\GraystackIT\MollieBilling\Events\SubscriptionActivationFailed::class);
+    Notification::assertSentTo(new \Illuminate\Notifications\AnonymousNotifiable, AdminPlanChangeFailedNotification::class);
+});

@@ -68,6 +68,7 @@ return [
     'addons_heading' => 'Add-ons',
     'addons_description' => 'Extra capabilities you can enable on top of your plan.',
     'extra_seats' => 'Additional seats',
+    'seats_not_available' => 'This plan does not offer additional seats on the selected billing interval.',
     'extra_seat_price' => 'Each extra seat:',
 
     // Step 4: confirm

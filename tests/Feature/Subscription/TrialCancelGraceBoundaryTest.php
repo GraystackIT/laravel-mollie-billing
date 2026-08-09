@@ -112,3 +112,24 @@ it('records the pre-cancel ends_at so a resume can tell a grant from an unlimite
     expect($billable->getBillingSubscriptionMeta())->toHaveKey('cancelled_from');
     expect($billable->getBillingSubscriptionMeta()['cancelled_from']['ends_at'])->toBeNull();
 });
+
+it('gives a trial longer than one interval the whole trial as grace', function (): void {
+    // `trial_days` is per-interval config with no upper bound, and a 45-day trial on a
+    // monthly plan is an ordinary thing to sell. `min(trial_ends_at, nextBillingDate())`
+    // then picks the interval — so a customer cancelling on day two kept 30 of the 45 free
+    // days they were promised. The cap exists to stop a *paid* interval being handed out
+    // for free; during a trial there is no paid interval, only the trial.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.trial_days', 45);
+
+    $billable = graceTrialBillable('monthly', trialDays: 45);
+    $trialEnd = $billable->trial_ends_at;
+
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 'sub_grace', 'status' => 'canceled']);
+
+    app(CancelSubscription::class)->handle($billable, immediately: false);
+
+    $billable->refresh();
+
+    expect($billable->subscription_ends_at->diffInSeconds($trialEnd, true))->toBeLessThan(2)
+        ->and($billable->subscription_ends_at->isAfter(BillingTime::nowUtc()->addDays(40)))->toBeTrue();
+});

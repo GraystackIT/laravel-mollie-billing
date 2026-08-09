@@ -310,6 +310,21 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
      */
     private function giveUp(Model $billable, array $meta, Throwable $reason): void
     {
+        /** @var Model&\GraystackIT\MollieBilling\Contracts\Billable $billable */
+        // Only a subscription that is still running can be dunned — the same guard
+        // ChargebackHandler and SubscriptionPaymentHandler::failed() apply, and for the
+        // same reason. Forcing PastDue onto a Cancelled row still inside its grace period
+        // undoes the cancellation: `subscription_ends_at` stops meaning what it did,
+        // ResubscribeSubscription refuses because the status is no longer Cancelled, and
+        // the auto-cancel pass later re-cancels and recomputes the grace boundary — handing
+        // back access the customer had already given up. The debt itself is recorded either
+        // way, because it is owed either way.
+        $isDunnable = in_array(
+            $billable->getBillingSubscriptionStatus(),
+            [SubscriptionStatus::Active, SubscriptionStatus::Trial, SubscriptionStatus::PastDue],
+            true,
+        );
+
         // Key-scoped, like every other write in this job. `$meta` was read before the Mollie
         // attempts that led here, so persisting the whole blob reverted anything another
         // process committed in between — `pending_refund_retries` above all, whose only reader
@@ -317,14 +332,17 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
         // status column in the same save.
         $this->mutateBillingMeta(
             $billable,
-            function (array $current): array {
+            function (array $current) use ($isDunnable): array {
                 $current['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_FAILED;
-                $current['past_due_since'] = $current['past_due_since']
-                    ?? BillingTime::nowUtc()->toIso8601String();
+
+                if ($isDunnable) {
+                    $current['past_due_since'] = $current['past_due_since']
+                        ?? BillingTime::nowUtc()->toIso8601String();
+                }
 
                 return $current;
             },
-            ['subscription_status' => SubscriptionStatus::PastDue],
+            $isDunnable ? ['subscription_status' => SubscriptionStatus::PastDue] : [],
         );
 
         event(new OverageChargeFailed($billable, (int) ($meta['usage_overage_attempts'] ?? 0), $reason));

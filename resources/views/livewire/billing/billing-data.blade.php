@@ -191,6 +191,18 @@ new class extends Component {
             ]);
         }
 
+        // Outside the transaction, like the identical form on the plan-change screen —
+        // which is where this was already done and here it was not. The name the customer
+        // just typed is what Mollie's own dashboard, its mails and its exports show, so
+        // leaving it stale meant the same edit had a different outcome depending on which
+        // screen it was made from. Non-fatal: the local data is saved either way and the
+        // name can be pushed again later.
+        try {
+            app(\GraystackIT\MollieBilling\Support\MollieCustomerResolver::class)->sync($billable);
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
         $this->persistedCountry = $this->billing_country;
 
         if ($countryChanged) {

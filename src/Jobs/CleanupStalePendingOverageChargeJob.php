@@ -23,7 +23,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Daily poll for overage charges that were created and then never heard from again.
@@ -166,7 +166,7 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
         }
 
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             // Mollie unreachable is not a verdict. Tomorrow's pass asks again.
             Log::warning('CleanupStalePendingOverageChargeJob: Mollie unreachable', [

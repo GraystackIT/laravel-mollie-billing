@@ -226,20 +226,9 @@ class OneTimeOrderHandler
      */
     protected function ensureBillingCountry(Billable $billable): void
     {
-        if ((string) ($billable->getBillingCountry() ?? '') !== '') {
-            return;
-        }
-
-        if (! ($billable instanceof Model)) {
-            return;
-        }
-
-        Log::warning('One-time order: billable has no billing country — falling back to the country the checkout charged', [
-            'billable_id' => $billable->getKey(),
-            'country' => $this->checkoutCountryFallback(),
-        ]);
-
-        $billable->forceFill(['billing_country' => $this->checkoutCountryFallback()])->save();
+        // One implementation, on WebhookSupport: every handler that invoices a charge needs
+        // it, and the two copies would have drifted.
+        $this->support->ensureBillingCountry($billable);
     }
 
     /**

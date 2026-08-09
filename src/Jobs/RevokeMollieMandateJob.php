@@ -13,7 +13,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Requests\RevokeMandateRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Revokes a previously valid Mollie mandate after the customer set up a new one.
@@ -44,7 +44,7 @@ class RevokeMollieMandateJob implements ShouldQueue
     public function handle(): void
     {
         try {
-            Mollie::send(new RevokeMandateRequest($this->mollieCustomerId, $this->mandateId));
+            MollieCall::send(new RevokeMandateRequest($this->mollieCustomerId, $this->mandateId));
         } catch (ApiException $e) {
             if (! in_array($e->getCode(), [404, 410], true)) {
                 $this->logFailure($e);

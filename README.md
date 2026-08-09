@@ -51,7 +51,7 @@ Publish the config and migrations:
 ```bash
 php artisan vendor:publish --tag=mollie-billing-config       # mollie-billing.php + mollie-billing-plans.php
 php artisan vendor:publish --tag=mollie-billing-migrations
-php artisan vendor:publish --tag=mollie-billing-views        # optional: override Blade/Livewire views
+php artisan vendor:publish --tag=mollie-billing-views        # optional: override Blade views (see the caveat under Customization)
 php artisan vendor:publish --tag=billing-lang                # optional: override translations
 ```
 
@@ -126,10 +126,12 @@ BILLING_CURRENCY=EUR
 either works. The package propagates `BILLING_MOLLIE_KEY` into `mollie.key` so
 your `.env` stays on the `BILLING_*` prefix.
 
-Mount the package routes in `routes/web.php`. The three route groups serve different scopes and need different middleware:
+Mount the package routes. The groups serve different scopes and need different middleware:
 
 ```php
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+
+// routes/web.php
 
 // Customer portal — needs auth + your tenant resolution middleware
 Route::middleware(['web', 'auth', 'tenant'])->group(function () {
@@ -147,7 +149,20 @@ Route::middleware(['web', 'auth'])->group(function () {
 });
 ```
 
-The admin routes are auto-loaded by the service provider as well, so you only need to call `adminRoutes()` if you want them under a custom middleware stack.
+```php
+// routes/api.php — or any group WITHOUT the `web` middleware
+
+// Mollie webhook. REQUIRED: every payment the package creates carries this URL, so
+// without it the very first checkout throws RouteNotFoundException [billing.webhook]
+// before it ever reaches Mollie. Mollie calls it server-to-server — no session, no
+// CSRF token, no tenant slug — so it must not sit inside the `web` group.
+MollieBilling::webhookRoutes();
+```
+
+Run `php artisan billing:check-config` after mounting: it verifies the webhook route
+exists, among the rest of the configuration.
+
+The admin routes are auto-loaded by the service provider as well, so you only need to call `adminRoutes()` if you want them under a custom middleware stack — and then set `mollie-billing.routes.auto_load_admin` to `false` (env `BILLING_AUTO_LOAD_ADMIN_ROUTES`), otherwise both registrations exist, the auto-loaded ones match the URI first and your middleware never runs. `MollieBilling::promotionRoutes()` is optional — mount it (without tenant scoping) if you use coupon auto-apply links.
 
 ### Multi-tenant URL prefixes
 
@@ -426,6 +441,15 @@ php artisan vendor:publish --tag=mollie-billing-views
 ```
 
 Views are published to `resources/views/vendor/mollie-billing/`. SFC files use the ⚡ prefix convention (e.g. `⚡checkout.blade.php`).
+
+**What publishing does and does not override.** Ordinary Blade views (layouts, partials,
+invoice templates) resolve through Laravel's view finder, so a published copy wins.
+Livewire *components* do not: Livewire 4 resolves a namespaced component from the single
+view path the package registers with `Livewire::addNamespace()`, and its finder has no
+notion of a vendor override. Editing a published `⚡…blade.php` therefore changes nothing
+for those screens. To replace one, register your own component under your own namespace
+and point the route (or `header_components`) at it — the package's services, events and
+facade callbacks are the supported seams, and none of them requires touching a view.
 
 To add your own Livewire component (e.g. a language switcher) to the portal, checkout and
 admin headers, use `mollie-billing.header_components` instead of publishing the layouts:
@@ -983,6 +1007,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Audit Trail](docs/audit.md) — per-billable timeline, localizable storage format, categories, retention, adding new events
 - [Testing Lifecycle Flows](docs/testing-flows.md) — `billing:simulate` and `billing:webhook-replay` for reproducing every lifecycle transition on staging
 - [Browser Testing](docs/browser-testing.md) — the Chrome end-to-end suite: workbench app, fake Mollie, writing scenarios, screenshot gallery
+- [Decisions](docs/decisions.md) — behaviour that looks like a defect and is not: enforced invariants, deliberate choices, and findings that were investigated and refuted
 
 ## Architecture
 

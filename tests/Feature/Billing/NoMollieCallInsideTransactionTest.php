@@ -12,9 +12,11 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\MollieCall;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Mollie\Api\Http\Data\Money as MollieMoney;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
@@ -82,7 +84,7 @@ function txBillable(): TestBillable
     return $billable->refresh();
 }
 
-function txPaidInvoice(TestBillable $billable, int $net = 900): BillingInvoice
+function txPaidInvoice(TestBillable $billable, int $net = 900, string $planCode = 'starter'): BillingInvoice
 {
     return BillingInvoice::create([
         'billable_type' => $billable->getMorphClass(),
@@ -100,8 +102,8 @@ function txPaidInvoice(TestBillable $billable, int $net = 900): BillingInvoice
         'period_end' => BillingTime::nowUtc()->addDays(22),
         'line_items' => [[
             'kind' => 'plan',
-            'code' => 'starter',
-            'label' => 'Starter',
+            'code' => $planCode,
+            'label' => ucfirst($planCode),
             'quantity' => 1,
             'unit_price_net' => $net,
             'amount_net' => $net,
@@ -113,6 +115,33 @@ function txPaidInvoice(TestBillable $billable, int $net = 900): BillingInvoice
         ]],
     ])->refresh();
 }
+
+it('refuses any Mollie request made from inside a transaction', function (): void {
+    // The guard itself. Every Mollie request in the package goes through MollieCall, so
+    // this one assertion is what turns "no Mollie call inside a transaction" from a rule
+    // reviewers have to re-check on every change into one the runtime enforces. Without
+    // it the whole mechanism could rot silently — a passing suite would prove nothing.
+    Mollie::shouldReceive('send')->never();
+
+    expect(fn () => DB::transaction(fn () => MollieCall::send(new CreatePaymentRequest(
+        description: 'nope',
+        amount: new MollieMoney('EUR', '1.00'),
+    ))))->toThrow(LogicException::class, 'inside a database transaction');
+});
+
+it('allows a Mollie request at the ambient transaction depth', function (): void {
+    // RefreshDatabase holds a transaction of its own for the whole test, so the guard
+    // compares against that depth rather than against 0 — otherwise it would refuse
+    // every call in the suite and prove nothing either.
+    Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 'tr_ok']);
+
+    $payment = MollieCall::send(new CreatePaymentRequest(
+        description: 'fine',
+        amount: new MollieMoney('EUR', '1.00'),
+    ));
+
+    expect($payment->id)->toBe('tr_ok');
+});
 
 it('creates a plan-change charge with no transaction open', function (): void {
     $billable = txBillable();
@@ -136,6 +165,112 @@ it('creates a plan-change charge with no transaction open', function (): void {
     // call must not have been wrapped in a transaction that a later throw could roll back.
     expect($levels)->not->toBeEmpty()
         ->and(array_unique($levels))->toBe([$baseline]);
+});
+
+it('enables an addon with no transaction open', function (): void {
+    // The addon services used to wrap `update()` in `DB::transaction` to serialise their
+    // read-modify-write of `active_addon_codes`. That put the whole prorata pipeline —
+    // payment, refund, PATCH — inside a transaction a later throw rolls back, while
+    // Mollie keeps its half. The serialisation now comes from the change lock instead.
+    config()->set('mollie-billing-plans.addons.extra', [
+        'name' => 'Extra',
+        'feature_keys' => [],
+        'intervals' => ['monthly' => ['price_net' => 500]],
+    ]);
+    config()->set('mollie-billing-plans.plans.starter.allowed_addons', ['extra']);
+
+    $billable = txBillable();
+    txPaidInvoice($billable);
+
+    $levels = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$levels) {
+        $levels[] = DB::transactionLevel();
+
+        return (object) ['id' => 'tr_addon_tx', 'status' => 'open', 'subscriptionId' => 'sub_tx'];
+    });
+
+    $baseline = DB::transactionLevel();
+
+    app(\GraystackIT\MollieBilling\Services\Billing\EnableAddon::class)->handle($billable, 'extra');
+
+    expect($levels)->not->toBeEmpty()
+        ->and(array_unique($levels))->toBe([$baseline])
+        ->and($billable->fresh()->getActiveBillingAddonCodes())->toBe(['extra']);
+});
+
+it('disables an addon with no transaction open', function (): void {
+    config()->set('mollie-billing-plans.addons.extra', [
+        'name' => 'Extra',
+        'feature_keys' => [],
+        'intervals' => ['monthly' => ['price_net' => 500]],
+    ]);
+    config()->set('mollie-billing-plans.plans.starter.allowed_addons', ['extra']);
+
+    $billable = txBillable();
+    $billable->forceFill(['active_addon_codes' => ['extra']])->save();
+    txPaidInvoice($billable, 1400);
+
+    $levels = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$levels) {
+        $levels[] = DB::transactionLevel();
+
+        return (object) ['id' => 're_addon_tx', 'status' => 'active', 'subscriptionId' => 'sub_tx'];
+    });
+
+    $baseline = DB::transactionLevel();
+
+    app(\GraystackIT\MollieBilling\Services\Billing\DisableAddon::class)->handle($billable->fresh(), 'extra');
+
+    expect($levels)->not->toBeEmpty()
+        ->and(array_unique($levels))->toBe([$baseline])
+        ->and($billable->fresh()->getActiveBillingAddonCodes())->toBe([]);
+});
+
+it('charges the plan-change overage with no transaction open', function (): void {
+    // The wallet rebalance is local and stays in the phase-3 transaction, but the charge
+    // for the excess it cannot resolve is a real Mollie payment. Inside the transaction a
+    // later throw dropped the `usage_overage` snapshot and the `pending` status while the
+    // payment stayed live — unreconcilable by every retry and sweep, which key off exactly
+    // that snapshot, and the restored negative balance is charged again by the next sweep.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', ['Tokens' => 100]);
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.usage_overage_prices', ['Tokens' => 5]);
+    config()->set('mollie-billing-plans.plans.starter.intervals.monthly.included_usages', ['Tokens' => 10]);
+    config()->set('mollie-billing-plans.plans.starter.intervals.monthly.usage_overage_prices', ['Tokens' => 5]);
+
+    $billable = txBillable();
+    $billable->forceFill(['subscription_plan_code' => 'pro', 'allows_billing_overage' => true])->save();
+    $billable->createWallet(['name' => 'Tokens', 'slug' => 'Tokens'])->forceWithdraw(50);
+    txPaidInvoice($billable, 2900, 'pro');
+
+    $overageLevels = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$overageLevels) {
+        $payload = $request instanceof CreatePaymentRequest
+            ? (array) json_decode((string) $request->payload(), true)
+            : [];
+
+        if (($payload['metadata']['type'] ?? null) === 'overage') {
+            $overageLevels[] = DB::transactionLevel();
+        }
+
+        return (object) ['id' => 'tr_dg_'.count($overageLevels), 'status' => 'open', 'subscriptionId' => 'sub_tx'];
+    });
+
+    $baseline = DB::transactionLevel();
+
+    // Phase 1 defers the switch behind a prorata charge; phase 2 applies it once that
+    // charge clears, and that is where the wallets are rebalanced.
+    app(UpdateSubscription::class)->update($billable->fresh(), ['plan_code' => 'starter']);
+    app(UpdateSubscription::class)->applyPendingPlanChange($billable->fresh());
+
+    expect($billable->fresh()->subscription_plan_code)->toBe('starter')
+        ->and($overageLevels)->not->toBeEmpty()
+        ->and(array_unique($overageLevels))->toBe([$baseline]);
+
+    // And it is still recorded, so a declined payment stays recoverable.
+    expect($billable->fresh()->getBillingSubscriptionMeta()['usage_overage_status'] ?? null)->toBe('pending');
 });
 
 it('posts an admin refund with no transaction open', function (): void {

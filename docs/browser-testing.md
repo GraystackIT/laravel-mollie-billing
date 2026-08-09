@@ -63,6 +63,18 @@ is what lets a test create a billable, flip a setting or deliver a webhook and h
 the browser see it. In-memory SQLite would give the two processes two different
 databases.
 
+That connection sets a **10s `busy_timeout`**. PDO's default is 0, so the moment the two
+processes collided — a webhook writing an invoice while the browser's own request read the
+dashboard — the run failed with `database is locked` rather than waiting. The timeout makes
+them queue instead.
+
+Do **not** add `journal_mode = wal` here, however appealing WAL's reader/writer overlap
+sounds. Laravel's SQLite connector issues that pragma on every connect and switching the
+mode needs an exclusive lock, so the two processes then collide on the pragma itself: a
+full run went from 2 failures to 45. (And if you try it anyway, delete
+`workbench/database/workbench.sqlite` afterwards — SQLite reports `database disk image is
+malformed` when the mode changes under an existing file.)
+
 **Mollie is faked at the SDK's own seam.** `FakeMollieHttpAdapter` implements
 `Mollie\Api\Contracts\HttpAdapterContract` — the same interface the SDK's own
 `MockMollieHttpAdapter` uses. Every typed request object the package builds, every

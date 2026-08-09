@@ -24,6 +24,7 @@ use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Issue refunds against paid Mollie invoices.
@@ -150,7 +151,7 @@ class RefundInvoiceService
 
         try {
             // ── Phase 1: decide, under the row lock, in a transaction of its own ──────────
-            /** @var array{net:int, gross:int, description:string, billable:Billable|null} $plan */
+            /** @var array{net:int, gross:int, description:string, billable:Billable|null, already_refunded_net:int} $plan */
             $plan = DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $lineItems): array {
                 $fresh = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
@@ -182,11 +183,36 @@ class RefundInvoiceService
                     'gross' => $refundAmountNet + $refundVat,
                     'description' => $description,
                     'billable' => $fresh->billable()->first(),
+                    // What had already been credited back when this attempt was planned —
+                    // the idempotency key in Phase 2 is built on it.
+                    'already_refunded_net' => (int) $fresh->effectiveRefundedNet(),
                 ];
             });
 
             // ── Phase 2: the money, with no lock and no transaction held ─────────────────
+            //
+            // Keyed, like every other refund the package posts. Without it a call that
+            // timed out on the wire but arrived at Mollie could be repeated — by the
+            // operator clicking again on the error, or by a queued retry — and paid the
+            // customer a second time: Phase 3 never ran, so `refunded_net` was untouched
+            // and the amount validated as fully refundable all over again.
+            //
+            // The key includes how much was already refunded when this attempt was
+            // planned, which is exactly what separates a retry from a deliberate second
+            // refund of the same amount: a retry of a failed attempt sees the same figure,
+            // a genuine second refund sees the first one's increment. So Mollie replays
+            // the original refund for the former and creates a new one for the latter.
+            $idempotencyKey = sprintf(
+                'invoice-refund:%d:%d:%d:%s',
+                (int) $invoice->getKey(),
+                (int) $plan['gross'],
+                (int) $plan['already_refunded_net'],
+                $reasonCode->value,
+            );
+
             try {
+                Mollie::setIdempotencyKey($idempotencyKey);
+
                 $mollieRefundId = $this->callMollieRefund(
                     $invoice->mollie_payment_id,
                     $plan['gross'],
@@ -201,6 +227,12 @@ class RefundInvoiceService
                 }
 
                 throw $e;
+            } finally {
+                // Whatever happened. The SDK clears the key from a *response*, and a 4xx is
+                // converted to a throw before that runs — so a rejected refund left its key
+                // on the shared client and the next mutating request through it carried it,
+                // getting the rejection replayed as its own answer.
+                InvoiceService::forgetIdempotencyKey();
             }
 
             // ── Phase 3: book it. The money has moved, so this stays short ───────────────
@@ -507,7 +539,7 @@ class RefundInvoiceService
      */
     protected function callMollieRefund(string $paymentId, int $grossCents, string $description, string $currency): ?string
     {
-        $refund = Mollie::send(new CreatePaymentRefundRequest(
+        $refund = MollieCall::send(new CreatePaymentRefundRequest(
             paymentId: $paymentId,
             description: $description,
             amount: new Money($currency, InvoiceService::molliePrice($grossCents, $currency)),

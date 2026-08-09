@@ -21,11 +21,15 @@ new class extends Component {
         $this->kpis = [
             'mrr' => $kpiService->mrr(),
             'arr' => $kpiService->arr(),
-            'active' => $kpiService->activeSubscriptionsByStatus(),
             'churn' => $kpiService->churnRate(30),
             'trial_conversion' => $kpiService->trialConversionRate(90),
-            'open_overage' => $kpiService->openOverageCharges(),
         ];
+
+        // `activeSubscriptionsByStatus()` and `openOverageCharges()` used to be resolved
+        // here and never rendered. The second one walks the whole billable table in
+        // `chunkById(200)`, hydrating a JSON column per row, and threw the result away —
+        // paid for on every dashboard load whose 5-minute KPI cache had expired. Both
+        // remain on `AdminKpiService` for anyone who wants to render them.
 
         $this->openMismatches = BillingCountryMismatch::query()
             ->where('status', CountryMismatchStatus::Pending)

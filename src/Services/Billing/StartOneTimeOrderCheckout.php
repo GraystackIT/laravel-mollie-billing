@@ -24,7 +24,7 @@ use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Str;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class StartOneTimeOrderCheckout
 {
@@ -195,7 +195,7 @@ class StartOneTimeOrderCheckout
         // checkout's outcome to whoever shares the session.
         $orderToken = Str::random(32);
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: $this->catalog->productName($productCode) ?? $productCode,
             amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), array_merge($urlParams, [
@@ -325,6 +325,10 @@ class StartOneTimeOrderCheckout
                 lineItems: $lineItems,
                 periodStart: $now,
                 periodEnd: $now,
+                // Rendered after the commit below. A refused redemption rolls the invoice
+                // row back but cannot roll back a file, so the PDF outlived the invoice it
+                // documented — a serial number on disk that the books have no record of.
+                deferDocument: true,
             );
 
             foreach ($resolvedCoupons as $entry) {
@@ -340,6 +344,9 @@ class StartOneTimeOrderCheckout
 
             return $invoice;
         });
+
+        // Committed — the invoice exists for good, so it may have its document.
+        $this->invoiceService->issueInvoiceDocument($invoice, $billable);
 
         $usageType = $this->catalog->productUsageType($productCode);
         $quantity = $this->catalog->productQuantity($productCode);

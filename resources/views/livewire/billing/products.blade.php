@@ -401,6 +401,24 @@ new class extends Component {
             'boughtGroups' => $boughtGroups,
             'currencySymbol' => $currencySymbol,
             'reverseCharge' => $reverseCharge,
+            // At the same scale as the prices they sit next to. `couponDiscounts` is net —
+            // that is what the order is priced on — while `price_net` above is already
+            // grossed for a B2C customer. Rendering the two together showed a €120.00 price
+            // with a −€20.00 discount for a 20 % coupon that actually takes €24.00 off, so
+            // the arithmetic on screen did not add up to the amount charged.
+            'couponDiscountsDisplay' => collect($this->couponDiscounts)
+                ->map(function (int $discountNet) use ($reverseCharge, $vatService, $country, $billable): int {
+                    if ($discountNet <= 0 || $reverseCharge || $billable === null) {
+                        return $discountNet;
+                    }
+
+                    try {
+                        return (int) $vatService->calculate($country, $discountNet, $billable)['gross'];
+                    } catch (\Throwable) {
+                        return $discountNet;
+                    }
+                })
+                ->all(),
             'localBlocksProducts' => $localBlocksProducts,
             'isAccessGrant' => $isAccessGrant,
         ];
@@ -547,7 +565,7 @@ new class extends Component {
 
                                     @if (($couponDiscounts[$product['code']] ?? 0) > 0)
                                         <flux:text class="text-xs text-emerald-600 dark:text-emerald-400">
-                                            −{{ BillingMoney::format($couponDiscounts[$product['code']] ?? 0) }} {{ __('billing::portal.coupon_discount_applied') }}
+                                            −{{ BillingMoney::format($couponDiscountsDisplay[$product['code']] ?? $couponDiscounts[$product['code']] ?? 0) }} {{ __('billing::portal.coupon_discount_applied') }}
                                         </flux:text>
                                     @endif
 

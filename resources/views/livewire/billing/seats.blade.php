@@ -254,12 +254,28 @@ new class extends Component {
         $this->couponWarnings = (array) ($preview['warnings'] ?? []);
     }
 
+    /**
+     * The lowest seat count this screen may offer.
+     *
+     * Not just the plan's included quota: seats already handed to team members cannot be
+     * given back by moving a counter. `ValidateSubscriptionChange` refuses such a change,
+     * and without this clamp the screen happily proposed it — the customer would click
+     * "Update seats", see an error, and the number they had typed would be a refund the
+     * package was never going to pay.
+     */
     private function minSeats(): int
     {
         $billable = $this->resolveBillable();
         $planCode = $billable?->getBillingSubscriptionPlanCode();
 
-        return $planCode ? app(SubscriptionCatalogInterface::class)->includedSeats($planCode) : 0;
+        if ($planCode === null) {
+            return 0;
+        }
+
+        return max(
+            app(SubscriptionCatalogInterface::class)->includedSeats($planCode),
+            $billable->getUsedBillingSeats(),
+        );
     }
 
     public function syncSeats(): void

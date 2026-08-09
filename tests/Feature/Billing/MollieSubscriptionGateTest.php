@@ -185,3 +185,43 @@ it('lets the checkout gate clear a stale mollie_subscription_id when Mollie repo
     $billable->refresh();
     expect($billable->getBillingSubscriptionMeta())->not->toHaveKey('mollie_subscription_id');
 });
+
+it('keeps the subscription id when Mollie reports it suspended', function (): void {
+    // `suspended` is not terminal: Mollie paused charging after repeated failures and
+    // hands the subscription straight back, resuming it once a usable mandate exists.
+    // Forgetting its id made it unreachable — nothing could cancel or PATCH it, the
+    // documented past-due recovery had no target, and the checkout gate opened the door
+    // to a second CreateSubscriptionRequest that Mollie rejects with 422 "same
+    // description already exists".
+    $billable = makePastDueWithMollieSub('sub_suspended_1');
+
+    Mollie::shouldReceive('send')->andReturnUsing(fn () => (object) [
+        'id' => 'sub_suspended_1',
+        'status' => 'suspended',
+        'startDate' => now('UTC')->subDays(3)->toDateString(),
+    ]);
+
+    $gate = app(MollieSubscriptionGate::class);
+
+    expect($gate->snapshot($billable)?->status?->value)->toBe('suspended')
+        ->and($gate->hasLiveMollieSubscription($billable))->toBeTrue()
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? null)
+        ->toBe('sub_suspended_1');
+});
+
+it('still drops the id for the terminal Mollie statuses', function (): void {
+    foreach (['canceled', 'completed'] as $terminal) {
+        Cache::flush();
+        $billable = makePastDueWithMollieSub('sub_'.$terminal);
+
+        Mollie::shouldReceive('send')->andReturnUsing(fn () => (object) [
+            'id' => 'sub_'.$terminal,
+            'status' => $terminal,
+        ]);
+
+        $gate = app(MollieSubscriptionGate::class);
+
+        expect($gate->snapshot($billable))->toBeNull()
+            ->and($billable->fresh()->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? null)->toBeNull();
+    }
+});

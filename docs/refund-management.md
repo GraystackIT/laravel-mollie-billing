@@ -102,7 +102,13 @@ This fires a `WalletCredited` event and does not touch Mollie.
 | Type | Created by | `parent_invoice_id` | Use case |
 |------|-----------|---------------------|----------|
 | **Linked** | `InvoiceService::createCreditNote()` | Set to original invoice | Standard refunds |
-| **Standalone** | `InvoiceService::createStandaloneCreditNote()` | `null` | Prorata downgrade refunds |
+| **Prorata** | `InvoiceService::createRefund()` | Set per line, on the invoice each line reverses | Prorata downgrade refunds |
+
+`createRefund()` takes `ProrataLine` objects rather than an amount: each line already
+knows which original invoice and which of its line items it reverses, so one call can
+refund across several past invoices at once and each credit line carries its own
+`parent_invoice_id`. Both entry points are on `InvoiceService`; there is no separate
+standalone-credit-note API.
 
 ### Key properties
 

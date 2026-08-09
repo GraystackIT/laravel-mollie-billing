@@ -128,3 +128,28 @@ it('does not notify below the threshold', function (): void {
 
     Notification::assertNothingSent();
 });
+
+it('still notifies only once when the period anchor already points at the next period', function (): void {
+    // The nightly pass runs the evening before a renewal: it refills the wallets and moves
+    // `subscription_period_starts_at` to tomorrow 00:00 — a deliberately future anchor. The
+    // dedupe compared "notified at" against that anchor, and a timestamp from today is
+    // never >= tomorrow, so the marker never counted as set: every single debit above the
+    // threshold re-sent the mail, for the rest of the day. A busy metered day meant
+    // hundreds of identical warnings.
+    Notification::fake();
+    MollieBilling::notifyBillingAdminsUsing(fn ($billable): array => [$billable]);
+
+    $billable = thresholdBillable();
+    $billable->forceFill([
+        'subscription_period_starts_at' => now()->addDay()->startOfDay(),
+    ])->save();
+
+    $service = app(WalletUsageService::class);
+    $service->credit($billable->refresh(), 'Tokens', 100);
+
+    $service->debit($billable, 'Tokens', 85);
+    $service->debit($billable, 'Tokens', 5);
+    $service->debit($billable, 'Tokens', 5);
+
+    Notification::assertSentTimes(UsageThresholdNotification::class, 1);
+});

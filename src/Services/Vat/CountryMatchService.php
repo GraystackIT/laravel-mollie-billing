@@ -42,6 +42,7 @@ class CountryMatchService
         private readonly CancelSubscription $cancelSubscription,
         private readonly RefundInvoiceService $refunds,
         private readonly InvoiceService $invoices,
+        private readonly VatCalculationService $vat,
     ) {
     }
 
@@ -206,6 +207,7 @@ class CountryMatchService
 
         $justification = $justification === null ? null : trim($justification);
         $this->assertCountryIsResolvable($mismatch, $newCountry, $justification);
+        $this->assertCountryIsInvoiceable($billable, $newCountry);
 
         if ($mismatch->status === CountryMismatchStatus::Resolved) {
             if ($mismatch->chosen_country !== $newCountry) {
@@ -478,6 +480,28 @@ class CountryMatchService
      * the mismatch Pending with no path to resolve it and the subscription cancelling
      * at period end.
      */
+    /**
+     * Refuse a country the package cannot price, before a single refund goes out.
+     *
+     * `resolve()` refunds every affected invoice first and only then issues the
+     * correction charge, and `issueCorrectionOnce()` swallows whatever that throws. A
+     * country outside the EU (and outside `additional_countries`) is exactly such a
+     * country — and it is reachable, because the portal modal and the admin screen offer
+     * the mismatch's own payment/IP signals, which is where a UK-issued card or a Swiss
+     * IP lands. The customer was then fully refunded, never re-charged, and left with a
+     * `billing_country` that makes every later checkout, resubscribe and renewal throw.
+     *
+     * The probe goes through `VatCalculationService::calculate()` rather than
+     * re-implementing its rule: it is the single owner of "is this country billable",
+     * and it reads only persisted state, so this costs no external call.
+     *
+     * @throws \GraystackIT\MollieBilling\Exceptions\NonEuCountryException
+     */
+    private function assertCountryIsInvoiceable(Billable $billable, string $newCountry): void
+    {
+        $this->vat->calculate($newCountry, 1, $billable);
+    }
+
     private function assertCountryIsResolvable(
         BillingCountryMismatch $mismatch,
         string $newCountry,

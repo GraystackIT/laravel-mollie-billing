@@ -126,12 +126,24 @@ class WorkbenchServiceProvider extends ServiceProvider
 
             // One file-backed SQLite for BOTH processes. In-memory would give the
             // Dusk server and the test process two different databases.
+            //
+            // Two processes on one SQLite file contend for its write lock, and PDO's
+            // default busy timeout is 0 — so a collision (a webhook writing an invoice
+            // while the browser's own request reads the dashboard) failed the run outright
+            // with "database is locked" instead of waiting a moment. The timeout makes them
+            // queue.
+            //
+            // NOT `journal_mode = wal`, tempting as it is: Laravel's SQLite connector
+            // issues that pragma on every connect, and switching the mode needs an
+            // exclusive lock — so the two processes collide on the pragma itself, which is
+            // strictly worse (a full run went from 2 failures to 45).
             'database.default' => 'workbench',
             'database.connections.workbench' => [
                 'driver' => 'sqlite',
                 'database' => $database,
                 'prefix' => '',
                 'foreign_key_constraints' => true,
+                'busy_timeout' => 10000,
             ],
 
             // The invoice PDFs a webhook writes must be readable by the portal's

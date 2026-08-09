@@ -76,3 +76,44 @@ it('preserves an existing subscription_ends_at on graceful local cancel', functi
 
     expect($billable->subscription_ends_at->diffInSeconds($existing, true))->toBeLessThan(2);
 });
+
+it('tells the billing admins about a cancellation on a free plan too', function (): void {
+    // The Local branch returned before the notification block, so an operator watching
+    // churn through the package's own mail saw every paid cancellation and none of the
+    // free-plan ones — the same act, silently reported only half the time.
+    \Illuminate\Support\Facades\Notification::fake();
+    \GraystackIT\MollieBilling\Facades\MollieBilling::notifyBillingAdminsUsing(fn ($b) => [$b]);
+
+    $billable = makeLocalSubscriber();
+
+    app(CancelSubscription::class)->handle($billable, immediately: false);
+
+    \Illuminate\Support\Facades\Notification::assertSentTo(
+        $billable,
+        \GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification::class,
+    );
+});
+
+it('tells the billing admins about a cancellation on a paid plan', function (): void {
+    // The other half of the pair: this one has always worked, and is here so the two
+    // branches can never drift apart again without a test saying so.
+    \Illuminate\Support\Facades\Notification::fake();
+    \GraystackIT\MollieBilling\Facades\MollieBilling::notifyBillingAdminsUsing(fn ($b) => [$b]);
+
+    $billable = makeLocalSubscriber();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'mollie_customer_id' => 'cst_cancel',
+        'subscription_meta' => ['seat_count' => 1, 'mollie_subscription_id' => 'sub_cancel'],
+    ])->save();
+
+    \Mollie\Laravel\Facades\Mollie::shouldReceive('send')
+        ->andReturn((object) ['id' => 'sub_cancel', 'status' => 'canceled']);
+
+    app(CancelSubscription::class)->handle($billable->refresh(), immediately: false);
+
+    \Illuminate\Support\Facades\Notification::assertSentTo(
+        $billable,
+        \GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification::class,
+    );
+});

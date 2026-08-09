@@ -15,7 +15,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Hourly poll for hung subscription_meta.country_corrections entries.
@@ -48,6 +48,22 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
     use UsesBillingQueue;
 
     public int $tries = 1;
+
+    /**
+     * How long a correction may sit at a non-terminal Mollie status before it is
+     * written off as failed.
+     *
+     * Deliberately generous, and deliberately the same figure the overage sweeper
+     * uses for the structurally identical case. `pending` is where a SEPA Direct
+     * Debit lives for several business days, and `open` is where a bank transfer
+     * lives until the money arrives — neither says anything is wrong. Escalating
+     * earlier is not a safe default here: it cancels the customer's subscription at
+     * period end and mails the admins that the reissue failed, for a payment that is
+     * simply still travelling. Nothing is lost by waiting, because a checkout the
+     * customer really did abandon is expired by Mollie itself and lands in the
+     * terminal branch above long before this limit.
+     */
+    public const HARD_LIMIT_DAYS = 14;
 
     /**
      * One synchronous Mollie call per pending entry, so the run scales with the backlog.
@@ -117,7 +133,7 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
             }
 
             try {
-                $payment = Mollie::send(new GetPaymentRequest($paymentId));
+                $payment = MollieCall::send(new GetPaymentRequest($paymentId));
             } catch (\Throwable $e) {
                 Log::warning('CleanupStalePendingCountryCorrectionJob: Mollie unreachable', [
                     'billable_id' => $billable->getKey(),
@@ -148,20 +164,20 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
                 continue;
             }
 
-            // Status pending/open/authorized: only escalate after the 24h hard limit.
-            $ageHours = $createdAt?->diffInHours($now) ?? PHP_INT_MAX;
-            if ($ageHours < 24) {
+            // Status pending/open/authorized: only escalate past the hard limit.
+            $ageDays = $createdAt?->diffInDays($now) ?? PHP_INT_MAX;
+            if ($ageDays < self::HARD_LIMIT_DAYS) {
                 continue;
             }
 
-            // Treat a 24h+ hang as a failure: synthesise a payment object that
+            // Treat the hang as a failure: synthesise a payment object that
             // looks `failed` so handleCountryCorrectionFailed runs the same path
             // a real failed-webhook would — drop the pending entry, flip the
             // mismatch back to Pending, re-cancel the subscription, notify.
             $synthesized = clone $payment;
             $synthesized->status = 'failed';
             $synthesized->details = (object) [
-                'failureReason' => "Country correction stuck for >24h at Mollie status '{$status}'",
+                'failureReason' => 'Country correction stuck for >'.self::HARD_LIMIT_DAYS." days at Mollie status '{$status}'",
             ];
             Log::warning('CleanupStalePendingCountryCorrectionJob: escalating stuck country_correction', [
                 'billable_id' => $billable->getKey(),

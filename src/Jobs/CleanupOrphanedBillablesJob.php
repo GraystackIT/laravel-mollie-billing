@@ -24,7 +24,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Removes billables that were created during a checkout flow but never
@@ -324,7 +324,7 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
         }
 
         try {
-            $payments = Mollie::send(new GetPaginatedCustomerPaymentsRequest($customerId, limit: 50));
+            $payments = MollieCall::send(new GetPaginatedCustomerPaymentsRequest($customerId, limit: 50));
         } catch (\Throwable $e) {
             Log::warning('CleanupOrphanedBillablesJob: Mollie unreachable for customer, skipping cleanup', [
                 'billable_id' => $billable->getKey(),
@@ -352,7 +352,7 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
     private function mollieReportsTerminalFailure(string $paymentId): bool
     {
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('CleanupOrphanedBillablesJob: Mollie unreachable for payment', [
                 'payment_id' => $paymentId,

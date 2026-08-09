@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\Log;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 new class extends Component {
     /** Tick budget before we stop polling and show the timeout state. */
@@ -219,7 +219,7 @@ new class extends Component {
         }
 
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('Return-page one-time-order status probe failed', [
                 'payment_id' => $paymentId,
@@ -259,7 +259,7 @@ new class extends Component {
         }
 
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             // Mollie API hiccup — don't fail the page over it; let the next
             // tick retry. The webhook will still resolve eventually.

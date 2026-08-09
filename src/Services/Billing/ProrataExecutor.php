@@ -30,7 +30,11 @@ class ProrataExecutor
 
     /**
      * @param  list<ProrataLine>  $lines  from the ProrataComposer
-     * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
+     * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice, cancelled_at_mollie?: bool}
+     *         `cancelled_at_mollie` is present on the two paths that patch Mollie themselves
+     *         and is false when the PATCH (or, for a free target, the cancel) did not land —
+     *         the caller must then keep `mollie_subscription_id`, or a subscription that is
+     *         still live at Mollie becomes untargetable and keeps charging.
      *         path ∈ {'noop', 'in_flight', 'sidegrade', 'deferred_charge', 'refund'}.
      *         invoice is filled for sidegrade and refund (immediate redemption with that invoice id).
      *         For deferred_charge the invoice is null — redemption happens in
@@ -58,8 +62,8 @@ class ProrataExecutor
         // Sidegrade: real plan switch + charge total == |refund total|.
         if ($this->isSaldoZeroPlanSwitch($intent, $chargeLines, $refundLines)) {
             $invoice = $this->invoices->createPlanSwitchInvoice($billable, $chargeLines, $refundLines);
-            $this->safelyPatch($billable, $intent);
-            return ['path' => 'sidegrade', 'invoice' => $invoice];
+            $cancelledAtMollie = $this->safelyPatch($billable, $intent);
+            return ['path' => 'sidegrade', 'invoice' => $invoice, 'cancelled_at_mollie' => $cancelledAtMollie];
         }
 
         if (! empty($chargeLines)) {
@@ -71,9 +75,9 @@ class ProrataExecutor
         // Pure refund phase: PATCH (best-effort) + refunds directly.
         // A PATCH failure must not block the refund — it is persisted to pending_subscription_patch
         // and picked up by the RetrySubscriptionPatchJob.
-        $this->safelyPatch($billable, $intent);
+        $cancelledAtMollie = $this->safelyPatch($billable, $intent);
         $refundInvoice = $this->invoices->createRefund($billable, $refundLines);
-        return ['path' => 'refund', 'invoice' => $refundInvoice];
+        return ['path' => 'refund', 'invoice' => $refundInvoice, 'cancelled_at_mollie' => $cancelledAtMollie];
     }
 
     /**
@@ -81,10 +85,10 @@ class ProrataExecutor
      * (for the Retry-Job) if it fails. Never throws — the refund/sidegrade flow
      * downstream must always complete.
      */
-    private function safelyPatch(Billable $billable, PlanChangeIntent $intent): void
+    private function safelyPatch(Billable $billable, PlanChangeIntent $intent): bool
     {
         try {
-            $this->subscriptionPatcher->updateForIntent($billable, $intent);
+            return $this->subscriptionPatcher->updateForIntent($billable, $intent);
         } catch (\Throwable $e) {
             Log::warning('Mollie-Subscription PATCH failed during pro-rata flow — queued for retry', [
                 'billable' => $billable instanceof Model ? $billable->getKey() : null,
@@ -119,6 +123,8 @@ class ProrataExecutor
                 RetrySubscriptionPatchJob::dispatch($intentData, $firstAttemptAt);
             }
         }
+
+        return false;
     }
 
     /**

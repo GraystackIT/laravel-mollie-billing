@@ -54,6 +54,11 @@ class SingleChargeHandler
             return;
         }
 
+        // The charge was priced with the fallback country when the column was empty; the
+        // invoice has to be able to use the same one, or the money is collected and never
+        // invoiced. See WebhookSupport::ensureBillingCountry().
+        $this->support->ensureBillingCountry($billable);
+
         $lineItems = (array) ($metadata['line_items'] ?? []);
         if (empty($lineItems)) {
             // No `line_items` metadata means a payment created before this package

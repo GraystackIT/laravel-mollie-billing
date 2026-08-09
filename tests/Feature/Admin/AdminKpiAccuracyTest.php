@@ -115,14 +115,17 @@ it('reports the monthly share per month in the trend', function (): void {
 });
 
 it('does not count a converted trial as its own failure', function (): void {
-    // One customer, one trial, ended inside the window, mandate captured: 100%.
-    // Counting "has a mandate" against "is Expired" put this billable in both sets and
-    // reported 50% — the cancelled-months-later case.
+    // One customer, one trial, converted inside the window: 100%.
+    //
+    // The shape a real conversion leaves behind — `trial_ends_at` nulled, the moment
+    // stamped in the meta. Keying the cohort on `trial_ends_at` alone therefore found
+    // nothing to count, and the tile read 0 % for a business converting everyone.
     kpiBillable([
         'subscription_source' => SubscriptionSource::Mollie,
-        'subscription_status' => SubscriptionStatus::Expired,
-        'trial_ends_at' => BillingTime::nowUtc()->subDays(10),
+        'subscription_status' => SubscriptionStatus::Active,
+        'trial_ends_at' => null,
         'mollie_mandate_id' => 'mdt_converted',
+        'subscription_meta' => ['trial_converted_at' => BillingTime::nowUtc()->subDays(10)->toIso8601String()],
     ]);
 
     expect(app(AdminKpiService::class)->trialConversionRate(90))->toBe(1.0);
@@ -141,8 +144,9 @@ it('counts an unpaid trial parked in past_due as a failed conversion', function 
     kpiBillable([
         'subscription_source' => SubscriptionSource::Mollie,
         'subscription_status' => SubscriptionStatus::Active,
-        'trial_ends_at' => BillingTime::nowUtc()->subDays(5),
+        'trial_ends_at' => null,
         'mollie_mandate_id' => 'mdt_ok',
+        'subscription_meta' => ['trial_converted_at' => BillingTime::nowUtc()->subDays(5)->toIso8601String()],
     ]);
 
     expect(app(AdminKpiService::class)->trialConversionRate(90))->toBe(0.5);
@@ -165,6 +169,44 @@ it('answers zero instead of raising when the invoice table is unavailable', func
     // fallback, and the fallback has to be an int: without it the typed closure raised a
     // TypeError and the whole admin layout 500ed.
     Schema::drop('billing_invoices');
+
+    expect(app(AdminKpiService::class)->mrr())->toBe(0);
+});
+
+it('stops counting a cancellation once its grace period has ended long ago', function (): void {
+    // A yearly customer who cancelled eleven months ago and keeps access until next month
+    // is not this month's churn. With only a lower bound on `subscription_ends_at` every
+    // such cancellation counted on every dashboard load, and the number never decayed.
+    kpiBillable([
+        'subscription_status' => SubscriptionStatus::Cancelled,
+        'subscription_ends_at' => BillingTime::nowUtc()->addMonths(11),
+    ]);
+    kpiBillable(['subscription_status' => SubscriptionStatus::Active]);
+
+    expect(app(AdminKpiService::class)->churnRate(30))->toBe(0.0);
+
+    Cache::flush();
+
+    // One whose access actually ended inside the window does count.
+    kpiBillable([
+        'subscription_status' => SubscriptionStatus::Cancelled,
+        'subscription_ends_at' => BillingTime::nowUtc()->subDays(3),
+    ]);
+
+    expect(app(AdminKpiService::class)->churnRate(30))->toBe(round(1 / 2, 4));
+});
+
+it('does not count revenue that was refunded', function (): void {
+    $billable = kpiBillable();
+    $invoice = kpiInvoice($billable, net: 2_900, periodDays: 30);
+
+    expect(app(AdminKpiService::class)->mrr())->toBe(2_900);
+
+    Cache::flush();
+
+    // Billing error, corrected the same week: the money is back with the customer, so it
+    // is not recurring revenue any more.
+    $invoice->forceFill(['refunded_net' => 2_900])->save();
 
     expect(app(AdminKpiService::class)->mrr())->toBe(0);
 });

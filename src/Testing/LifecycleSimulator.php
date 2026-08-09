@@ -24,8 +24,8 @@ use Illuminate\Http\Request;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
 use RuntimeException;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Drives subscription-lifecycle transitions deterministically on staging/test systems.
@@ -254,7 +254,7 @@ class LifecycleSimulator
             : $this->estimateRenewalGrossMinor($billable);
         $amountValue = BillingMoney::mollieAmount($grossMinor, $currency);
 
-        $created = Mollie::send(new CreatePaymentRequest(
+        $created = MollieCall::send(new CreatePaymentRequest(
             description: 'Simulated subscription renewal',
             amount: new Money($currency, $amountValue),
             metadata: [
@@ -325,7 +325,7 @@ class LifecycleSimulator
         $payment = null;
 
         while (time() < $deadline) {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
             $status = (string) ($payment->status ?? '');
 
             if (in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
@@ -356,16 +356,30 @@ class LifecycleSimulator
             : 0;
         $seats = $catalog->includedSeats($planCode) + $extraSeats;
 
-        $net = \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
-            $catalog, $billable, $planCode, $interval, $seats, $addonCodes
-        );
-        $vat = $vatService->calculate(
-            (string) ($billable->getBillingCountry() ?? ''),
-            $net,
-            $billable,
+        // Per line, because that is how the invoice books it: `round(Σ net × rate)` and
+        // `Σ round(net × rate)` are not the same number — 550 + 550 at 19% is 1309 the
+        // first way and 1310 the second. Rounding once over the sum made `billing:simulate`
+        // print a figure a cent or two off the charge that then arrived, on the one screen
+        // whose whole job is telling an operator what to expect.
+        $lines = \GraystackIT\MollieBilling\Support\SubscriptionAmount::lineItems(
+            $catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes
         );
 
-        return (int) $vat['gross'];
+        $rate = (float) $vatService->calculate(
+            (string) ($billable->getBillingCountry() ?? ''),
+            \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
+                $catalog, $billable, $planCode, $interval, $seats, $addonCodes
+            ),
+            $billable,
+        )['rate'];
+
+        return \GraystackIT\MollieBilling\Support\BillingMoney::grossWithLineVat(
+            array_map(
+                static fn (array $line): int => (int) ($line['amount_net'] ?? $line['total_net'] ?? 0),
+                $lines,
+            ),
+            $rate,
+        );
     }
 
     private function force(Billable $billable, array $attributes): void

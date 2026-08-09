@@ -23,7 +23,7 @@ use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Responsible for Mollie subscription changes for future periods.
@@ -47,7 +47,14 @@ class MollieSubscriptionPatcher
      * - newPlan = Free → cancelForFreeDowngrade()
      * - otherwise → updateRecurringAmount() with new plan/seats/addons
      */
-    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
+    /**
+     * @return bool Whether Mollie now reflects the intent. Only the free-downgrade branch
+     *              can answer false: the cancel is best-effort and leaves a
+     *              `pending_subscription_cancel` marker, and the caller must NOT drop
+     *              `mollie_subscription_id` on a subscription that is still live — nothing
+     *              could ever target it again, and Mollie keeps charging the old price.
+     */
+    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): bool
     {
         $extraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
         $totalSeats = $this->catalog->includedSeats($intent->newPlan) + $extraSeats;
@@ -70,9 +77,7 @@ class MollieSubscriptionPatcher
         );
 
         if ($targetNet <= 0) {
-            $this->cancelForFreeDowngrade($billable);
-
-            return;
+            return $this->cancelForFreeDowngrade($billable);
         }
 
         // Preserve any active recurring coupon discount across plan/seat/addon
@@ -101,6 +106,9 @@ class MollieSubscriptionPatcher
             couponDiscountNet: $couponDiscountNet,
             forceResetStartDate: $intent->forceResetStartDate,
         );
+
+        // `updateRecurringAmount()` throws on failure, so reaching here means Mollie took it.
+        return true;
     }
 
     /**
@@ -231,7 +239,7 @@ class MollieSubscriptionPatcher
             default => null,
         };
 
-        Mollie::send(new MollieUpdateSubscriptionRequest(
+        MollieCall::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             amount: new Money($currency, $value),
@@ -375,7 +383,7 @@ class MollieSubscriptionPatcher
         $current = $billable->nextBillingDate() ?? BillingTime::nowUtc();
         $newDate = $current->copy()->addDays($days);
 
-        Mollie::send(new MollieUpdateSubscriptionRequest(
+        MollieCall::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             startDate: new Date($newDate),
@@ -415,7 +423,7 @@ class MollieSubscriptionPatcher
 
         $newDate = $target->copy();
 
-        Mollie::send(new MollieUpdateSubscriptionRequest(
+        MollieCall::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             startDate: new Date($newDate),
@@ -450,7 +458,7 @@ class MollieSubscriptionPatcher
         }
 
         try {
-            Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
+            MollieCall::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
 
             return true;
         } catch (ApiException $e) {

@@ -35,6 +35,10 @@ auth.json
 .claude
 .codex
 workbench/database/*.sqlite
+# SQLite WAL sidecars. The browser suite deliberately does not enable WAL (see
+# docs/browser-testing.md), but a stray tool or a local experiment leaves these behind.
+workbench/database/*.sqlite-wal
+workbench/database/*.sqlite-shm
 workbench/storage/
 workbench/public/build/
 tests/Browser/screenshots/

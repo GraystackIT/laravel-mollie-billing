@@ -229,17 +229,33 @@ class LocalToMollieUpgradeHandler
 
         $this->firstPaymentArtifacts->runCountryMatchCheck($billable);
 
-        event(new SubscriptionUpgradedFromLocal(
+        // Each step isolated. Past this point the invoice exists and the subscription is
+        // live at Mollie, so the re-delivery is swallowed by the invoice guard — anything
+        // that throws here is lost work nobody retries. Events are the documented extension
+        // seam, and a throwing app listener used to take `runAfterCheckout()` down with it:
+        // the customer had paid and been upgraded, but the app never learned to admit them.
+        $this->support->safely(
+            fn () => event(new SubscriptionUpgradedFromLocal($billable, $oldPlan, $oldInterval, $planCode, $interval)),
+            'local_upgrade.upgraded_event',
             $billable,
-            $oldPlan,
-            $oldInterval,
-            $planCode,
-            $interval,
-        ));
-        event(new PaymentSucceeded($billable, $invoice));
+        );
 
-        $this->support->notifyInvoiceAvailable($billable, $invoice);
+        $this->support->safely(
+            fn () => event(new PaymentSucceeded($billable, $invoice)),
+            'local_upgrade.payment_succeeded_event',
+            $billable,
+        );
 
-        MollieBilling::runAfterCheckout($billable, true);
+        $this->support->safely(
+            fn () => $this->support->notifyInvoiceAvailable($billable, $invoice),
+            'local_upgrade.invoice_notification',
+            $billable,
+        );
+
+        $this->support->safely(
+            fn () => MollieBilling::runAfterCheckout($billable, true),
+            'local_upgrade.after_checkout',
+            $billable,
+        );
     }
 }

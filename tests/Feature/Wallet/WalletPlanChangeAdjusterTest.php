@@ -214,3 +214,34 @@ it('keeps the documented old-period semantics for an unchanged period start', fu
     // entitlement round(100 * 5/30) = 17, used 40 → excess 23 → target 50 − 23 = 27
     expect((int) $billable->getWallet('Tokens')->refresh()->balanceInt)->toBe(27);
 });
+
+it('bills the debt of a pay-per-use type on a plan change instead of forgiving it', function (): void {
+    // A usage type may be priced without any included quota — every unit is billed, the
+    // wallet only ever goes negative. The excess calculation was gated on the old plan
+    // including some of it, so for exactly this shape it computed nothing: the rebalance
+    // reset the wallet to the new plan's quota and the whole consumed, unbilled debt
+    // simply disappeared. A plan change was a way to use the metered feature for free.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.usage_overage_prices.SMS', 5);
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.usage_overage_prices.SMS', 5);
+
+    $billable = adjusterBillable(500);
+    $billable->createWallet(['name' => 'SMS', 'slug' => 'SMS'])->forceWithdraw(120);
+
+    $lines = app(WalletPlanChangeAdjuster::class)->adjust(
+        $billable->refresh(),
+        'pro',
+        'monthly',
+        'pro',
+        'yearly',
+        now()->subDays(15),
+        now()->addDays(15),
+        deferOverageCharge: true,
+    );
+
+    $sms = collect($lines)->firstWhere('code', 'SMS');
+
+    expect($sms)->not->toBeNull()
+        ->and((int) $sms['quantity'])->toBe(120)
+        ->and((int) $sms['unit_price_net'])->toBe(5)
+        ->and((int) $sms['total_net'])->toBe(600);
+});

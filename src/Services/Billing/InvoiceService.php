@@ -41,6 +41,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class InvoiceService
 {
@@ -895,9 +896,23 @@ class InvoiceService
             // Per-item VAT: line_item.vat_rate is the source of truth.
             $taxPercentage = (float) ($item['vat_rate'] ?? 0);
 
+            // The booked VAT wins over the rate whenever it can be expressed per unit.
+            // Given only a percentage the renderer recomputes `net × rate`, and the stored
+            // figure is not always that number — a partial credit note allocates its VAT
+            // across the lines it reverses rather than recomputing each one — so the
+            // document totalled a cent or two away from the `amount_gross` it is the
+            // document *of*. `unit_tax` takes precedence in the renderer and is multiplied
+            // by the quantity, so it is used only when the stored amount divides evenly;
+            // otherwise the rate stays, exactly as before.
+            $storedVat = array_key_exists('vat_amount', $item) ? (int) $item['vat_amount'] : null;
+            $unitTax = $storedVat !== null && $qty > 0 && $storedVat % $qty === 0
+                ? Money::ofMinor(intdiv($storedVat, $qty), $currency)
+                : null;
+
             $items[] = new PdfInvoiceItem(
                 label: (string) ($item['label'] ?? $item['kind'] ?? 'Line'),
                 unit_price: Money::ofMinor($netUnit, $currency),
+                unit_tax: $unitTax,
                 tax_percentage: $taxPercentage,
                 quantity: $qty,
                 description: $description,
@@ -1277,6 +1292,61 @@ class InvoiceService
      * the implementation so the invoice side and the outbound Mollie side cannot
      * disagree about a currency's scale.
      */
+    /**
+     * The invoice at the end of a settlement chain — the one holding a Mollie payment.
+     *
+     * Returns null when the chain leads nowhere (or loops), which makes the caller write an
+     * unsettled document rather than one pointing at money that does not exist.
+     */
+    private static function settlementRoot(?BillingInvoice $invoice): ?BillingInvoice
+    {
+        $seen = [];
+
+        while ($invoice !== null && $invoice->mollie_payment_id === null) {
+            $key = (int) $invoice->getKey();
+
+            if ($invoice->settled_by_invoice_id === null || isset($seen[$key])) {
+                return null;
+            }
+
+            $seen[$key] = true;
+            $invoice = $invoice->settledBy;
+        }
+
+        return $invoice;
+    }
+
+    /**
+     * Clear any idempotency key left on the shared Mollie client.
+     *
+     * Tolerant by design: the accessor differs across SDK versions and a test double may
+     * expose neither, and failing to clean up a key must never take down the caller that
+     * just moved money.
+     */
+    public static function forgetIdempotencyKey(): void
+    {
+        self::resetIdempotencyKey();
+    }
+
+    private static function resetIdempotencyKey(): void
+    {
+        try {
+            $client = Mollie::api();
+
+            if (method_exists($client, 'resetIdempotencyKey')) {
+                $client->resetIdempotencyKey();
+
+                return;
+            }
+
+            if (method_exists($client, 'setIdempotencyKey')) {
+                $client->setIdempotencyKey(null);
+            }
+        } catch (\Throwable) {
+            // Nothing to clean up, or nothing that can be.
+        }
+    }
+
     public static function normalizeCurrency(?string $currency): string
     {
         return BillingMoney::normalizeCurrency($currency);
@@ -1400,7 +1470,7 @@ class InvoiceService
         // and PDF must not disagree after a BILLING_CURRENCY change.
         $currency = self::normalizeCurrency($original->currency);
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: 'Country correction for invoice '.($original->serial_number ?? $original->id),
             amount: new MollieMoney($currency, self::molliePrice($sumGross, $currency)),
             metadata: [
@@ -1724,6 +1794,7 @@ class InvoiceService
         ?\Carbon\CarbonInterface $periodStart = null,
         ?\Carbon\CarbonInterface $periodEnd = null,
         ?string $currency = null,
+        bool $deferDocument = false,
     ): BillingInvoice {
         /** @var Model&Billable $billable */
         $sumNet = 0;
@@ -1761,10 +1832,29 @@ class InvoiceService
         $invoice->mismatch_id = $billable->latestOpenCountryMismatch()?->id;
         $this->persistWithSerial($invoice, $kind->value);
 
-        $this->generateAndStorePdf($invoice, $billable);
-        event(new InvoiceCreated($billable, $invoice));
+        // Same reason `createCreditNote()` has this: a caller inside a transaction hands
+        // the render and the announcement back out. A rollback undoes the row but not the
+        // file, so the disk kept an invoice document carrying a serial number that no
+        // invoice in the books has — and until then the render held the invoice row lock
+        // and the serial range. {@see issueInvoiceDocument()}.
+        if (! $deferDocument) {
+            $this->issueInvoiceDocument($invoice, $billable);
+        }
 
         return $invoice;
+    }
+
+    /**
+     * Render an invoice's PDF and announce it.
+     *
+     * Split out of {@see createInvoice()} so a caller can persist inside a transaction and
+     * do this after committing. Safe to call twice — `generateAndStorePdf()` overwrites the
+     * same deterministic path — but nothing calls it twice.
+     */
+    public function issueInvoiceDocument(BillingInvoice $invoice, Billable $billable): void
+    {
+        $this->generateAndStorePdf($invoice, $billable);
+        event(new InvoiceCreated($billable, $invoice));
     }
 
     /**
@@ -1797,7 +1887,7 @@ class InvoiceService
         // Mollie metadata is hard-capped at 1024 bytes — keep it to a minimal correlation
         // payload. The full charge/refund line list lives in subscription_meta.pending_prorata_change
         // and is read back by the Phase-2 webhook.
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: "Plan change for {$intent->newPlan}",
             amount: new MollieMoney($currency, self::molliePrice($grossTotal, $currency)),
             metadata: [
@@ -2054,9 +2144,14 @@ class InvoiceService
                 $line->refundToken,
             );
 
-            // Mollie's SDK auto-resets the key on response (ResetIdempotencyKey
-            // middleware), so we set it once per refund call and don't need
-            // to clean up explicitly.
+            // Set here, cleared in the `finally` below.
+            //
+            // The SDK's `ResetIdempotencyKey` middleware only runs on a response, and
+            // `ConvertResponseToException` turns a 4xx into a throw before it gets there —
+            // so a refund Mollie rejects left its key on the shared client, and the next
+            // mutating request through that client (a payment, a PATCH) carried it. Mollie
+            // answers a reused key with the *previous* response, which is how a plan
+            // change's charge could come back as the rejected refund's error.
             Mollie::setIdempotencyKey($idempotencyKey);
 
             // The try covers the Mollie call and nothing else. It used to wrap the
@@ -2067,7 +2162,7 @@ class InvoiceService
             // read `refunded_net` (whose write had just failed) as the remaining headroom
             // and paid the customer twice.
             try {
-                $refund = Mollie::send(new CreatePaymentRefundRequest(
+                $refund = MollieCall::send(new CreatePaymentRefundRequest(
                     paymentId: $refundPaymentId,
                     description: $description ?? "Plan change refund: {$line->label}",
                     amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
@@ -2076,6 +2171,11 @@ class InvoiceService
                 $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
 
                 continue;
+            } finally {
+                // Whatever happened. The SDK clears the key from a *response*, and a 4xx
+                // is converted to a throw before that runs — leaving the key on the shared
+                // client for the next mutating request to reuse.
+                self::resetIdempotencyKey();
             }
 
             $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
@@ -2236,9 +2336,12 @@ class InvoiceService
             ? reset($sourceInvoices)
             : null;
 
-        if ($settledAgainst !== null && $settledAgainst->refundablePaymentId() === null) {
-            $settledAgainst = null;
-        }
+        // Settle against the invoice that actually collected the payment, not against
+        // another switch document. The guard used to test `refundablePaymentId()`, which
+        // resolves the chain — so a switch invoice passed it and became the target, and the
+        // document written here then had no payment of its own *and* a parent with none
+        // either: unrefundable, so a third change in one period was never paid out.
+        $settledAgainst = self::settlementRoot($settledAgainst);
 
         $currency = self::normalizeCurrency($currencyFromOriginal);
 

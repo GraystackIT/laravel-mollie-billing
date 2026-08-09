@@ -74,9 +74,11 @@ function bindRecordingPatcher(): object
 
         public function __construct() {}
 
-        public function updateForIntent(\GraystackIT\MollieBilling\Contracts\Billable $billable, PlanChangeIntent $intent): void
+        public function updateForIntent(\GraystackIT\MollieBilling\Contracts\Billable $billable, PlanChangeIntent $intent): bool
         {
             $this->patched[] = $intent->newPlan;
+
+            return true;
         }
     };
 

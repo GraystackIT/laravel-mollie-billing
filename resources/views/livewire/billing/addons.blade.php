@@ -303,18 +303,40 @@ new class extends Component {
 
         $meta = $billable->getBillingSubscriptionMeta();
 
-        if (empty($meta['pending_plan_change'])) {
-            $this->polling = false;
-            $name = $this->pendingAddon
-                ? (app(SubscriptionCatalogInterface::class)->addonName($this->pendingAddon) ?? $this->pendingAddon)
-                : null;
+        // Both markers, and the failure one.
+        //
+        // An addon change books its deferred charge under `pending_prorata_change`;
+        // `pending_plan_change` is written only for a real plan or interval switch. Polling
+        // on the latter alone meant the very first tick found it empty and announced
+        // success while the payment was still open — and it announced success again when
+        // the charge was later declined, because `failed()` clears the markers too. The
+        // customer read "add-on enabled" for a charge that never went through.
+        if (! empty($meta['pending_prorata_change']) || ! empty($meta['pending_plan_change'])) {
+            return;
+        }
+
+        $this->polling = false;
+
+        $failedAt = $meta['plan_change_failed_at'] ?? null;
+        $failedRecently = $failedAt !== null
+            && \GraystackIT\MollieBilling\Support\BillingTime::toUtc($failedAt)
+                ->greaterThan(\GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->subMinutes(30));
+
+        $name = $this->pendingAddon
+            ? (app(SubscriptionCatalogInterface::class)->addonName($this->pendingAddon) ?? $this->pendingAddon)
+            : null;
+
+        if ($failedRecently) {
+            $this->toast(__('billing::portal.flash.plan_change_failed'), 'danger');
+        } else {
             $message = $name
                 ? __("billing::portal.addons_flash.{$this->pendingAction}", ['addon' => $name])
                 : __('billing::portal.flash.plan_changed');
             $this->toast($message, 'success');
-            $this->pendingAddon = null;
-            $this->pendingAction = null;
         }
+
+        $this->pendingAddon = null;
+        $this->pendingAction = null;
     }
 
     public function with(): array

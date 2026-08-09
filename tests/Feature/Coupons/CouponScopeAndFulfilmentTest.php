@@ -237,6 +237,11 @@ it('does not deliver a fully covered order when the redemption is refused', func
     // consideration, so a redemption that cannot be recorded is goods given away.
     expect(BillingInvoice::query()->count())->toBe(0)
         ->and((int) ($billable->fresh()->getWallet('Tokens')?->balanceInt ?? 0))->toBe(0);
+
+    // And nothing on disk either. The PDF was rendered and written inside the transaction
+    // the refusal rolls back, so the file outlived the row it belonged to: an invoice
+    // document carrying a serial number that no invoice in the books has.
+    expect(Storage::disk('local')->allFiles())->toBe([]);
 });
 
 it('delivers a fully covered order when the redemption succeeds', function (): void {

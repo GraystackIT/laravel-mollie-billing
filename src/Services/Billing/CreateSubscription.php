@@ -21,7 +21,7 @@ use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Creates a Mollie subscription and updates the billable to reflect the new
@@ -163,7 +163,7 @@ class CreateSubscription
         // working payment method.
         $mandateId = (string) ($spec['mandate_id'] ?? $billable->getMollieMandateId() ?? '');
 
-        $subscription = Mollie::send(new CreateSubscriptionRequest(
+        $subscription = MollieCall::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
             amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             interval: $interval === 'yearly' ? '12 months' : '1 month',

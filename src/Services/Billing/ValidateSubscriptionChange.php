@@ -213,6 +213,22 @@ class ValidateSubscriptionChange
             ) {
                 throw new SeatDowngradeRequiredException($billable, $context->newSeats, $newIncludedSeats);
             }
+
+            // The floor the auto-derive branch below has always enforced, applied here too.
+            //
+            // Only this branch is reachable from the portal's seats screen, and it had no
+            // such check: an org with ten members assigned could set the counter to one and
+            // the change went through — a prorata refund for nine seats paid out while every
+            // one of those members kept working, because the package never revokes seats, it
+            // only counts what the host app reports through `getUsedBillingSeats()`. The
+            // customer has to release the members first; that is exactly what this exception
+            // says, and the same rule the non-explicit branch applies.
+            $usedSeats = $billable->getUsedBillingSeats();
+
+            if ($context->newSeats < $usedSeats) {
+                throw new SeatDowngradeRequiredException($billable, $usedSeats, $context->newSeats);
+            }
+
             return;
         }
 
@@ -422,15 +438,13 @@ class ValidateSubscriptionChange
         // plan switch, no credit refund, no failure event, and any coupon stacked on it
         // redeemed against the wrong invoice.
         //
-        // Scoped to changes that move money, which is also what keeps
-        // `applyPendingPlanChange()` out of it: that path re-validates a change whose
-        // pending marker is by definition present, and builds its context with both
-        // prorata amounts at 0.
-        $movesMoney = $context->prorataChargeNet > 0 || $context->prorataCreditNet > 0;
-
+        // Exempt only the Phase 2 re-validation, which is told so explicitly. It used to be
+        // recognised by both prorata amounts being 0 — but so is a switch between two plans
+        // priced the same, and that switch then walked past this guard into precisely the
+        // failure described above.
         $meta = $billable->getBillingSubscriptionMeta();
 
-        if ($movesMoney && (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change']))) {
+        if (! $context->isPendingReapply && (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change']))) {
             throw new InvalidSubscriptionStateException(
                 'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
             );

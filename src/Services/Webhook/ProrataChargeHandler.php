@@ -133,7 +133,22 @@ class ProrataChargeHandler
         // continue a monthly one), and so does the past-due reset, where the patcher
         // moves Mollie's schedule to `now + 1 interval`.
         $forcesResetStartDate = (bool) ($intentData['force_reset_start_date'] ?? false);
-        $startsNewPeriod = ($oldInterval !== '' && $oldInterval !== $newIntervalCode) || $forcesResetStartDate;
+
+        // A converted trial starts a new window too, and it has to be decided HERE — the
+        // period anchor is written from `$startsNewPeriod` further down, while the trial
+        // override that moves Mollie's cadence sits after it. Read from the stored intent
+        // alone, `force_reset_start_date` is false for a trial (it is set for the past-due
+        // reset only), so a same-interval switch mid-trial moved Mollie's first charge a
+        // full interval out while the local anchor stayed at the trial start. From then on
+        // `nextBillingDate()` named a day Mollie does not charge on, and everything keyed
+        // off it was wrong with it: the overage pre-pass fired against the wrong day, a
+        // graceful cancel granted grace nobody paid for, and a later seat change prorated
+        // against a window that had already elapsed.
+        $wasTrial = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial;
+
+        $startsNewPeriod = ($oldInterval !== '' && $oldInterval !== $newIntervalCode)
+            || $forcesResetStartDate
+            || $wasTrial;
 
         // Kept separate from the period question: wallet quotas differ per (plan,
         // interval), so the adjuster has to run for a plain plan change too — even
@@ -174,8 +189,6 @@ class ProrataChargeHandler
                 // earlier, so today's BILLING_CURRENCY may no longer match it.
                 currency: $payment->amount->currency ?? null,
             );
-            event(new PaymentSucceeded($billable, $chargeInvoice));
-            $this->support->notifyInvoiceAvailable($billable, $chargeInvoice);
         } catch (\Throwable $e) {
             Log::error('Failed to persist prorata_charge invoice', [
                 'billable' => $billable->getKey(),
@@ -184,6 +197,28 @@ class ProrataChargeHandler
             ]);
             return;
         }
+
+        // Announced outside the try, and each one isolated.
+        //
+        // Inside it, a throwing `PaymentSucceeded` listener — events are the documented
+        // extension seam, so an app listener is the likeliest thrower there is — logged
+        // "Failed to persist prorata_charge invoice" (which had in fact succeeded) and
+        // returned before the plan change was applied. Mollie's re-delivery could not
+        // repair it either: `paid()` opens with the invoice guard and no-ops. The customer
+        // had paid the prorata charge for a plan switch that then simply never happened.
+        $this->support->safely(
+            fn () => event(new PaymentSucceeded($billable, $chargeInvoice)),
+            'prorata_charge.payment_succeeded_event',
+            $billable,
+            ['payment_id' => (string) $payment->id],
+        );
+
+        $this->support->safely(
+            fn () => $this->support->notifyInvoiceAvailable($billable, $chargeInvoice),
+            'prorata_charge.invoice_notification',
+            $billable,
+            ['payment_id' => (string) $payment->id],
+        );
 
         // The prorated old-plan entitlement is measured over the OLD period, so the
         // boundaries are captured here and passed explicitly. Running the adjuster
@@ -232,8 +267,9 @@ class ProrataChargeHandler
         }
 
         $billable->refresh();
+        // `$wasTrial` was resolved before the period decision above — same status, one
+        // source of truth for both the anchor and the Mollie cadence.
         $wasPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
-        $wasTrial = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial;
         if ($intentData !== null) {
             $meta = $billable->getBillingSubscriptionMeta();
 
@@ -241,6 +277,13 @@ class ProrataChargeHandler
             $meta['seat_count'] = $derivedFromCharge ?? (int) ($intentData['new_seats'] ?? $billable->getBillingSeatCount());
 
             unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
+
+            // See SubscriptionPaymentHandler: the conversion nulls `trial_ends_at`, so the
+            // moment it happened has to be recorded or the trial-conversion KPI has no
+            // cohort to count.
+            if ($wasTrial) {
+                $meta['trial_converted_at'] = $newPeriodStart->toIso8601String();
+            }
 
             if ($wasPastDue) {
                 unset($meta['payment_failure'], $meta['past_due_since']);
@@ -672,7 +715,34 @@ class ProrataChargeHandler
         $reason = (string) ($payment->details?->failureReason ?? $payment->status ?? 'unknown');
         $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
         $meta['plan_change_failed_reason'] = $reason;
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        $attributes = ['subscription_meta' => $meta];
+
+        // Put back what the change committed before it was paid for.
+        //
+        // A plan or interval switch defers its local write until this charge clears, but a
+        // seat or addon change does not: `UpdateSubscription`'s phase 3 writes `seat_count`
+        // and `active_addon_codes` straight away and reports success. When the charge is
+        // then declined — with SEPA, days later — nothing here undid it: the customer kept
+        // three seats they had not paid for, `FeatureAccess` kept granting the add-on's
+        // features, and the next renewal rebuilt its lines from the inflated count while
+        // Mollie was still billing the old amount (no PATCH runs on the deferred path).
+        //
+        // The pre-change state is exactly what the stored intent holds. The validator
+        // refuses a second change while one is pending, so nothing legitimate can have
+        // moved these in between.
+        $intent = (array) ($pending['intent'] ?? []);
+
+        if (array_key_exists('current_seats', $intent)) {
+            $meta['seat_count'] = (int) $intent['current_seats'];
+            $attributes['subscription_meta'] = $meta;
+        }
+
+        if (array_key_exists('current_addons', $intent)) {
+            $attributes['active_addon_codes'] = array_values(array_keys((array) $intent['current_addons']));
+        }
+
+        $billable->forceFill($attributes)->save();
 
         event(new PlanChangeFailed($billable, $pending, (string) $payment->id, $reason));
 

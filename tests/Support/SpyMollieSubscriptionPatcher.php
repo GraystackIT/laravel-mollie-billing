@@ -24,16 +24,16 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
      */
     public static bool $cancelSucceeds = true;
 
-    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
+    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): bool
     {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
 
         if ($catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
-            self::$calls[] = ['cancel', $customerId, $subscriptionId];
-            SpyUpdateSubscription::$calls[] = ['cancel', $customerId, $subscriptionId];
-            return;
+            // Through cancelForFreeDowngrade(), so `$cancelSucceeds` reaches the caller the
+            // same way the real patcher's return value does.
+            return $this->cancelForFreeDowngrade($billable);
         }
 
         $payload = [
@@ -48,6 +48,8 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
         ];
         self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
         SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];
+
+        return true;
     }
 
     public function cancelForFreeDowngrade(Billable $billable): bool

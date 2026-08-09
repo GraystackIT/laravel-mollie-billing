@@ -438,16 +438,30 @@ class WalletUsageService
         $meta = $billable->getBillingSubscriptionMeta();
         $notified = $meta['usage_threshold_notified_at'][$type] ?? null;
         $periodStart = $billable->getBillingPeriodStartsAt();
+        $currentPeriod = $periodStart?->toIso8601String();
 
-        $alreadyNotified = $notified !== null
-            && $periodStart !== null
-            && Carbon::parse((string) $notified)->setTimezone('UTC')->greaterThanOrEqualTo($periodStart);
+        // Which period the last warning belongs to, recorded rather than inferred from a
+        // timestamp comparison. The anchor is not always in the past: the nightly pass
+        // refills the wallets the evening before a renewal and moves
+        // `subscription_period_starts_at` to tomorrow 00:00, and a marker written today is
+        // never >= tomorrow — so the dedupe silently stopped working for the rest of the
+        // day and every debit above the threshold re-sent the same mail.
+        $notifiedPeriod = $meta['usage_threshold_notified_period'][$type] ?? null;
+
+        $alreadyNotified = $notifiedPeriod !== null
+            ? $notifiedPeriod === $currentPeriod
+            // Rows written before the companion key existed still dedupe the old way,
+            // which is correct for every anchor that is in the past.
+            : ($notified !== null
+                && $periodStart !== null
+                && Carbon::parse((string) $notified)->setTimezone('UTC')->greaterThanOrEqualTo($periodStart));
 
         if ($alreadyNotified) {
             return null;
         }
 
         $meta['usage_threshold_notified_at'][$type] = BillingTime::nowUtc()->toIso8601String();
+        $meta['usage_threshold_notified_period'][$type] = $currentPeriod;
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
         return $percent;

@@ -9,8 +9,22 @@ class SubscriptionUpdateRequest
     /** @var array<int, string> */
     public readonly array $couponCodes;
 
+    /** 'immediate' | 'end_of_period' */
+    public readonly string $applyAt;
+
+    /**
+     * Whether the caller actually named an `apply_at`.
+     *
+     * `plan_change_mode = end_of_period` has to tell "the caller asked for immediate,
+     * which this install forbids" apart from "the caller said nothing" — the latter is
+     * every internal API (`changeBillingPlan()`, the portal), which would otherwise
+     * throw `Immediate plan changes are not allowed.` instead of being scheduled.
+     */
+    public readonly bool $applyAtExplicit;
+
     /**
      * @param  array<int, string>|null  $couponCodes  Multiple coupon codes (stackable). Falls back to `couponCode` when null.
+     * @param  string|null  $applyAt  'immediate' | 'end_of_period'; null means "no preference".
      */
     public function __construct(
         public readonly ?string $planCode = null,
@@ -18,7 +32,7 @@ class SubscriptionUpdateRequest
         public readonly ?int $seats = null,
         public readonly ?array $addons = null,
         public readonly ?string $couponCode = null,
-        public readonly string $applyAt = 'immediate', // 'immediate' | 'end_of_period'
+        ?string $applyAt = null,
         public readonly bool $internal = false,
         /**
          * Escape hatch for moving a billable onto a hidden plan (internal /
@@ -31,7 +45,11 @@ class SubscriptionUpdateRequest
          */
         public readonly bool $allowHiddenPlan = false,
         ?array $couponCodes = null,
+        ?bool $applyAtExplicit = null,
     ) {
+        $this->applyAt = $applyAt ?? 'immediate';
+        $this->applyAtExplicit = $applyAtExplicit ?? ($applyAt !== null);
+
         // Normalise into a deduped, non-empty array. The single `couponCode`
         // input is treated as a one-element list when `couponCodes` is null,
         // for backwards-compat with existing call sites.
@@ -71,7 +89,7 @@ class SubscriptionUpdateRequest
             seats: isset($request['seats']) ? (int) $request['seats'] : null,
             addons: $request['addons'] ?? null,
             couponCode: $request['coupon_code'] ?? $request['couponCode'] ?? null,
-            applyAt: $request['apply_at'] ?? $request['applyAt'] ?? 'immediate',
+            applyAt: $request['apply_at'] ?? $request['applyAt'] ?? null,
             internal: (bool) ($request['internal'] ?? false),
             couponCodes: $couponCodes,
         );
@@ -99,6 +117,7 @@ class SubscriptionUpdateRequest
             internal: $this->internal,
             allowHiddenPlan: $allow,
             couponCodes: $this->couponCodes,
+            applyAtExplicit: $this->applyAtExplicit,
         );
     }
 

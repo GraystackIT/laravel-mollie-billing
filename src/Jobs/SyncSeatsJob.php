@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -23,11 +24,12 @@ use Illuminate\Support\Facades\DB;
  * Prefer {@see byDelta()} over the absolute constructor. An absolute seat count is
  * captured at dispatch time, so two concurrent changes ("member invited" twice) both
  * compute their target from the same stale read and the later job silently discards
- * the earlier one's seat. A delta is resolved inside the job, under the billable's row
- * lock — the same read-modify-write the addon services use.
+ * the earlier one's seat. A delta is resolved inside the job, under the seat lock that
+ * also covers the write — the same read-modify-write the addon services use.
  *
- * ShouldBeUnique per billable on top of that: the lock serialises overlapping runs,
- * uniqueness keeps a duplicate of the *same* pending change from being queued twice.
+ * ShouldBeUnique per billable on top of that: the seat lock in handle() serialises
+ * overlapping runs, uniqueness keeps a duplicate of the *same* pending change from being
+ * queued twice.
  */
 class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
 {
@@ -89,10 +91,46 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
             : $this->billableClass.':'.$this->billableId.':seats:'.$this->seats;
     }
 
+    /** Serialises seat jobs for one billable against each other — see handle(). */
+    public const LOCK_PREFIX = 'billing:seat-sync:';
+
+    /** How long a seat job waits for the one ahead of it before giving up. */
+    public const LOCK_WAIT_SECONDS = 30;
+
     public function handle(SyncSeats $service): void
     {
         /** @var class-string $class */
         $class = $this->billableClass;
+
+        // A cache lock, held across the whole read-modify-write, because the row lock no
+        // longer can be. `byDelta()` exists so that two "member invited" events add two
+        // seats, and it resolves the target from the locked row — but that transaction has
+        // to commit before the write, since the write goes through UpdateSubscription and
+        // no Mollie call may sit inside a transaction. In that gap a second delta job read
+        // the same count and both wrote the same target, silently dropping one of the two
+        // seats: exactly the race byDelta() was introduced to close.
+        //
+        // A different key from `billing:subscription-change:{id}`, which update() takes
+        // itself — taking that one here would deadlock against it. Blocking rather than
+        // refusing, because unlike a plan change these are meant to accumulate; and if the
+        // wait runs out the job fails visibly with `tries = 1`, which is the outcome an
+        // operator can act on. Holding a cache lock across the Mollie round trip is the
+        // established shape here — update() and RefundInvoiceService both do it.
+        $lock = Cache::lock(self::LOCK_PREFIX.$this->billableClass.':'.$this->billableId, $this->timeout + 60);
+        $lock->block(self::LOCK_WAIT_SECONDS);
+
+        try {
+            $this->run($service, $class);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * @param  class-string  $class
+     */
+    private function run(SyncSeats $service, string $class): void
+    {
 
         // Decide under the row lock, then act outside it. `SyncSeats` goes on to
         // `UpdateSubscription::update()`, which posts a prorata payment and a Mollie PATCH —

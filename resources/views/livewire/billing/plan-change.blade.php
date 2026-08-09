@@ -10,11 +10,13 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
+use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Illuminate\Support\Facades\Cache;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use Livewire\Attributes\Locked;
@@ -400,7 +402,24 @@ new class extends Component {
         }
     }
 
-    public function applyScheduledNow(UpdateSubscription $service): void
+    /**
+     * "Apply the scheduled change now" — the period-end path, run early.
+     *
+     * Delegated to `ScheduleSubscriptionChange::apply()`, which is the same code the daily
+     * dispatcher runs, rather than reassembling the payload here. The hand-rolled version
+     * got four things wrong, all of them losing the customer's change:
+     *
+     *  - it cancelled the scheduled change BEFORE attempting it, and never restored it, so
+     *    any failure deleted a change the customer had booked;
+     *  - it passed `apply_at => immediate` without `internal`, so on an install with
+     *    `plan_change_mode = end_of_period` it could never succeed — it threw, and the
+     *    catch then deleted the change;
+     *  - it replayed a seat count that may have been auto-derived at schedule time as an
+     *    explicit one, which is exactly what `apply()` documents it must not do;
+     *  - it forwarded only the legacy single `coupon_code`, silently dropping the stacked
+     *    `coupon_codes` and with them the discount the customer was promised.
+     */
+    public function applyScheduledNow(ScheduleSubscriptionChange $service): void
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
@@ -412,15 +431,7 @@ new class extends Component {
         if (! $sc) return;
 
         try {
-            $service->cancelScheduledChange($billable);
-            $service->update($billable, [
-                'plan_code' => $sc['plan_code'] ?? null,
-                'interval' => $sc['interval'] ?? null,
-                'seats' => $sc['seats'] ?? null,
-                'addons' => $sc['addons'] ?? null,
-                'coupon_code' => $sc['coupon_code'] ?? null,
-                'apply_at' => 'immediate',
-            ]);
+            $service->apply($billable);
             $this->toast(__('billing::portal.flash.plan_changed'), 'success');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Scheduled plan change (apply now) failed', [
@@ -434,7 +445,8 @@ new class extends Component {
                 'trace' => collect(explode("\n", $e->getTraceAsString()))->take(15)->implode("\n"),
             ]);
             report($e);
-            $service->clearPendingPlanChange($billable);
+            // No clearing here: `apply()` owns the stored change and decides itself whether
+            // a failure is permanent (drop it) or worth keeping for the next attempt.
             $this->toast(config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'), 'danger');
         }
     }
@@ -517,7 +529,18 @@ new class extends Component {
                 'trace' => collect(explode("\n", $e->getTraceAsString()))->take(15)->implode("\n"),
             ]);
             report($e);
-            $service->clearPendingPlanChange($billable);
+
+            // Deliberately NOT `clearPendingPlanChange()`. That wipes
+            // `pending_prorata_change` and `prorata_pending_payment_id` too — markers this
+            // action may not own. An addon or seat change books a deferred prorata charge
+            // under exactly those keys without writing `pending_plan_change`, so a customer
+            // whose addon charge was still open and who then hit any error on the plan
+            // screen had the marker deleted underneath a live Mollie payment: when it
+            // settled, `ProrataChargeHandler` had nothing to match and reported an orphaned
+            // charge — money collected, nothing delivered, refunded by hand.
+            //
+            // `update()` cleans up its own partial writes; anything it did leave behind is
+            // reconciled by `CleanupStalePendingProrataChangeJob`.
             $this->toast(config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'), 'danger');
         }
     }
@@ -564,12 +587,46 @@ new class extends Component {
             (array) ($this->preview['incompatibleAddons'] ?? []),
         ));
 
+        // The coupon has to travel with the payment, not just with the price.
+        //
+        // `refreshPreview()` above prices with every applied code, so the customer is
+        // charged the discounted amount — but the code was never forwarded, so the webhook
+        // had nothing to redeem: no redemption row, no recurring marker (the Mollie
+        // subscription is created at full price, losing the ongoing discount), and the
+        // reconciliation saw an amount it could not explain and fired PaymentAmountMismatch.
+        //
+        // The first-payment path carries exactly one code (`metadata.coupon_code`, which is
+        // all `FirstPaymentCouponPricing::price()` accepts), so a stacked selection is
+        // refused rather than silently charged at one price and recorded at another.
+        if (count($this->appliedCouponCodes) > 1) {
+            $this->toast(__('billing::portal.flash.upgrade_single_coupon_only'), 'danger');
+
+            return null;
+        }
+
+        // One payment per intent, like the checkout.
+        //
+        // `refreshPreview()` above is several round-trips and the Mollie call another, so
+        // the button stays live for a second or more: a double-click — or browser-Back
+        // from Mollie and click again — minted a second `sequenceType: first` payment on
+        // the same mandate-to-be. Both settle, both activate, and the customer is charged
+        // twice. Non-blocking on purpose: the loser must not sit on a worker waiting for
+        // the winner to finish talking to Mollie.
+        $submitLock = Cache::lock('billing:checkout-submit:'.$billable->getKey(), 60);
+
+        if (! $submitLock->get()) {
+            $this->toast(__('billing::checkout.error_already_in_progress'), 'danger');
+
+            return null;
+        }
+
         try {
             $result = $service->handle($billable, [
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
+                'coupon_code' => $this->appliedCouponCodes[0] ?? null,
                 'amount_gross' => $grossAmount,
             ]);
 
@@ -587,6 +644,8 @@ new class extends Component {
             report($e);
             $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
+        } finally {
+            $submitLock->release();
         }
     }
 

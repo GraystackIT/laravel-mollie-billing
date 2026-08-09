@@ -10,6 +10,14 @@ use Livewire\Component;
 use Livewire\WithPagination;
 
 new class extends Component {
+    /**
+     * Widest span the daily series is built for.
+     *
+     * A little over a year: enough for every legitimate view of a yearly subscription, and
+     * a hard ceiling on how much work a date input can ask the render path for.
+     */
+    private const MAX_RANGE_DAYS = 400;
+
     use WithPagination;
 
     public string $usageType = '';
@@ -185,6 +193,16 @@ new class extends Component {
         $rangeEnd = self::parseDay($this->dateTo)?->endOfDay();
         $series = [];
         if ($rangeStart && $rangeEnd && $rangeEnd->gte($rangeStart)) {
+            // Clamped before the loop, because the loop builds one array entry per day of
+            // whatever the two date inputs say. They are plain `wire:model` properties on a
+            // bare `<input type="date">`, and browsers accept years far outside anything
+            // sensible — a mistyped year (or a crafted payload) asked for millions of
+            // iterations, exhausting memory in the render path and leaving the customer's
+            // own usage page a 500 they cannot navigate out of.
+            if ($rangeStart->diffInDays($rangeEnd) > self::MAX_RANGE_DAYS) {
+                $rangeStart = $rangeEnd->copy()->subDays(self::MAX_RANGE_DAYS)->startOfDay();
+            }
+
             $cursor = $rangeStart->copy();
             while ($cursor->lte($rangeEnd)) {
                 $key = $cursor->format('Y-m-d');

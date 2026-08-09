@@ -148,6 +148,8 @@ it('posts a service-issued refund in the original payment currency and stores th
     $original = usdInvoice($b);
 
     $captured = [];
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('api')->andReturnSelf();
     Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$captured) {
         $captured[] = $request;
 

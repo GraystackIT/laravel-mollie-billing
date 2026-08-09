@@ -485,7 +485,17 @@ class WebhookSupport
      *
      * @param  array<string, mixed>  $context
      */
-    private function safely(callable $step, string $what, Billable $billable, array $context = []): void
+    /**
+     * Run a side effect that must not be able to abort the caller.
+     *
+     * Public because every handler that has already written an invoice needs it: past
+     * that point the re-delivery is swallowed by the invoice guard, so anything that
+     * throws afterwards is lost work nobody will retry. Events are the documented
+     * extension seam, which makes an app listener the likeliest thrower of all.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    public function safely(callable $step, string $what, Billable $billable, array $context = []): void
     {
         try {
             $step();
@@ -497,6 +507,36 @@ class WebhookSupport
                 ...$context,
             ]);
         }
+    }
+
+    /**
+     * Give a billable without a billing country the one its charge was priced with.
+     *
+     * The charge sites fall back to `checkout_country_fallback` when the column is empty
+     * (`ChargeUsageOverageDirectly::charge()` does, and so does the checkout), but the
+     * invoicing side did not: `InvoiceService` read the empty column, `VatCalculationService`
+     * refused it, and the webhook 500ed. Mollie then re-delivered the same payment forever —
+     * money collected, no invoice, no wallet settlement, a customer stuck. Nothing in the
+     * package forbids a null country: the column is nullable and a programmatically
+     * provisioned or imported billable simply may not have one.
+     *
+     * Writing it is deliberate rather than passing it through: the country decided what was
+     * charged, so it is now a fact about this billable, not a per-call default.
+     */
+    public function ensureBillingCountry(Billable $billable): void
+    {
+        if ((string) ($billable->getBillingCountry() ?? '') !== '' || ! ($billable instanceof Model)) {
+            return;
+        }
+
+        $fallback = (string) config('mollie-billing.checkout_country_fallback', 'DE');
+
+        Log::warning('Billable has no billing country — adopting the one the charge was priced with', [
+            'billable_id' => $billable->getKey(),
+            'country' => $fallback,
+        ]);
+
+        $billable->forceFill(['billing_country' => $fallback])->save();
     }
 
     public function notifyInvoiceAvailable(Billable $billable, BillingInvoice $invoice): void
@@ -594,13 +634,13 @@ class WebhookSupport
      * and a return: no event, no alert, and a return page that span to a timeout. The
      * cheapest fix for the customer is an operator who knows within seconds.
      */
-    public function reportSkippedActivation(Billable $billable, object $payment, string $context): void
+    public function reportSkippedActivation(Billable $billable, object $payment, string $context, ?string $reason = null): void
     {
         $paymentId = (string) ($payment->id ?? '');
         $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
         $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
         $status = $billable->getBillingSubscriptionStatus()->value;
-        $reason = 'Mandate captured but the subscription was not activated: status '.$status.' is not activatable';
+        $reason ??= 'Mandate captured but the subscription was not activated: status '.$status.' is not activatable';
 
         Log::error('Mandate-only activation skipped', [
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,

@@ -17,7 +17,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Daily cron: polls Mollie for stuck pending_prorata_change states older than 24h.
@@ -164,7 +164,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         // invoice existed, and the admin alert said only "deleted after 7 days without
         // webhook" — never that the money had arrived.
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('CleanupStalePendingProrataChangeJob: Mollie unreachable for payment '.$paymentId, ['error' => $e->getMessage()]);
 

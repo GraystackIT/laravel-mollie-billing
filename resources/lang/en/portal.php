@@ -362,6 +362,7 @@ return [
         'trial_ended' => 'Trial ended. Your subscription has been cancelled.',
         'resubscribed' => 'Subscription reactivated.',
         'plan_changed' => 'Plan changed.',
+        'upgrade_single_coupon_only' => 'Only one discount code can be applied when upgrading to a paid plan. Please remove the others and try again.',
         'plan_scheduled' => 'Plan change scheduled for :date.',
         'scheduled_cancelled' => 'Scheduled change has been cancelled.',
         'plan_change_pending_payment' => 'Your subscription is being updated. We\'ll confirm once the transaction is complete.',

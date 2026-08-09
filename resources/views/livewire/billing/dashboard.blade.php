@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -458,11 +459,16 @@ new class extends Component {
         }
 
         $openMismatch = $b->latestOpenCountryMismatch();
+        // Only signals the package can actually invoice. A UK-issued card or a Swiss IP
+        // is an ordinary signal, and offering it let the customer resolve to a country
+        // `VatCalculationService` refuses — which refunded every invoice and then failed
+        // to re-charge, silently. `resolve()` rejects such a country too; filtering here
+        // is what keeps it from being presented as a choice in the first place.
         $allowedFixCountries = $openMismatch !== null
-            ? array_values(array_unique(array_filter([
+            ? array_values(array_filter(array_unique(array_filter([
                 $openMismatch->tax_country_payment ? strtoupper((string) $openMismatch->tax_country_payment) : null,
                 $openMismatch->tax_country_ip ? strtoupper((string) $openMismatch->tax_country_ip) : null,
-            ])))
+            ])), fn (string $country): bool => app(VatCalculationService::class)->isInvoiceable($country)))
             : [];
         $resolvedMismatch = $b->latestResolvedCountryMismatch();
         $endsAt = $b->getBillingSubscriptionEndsAt();

@@ -17,7 +17,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class ChargeUsageOverageDirectly
 {
@@ -64,13 +64,19 @@ class ChargeUsageOverageDirectly
      */
     public function handle(Billable $billable): UsageOverageChargeResult
     {
-        $lineItems = $this->buildLineItemsFromWallets($billable);
-
-        if ($lineItems === []) {
+        // The wallets stay negative until the charge that covers them settles — with
+        // SEPA that is days, not seconds — so rebuilding line items from them while a
+        // payment is in flight bills the same debt again. `safeCharge()` and
+        // `handleExplicit()` both guarded that; this entry point did not, and it is the
+        // one an immediate cancellation goes through: the nightly sweep created the
+        // period-end payment, the customer cancelled the next morning, and Mollie
+        // collected both. The webhook cannot absorb it either — its idempotency is per
+        // payment id, so each settles into its own invoice and credits the units again.
+        if ($this->anotherChargeIsInFlight($billable)) {
             return UsageOverageChargeResult::nothingToCharge();
         }
 
-        return $this->charge($billable, $lineItems);
+        return $this->chargeFromWallets($billable);
     }
 
     /**
@@ -94,22 +100,58 @@ class ChargeUsageOverageDirectly
         // overwritten payment then acted on the new one: the *new* line items were charged a
         // second time while the overwritten charge's units were never recovered and were
         // invisible even to the stale-snapshot sweep, which only polls the id in the slot.
+        if ($this->anotherChargeIsInFlight($billable)) {
+            // Not an exception: the plan change itself is legitimate and must go through. The
+            // excess stays on the wallet as a negative balance, which the next period-end
+            // sweep charges once the slot is free.
+            return UsageOverageChargeResult::nothingToCharge();
+        }
+
+        return $this->charge($billable, $lineItems);
+    }
+
+    /**
+     * Whether a previous overage charge is still waiting for its webhook.
+     *
+     * `subscription_meta.usage_overage` is a single slot, so a second charge does not
+     * merely duplicate the money — it overwrites the first one's snapshot, inheriting
+     * its `created_at`, its dunning cycle and its counted-payments list, and leaving the
+     * overwritten payment invisible to `CleanupStalePendingOverageChargeJob`, which only
+     * ever polls the id currently in the slot.
+     */
+    private function anotherChargeIsInFlight(Billable $billable): bool
+    {
         $meta = $billable->getBillingSubscriptionMeta();
         $inFlight = (array) ($meta[self::META_KEY] ?? []);
         $inFlightPaymentId = (string) ($inFlight['payment_id'] ?? '');
 
-        if ($inFlightPaymentId !== ''
-            && ($meta['usage_overage_status'] ?? null) === self::STATUS_PENDING
-            && ! $this->pendingChargeIsSettled($billable)
+        if ($inFlightPaymentId === ''
+            || ($meta['usage_overage_status'] ?? null) !== self::STATUS_PENDING
+            || $this->pendingChargeIsSettled($billable)
         ) {
-            Log::warning('Refusing a plan-change overage charge while another is still in flight', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'in_flight_payment_id' => $inFlightPaymentId,
-            ]);
+            return false;
+        }
 
-            // Not an exception: the plan change itself is legitimate and must go through. The
-            // excess stays on the wallet as a negative balance, which the next period-end
-            // sweep charges once the slot is free.
+        Log::warning('Refusing an overage charge while another is still in flight', [
+            'billable' => $billable instanceof Model ? $billable->getKey() : null,
+            'in_flight_payment_id' => $inFlightPaymentId,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Charge whatever the wallets currently owe, without the in-flight guard.
+     *
+     * Only the retry path may use this: it is driven by the snapshot of the charge
+     * that is in flight, so refusing on account of that same snapshot would make the
+     * retry a no-op forever.
+     */
+    private function chargeFromWallets(Billable $billable): UsageOverageChargeResult
+    {
+        $lineItems = $this->buildLineItemsFromWallets($billable);
+
+        if ($lineItems === []) {
             return UsageOverageChargeResult::nothingToCharge();
         }
 
@@ -143,7 +185,7 @@ class ChargeUsageOverageDirectly
             return $this->charge($billable, $lineItems);
         }
 
-        return $this->handle($billable);
+        return $this->chargeFromWallets($billable);
     }
 
     /**
@@ -369,7 +411,7 @@ class ChargeUsageOverageDirectly
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountValue = BillingMoney::mollieAmount((int) $vat['gross'], $currency);
 
-        return Mollie::send(new CreatePaymentRequest(
+        return MollieCall::send(new CreatePaymentRequest(
             description: 'Usage overage',
             amount: new Money($currency, $amountValue),
             metadata: [

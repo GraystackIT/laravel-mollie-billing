@@ -161,8 +161,15 @@ class MollieBillingServiceProvider extends ServiceProvider
         // their tenant prefix/middleware. BillingRoute auto-detects any
         // wrapping name prefix at runtime.
         //
-        // Admin routes are tenant-agnostic, so they can be auto-loaded safely.
-        $this->loadRoutesFrom(__DIR__.'/../routes/admin.php');
+        // Admin routes are tenant-agnostic, so they can be auto-loaded safely — but an app
+        // that wants them under its own middleware stack has to be able to turn that off.
+        // Calling `MollieBilling::adminRoutes()` on top does not replace these: both
+        // registrations carry the same URIs and these were registered first, so they match
+        // first and the app's stack never runs. The README's instruction only works with
+        // the auto-load disabled.
+        if (config('mollie-billing.routes.auto_load_admin', true)) {
+            $this->loadRoutesFrom(__DIR__.'/../routes/admin.php');
+        }
 
         // The blocked-country page must be reachable without tenant context,
         // auth, or any of the package middleware (otherwise the IP block

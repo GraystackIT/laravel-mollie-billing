@@ -172,3 +172,23 @@ it('rejects a non-integer overage price that is not the explicit false', functio
         ->expectsOutputToContain('must be a non-negative integer, or `false`')
         ->assertExitCode(1);
 });
+
+it('does not fail a config whose plans simply declare no tier', function (): void {
+    // `tier` is documented as being for the consuming app's own use — the package derives
+    // up/downgrade from the prorata amounts and never reads it. A config without it works
+    // in every respect, so failing the command over it blocked deploys on a field that
+    // changes nothing. It is still validated when present, and duplicates still warn.
+    $plans = config('mollie-billing-plans.plans');
+    unset($plans['pro']['tier']);
+    config()->set('mollie-billing-plans.plans', $plans);
+
+    $this->artisan('billing:check-config')->assertExitCode(0);
+});
+
+it('still errors on a tier that is not an integer', function (): void {
+    config()->set('mollie-billing-plans.plans.pro.tier', 'two');
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('tier must be an integer')
+        ->assertExitCode(1);
+});

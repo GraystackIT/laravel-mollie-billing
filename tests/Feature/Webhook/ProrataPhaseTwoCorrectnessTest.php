@@ -269,7 +269,7 @@ it('queues a retry when the Phase-2 PATCH fails', function (): void {
         public function updateForIntent(
             GraystackIT\MollieBilling\Contracts\Billable $billable,
             GraystackIT\MollieBilling\Services\Billing\PlanChangeIntent $intent,
-        ): void {
+        ): bool {
             throw new RuntimeException('Mollie is down');
         }
     });

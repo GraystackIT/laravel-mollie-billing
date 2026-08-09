@@ -540,6 +540,7 @@ return [
             'justification_too_long' => 'The justification may be at most :max characters long.',
             'confirm' => 'Confirm resolve',
             'invalid_country' => 'Please choose or enter a valid 2-letter country code before confirming.',
+            'country_not_invoiceable' => 'VAT cannot be calculated for :country, so the corrected invoices could never be issued. Configure it under additional_countries or choose another country.',
             'unresolvable' => 'Could not resolve the mismatch. Check the error and try again.',
             'resolved' => 'Mismatch resolved. Refunds and reissues have been queued at Mollie — invoices will appear once Mollie confirms the payments.',
         ],

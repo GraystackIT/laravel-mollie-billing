@@ -8,7 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use Illuminate\Database\Eloquent\Model;
 use Mollie\Api\Http\Requests\CreateCustomerRequest;
 use Mollie\Api\Http\Requests\UpdateCustomerRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class MollieCustomerResolver
 {
@@ -20,7 +20,7 @@ class MollieCustomerResolver
             return $existing;
         }
 
-        $customer = Mollie::send(new CreateCustomerRequest(
+        $customer = MollieCall::send(new CreateCustomerRequest(
             name: $billable->getBillingName(),
             email: $billable->getBillingEmail(),
             metadata: [
@@ -47,7 +47,7 @@ class MollieCustomerResolver
             return;
         }
 
-        Mollie::send(new UpdateCustomerRequest(
+        MollieCall::send(new UpdateCustomerRequest(
             id: $customerId,
             name: $billable->getBillingName(),
             email: $billable->getBillingEmail(),

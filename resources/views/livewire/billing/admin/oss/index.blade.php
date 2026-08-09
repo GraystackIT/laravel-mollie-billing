@@ -21,11 +21,16 @@ new class extends Component {
             return;
         }
 
+        // Nothing unwinds a run whose process was killed, so before deciding that one is
+        // in flight, the rows that only claim to be get written off. Without it a single
+        // dead run blocked the export screen permanently — see BillingOssExport.
+        BillingOssExport::reclaimAbandonedRuns();
+
         // Reject if there's already a pending export for this year — the table
         // is auto-refreshing via wire:poll, so the user sees the spinner spin.
         $hasPending = BillingOssExport::query()
             ->where('year', $year)
-            ->whereIn('status', [OssExportStatus::Queued, OssExportStatus::Processing])
+            ->running()
             ->exists();
 
         if ($hasPending) {
@@ -79,7 +84,7 @@ new class extends Component {
             ->get();
 
         $hasPending = BillingOssExport::query()
-            ->whereIn('status', [OssExportStatus::Queued, OssExportStatus::Processing])
+            ->running()
             ->exists();
 
         return [

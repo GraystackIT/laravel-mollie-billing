@@ -15,11 +15,22 @@ This document explains how the package calculates VAT, validates VAT numbers (UI
 
 ## VAT calculation
 
-`VatCalculationService::calculate(string $country, int $netAmount, ?string $vatNumber = null)` is the single entry point used by all pricing code (subscription, addons, overage, one-time charges).
+`VatCalculationService::calculate(string $country, int $netAmount, ?Billable $billable = null)` is the single entry point used by all pricing code (subscription, addons, overage, one-time charges).
 
 Resolution order:
 
-1. **Reverse-charge** — when a non-empty `$vatNumber` is passed and the destination is an EU country, the service runs the VIES live check. If valid → VAT = 0, gross = net, rate = 0. Returns immediately.
+1. **Reverse-charge** — when a `$billable` is passed, the destination is an EU country and `reverseChargeApplies()` says so → VAT = 0, gross = net, rate = 0. Returns immediately.
+
+   `calculate()` never talks to VIES. It reads the billable's *persisted* validation
+   (`billing_vat_validations`, `valid = true`), which is written when the VAT number is
+   checked — during checkout or in the billing-data form. Pricing must not depend on a
+   third-party service being reachable at the moment a price is quoted.
+
+   Reverse-charge is also refused for a **domestic supply**: if either the validated
+   customer country or the invoice country equals `mollie-billing.vat.seller_country`,
+   VAT is charged as normal. Without a configured seller country the domestic check
+   cannot run: reverse-charge is then granted unless `mollie-billing.vat.require_seller_country`
+   is `true` (and always refused when the configured value is not a usable ISO alpha-2 code).
 2. **VAT rate lookup** — `vatRateFor($country)` resolves in this order:
     - `config('mollie-billing.vat_rate_overrides.{COUNTRY}')`
     - `config('mollie-billing.additional_countries.{COUNTRY}.vat_rate')`
@@ -122,10 +133,19 @@ The self-service modal asks the user for the correct invoice address and a count
 
 The address-edit page (`billing-data.blade.php`) disables the country dropdown while a Pending mismatch exists and surfaces a hint banner pointing back to the dashboard. The `save()` action is a defence-in-depth gate: even direct wire calls cannot change the country while the mismatch is open.
 
+**When `check()` runs matters.** It is not a read — a mismatch flags, and flagging cancels the
+subscription at period end and writes `Cancelled` straight away. Every caller therefore runs it
+**after** the payment it accompanies has been fully booked (`FirstPaymentArtifacts`,
+`MandateOnlyPaymentHandler`, and `SubscriptionPaymentHandler` since 0.4). Calling it earlier
+made the renewal's own booking see a dead subscription: no wallet recharge, no period advance,
+an admin alert about money collected for a subscription that no longer runs, and a customer
+locked out of the period they had just paid for.
+
 ### Resolve flow (`CountryMatchService::resolve()`)
 
 Triggered from the user modal or the admin override. Steps, in order:
 
+0. **Refuse a country the package cannot invoice.** Before a single refund goes out, the chosen country is probed through `VatCalculationService::calculate()` — the one owner of "is this country billable" — and a `NonEuCountryException` aborts the resolve with nothing changed. This is not a theoretical case: the mismatch's own signals are exactly where a UK-issued card or a Swiss IP lands, and both selectors offered them. Because step 3's failure is swallowed (see *Idempotency* below), choosing such a country used to refund the customer in full, never re-charge, and leave a `billing_country` that makes every later checkout, resubscribe and renewal throw. Both the portal modal and the admin modal filter their options on `VatCalculationService::isInvoiceable()`, so an unbillable signal is never presented; configure the country under `mollie-billing.additional_countries` if you do invoice there.
 1. **Refund every linked invoice** (filter: `mismatch_id = $mismatch->id` AND `invoice_kind != Refund` AND `amount_net > 0` AND `remainingRefundableNet() > 0`). Each refund goes through `RefundInvoiceService::refundFully()` with `RefundReasonCode::BillingError`, which creates a local credit note and calls Mollie's refund API. The credit-note serial is captured per original invoice for the reissue PDF.
 
    The "anything left to refund" gate reads `BillingInvoice::remainingRefundableNet()`, i.e. the *effective* refunded net (`max(refunded_net, sum of credit-note lines pointing at this invoice)`) — never the `refunded_net` column alone. A credit note written by a path that did not update that cache column (legacy pro-rata refunds) leaves it at 0, the gate would wave the invoice through to `refundFully()`, and the resulting `Refund amount must be positive.` is rethrown and aborts the entire resolve — leaving the mismatch Pending with no way out for the customer.
@@ -155,7 +175,7 @@ The user can retry the resolve modal. The retry path through `retryPendingReissu
 
 ### Admin override
 
-The admin portal's mismatch list still has Pending and Resolved tabs. The Pending resolve modal lets an admin pick the user-, payment-, or IP-derived country, **or** enter any ISO-2 code freely (admins know the context). The chosen country goes through the same `CountryMatchService::resolve()` path as the user modal. `resolved_by_user_id` records the operator.
+The admin portal's mismatch list still has Pending and Resolved tabs. The Pending resolve modal lets an admin pick the user-, payment-, or IP-derived country, **or** enter any ISO-2 code freely (admins know the context) — as long as the package can invoice it; anything else is refused with a translated message rather than the service's exception. The chosen country goes through the same `CountryMatchService::resolve()` path as the user modal. `resolved_by_user_id` records the operator.
 
 The admin modal additionally **requires** a free-text justification (max 500 characters). It is stored at `subscription_meta.tax_country_verified.justification` and lands in the `country_mismatch_resolved` audit entry alongside `chosen_country`, so the trail records not just that a resolution happened but which country won and on what grounds. That justification is what allows an ISO-2 code matching none of the three signals to be accepted at all — the user-facing modal has no such freedom.
 

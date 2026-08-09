@@ -97,6 +97,15 @@ return [
     // for every currency.
     'currency_symbol' => env('BILLING_CURRENCY_SYMBOL'),
 
+    'routes' => [
+        // The admin panel's routes (`/billing/admin/*`) are registered by the service
+        // provider. Set this to false when you mount them yourself with
+        // `MollieBilling::adminRoutes()` inside your own route group — otherwise both
+        // registrations exist, the auto-loaded ones match first, and your middleware
+        // stack never runs.
+        'auto_load_admin' => env('BILLING_AUTO_LOAD_ADMIN_ROUTES', true),
+    ],
+
     // Invoice PDF generation and storage. PDFs are generated locally via elegantly/laravel-invoices
     // and stored on the configured Laravel filesystem disk.
     'invoices' => [
@@ -168,13 +177,20 @@ return [
     // Default for Billable::allowsBillingOverage() — overridable per billable.
     'allow_overage_default' => env('BILLING_ALLOW_OVERAGE', true),
 
-    // Controls how plan changes are applied:
-    // Immediate    — always applied immediately (with prorata billing)
-    // EndOfPeriod  — always scheduled for the end of the current period
-    // UserChoice   — the user decides (both options shown in the portal)
-    'plan_change_mode' => PlanChangeMode::from(
-        env('BILLING_PLAN_CHANGE_MODE', PlanChangeMode::UserChoice->value)
-    ),
+    // Controls how plan changes are applied. Note the values are the snake_case
+    // backing values, not the enum case names:
+    // immediate      — always applied immediately (with prorata billing)
+    // end_of_period  — always scheduled for the end of the current period
+    // user_choice    — the user decides (both options shown in the portal)
+    //
+    // `tryFrom`, not `from`: this file is evaluated inside the service provider's
+    // `mergeConfigFrom()`, so a typo in the env value used to throw a ValueError during
+    // `register()` — every request and every artisan call dead, including the
+    // `billing:check-config` that would have named the problem. It degrades to the
+    // default instead, and check-config reports the offending raw value.
+    'plan_change_mode' => PlanChangeMode::tryFrom(
+        strtolower(trim((string) env('BILLING_PLAN_CHANGE_MODE', PlanChangeMode::UserChoice->value)))
+    ) ?? PlanChangeMode::UserChoice,
 
     // Mollie API key. When set, propagates to `mollie.key` so the underlying
     // `mollie/laravel-mollie` package picks it up. Leave empty to keep using

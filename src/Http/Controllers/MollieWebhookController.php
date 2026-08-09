@@ -30,7 +30,7 @@ use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class MollieWebhookController extends Controller
 {
@@ -313,7 +313,7 @@ class MollieWebhookController extends Controller
     protected function fetchPayment(string $paymentId): object
     {
         try {
-            return Mollie::send(new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId));
+            return MollieCall::send(new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId));
         } catch (\Mollie\Api\Exceptions\ApiException $e) {
             if (method_exists($e, 'getCode') && $e->getCode() === 404) {
                 throw new PaymentNotFoundException($paymentId);

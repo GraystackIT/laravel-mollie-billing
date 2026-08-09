@@ -121,11 +121,11 @@ class SubscriptionPaymentHandler
             $billable->forceFill(['tax_country_payment' => $newPaymentCountry])->save();
         }
 
-        try {
-            $this->countryMatchService->check($billable);
-        } catch (\Throwable $e) {
-            Log::warning('Country match check failed during recurring', ['error' => $e->getMessage()]);
-        }
+        // The three-way country check runs at the END of this method, not here — see the
+        // call site below. `tax_country_payment` is written now because everything that
+        // follows may read it; the *check* must not, because flagging a mismatch cancels
+        // the subscription and this renewal would then be treated as money arriving for a
+        // subscription that no longer runs.
 
         $seats = $this->catalog->includedSeats($planCode) + $extraSeats;
         $expectedNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
@@ -383,9 +383,17 @@ class SubscriptionPaymentHandler
         // row said n and the next renewal rebuilt its lines from the stale count.
         $this->mutateBillingMeta(
             $billable,
-            static function (array $meta) use ($derivedSeatCount, $wasPastDue): array {
+            static function (array $meta) use ($derivedSeatCount, $wasPastDue, $wasTrial, $periodStartsAt): array {
                 if ($derivedSeatCount !== null) {
                     $meta['seat_count'] = $derivedSeatCount;
+                }
+
+                // When the trial ended, as a fact rather than something to infer later.
+                // The conversion nulls `trial_ends_at`, so a converted trial leaves every
+                // cohort keyed on that column — which made the admin dashboard's
+                // trial-conversion tile read 0 % for a business converting everyone.
+                if ($wasTrial) {
+                    $meta['trial_converted_at'] = $periodStartsAt->toIso8601String();
                 }
 
                 // A successful recurring charge recovers a PastDue billable — drop the
@@ -427,6 +435,24 @@ class SubscriptionPaymentHandler
         }
 
         $this->support->notifyInvoiceAvailable($billable, $invoice);
+
+        // Last, once the renewal is fully booked — the same ordering
+        // `FirstPaymentArtifacts::runCountryMatchCheck()` and
+        // `MandateOnlyPaymentHandler::activateAfterMandate()` already use.
+        //
+        // `check()` is not a read: a mismatch calls `flag()`, which cancels the
+        // subscription at period end and writes status Cancelled immediately. Run before
+        // the booking — as it was — that made `isBillableState()` false a few lines later,
+        // so the renewal returned through `reportRenewalForEndedSubscription()`: an admin
+        // alert saying Mollie had collected for a dead subscription, no wallet recharge, no
+        // period advance, and a customer who had just paid locked out for the period they
+        // bought. And it needs only the ordinary drift the mismatch flow exists for — a
+        // declared AT with a card and an IP that both say DE.
+        try {
+            $this->countryMatchService->check($billable);
+        } catch (\Throwable $e) {
+            Log::warning('Country match check failed during recurring', ['error' => $e->getMessage()]);
+        }
     }
 
     /**
