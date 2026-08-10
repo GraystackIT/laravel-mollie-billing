@@ -45,6 +45,10 @@ class PerLineVatFakeWebhookController extends MollieWebhookController
 }
 
 beforeEach(function (): void {
+    // The overage charge carries a stable idempotency key, so a retry cannot buy a second
+    // payment for the same debt — see MollieCall::send() and ChargeUsageOverageDirectly.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+
     PerLineVatFakeWebhookController::$nextPayment = null;
     $this->app->bind(MollieWebhookController::class, PerLineVatFakeWebhookController::class);
 

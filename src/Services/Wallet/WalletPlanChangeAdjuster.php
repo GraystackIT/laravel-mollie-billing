@@ -231,6 +231,27 @@ class WalletPlanChangeAdjuster
         try {
             $result = $this->overageService->handleExplicit($billable, $overageLineItems);
         } catch (\Throwable $e) {
+            // Restoring the excess assumes the charge did not happen. After a throw that is not
+            // known: `charge()` posts the payment before it can store the id, so a read timeout
+            // on the response leaves a payment Mollie may well be collecting. Putting the debt
+            // back on the wallet then had the next nightly sweep charge it a second time while
+            // the first payment settled into its own invoice — and for a plan-change line the
+            // webhook does not credit the units back (`settles_wallet: false`), so nothing
+            // cancelled it out. The customer paid twice.
+            //
+            // The debt stays where `handleExplicit()` left it — in the pending snapshot, marked
+            // as unknown — and `CleanupStalePendingOverageChargeJob` asks Mollie which of the
+            // two happened.
+            if ($this->overageService->paymentMayExist($billable)) {
+                Log::error('Plan-change overage charge failed after the payment was posted — leaving the debt for reconciliation', [
+                    'billable_id' => $billable->getKey(),
+                    'line_items' => $overageLineItems,
+                    'exception' => $e->getMessage(),
+                ]);
+
+                return;
+            }
+
             $this->restoreUnchargedExcess($billable, $overageLineItems, 'exception: '.$e->getMessage());
 
             return;

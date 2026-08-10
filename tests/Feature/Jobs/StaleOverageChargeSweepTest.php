@@ -102,6 +102,44 @@ it('leaves a charge that is still young alone', function (): void {
         ->toBe(ChargeUsageOverageDirectly::STATUS_PENDING);
 });
 
+it('books a paid charge whose webhook was lost, by replaying the delivery', function (): void {
+    // The branch that recovers money: Mollie collected, the delivery never arrived, and the
+    // only correct way to book it is the path the webhook itself would have taken. It used
+    // to get there by reflecting into a protected controller method — with no test at all,
+    // so a rename would have broken the recovery silently and the charge would have been
+    // written off as uncollected instead.
+    \Illuminate\Support\Facades\Storage::fake('local');
+    config()->set('mollie-billing.invoices.disk', 'local');
+
+    $billable = stalledOverageBillable(ageHours: 100);
+
+    Mollie::shouldReceive('send')->andReturn((object) [
+        'id' => 'tr_stalled',
+        'status' => 'paid',
+        'amount' => (object) ['value' => '4.40', 'currency' => 'EUR'],
+        'amountRefunded' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'paidAt' => BillingTime::nowUtc()->toIso8601String(),
+        'metadata' => [
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+            'type' => 'overage',
+        ],
+        'countryCode' => 'DE',
+    ]);
+
+    app(CleanupStalePendingOverageChargeJob::class)->handle();
+
+    // The invoice the lost webhook owed the customer, for the amount that actually cleared.
+    $invoice = BillingInvoice::query()->where('mollie_payment_id', 'tr_stalled')->sole();
+
+    expect((int) $invoice->amount_gross)->toBe(440)
+        ->and($invoice->status)->toBe(InvoiceStatus::Paid);
+
+    // …and the snapshot is gone, so the next cycle can charge again.
+    expect($billable->fresh()->getBillingSubscriptionMeta())
+        ->not->toHaveKey(ChargeUsageOverageDirectly::META_KEY);
+});
+
 it('writes off a charge Mollie reports as failed, so the next cycle is free', function (): void {
     $billable = stalledOverageBillable(ageHours: 100);
 

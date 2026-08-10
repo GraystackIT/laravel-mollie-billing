@@ -19,6 +19,10 @@ use Mollie\Laravel\Facades\Mollie;
 // ask whether a payment is already in flight, or the same debt goes to Mollie twice.
 
 beforeEach(function (): void {
+    // The overage charge carries a stable idempotency key, so a retry cannot buy a second
+    // payment for the same debt — see MollieCall::send() and ChargeUsageOverageDirectly.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+
     config()->set('mollie-billing-plans.plans.pro', [
         'name' => 'Pro',
         'tier' => 2,

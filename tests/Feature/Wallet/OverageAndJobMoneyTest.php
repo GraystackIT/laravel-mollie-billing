@@ -35,6 +35,10 @@ class JobMoneyFakeWebhookController extends MollieWebhookController
 }
 
 beforeEach(function (): void {
+    // The overage charge carries a stable idempotency key, so a retry cannot buy a second
+    // payment for the same debt — see MollieCall::send() and ChargeUsageOverageDirectly.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+
     Storage::fake('local');
     config()->set('mollie-billing.invoices.disk', 'local');
 

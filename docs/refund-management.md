@@ -217,6 +217,7 @@ This makes refunds identifiable in the Mollie dashboard.
 |------|------------|
 | `RefundInvoiceService::refund()` | Cache lock per invoice (`billing:invoice-refund:{id}`, `RefundInProgressException` for the loser) + `lockForUpdate` and a `remainingRefundableNet()` check inside the short decide/write transactions. The Mollie call and the PDF render sit between them, with nothing held — a transaction across them could be rolled back after the money had moved, and the retry then refunded again. |
 | `InvoiceService::createRefund()` | Per-line idempotency token (stable across retries) + clamp against `effectiveRefundedNet()` |
+| Any Mollie call with a stable key | `MollieCall::send($request, $key)` sets it on the shared client and clears it in a `finally`. The SDK clears the key from a *response* middleware, which a throw never reaches — so a failed call used to leave its key behind and the next mutating request carried it, getting this operation's cached response or a 400 for reusing a key with different parameters. Mollie caches a key for **one hour**. |
 | Webhook sync | Deduplication by Mollie refund ID in `mollie_payment_id` |
 | Chargeback sync | Deduplication by Mollie chargeback ID in the credit note's `line_items` |
 

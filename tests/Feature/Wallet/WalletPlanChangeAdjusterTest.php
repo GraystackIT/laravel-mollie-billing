@@ -15,6 +15,10 @@ use Mollie\Laravel\Facades\Mollie;
  * so anything re-derived from live model state is wrong by construction.
  */
 beforeEach(function (): void {
+    // The overage charge carries a stable idempotency key, so a retry cannot buy a second
+    // payment for the same debt — see MollieCall::send() and ChargeUsageOverageDirectly.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+
     // Pinned so that "15 days ago" and "5 days ago" both start inside a 30-day
     // month: the derived old-period end uses addMonth() (same as
     // HasBilling::nextBillingDate()), which overflows for month-end starts.

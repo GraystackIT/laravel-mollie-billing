@@ -336,6 +336,24 @@ class MollieWebhookController extends Controller
         return $this->support->invoiceAlreadyExistsForPayment($payment);
     }
 
+    /**
+     * Re-run a delivery Mollie made and we lost, from a recovery job.
+     *
+     * `CleanupStalePendingOverageChargeJob` finds a payment Mollie reports as paid whose
+     * webhook never landed, and the only correct way to book it is the very code path the
+     * webhook would have taken — invoice, wallet settlement, events. It used to reach
+     * `route()` through `ReflectionMethod::setAccessible()`, which a rename would have
+     * broken silently at runtime, with nothing to catch it: the replay path had no test.
+     *
+     * Idempotent by the same guards the HTTP entry point relies on, which is what makes it
+     * safe to expose: `invoiceAlreadyExistsForPayment()` short-circuits every handler that
+     * writes an invoice, and the caller has already checked that no invoice exists.
+     */
+    public function replayDelivery(object $payment, ?Billable $billable): void
+    {
+        $this->route($payment, $billable);
+    }
+
     protected function route(object $payment, ?Billable $billable): void
     {
         $status = (string) ($payment->status ?? 'unknown');

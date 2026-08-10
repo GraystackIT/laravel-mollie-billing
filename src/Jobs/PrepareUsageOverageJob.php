@@ -210,22 +210,45 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             ->whereNotNull('subscription_meta')
             ->chunkById(200, function ($billables) use ($billableClass, $chargeService): void {
                 foreach ($billables as $billable) {
-                    $meta = $billable->getBillingSubscriptionMeta();
+                    // Guarded per row, like passes 1, 2 and 4. `chunkById()` walks ascending
+                    // ids and anything thrown here ends the pass — and, escaping `handle()`,
+                    // the passes after it too. So one billable whose snapshot could not be
+                    // read, or one failed `dispatch()` against an unreachable queue, stopped
+                    // every higher id from being retried at all, silently, for a whole day.
+                    try {
+                        $meta = $billable->getBillingSubscriptionMeta();
 
-                    if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
-                        continue;
+                        if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
+                            continue;
+                        }
+
+                        $paymentId = (string) ($chargeService->pendingCharge($billable)['payment_id'] ?? '');
+
+                        if ($paymentId !== '') {
+                            continue;
+                        }
+
+                        // No id because the create-payment call never came back: a payment may
+                        // exist at Mollie. The retry ladder is only safe inside Mollie's
+                        // one-hour idempotency window, and this pass runs nightly — so a retry
+                        // from here would create a second payment for the same debt.
+                        // `CleanupStalePendingOverageChargeJob` owns this snapshot: it asks
+                        // Mollie which of the two happened and either adopts the payment or
+                        // clears the marker so a later cycle can charge again.
+                        if ($chargeService->paymentMayExist($billable)) {
+                            continue;
+                        }
+
+                        RetryUsageOverageChargeJob::dispatch(
+                            $billableClass,
+                            $billable->getKey(),
+                        );
+                    } catch (Throwable $e) {
+                        Log::error('PrepareUsageOverageJob: failed dispatching an overage charge retry', [
+                            'billable_id' => $billable->getKey(),
+                            'exception' => $e->getMessage(),
+                        ]);
                     }
-
-                    $paymentId = (string) ($chargeService->pendingCharge($billable)['payment_id'] ?? '');
-
-                    if ($paymentId !== '') {
-                        continue;
-                    }
-
-                    RetryUsageOverageChargeJob::dispatch(
-                        $billableClass,
-                        $billable->getKey(),
-                    );
                 }
             });
 

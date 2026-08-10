@@ -1325,26 +1325,10 @@ class InvoiceService
      */
     public static function forgetIdempotencyKey(): void
     {
-        self::resetIdempotencyKey();
-    }
-
-    private static function resetIdempotencyKey(): void
-    {
-        try {
-            $client = Mollie::api();
-
-            if (method_exists($client, 'resetIdempotencyKey')) {
-                $client->resetIdempotencyKey();
-
-                return;
-            }
-
-            if (method_exists($client, 'setIdempotencyKey')) {
-                $client->setIdempotencyKey(null);
-            }
-        } catch (\Throwable) {
-            // Nothing to clean up, or nothing that can be.
-        }
+        // One implementation, on the door every Mollie request goes through. It owns the key's
+        // lifetime now that `MollieCall::send()` can set one, and two copies of a cleanup this
+        // subtle would have drifted.
+        MollieCall::forgetIdempotencyKey();
     }
 
     public static function normalizeCurrency(?string $currency): string
@@ -2175,7 +2159,7 @@ class InvoiceService
                 // Whatever happened. The SDK clears the key from a *response*, and a 4xx
                 // is converted to a throw before that runs — leaving the key on the shared
                 // client for the next mutating request to reuse.
-                self::resetIdempotencyKey();
+                self::forgetIdempotencyKey();
             }
 
             $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;

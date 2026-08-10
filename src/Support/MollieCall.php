@@ -57,13 +57,68 @@ final class MollieCall
      * @template T
      *
      * @param  object  $request  a typed Mollie request object
+     * @param  string|null  $idempotencyKey  a key that is *stable across retries of this same
+     *                                       operation*. Mollie replays the original response
+     *                                       for a repeated key instead of acting twice — for
+     *                                       one hour, and only when the parameters are
+     *                                       identical (a mismatch is a 400). See
+     *                                       {@see ChargeUsageOverageDirectly} for the one
+     *                                       caller that has such a key, and why.
      */
-    public static function send(object $request): mixed
+    public static function send(object $request, ?string $idempotencyKey = null): mixed
     {
         self::assertNoOpenTransaction($request);
         self::assertAmountsAreScaled($request);
 
-        return Mollie::send($request);
+        if ($idempotencyKey === null) {
+            return Mollie::send($request);
+        }
+
+        // The SDK already puts an idempotency key on every POST — a *random* one from
+        // `DefaultIdempotencyKeyGenerator`, which guards a duplicated send of one request
+        // object and nothing else: a retry generates a new key and Mollie sees a new payment.
+        // A caller-supplied key supersedes the generator (`ApplyIdempotencyKey` reads
+        // `$connector->getIdempotencyKey()` first), and it has to reach the connector rather
+        // than the request's own headers — the same middleware overwrites that header whenever
+        // a generator is configured, which it always is.
+        Mollie::setIdempotencyKey($idempotencyKey);
+
+        try {
+            return Mollie::send($request);
+        } finally {
+            // Whatever happened. The SDK clears the key from a *response* middleware, and a
+            // throw — which is the very case a stable key exists for — never reaches it, so a
+            // failed call left its key on the shared client and the next mutating request
+            // through it carried it: either answered with this operation's cached response, or
+            // rejected with a 400 for reusing a key with different parameters.
+            self::forgetIdempotencyKey();
+        }
+    }
+
+    /**
+     * Clear any idempotency key left on the shared Mollie client.
+     *
+     * Tolerant by design: the accessor differs across SDK versions and a test double may
+     * expose neither, and failing to clean up a key must never take down the caller that just
+     * moved money.
+     */
+    public static function forgetIdempotencyKey(): void
+    {
+        try {
+            $client = Mollie::api();
+
+            if (method_exists($client, 'resetIdempotencyKey')) {
+                $client->resetIdempotencyKey();
+
+                return;
+            }
+
+            if (method_exists($client, 'setIdempotencyKey')) {
+                $client->setIdempotencyKey(null);
+            }
+        } catch (\Throwable) {
+            // Nothing to clean up, or nothing that can be.
+        }
     }
 
     /**

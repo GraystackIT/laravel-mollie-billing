@@ -392,6 +392,78 @@ the charge, the customer cancels immediately the next morning
 (`CancelSubscription::handle(immediately: true)`, reached from the portal *and* from the
 past-due auto-cancel in `PrepareUsageOverageJob`), and Mollie collected both.
 
+### A retry cannot buy a second payment
+
+The in-flight guard above keys off the persisted `payment_id`, and there is one window where
+that id does not exist yet: `charge()` writes the snapshot, calls Mollie, and only then stores
+the id. A call that throws *after* Mollie created the payment — a read timeout on the response
+is the ordinary case, not an exotic one — leaves a `pending` snapshot with `payment_id: null`,
+which `anotherChargeIsInFlight()` deliberately does not treat as in flight. So
+`RetryUsageOverageChargeJob` came back 60 seconds later and charged the same debt again.
+
+The charge therefore carries an **idempotency key** that is stable across the retries of one
+dunning cycle:
+
+```
+usage-overage:{billable_type}:{billable_id}:{cycle_started_at}:{gross_in_cents}
+```
+
+Mollie replays the original response for a repeated key instead of acting twice, so the retry
+is answered with the payment that already exists and learns the id it lost. Each part earns
+its place:
+
+| Part | Why |
+|---|---|
+| `cycle_started_at` | The snapshot's `created_at`, which `persistPendingCharge()` inherits while a cycle continues and only re-mints after a cycle has failed. So p1 → p2 → p3 of one cycle share a key, and the next cycle's legitimate charge does not. |
+| `gross_in_cents` | Mollie answers **400** to a reused key whose parameters differ. If more usage accrued between two attempts the amount moves, and this makes that a new key rather than a rejected request. |
+| the billable | Two customers can never collide. |
+
+Mollie caches a key for **one hour**. That covers this ladder — `backoff()` is
+`[60, 300, 900]`, so all three retries land inside ~21 minutes — and deliberately not the
+nightly sweep, which is a day later and a genuinely new decision about a debt that is still
+owed. Set through `MollieCall::send($request, $key)`, which also clears it afterwards: the
+SDK clears the key from a *response* middleware, and a throw never reaches that, so a failed
+call would otherwise leave its key on the shared client for the next mutating request to
+carry.
+
+### …and beyond that hour, Mollie is asked
+
+The key protects the retry ladder. It cannot protect the sweep that runs a day later, and that
+is the same debt: a `CreatePaymentRequest` that left the process without an answer leaves a
+`pending` snapshot with `payment_id: null`, which is indistinguishable from "we never asked".
+Both readings cost money — silence the debt, or charge it twice — so the state is marked
+instead of guessed:
+
+```
+subscription_meta.usage_overage.payment_unknown_at   # ISO-8601, set when the answer was lost
+```
+
+While it is set, nobody charges. `anotherChargeIsInFlight()` counts the snapshot as in flight
+even though there is no id to name it by; `WalletPlanChangeAdjuster::chargeDeferredOverage()`
+does **not** hand the excess back to the wallet (doing so is what the next sweep then charged
+a second time, and a plan-change line is never credited back by the webhook because it carries
+`settles_wallet: false`); and `PrepareUsageOverageJob`'s retry pass skips it rather than
+sending it through a ladder that is only safe inside the idempotency window.
+
+`CleanupStalePendingOverageChargeJob` resolves it, by asking the only party that knows —
+Mollie's payment list for that customer:
+
+| Mollie's answer | What happens |
+|---|---|
+| A payment matching the snapshot (metadata `type: overage` + billable, the same gross, created no earlier than the snapshot) | Its id is adopted into the snapshot and the ordinary flow takes over: poll the status, replay a lost `paid` delivery, write off a `failed` one. |
+| No such payment | The request never arrived. The marker is dropped and the debt is an ordinary un-charged one again, chargeable by the next cycle. |
+| 404 / 410 for the customer | The customer was deleted at Mollie, so no payment of theirs survives either. Marker dropped, same as above. |
+| Mollie unreachable | Nothing is decided. Tomorrow's run asks again — an unanswered question is not evidence of absence. |
+
+This branch runs on its own, much shorter clock: `RECONCILE_UNKNOWN_AFTER_HOURS = 1`, against the
+72 hours the other branches wait out. Those 72 hours buy patience for a delivery that is still
+coming (Mollie retries its webhook for hours, a SEPA debit takes days). Here nothing is coming,
+the question is answerable as soon as Mollie can be reached — and until it is answered this
+billable's overage cannot be charged at all, so waiting three days would freeze the money for
+nothing. One hour, so the two cheaper resolutions get to run first: Mollie's idempotency window
+(a key is cached for an hour) and `RetryUsageOverageChargeJob`'s ladder (`[60, 300, 900]`),
+either of which may turn the unknown into a known payment id on its own.
+
 ### A charge whose webhook never arrived
 
 `usage_overage_status = pending` with a `payment_id` means "a charge exists and its outcome

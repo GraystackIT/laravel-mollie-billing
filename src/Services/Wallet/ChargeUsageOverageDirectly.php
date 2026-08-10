@@ -47,6 +47,21 @@ class ChargeUsageOverageDirectly
      */
     public const COUNTED_PAYMENTS_KEY = 'usage_overage_counted_payments';
 
+    /**
+     * Snapshot key meaning "we asked Mollie to create this payment and never learned the
+     * answer" — as opposed to a `payment_id: null` that means "we never got as far as asking".
+     *
+     * The two look identical in the snapshot and must not be treated alike. `charge()` writes
+     * the snapshot, calls Mollie, then stores the id; a throw in between (a read timeout on
+     * the response is the ordinary case) leaves no id although the payment may well exist.
+     * Reading that as "never charged" is what let the debt be restored to the wallet and
+     * charged a second time by the next nightly sweep, while the first payment settled into
+     * its own invoice. So the marker is set instead, nobody charges while it is present, and
+     * `CleanupStalePendingOverageChargeJob` resolves it against Mollie's own payment list —
+     * the only place that knows whether the request arrived.
+     */
+    public const PAYMENT_UNKNOWN_KEY = 'payment_unknown_at';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -125,10 +140,23 @@ class ChargeUsageOverageDirectly
         $inFlight = (array) ($meta[self::META_KEY] ?? []);
         $inFlightPaymentId = (string) ($inFlight['payment_id'] ?? '');
 
-        if ($inFlightPaymentId === ''
-            || ($meta['usage_overage_status'] ?? null) !== self::STATUS_PENDING
-            || $this->pendingChargeIsSettled($billable)
-        ) {
+        if (($meta['usage_overage_status'] ?? null) !== self::STATUS_PENDING) {
+            return false;
+        }
+
+        // A payment whose creation we never got an answer for counts as in flight, even though
+        // there is no id to name it by. Otherwise this guard reads "no id" as "no payment" and
+        // the next sweep charges a debt Mollie may already be collecting.
+        if ($inFlightPaymentId === '' && isset($inFlight[self::PAYMENT_UNKNOWN_KEY])) {
+            Log::warning('Refusing an overage charge while a previous one may already exist at Mollie', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'unknown_since' => (string) $inFlight[self::PAYMENT_UNKNOWN_KEY],
+            ]);
+
+            return true;
+        }
+
+        if ($inFlightPaymentId === '' || $this->pendingChargeIsSettled($billable)) {
             return false;
         }
 
@@ -215,6 +243,111 @@ class ChargeUsageOverageDirectly
      * died before clearing it — without the check, the next retry pass would
      * charge the customer twice for the same overage.
      */
+    /**
+     * Whether a charge was handed to Mollie whose outcome we never learned.
+     *
+     * The one question that separates "this debt was never charged" from "this debt may already
+     * be being collected". Every caller that would otherwise re-derive the debt from the
+     * wallets, or hand it back to them, has to ask it — see
+     * {@see self::PAYMENT_UNKNOWN_KEY}.
+     */
+    public function paymentMayExist(Billable $billable): bool
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (($meta['usage_overage_status'] ?? null) !== self::STATUS_PENDING) {
+            return false;
+        }
+
+        $snapshot = (array) ($meta[self::META_KEY] ?? []);
+
+        return (string) ($snapshot['payment_id'] ?? '') === ''
+            && isset($snapshot[self::PAYMENT_UNKNOWN_KEY]);
+    }
+
+    /**
+     * Record that a create-payment request left this process without an answer.
+     *
+     * Kept on the snapshot rather than beside it, so it travels with the charge it describes
+     * and disappears with it — `persistPendingCharge()` rewrites the whole snapshot when an id
+     * finally arrives, which is exactly when the marker stops being true.
+     */
+    private function markPaymentUnknown(Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta): ?array {
+            $snapshot = (array) ($meta[self::META_KEY] ?? []);
+
+            if ($snapshot === [] || (string) ($snapshot['payment_id'] ?? '') !== '') {
+                // Either there is no snapshot to mark, or an id arrived in the meantime — a
+                // sibling delivery, or the retry that succeeded. Both make the marker false.
+                return null;
+            }
+
+            $snapshot[self::PAYMENT_UNKNOWN_KEY] ??= BillingTime::nowUtc()->toIso8601String();
+            $meta[self::META_KEY] = $snapshot;
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Drop the marker because Mollie has answered: no such payment exists.
+     *
+     * Only `CleanupStalePendingOverageChargeJob` may call this, and only after Mollie itself
+     * has listed the customer's payments — clearing it on a guess would re-open the double
+     * charge the marker exists to prevent.
+     */
+    public function forgetUnknownPayment(Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta): ?array {
+            $snapshot = (array) ($meta[self::META_KEY] ?? []);
+
+            if (! isset($snapshot[self::PAYMENT_UNKNOWN_KEY])) {
+                return null;
+            }
+
+            unset($snapshot[self::PAYMENT_UNKNOWN_KEY]);
+            $meta[self::META_KEY] = $snapshot;
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Adopt a payment Mollie turned out to hold for a snapshot that lost its id.
+     *
+     * The snapshot keeps its `created_at` — this is the same cycle, not a new one — so the
+     * dunning budget and the counted-payments list stay intact.
+     */
+    public function adoptUnknownPayment(Billable $billable, string $paymentId): void
+    {
+        if (! $billable instanceof Model || $paymentId === '') {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId): ?array {
+            $snapshot = (array) ($meta[self::META_KEY] ?? []);
+
+            if ($snapshot === [] || (string) ($snapshot['payment_id'] ?? '') !== '') {
+                return null;
+            }
+
+            $snapshot['payment_id'] = $paymentId;
+            unset($snapshot[self::PAYMENT_UNKNOWN_KEY]);
+            $meta[self::META_KEY] = $snapshot;
+
+            return $meta;
+        });
+    }
+
     public function pendingChargeIsSettled(Billable $billable): bool
     {
         $paymentId = (string) ($this->pendingCharge($billable)['payment_id'] ?? '');
@@ -320,7 +453,20 @@ class ChargeUsageOverageDirectly
         // the wallet balances it was derived from.
         $this->persistPendingCharge($billable, null, $lineItems, $vat);
 
-        $payment = $this->createMolliePayment($billable, $vat, $lineItems);
+        try {
+            $payment = $this->createMolliePayment($billable, $vat, $lineItems, $this->idempotencyKeyFor($billable, $vat));
+        } catch (\Throwable $e) {
+            // The request left this process. Whether Mollie created the payment is now unknown
+            // — and "unknown" must not be read as "no", because the next sweep would charge the
+            // same debt again while the first payment settles into its own invoice. The marker
+            // freezes the debt for `CleanupStalePendingOverageChargeJob` to reconcile against
+            // Mollie's payment list, and the throw still reaches the caller so the retry ladder
+            // runs (inside Mollie's one-hour idempotency window it is answered with the
+            // original payment rather than a second one).
+            $this->markPaymentUnknown($billable);
+
+            throw $e;
+        }
 
         $paymentId = is_object($payment) ? ($payment->id ?? null) : null;
         $this->persistPendingCharge($billable, is_string($paymentId) ? $paymentId : null, $lineItems, $vat);
@@ -406,7 +552,60 @@ class ChargeUsageOverageDirectly
      * @param  array{net:int,vat:int,gross:int,rate:float}  $vat
      * @param  array<int, array<string, mixed>>  $lineItems
      */
-    private function createMolliePayment(Billable $billable, array $vat, array $lineItems): object
+    /**
+     * A key that identifies *this debt in this dunning cycle*, so a retry cannot buy a
+     * second payment for it.
+     *
+     * The failure it exists for: `createMolliePayment()` throws after Mollie already created
+     * the payment — a read timeout on the response is the ordinary case — so no payment id is
+     * ever stored, and `RetryUsageOverageChargeJob` comes back 60 seconds later and charges
+     * the same debt again. Both payments settle, each into its own invoice under the webhook's
+     * per-payment idempotency, and the customer paid twice. With a stable key Mollie replays
+     * the first response instead, and the retry learns the payment id it lost.
+     *
+     * What goes into it, and why each part:
+     *
+     *  - the snapshot's `created_at` is the *cycle* id. `persistPendingCharge()` inherits it
+     *    while a cycle continues and only mints a new one after a cycle has failed, so p1 → p2
+     *    → p3 of one cycle share a key and the next cycle's legitimate charge does not;
+     *  - the gross amount, because Mollie answers 400 to a reused key whose parameters
+     *    differ. If more usage accrued between two attempts the amount moves, and this makes
+     *    that a new key rather than a rejected request;
+     *  - the billable, so two customers can never collide.
+     *
+     * Mollie caches a key for **one hour**. That covers this ladder — `backoff()` is
+     * `[60, 300, 900]`, so all three retries land inside ~21 minutes — and deliberately not
+     * the nightly sweep, which is a day later and a genuinely new decision.
+     *
+     * @param  array{net:int,vat:int,gross:int,rate:float}  $vat
+     */
+    private function idempotencyKeyFor(Billable $billable, array $vat): ?string
+    {
+        if (! $billable instanceof Model) {
+            return null;
+        }
+
+        $cycleStartedAt = (string) ($this->pendingCharge($billable)['created_at'] ?? '');
+
+        if ($cycleStartedAt === '') {
+            // No snapshot to key off. Better no key than an unstable one: a key that changes
+            // per attempt buys nothing, and one that repeats across different charges would
+            // suppress a legitimate second payment.
+            return null;
+        }
+
+        // Readable rather than hashed, like `RefundInvoiceService`'s: when support has to ask
+        // Mollie what happened to a key, the key should say what it was for.
+        return sprintf(
+            'usage-overage:%s:%s:%s:%d',
+            $billable->getMorphClass(),
+            (string) $billable->getKey(),
+            $cycleStartedAt,
+            (int) $vat['gross'],
+        );
+    }
+
+    private function createMolliePayment(Billable $billable, array $vat, array $lineItems, ?string $idempotencyKey = null): object
     {
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $amountValue = BillingMoney::mollieAmount((int) $vat['gross'], $currency);
@@ -424,6 +623,6 @@ class ChargeUsageOverageDirectly
             mandateId: $billable->getMollieMandateId(),
             customerId: $billable->getMollieCustomerId(),
             webhookUrl: route(BillingRoute::webhook()),
-        ));
+        ), $idempotencyKey);
     }
 }

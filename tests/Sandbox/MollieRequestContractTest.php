@@ -10,6 +10,8 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\MollieMandateInspector;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
+use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\MollieCall;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
@@ -193,6 +195,146 @@ class MollieRequestContractTest extends SandboxTestCase
         }
 
         $this->assertSame(0, $count);
+    }
+
+    /**
+     * The whole point of the stable idempotency key: a repeated create-payment request must be
+     * *answered with the first payment*, not create a second one.
+     *
+     * `ChargeUsageOverageDirectly::charge()` posts the payment before it can store the id, so a
+     * read timeout on the response leaves a debt that looks uncharged. The retry ladder then
+     * re-sends it — and this is the contract that decides whether that collects the money twice.
+     * Documented by Mollie; never measured here, which for a claim about not charging customers
+     * twice is not good enough.
+     */
+    public function test_it_answers_a_repeated_idempotency_key_with_the_first_payment(): void
+    {
+        $ids = $this->sandboxCustomerWithMandate();
+        $billable = $this->billableOnSandbox($ids);
+
+        // Deliberately the exact shape `ChargeUsageOverageDirectly::idempotencyKeyFor()` builds,
+        // down to the FQCN's backslashes and the ISO timestamp's colons: Mollie documents no
+        // constraint on the format, so whether those survive as a header value is a fact to
+        // measure rather than assume.
+        $key = sprintf(
+            'usage-overage:%s:%s:%s:100',
+            $billable->getMorphClass(),
+            (string) $billable->getKey(),
+            BillingTime::nowUtc()->toIso8601String(),
+        );
+
+        $this->assertStringContainsString('\\', $key, 'The production key carries a class name; test what production sends.');
+
+        $request = fn (): \Mollie\Api\Http\Requests\CreatePaymentRequest => new \Mollie\Api\Http\Requests\CreatePaymentRequest(
+            description: 'Idempotency contract',
+            amount: new \Mollie\Api\Http\Data\Money('EUR', '1.00'),
+            metadata: ['type' => 'overage', 'billable_id' => (string) $billable->getKey()],
+            sequenceType: 'recurring',
+            mandateId: $ids['mandateId'],
+            customerId: $ids['customerId'],
+        );
+
+        $first = MollieCall::send($request(), $key);
+        $this->trackMollieResource('payment', (string) $first->id, $ids['customerId']);
+
+        // Byte-identical parameters, same key: Mollie must replay rather than charge again.
+        $second = MollieCall::send($request(), $key);
+
+        $this->assertSame(
+            (string) $first->id,
+            (string) $second->id,
+            'Mollie created a SECOND payment for a repeated idempotency key — the retry ladder would double-charge.',
+        );
+    }
+
+    /**
+     * A key must not be reusable for a *different* amount.
+     *
+     * This is why the overage key carries the gross: if more usage accrued between two attempts
+     * the request body moves, and Mollie rejects a reused key whose parameters differ. Without
+     * the amount in the key that rejection would be the retry's answer instead of a payment.
+     */
+    public function test_it_refuses_a_reused_idempotency_key_for_a_different_amount(): void
+    {
+        $ids = $this->sandboxCustomerWithMandate();
+        $billable = $this->billableOnSandbox($ids);
+
+        $key = 'sandbox-idempotency-mismatch:'.bin2hex(random_bytes(6));
+
+        $make = fn (string $value): \Mollie\Api\Http\Requests\CreatePaymentRequest => new \Mollie\Api\Http\Requests\CreatePaymentRequest(
+            description: 'Idempotency mismatch',
+            amount: new \Mollie\Api\Http\Data\Money('EUR', $value),
+            metadata: ['type' => 'overage', 'billable_id' => (string) $billable->getKey()],
+            sequenceType: 'recurring',
+            mandateId: $ids['mandateId'],
+            customerId: $ids['customerId'],
+        );
+
+        $first = MollieCall::send($make('1.00'), $key);
+        $this->trackMollieResource('payment', (string) $first->id, $ids['customerId']);
+
+        $rejected = false;
+
+        try {
+            MollieCall::send($make('2.00'), $key);
+        } catch (\Mollie\Api\Exceptions\ApiException $e) {
+            $rejected = true;
+        }
+
+        $this->assertTrue(
+            $rejected,
+            'Mollie accepted a reused idempotency key with a different amount; the overage key would not need the gross in it.',
+        );
+    }
+
+    /**
+     * The shape `CleanupStalePendingOverageChargeJob::matchLostPayment()` reads.
+     *
+     * When the answer to a create-payment call is lost, that method finds the payment again in
+     * the customer's list — on `metadata.type`, `metadata.billable_id`, `amount.value` and
+     * `createdAt`. The existing list test only proves an *empty* page is iterable; every field
+     * the matcher keys off is asserted here, on a real listed payment. A missing `createdAt`
+     * would silently disable the time guard and let a previous cycle's payment be adopted into
+     * this one — which silences a debt that is still owed.
+     */
+    public function test_it_lists_a_payment_with_the_fields_the_reconciliation_matches_on(): void
+    {
+        $ids = $this->sandboxCustomerWithMandate();
+        $billable = $this->billableOnSandbox($ids);
+
+        $billable->createWallet(['name' => 'SMS', 'slug' => 'SMS'])->forceWithdraw(40);
+
+        $result = app(\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::class)
+            ->handle($billable->refresh());
+
+        $this->assertNotNull($result->paymentId);
+        $this->trackMollieResource('payment', (string) $result->paymentId, $ids['customerId']);
+
+        $listed = null;
+
+        foreach (Mollie::send(new GetPaginatedCustomerPaymentsRequest($ids['customerId'], limit: 50)) as $payment) {
+            if ((string) ($payment->id ?? '') === (string) $result->paymentId) {
+                $listed = $payment;
+                break;
+            }
+        }
+
+        $this->assertNotNull($listed, 'The payment the package just created is not in the customer list the reconciliation reads.');
+
+        $metadata = json_decode(json_encode($listed->metadata ?? []), true) ?: [];
+
+        $this->assertSame('overage', $metadata['type'] ?? null);
+        $this->assertSame((string) $billable->getKey(), (string) ($metadata['billable_id'] ?? ''));
+
+        // 40 SMS at 5 cents is 2.00 net, plus 20% Austrian VAT — the figure the matcher compares
+        // against the snapshot's gross.
+        $this->assertSame('2.40', (string) ($listed->amount->value ?? ''));
+
+        $this->assertNotSame('', (string) ($listed->createdAt ?? ''), 'Without createdAt the matcher cannot tell this cycle from the last one.');
+        $this->assertTrue(
+            BillingTime::toUtc((string) $listed->createdAt)->isAfter(BillingTime::nowUtc()->subHour()),
+            'createdAt must parse as a recent UTC instant, the way matchLostPayment() reads it.',
+        );
     }
 
     public function test_it_revokes_a_mandate(): void

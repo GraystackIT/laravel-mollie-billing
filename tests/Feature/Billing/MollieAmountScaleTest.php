@@ -86,6 +86,11 @@ function scaleTestMollieAmount(object $request): object
 function scaleTestCapture(callable $act): object
 {
     $captured = [];
+
+    // Some of these paths carry a stable idempotency key (the usage-overage charge does — see
+    // MollieCall::send()). The amount is what this file measures, so the key is merely allowed.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+
     Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$captured): object {
         $captured[] = $request;
 
