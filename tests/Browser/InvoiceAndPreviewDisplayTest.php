@@ -111,7 +111,15 @@ class InvoiceAndPreviewDisplayTest extends BrowserTestCase
             $browser->type('vat_number', 'DE129273398');
             $this->waitForPresence($browser, '.text-emerald-700, .dark\\:text-emerald-400', 15);
             $this->clickWire($browser, '[wire\\:click="save"]');
-            $browser->pause(1200);
+
+            // Wait for what the assertion below actually depends on, not for a stopwatch: it is
+            // the *persisted* VIES validation that turns the VAT off, and `save()` writes the
+            // billable and that validation in one transaction. A blank `pause()` here moved on
+            // regardless — including when the write had been rolled back by a SQLite lock, which
+            // then showed up as an invoice carrying 19 % and read like a VAT bug.
+            $browser->waitUsing(15, 200, function () use ($billable): bool {
+                return $billable->fresh()?->currentVatValidation() !== null;
+            }, 'Waited for the VIES validation to be persisted by the billing-data save.');
         });
 
         $this->renewSubscription($billable->refresh(), '9.90');

@@ -150,7 +150,27 @@ Three things the portal's own patterns force, all learned the hard way:
 
 And one about time: **never wait on a stopwatch for something the server decides.**
 The VAT field is debounced and then asks VIES; a `pause(1500)` passed alone and
-failed under load. Wait for the verdict — in that case the validity icon.
+failed under load. Wait for the verdict — in that case the validity icon. And when an
+assertion depends on something being *persisted*, wait for that, not for the screen:
+`test_a_reverse_charged_invoice_shows_no_vat` waited out a `pause(1200)` after the
+billing-data save and then asserted the invoice carried no VAT — which reads like a VAT
+bug the two times the save had in fact been rolled back underneath it.
+
+### `database is locked`, and why `busy_timeout` does not fix it
+
+The two processes share one SQLite file, and `busy_timeout = 10000` covers the ordinary
+case: a writer waits for the other writer to finish. It cannot cover a transaction that
+**reads before it writes**. That one starts as a deferred read transaction and then asks
+to upgrade to a write; if the sibling already holds the write lock, SQLite refuses the
+upgrade *immediately* rather than waiting, because two transactions each holding a read
+lock and each waiting to write is a deadlock. The busy handler is never consulted, so the
+timeout is irrelevant.
+
+`WorkbenchSetting::nextId()` is exactly that shape — it must read the counter to increment
+it — so its writes are wrapped in a bounded retry (`retryingOnLock()`). Two runs of the
+browser suite failed on it, once as the raw lock and once as an invoice that carried VAT
+because the same lock had rolled back the billing-data save. Any new cross-process write
+belongs behind the same retry.
 
 ## Screenshots and the gallery
 
