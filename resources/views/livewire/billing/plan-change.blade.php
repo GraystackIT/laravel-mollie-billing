@@ -1,26 +1,62 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Concerns\ValidatesVatNumber;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
+use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\UpgradeLocalToMollie;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Illuminate\Support\Facades\Cache;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     use ValidatesVatNumber;
 
+    /**
+     * Bound with wire:model.live by the interval toggle, so it cannot be locked — it is
+     * validated instead, in every mutating action. An unknown value is not harmless:
+     * the catalog resolves an absent (plan, interval) pair to a free one, because
+     * `basePriceNet() ?? 0` plus `seatPriceNet() ?? null` makes `isFreePlan()` true.
+     * `ValidateSubscriptionChange` only rejects *hidden* plans, not absent ones.
+     */
     public string $selectedInterval = 'monthly';
+
+    /**
+     * Deliberately NOT #[Locked], and not because a lock would be lost — a probe
+     * confirms a locked property assigned server-side survives every later round-trip
+     * untouched, and only a *client* write is rejected. The reason is simpler: the plan
+     * selector is exactly where the customer is meant to write, so locking this would
+     * break the feature outright.
+     *
+     * A lock would also answer the wrong question. "Did the client change this" is not
+     * the risk; "is this a plan they may actually have" is — an unknown code or an
+     * interval priced as free turns a paid subscription into a downgrade-to-free.
+     * `assertSelectionIsValid()` carries that, and must run in every action that acts
+     * on this property.
+     */
     public ?string $selectedPlan = null;
+
+    /**
+     * Rendered pricing preview, produced by PreviewService. Locked because it is
+     * server-computed output, never input — `confirmAndPay()` used to read the
+     * Mollie charge amount straight out of it, which made a €99 plan buyable for
+     * a cent. It recomputes now, but the lock keeps every other reader honest too.
+     */
+    #[Locked]
     public array $preview = [];
     public bool $wasPending = false;
     public bool $dropExtraSeats = false;
@@ -41,12 +77,36 @@ new class extends Component {
     public string $billing_city = '';
     public string $billing_country = 'AT';
     public ?string $vat_number = null;
+
+    /** Outcome of the last server-side VIES check — locked so the client cannot claim reverse charge. */
+    #[Locked]
     public ?bool $vatNumberValid = null;
     public ?string $vatStatusMessage = null;
 
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's current plan, seats,
+     * addons, billing address or the pro-rata preview (which names invoice serials in its
+     * refund-cap notices). Withholding the billable leaves the preview empty, while the
+     * mutating actions keep resolving it unguarded so they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function updatedSelectedInterval(): void
@@ -76,6 +136,53 @@ new class extends Component {
             $catalog->allPlans(),
             fn (string $code): bool => ! $catalog->planIsHidden($code) || $code === $ownPlan,
         ));
+    }
+
+    /**
+     * Guard for every action that reaches UpdateSubscription. The plan must be one this
+     * billable may actually select, and the interval must be one the catalog knows —
+     * otherwise the (plan, interval) lookup silently prices as free and the change is
+     * executed as a downgrade, complete with a Mollie refund.
+     */
+    protected function assertSelectionIsValid(?Billable $billable = null): bool
+    {
+        $intervals = array_map(fn (SubscriptionInterval $i): string => $i->value, SubscriptionInterval::cases());
+
+        if (! in_array($this->selectedInterval, $intervals, true)) {
+            $this->rejectSelection();
+
+            return false;
+        }
+
+        if ($this->selectedPlan !== null && ! in_array($this->selectedPlan, $this->selectablePlans($billable), true)) {
+            $this->rejectSelection();
+
+            return false;
+        }
+
+        // A known interval is not necessarily one this plan is sold in. An interval
+        // the plan does not offer carries no price, so the change would be priced as
+        // a downgrade to free — including a real Mollie refund of the current period.
+        $targetPlan = $this->selectedPlan ?? $billable?->getBillingSubscriptionPlanCode();
+        if ($targetPlan !== null && $targetPlan !== ''
+            && ! app(SubscriptionCatalogInterface::class)->planOffersInterval($targetPlan, $this->selectedInterval)
+        ) {
+            $this->rejectSelection();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Flux Pro is a hard runtime dependency but ships under `suggest`, so it is absent
+     * from this package's own test environment — and a guard that cannot run under test
+     * is a guard nobody can prove works.
+     */
+    private function rejectSelection(): void
+    {
+        $this->toast(__('billing::portal.flash.error'), 'danger');
     }
 
     public function previewFor(string $planCode, PreviewService $service): void
@@ -116,7 +223,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable || ! $this->selectedPlan) {
             return;
         }
@@ -227,6 +334,7 @@ new class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
@@ -242,7 +350,7 @@ new class extends Component {
 
     private function refreshPreview(PreviewService $service): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable || ! $this->selectedPlan) {
             return;
         }
@@ -271,10 +379,10 @@ new class extends Component {
 
         try {
             $service->cancelScheduledChange($billable);
-            \Flux::toast(__('billing::portal.flash.scheduled_cancelled'), variant: 'success');
+            $this->toast(__('billing::portal.flash.scheduled_cancelled'), 'success');
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -287,14 +395,31 @@ new class extends Component {
 
         try {
             $service->cancelPendingPlanChange($billable);
-            \Flux::toast(__('billing::portal.flash.pending_change_cancelled'), variant: 'success');
+            $this->toast(__('billing::portal.flash.pending_change_cancelled'), 'success');
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
-    public function applyScheduledNow(UpdateSubscription $service): void
+    /**
+     * "Apply the scheduled change now" — the period-end path, run early.
+     *
+     * Delegated to `ScheduleSubscriptionChange::apply()`, which is the same code the daily
+     * dispatcher runs, rather than reassembling the payload here. The hand-rolled version
+     * got four things wrong, all of them losing the customer's change:
+     *
+     *  - it cancelled the scheduled change BEFORE attempting it, and never restored it, so
+     *    any failure deleted a change the customer had booked;
+     *  - it passed `apply_at => immediate` without `internal`, so on an install with
+     *    `plan_change_mode = end_of_period` it could never succeed — it threw, and the
+     *    catch then deleted the change;
+     *  - it replayed a seat count that may have been auto-derived at schedule time as an
+     *    explicit one, which is exactly what `apply()` documents it must not do;
+     *  - it forwarded only the legacy single `coupon_code`, silently dropping the stacked
+     *    `coupon_codes` and with them the discount the customer was promised.
+     */
+    public function applyScheduledNow(ScheduleSubscriptionChange $service): void
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
@@ -306,16 +431,8 @@ new class extends Component {
         if (! $sc) return;
 
         try {
-            $service->cancelScheduledChange($billable);
-            $service->update($billable, [
-                'plan_code' => $sc['plan_code'] ?? null,
-                'interval' => $sc['interval'] ?? null,
-                'seats' => $sc['seats'] ?? null,
-                'addons' => $sc['addons'] ?? null,
-                'coupon_code' => $sc['coupon_code'] ?? null,
-                'apply_at' => 'immediate',
-            ]);
-            \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
+            $service->apply($billable);
+            $this->toast(__('billing::portal.flash.plan_changed'), 'success');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Scheduled plan change (apply now) failed', [
                 'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
@@ -328,11 +445,9 @@ new class extends Component {
                 'trace' => collect(explode("\n", $e->getTraceAsString()))->take(15)->implode("\n"),
             ]);
             report($e);
-            $service->clearPendingPlanChange($billable);
-            \Flux::toast(
-                config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
-                variant: 'danger',
-            );
+            // No clearing here: `apply()` owns the stored change and decides itself whether
+            // a failure is permanent (drop it) or worth keeping for the next attempt.
+            $this->toast(config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -341,11 +456,15 @@ new class extends Component {
         $billable = $this->resolveBillable();
 
         if (! $billable || ! $this->selectedPlan) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return;
         }
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
+        if (! $this->assertSelectionIsValid($billable)) {
+            return;
+        }
 
         // Local → paid: divert to the dedicated UpgradeLocalToMollie path.
         // The regular UpdateSubscription would (correctly) refuse this transition
@@ -386,9 +505,9 @@ new class extends Component {
 
             if (! empty($result['scheduledFor'])) {
                 $date = BillingTime::display(\Carbon\Carbon::parse((string) $result['scheduledFor'])->setTimezone('UTC'), $billable)->translatedFormat('d. M Y');
-                \Flux::toast(__('billing::portal.flash.plan_scheduled', ['date' => $date]), variant: 'success');
+                $this->toast(__('billing::portal.flash.plan_scheduled', ['date' => $date]), 'success');
             } else {
-                \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
+                $this->toast(__('billing::portal.flash.plan_changed'), 'success');
             }
             $this->preview = [];
             $this->selectedPlan = null;
@@ -410,11 +529,19 @@ new class extends Component {
                 'trace' => collect(explode("\n", $e->getTraceAsString()))->take(15)->implode("\n"),
             ]);
             report($e);
-            $service->clearPendingPlanChange($billable);
-            \Flux::toast(
-                config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'),
-                variant: 'danger',
-            );
+
+            // Deliberately NOT `clearPendingPlanChange()`. That wipes
+            // `pending_prorata_change` and `prorata_pending_payment_id` too — markers this
+            // action may not own. An addon or seat change books a deferred prorata charge
+            // under exactly those keys without writing `pending_plan_change`, so a customer
+            // whose addon charge was still open and who then hit any error on the plan
+            // screen had the marker deleted underneath a live Mollie payment: when it
+            // settled, `ProrataChargeHandler` had nothing to match and reported an orphaned
+            // charge — money collected, nothing delivered, refunded by hand.
+            //
+            // `update()` cleans up its own partial writes; anything it did leave behind is
+            // reconciled by `CleanupStalePendingProrataChangeJob`.
+            $this->toast(config('app.debug') ? __('billing::portal.flash.error').' (Code: '.$e->getCode().')' : __('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -423,20 +550,73 @@ new class extends Component {
         $this->showLocalUpgradeConfirmation = false;
     }
 
-    public function confirmAndPay(UpgradeLocalToMollie $service)
+    public function confirmAndPay(UpgradeLocalToMollie $service, PreviewService $previewService)
     {
         $billable = $this->resolveBillable();
 
         if (! $billable || ! $this->selectedPlan) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         }
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
+        if (! $this->assertSelectionIsValid($billable)) {
+            return null;
+        }
+
+        // Re-price from the catalog right before charging. UpgradeLocalToMollie
+        // hands `amount_gross` to Mollie verbatim, and the webhook treats whatever
+        // was actually paid as the source of truth — so the number handed over here
+        // must come from PreviewService in this request, not from the snapshot.
+        $this->refreshPreview($previewService);
+
         $grossAmount = (int) ($this->preview['grossTotal'] ?? 0);
         if ($grossAmount <= 0) {
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
+            return null;
+        }
+
+        // Seats and addons come out of the same preview, so the subscription the
+        // webhook builds from this payment's metadata is the one that was priced.
+        // Deriving them independently let `dropExtraSeats` shrink the amount while
+        // the metadata still asked for every seat.
+        $extraSeats = max(0, (int) ($this->preview['newSeats'] ?? 0) - (int) ($this->preview['newIncludedSeats'] ?? 0));
+        $addonCodes = array_values(array_diff(
+            $billable->getActiveBillingAddonCodes(),
+            (array) ($this->preview['incompatibleAddons'] ?? []),
+        ));
+
+        // The coupon has to travel with the payment, not just with the price.
+        //
+        // `refreshPreview()` above prices with every applied code, so the customer is
+        // charged the discounted amount — but the code was never forwarded, so the webhook
+        // had nothing to redeem: no redemption row, no recurring marker (the Mollie
+        // subscription is created at full price, losing the ongoing discount), and the
+        // reconciliation saw an amount it could not explain and fired PaymentAmountMismatch.
+        //
+        // The first-payment path carries exactly one code (`metadata.coupon_code`, which is
+        // all `FirstPaymentCouponPricing::price()` accepts), so a stacked selection is
+        // refused rather than silently charged at one price and recorded at another.
+        if (count($this->appliedCouponCodes) > 1) {
+            $this->toast(__('billing::portal.flash.upgrade_single_coupon_only'), 'danger');
+
+            return null;
+        }
+
+        // One payment per intent, like the checkout.
+        //
+        // `refreshPreview()` above is several round-trips and the Mollie call another, so
+        // the button stays live for a second or more: a double-click — or browser-Back
+        // from Mollie and click again — minted a second `sequenceType: first` payment on
+        // the same mandate-to-be. Both settle, both activate, and the customer is charged
+        // twice. Non-blocking on purpose: the loser must not sit on a worker waiting for
+        // the winner to finish talking to Mollie.
+        $submitLock = Cache::lock('billing:checkout-submit:'.$billable->getKey(), 60);
+
+        if (! $submitLock->get()) {
+            $this->toast(__('billing::checkout.error_already_in_progress'), 'danger');
+
             return null;
         }
 
@@ -444,8 +624,9 @@ new class extends Component {
             $result = $service->handle($billable, [
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
-                'addon_codes' => $billable->getActiveBillingAddonCodes(),
-                'extra_seats' => max(0, $billable->getBillingSeatCount() - app(SubscriptionCatalogInterface::class)->includedSeats($this->selectedPlan)),
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'coupon_code' => $this->appliedCouponCodes[0] ?? null,
                 'amount_gross' => $grossAmount,
             ]);
 
@@ -457,18 +638,20 @@ new class extends Component {
                 return $this->redirect($result['checkout_url'], navigate: false);
             }
 
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
+        } finally {
+            $submitLock->release();
         }
     }
 
     public function openEditBillingModal(): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -543,8 +726,9 @@ new class extends Component {
         // returns null and reverse-charge silently stops applying.
         try {
             \Illuminate\Support\Facades\DB::transaction(function () use ($billable, $newVatNumber, $vat): void {
+                // Through the setter — see billing-data.blade.php and checkout.blade.php.
+                $billable->setBillingName($this->company_name);
                 $billable->forceFill([
-                    'name' => $this->company_name,
                     'billing_street' => $this->billing_street,
                     'billing_postal_code' => $this->billing_postal_code,
                     'billing_city' => $this->billing_city,
@@ -578,12 +762,12 @@ new class extends Component {
             $this->refreshPreview($previewService);
         }
 
-        \Flux::toast(__('billing::portal.flash.billing_details_saved'), variant: 'success');
+        $this->toast(__('billing::portal.flash.billing_details_saved'), 'success');
     }
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $scheduledChange = null;
         $pendingPlanChange = null;
         $planChangeFailed = null;
@@ -616,9 +800,9 @@ new class extends Component {
             // Detect pending → resolved transition (webhook applied the change).
             if ($this->wasPending && $pendingPlanChange === null) {
                 if ($planChangeFailed) {
-                    \Flux::toast(__('billing::portal.flash.plan_change_failed'), variant: 'danger');
+                    $this->toast(__('billing::portal.flash.plan_change_failed'), 'danger');
                 } else {
-                    \Flux::toast(__('billing::portal.flash.plan_changed'), variant: 'success');
+                    $this->toast(__('billing::portal.flash.plan_changed'), 'success');
                 }
             }
             $this->wasPending = $pendingPlanChange !== null;
@@ -638,6 +822,9 @@ new class extends Component {
             'planChangeFailed' => $planChangeFailed,
             'reverseCharge' => $reverseCharge,
             'displayCountry' => $displayCountry,
+            // Gates both savings badges in the plan selector: the "save up to X%"
+            // on the yearly toggle and the per-card percentage.
+            'showYearlySavings' => (bool) config('mollie-billing.show_yearly_savings', true),
         ];
     }
 };
@@ -739,12 +926,15 @@ new class extends Component {
 
     @if ($showLocalUpgradeConfirmation && $billable && $selectedPlan)
         @php
-            $currency = config('mollie-billing.currency', 'EUR');
-            $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+            $currencySymbol = BillingMoney::symbol();
             $upgradePlanName = $catalog->planName($selectedPlan) ?? $selectedPlan;
-            $previewNet = (int) ($preview['newNet'] ?? 0);
+            // The net line has to be the net the VAT was actually computed on, i.e.
+            // the recurring price after coupons — PreviewService exposes that as
+            // newPriceNet minus couponDiscountNet. ($preview['newNet'] never
+            // existed, so this line used to render a flat zero under a real total.)
             $previewVat = (int) ($preview['vatAmount'] ?? 0);
             $previewGross = (int) ($preview['grossTotal'] ?? 0);
+            $previewNet = max(0, (int) ($preview['newPriceNet'] ?? 0) - (int) ($preview['couponDiscountNet'] ?? 0));
             $countryNames = \GraystackIT\MollieBilling\Support\CountryResolver::resolve();
             $billingCountryIso = $billable->getBillingCountry();
             $billingCountryName = $billingCountryIso ? ($countryNames[$billingCountryIso] ?? $billingCountryIso) : null;
@@ -788,17 +978,17 @@ new class extends Component {
                     <div class="text-sm mt-1 space-y-1">
                         <div class="flex justify-between">
                             <span class="text-zinc-600 dark:text-zinc-400">{{ $upgradePlanName }} ({{ __('billing::enums.subscription_interval.'.$selectedInterval) }})</span>
-                            <span>{{ $currencySymbol }}{{ number_format($previewNet / 100, 2) }}</span>
+                            <span dusk="upgrade-net">{{ BillingMoney::format($previewNet) }}</span>
                         </div>
                         @if ($previewVat > 0)
                             <div class="flex justify-between">
                                 <span class="text-zinc-600 dark:text-zinc-400">{{ __('billing::portal.vat') }}</span>
-                                <span>{{ $currencySymbol }}{{ number_format($previewVat / 100, 2) }}</span>
+                                <span dusk="upgrade-vat">{{ BillingMoney::format($previewVat) }}</span>
                             </div>
                         @endif
                         <div class="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-700 pt-1">
                             <span>{{ __('billing::portal.total') }}</span>
-                            <span>{{ $currencySymbol }}{{ number_format($previewGross / 100, 2) }}</span>
+                            <span dusk="upgrade-total">{{ BillingMoney::format($previewGross) }}</span>
                         </div>
                     </div>
                 </div>
@@ -830,7 +1020,7 @@ new class extends Component {
             <flux:radio value="yearly">
                 <span class="flex items-center gap-2">
                     <span>{{ __('billing::portal.interval_yearly') }}</span>
-                    @if ($maxYearlySavings > 0)
+                    @if ($showYearlySavings && $maxYearlySavings > 0)
                         <flux:badge size="sm" color="lime">
                             {{ __('billing::portal.save_up_to', ['percent' => $maxYearlySavings]) }}
                         </flux:badge>
@@ -843,8 +1033,7 @@ new class extends Component {
     @php
         $currentPlanCode = $billable?->getBillingSubscriptionPlanCode();
         $currentInterval = $billable?->getBillingSubscriptionInterval();
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
         $planCount = count($plans);
     @endphp
 
@@ -923,14 +1112,14 @@ new class extends Component {
                                 @if ($isFree)
                                     {{ __('billing::portal.free') }}
                                 @else
-                                    {{ $currencySymbol }}{{ number_format($price / 100, 2) }}
+                                    {{ BillingMoney::format($price) }}
                                 @endif
                             </span>
                             @unless ($isFree)
                                 <span class="text-sm text-zinc-400 dark:text-zinc-500">{{ $selectedInterval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }}</span>
                             @endunless
                         </div>
-                        @if ($savings > 0)
+                        @if ($showYearlySavings && $savings > 0)
                             <flux:badge size="sm" color="lime" icon="arrow-trending-down" class="mt-2 mb-2">{{ __('billing::portal.save_yearly', ['percent' => round($savings)]) }}</flux:badge>
                         @endif
                         @unless ($isFree)
@@ -956,7 +1145,7 @@ new class extends Component {
                                 'unit' => __('billing::portal.seat_unit'),
                                 'extra' => $seatPrice !== null && $seatPrice > 0 ? $seatPrice : null,
                                 'extra_title' => $seatPrice !== null && $seatPrice > 0
-                                    ? __('billing::portal.seat_overage_price', ['currency' => $currencySymbol, 'price' => number_format($seatPrice / 100, 2)])
+                                    ? __('billing::portal.seat_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($seatPrice)])
                                     : null,
                             ];
                         }
@@ -970,7 +1159,7 @@ new class extends Component {
                                 'unit' => $usageLabel,
                                 'extra' => $overageDisplay !== null && $overageDisplay > 0 ? $overageDisplay : null,
                                 'extra_title' => $overageDisplay !== null && $overageDisplay > 0
-                                    ? __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => number_format($overageDisplay / 100, 2), 'type' => $usageLabel])
+                                    ? __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($overageDisplay), 'type' => $usageLabel])
                                     : null,
                             ];
                         }
@@ -984,7 +1173,7 @@ new class extends Component {
                                     <div class="flex items-baseline justify-between gap-3 text-zinc-600 dark:text-zinc-300">
                                         <span>{{ $row['label'] }}</span>
                                         @if ($row['extra'] !== null)
-                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => number_format($row['extra'] / 100, 2), 'unit' => $row['unit']]) }}</span>
+                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($row['extra']), 'unit' => $row['unit']]) }}</span>
                                         @endif
                                     </div>
                                 @endforeach
@@ -1165,7 +1354,7 @@ new class extends Component {
                                             @if ($previewSeatPrice > 0)
                                                 <div class="text-zinc-600 dark:text-zinc-300">
                                                     {{ __('billing::portal.preview_seats_extra_price', [
-                                                        'price' => $currencySymbol . number_format($previewSeatPrice / 100, 2),
+                                                        'price' => BillingMoney::format($previewSeatPrice),
                                                         'interval' => __('billing::portal.interval_' . $selectedInterval),
                                                     ]) }}
                                                 </div>
@@ -1357,8 +1546,8 @@ new class extends Component {
                                                     @php
                                                         $serial = $notice['invoiceSerial'] ?? null;
                                                         $params = [
-                                                            'already' => $currencySymbol . number_format(((int) ($notice['alreadyRefundedNet'] ?? 0)) / 100, 2),
-                                                            'original' => $currencySymbol . number_format(((int) ($notice['originalAmountNet'] ?? 0)) / 100, 2),
+                                                            'already' => BillingMoney::format((int) ($notice['alreadyRefundedNet'] ?? 0)),
+                                                            'original' => BillingMoney::format((int) ($notice['originalAmountNet'] ?? 0)),
                                                         ];
                                                     @endphp
                                                     <div>
@@ -1419,12 +1608,36 @@ new class extends Component {
                                             ];
                                         }
 
-                                        $prorataGross = (int) ($preview['prorataTotalGross'] ?? 0);
-                                        $totalGross = $prorataGross + $overageGross;
-                                        $isSidegrade = $totalGross === 0
+                                        // "Due now" is the money Mollie takes now, not the balance of the
+                                        // change. InvoiceService::createCharge() collects the sum of the
+                                        // charge-direction lines; the refund-direction lines become
+                                        // separate Mollie refunds in phase 2, after that payment clears
+                                        // (ProrataExecutor::execute()). Netting them showed "+€5.00" on a
+                                        // plan switch that charges €95 and credits €90 — and the €95 is
+                                        // what the customer sees on their card. Coupon lines are
+                                        // charge-direction with a negative amount, so they belong in
+                                        // $chargeGross exactly as they do in the Mollie total.
+                                        $chargeGross = 0;
+                                        $refundGross = 0;
+                                        foreach ($prorataLines as $line) {
+                                            if (($line['direction'] ?? 'charge') === 'refund') {
+                                                $refundGross += (int) $line['amount_gross'];
+                                            } else {
+                                                $chargeGross += (int) $line['amount_gross'];
+                                            }
+                                        }
+
+                                        // Saldo-zero plan switch: ProrataExecutor books it as a local
+                                        // plan-switch invoice and never touches Mollie, so nothing is due.
+                                        $isSidegrade = ($chargeGross + $refundGross) === 0
+                                            && $chargeGross > 0
                                             && ! empty($linesByCategory['plan'])
                                             && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'charge')) > 0
                                             && count(array_filter($linesByCategory['plan'], fn ($l) => $l['direction'] === 'refund')) > 0;
+
+                                        $chargedNowGross = $isSidegrade ? 0 : max(0, $chargeGross);
+                                        $refundedGross = $isSidegrade ? 0 : abs($refundGross);
+                                        $totalGross = $chargedNowGross + $overageGross;
                                     @endphp
 
                                     <div class="space-y-4">
@@ -1449,12 +1662,12 @@ new class extends Component {
                                                             </div>
                                                             @if (! empty($line['refund_cap_note']))
                                                                 <div class="mt-0.5 text-[0.7rem] text-zinc-400 wrap-break-word">
-                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => $currencySymbol . number_format(((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0)) / 100, 2)]) }}
+                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => BillingMoney::format((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0))]) }}
                                                                 </div>
                                                             @endif
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
-                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ BillingMoney::format(abs($line['amount_gross'])) }}
                                                         </span>
                                                     </div>
                                                 @endforeach
@@ -1480,12 +1693,12 @@ new class extends Component {
                                                             </div>
                                                             @if (! empty($line['refund_cap_note']))
                                                                 <div class="mt-0.5 text-[0.7rem] text-zinc-400 wrap-break-word">
-                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => $currencySymbol . number_format(((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0)) / 100, 2)]) }}
+                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => BillingMoney::format((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0))]) }}
                                                                 </div>
                                                             @endif
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
-                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ BillingMoney::format(abs($line['amount_gross'])) }}
                                                         </span>
                                                     </div>
                                                 @endforeach
@@ -1511,12 +1724,12 @@ new class extends Component {
                                                             </div>
                                                             @if (! empty($line['refund_cap_note']))
                                                                 <div class="mt-0.5 text-[0.7rem] text-zinc-400 wrap-break-word">
-                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => $currencySymbol . number_format(((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0)) / 100, 2)]) }}
+                                                                    {{ __('billing::portal.prorata_line_capped_by_prior_refund', ['amount' => BillingMoney::format((int) ($line['refund_cap_note']['alreadyRefundedNet'] ?? 0))]) }}
                                                                 </div>
                                                             @endif
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium {{ $line['amount_gross'] < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
-                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                            {{ $line['amount_gross'] < 0 ? '−' : '+' }}{{ BillingMoney::format(abs($line['amount_gross'])) }}
                                                         </span>
                                                     </div>
                                                 @endforeach
@@ -1540,7 +1753,7 @@ new class extends Component {
                                                             </div>
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
-                                                            −{{ $currencySymbol }}{{ number_format(abs($line['amount_gross']) / 100, 2) }}
+                                                            −{{ BillingMoney::format(abs($line['amount_gross'])) }}
                                                         </span>
                                                     </div>
                                                 @endforeach
@@ -1556,7 +1769,7 @@ new class extends Component {
                                                         <div class="min-w-0 flex-1">
                                                             <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ __('billing::portal.invoice_line_overage', ['type' => $oline['type']]) }}</div>
                                                             <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
-                                                                {{ $oline['units'] }}× {{ $currencySymbol }}{{ number_format($oline['unit_price_net'] / 100, 2) }}
+                                                                {{ $oline['units'] }}× {{ BillingMoney::format($oline['unit_price_net']) }}
                                                                 <span class="text-zinc-300 dark:text-zinc-600">·</span>
                                                                 @if ($overageVatRate == 0)
                                                                     {{ __('billing::portal.prorata_reverse_charge') }}
@@ -1566,7 +1779,7 @@ new class extends Component {
                                                             </div>
                                                         </div>
                                                         <span class="shrink-0 tabular-nums font-medium text-zinc-700 dark:text-zinc-200">
-                                                            +{{ $currencySymbol }}{{ number_format($oline['gross'] / 100, 2) }}
+                                                            +{{ BillingMoney::format($oline['gross']) }}
                                                         </span>
                                                     </div>
                                                 @endforeach
@@ -1577,14 +1790,18 @@ new class extends Component {
                                         <div class="mt-1 border-t border-zinc-200/70 pt-3 dark:border-zinc-700/60">
                                             <div class="flex items-baseline justify-between gap-3">
                                                 <span class="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.prorata_total') }}</span>
-                                                <span class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">
-                                                    {{ $totalGross < 0 ? '−' : ($totalGross > 0 ? '+' : '') }}{{ $currencySymbol }}{{ number_format(abs($totalGross) / 100, 2) }}
+                                                <span dusk="prorata-total" class="shrink-0 text-2xl font-bold tabular-nums tracking-tight {{ $totalGross > 0 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400' }}">
+                                                    {{ $totalGross > 0 ? '+' : '' }}{{ BillingMoney::format($totalGross) }}
                                                 </span>
                                             </div>
 
                                             @if ($isSidegrade)
                                                 <div class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
                                                     {{ __('billing::portal.prorata_sidegrade_no_charge') }}
+                                                </div>
+                                            @elseif ($refundedGross > 0)
+                                                <div class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
+                                                    {{ __('billing::portal.prorata_refund_separate', ['amount' => BillingMoney::format($refundedGross)]) }}
                                                 </div>
                                             @endif
                                         </div>
@@ -1605,16 +1822,23 @@ new class extends Component {
                                         $dueNowNewPlan = 0;
                                         $dueNowCredit = 0;
                                     }
-                                    $dueNowNet = $dueNowNewPlan - $dueNowCredit + $usageOverageNet;
-                                    $isCredit = $dueNowNet < 0;
+                                    // Collected now = the pro-rata charge plus the usage overage, both
+                                    // taken from the preview's own gross figures. The credit is a
+                                    // separate Mollie refund, so netting it in named an amount nobody
+                                    // moves; and re-deriving VAT from the summed net with the recurring
+                                    // rate disagreed with the per-component rates the preview used
+                                    // (the pro-rata rate comes off the invoice that paid the period).
                                     $dueNowVatRate = (float) ($preview['vatRate'] ?? 0);
-                                    $dueNowVat = (int) round(abs($dueNowNet) * $dueNowVatRate / 100);
-                                    $dueNowGross = $dueNowNet + ($isCredit ? -$dueNowVat : $dueNowVat);
+                                    $dueNowNet = $prorataCharge + $usageOverageNet;
+                                    $dueNowGross = (int) ($preview['prorataChargeGross'] ?? 0)
+                                        + (int) ($preview['usageOverageChargeGross'] ?? 0);
+                                    $dueNowVat = $dueNowGross - $dueNowNet;
+                                    $refundedNet = $prorataCharge > 0 ? 0 : $prorataCredit;
                                 @endphp
                                 <div class="space-y-2">
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_prorata_new_plan') }}</span>
-                                        <span class="tabular-nums font-medium text-zinc-800 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($dueNowNewPlan / 100, 2) }}</span>
+                                        <span class="tabular-nums font-medium text-zinc-800 dark:text-zinc-300">{{ BillingMoney::format($dueNowNewPlan) }}</span>
                                     </div>
                                     @if ($dueNowCredit > 0)
                                         @php
@@ -1628,7 +1852,7 @@ new class extends Component {
                                                     <span class="text-xs text-zinc-400 dark:text-zinc-500">({{ __('billing::portal.preview_prorata_days_'.($remainingDays === 1 ? 'one' : 'many'), ['count' => $remainingDays]) }})</span>
                                                 @endif
                                             </span>
-                                            <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($dueNowCredit / 100, 2) }}</span>
+                                            <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ BillingMoney::format($dueNowCredit) }}</span>
                                         </div>
                                         @if ($paidSeatsLost)
                                             <div class="text-xs text-zinc-400 dark:text-zinc-500 italic">
@@ -1642,7 +1866,7 @@ new class extends Component {
                                             @if (($usage['unresolved_overage'] ?? 0) > 0 && ($usage['overage_total_net'] ?? 0) > 0)
                                                 <div class="flex items-center justify-between text-sm">
                                                     <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_usage_overage_line', ['type' => ucfirst($usageType)]) }}</span>
-                                                    <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ $currencySymbol }}{{ number_format($usage['overage_total_net'] / 100, 2) }}</span>
+                                                    <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ BillingMoney::format($usage['overage_total_net']) }}</span>
                                                 </div>
                                             @endif
                                         @endforeach
@@ -1652,12 +1876,12 @@ new class extends Component {
 
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.net') }}</span>
-                                        <span class="tabular-nums {{ $isCredit ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-600 dark:text-zinc-300' }}">{{ $isCredit ? '−' : '' }}{{ $currencySymbol }}{{ number_format(abs($dueNowNet) / 100, 2) }}</span>
+                                        <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ BillingMoney::format($dueNowNet) }}</span>
                                     </div>
                                     @if ($dueNowVat > 0)
                                         <div class="flex items-center justify-between text-sm">
                                             <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.vat') }} ({{ number_format($dueNowVatRate, 0) }}%)</span>
-                                            <span class="tabular-nums {{ $isCredit ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-600 dark:text-zinc-300' }}">{{ $isCredit ? '−' : '' }}{{ $currencySymbol }}{{ number_format($dueNowVat / 100, 2) }}</span>
+                                            <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ BillingMoney::format($dueNowVat) }}</span>
                                         </div>
                                     @endif
 
@@ -1665,10 +1889,10 @@ new class extends Component {
 
                                     <div class="flex items-center justify-between">
                                         <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.preview_total') }}</span>
-                                        <span class="text-2xl font-bold tabular-nums {{ $isCredit ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-900 dark:text-white' }}">{{ $isCredit ? '−' : '' }}{{ $currencySymbol }}{{ number_format(abs($dueNowGross) / 100, 2) }}</span>
+                                        <span class="text-2xl font-bold tabular-nums {{ $dueNowGross > 0 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400' }}">{{ BillingMoney::format($dueNowGross) }}</span>
                                     </div>
 
-                                    @if ($isCredit)
+                                    @if ($refundedNet > 0)
                                         <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.preview_credit_note') }}</flux:text>
                                     @endif
                                 </div>
@@ -1686,7 +1910,7 @@ new class extends Component {
 
                                     <div class="flex items-center justify-between">
                                         <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.preview_total') }}</span>
-                                        <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}0.00</span>
+                                        <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ BillingMoney::format(0) }}</span>
                                     </div>
                                 </div>
                             </div>
@@ -1709,7 +1933,7 @@ new class extends Component {
                                             @endif
                                         </span>
                                         <span class="tabular-nums font-medium {{ ($item['total_net'] ?? 0) < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-700 dark:text-zinc-200' }}">
-                                            {{ ($item['total_net'] ?? 0) < 0 ? '−' : '' }}{{ $currencySymbol }}{{ number_format(abs($item['total_net'] ?? 0) / 100, 2) }}
+                                            {{ ($item['total_net'] ?? 0) < 0 ? '−' : '' }}{{ BillingMoney::format(abs($item['total_net'] ?? 0)) }}
                                         </span>
                                     </div>
                                 @endforeach
@@ -1718,7 +1942,7 @@ new class extends Component {
 
                                 <div class="flex items-center justify-between text-sm">
                                     <span class="text-zinc-500">{{ __('billing::portal.net') }}</span>
-                                    <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format(($preview['newPriceNet'] ?? 0) / 100, 2) }}</span>
+                                    <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ BillingMoney::format($preview['newPriceNet'] ?? 0) }}</span>
                                 </div>
                                 @if ($preview['reverseCharge'] ?? false)
                                     <div class="flex items-center justify-between text-sm">
@@ -1728,7 +1952,7 @@ new class extends Component {
                                 @elseif (($preview['vatAmount'] ?? 0) > 0)
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-500">{{ __('billing::portal.vat') }} ({{ number_format($preview['vatRate'] ?? 0, 0) }}%)</span>
-                                        <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ $currencySymbol }}{{ number_format($preview['vatAmount'] / 100, 2) }}</span>
+                                        <span class="tabular-nums text-zinc-600 dark:text-zinc-300">{{ BillingMoney::format($preview['vatAmount']) }}</span>
                                     </div>
                                 @endif
 
@@ -1736,7 +1960,7 @@ new class extends Component {
 
                                 <div class="flex items-center justify-between">
                                     <span class="text-sm font-medium text-zinc-700 dark:text-zinc-200">{{ ($preview['reverseCharge'] ?? false) ? __('billing::portal.net') : __('billing::portal.gross') }}</span>
-                                    <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(($preview['grossTotal'] ?? 0) / 100, 2) }}</span>
+                                    <span class="text-2xl font-bold tabular-nums text-zinc-900 dark:text-white">{{ BillingMoney::format($preview['grossTotal'] ?? 0) }}</span>
                                 </div>
                                 <flux:text class="text-xs">{{ __('billing::portal.preview_recurring_from_next_period') }}</flux:text>
 

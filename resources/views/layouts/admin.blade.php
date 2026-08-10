@@ -6,6 +6,14 @@
     $primaryColor = config('mollie-billing.primary_color', 'teal');
     $portalTitle = __('billing::admin.title', ['app' => config('mollie-billing.company_name') ?: config('app.name')]);
     $currentRoute = request()->route()?->getName();
+
+    // Where "back" leaves the panel to. Its own key, because the admin panel and the customer
+    // portal do not lead to the same place: the portal returns a customer to their app
+    // dashboard, the panel returns staff to wherever they administer from. Falls back to
+    // `dashboard_url` so a single-app install only has to configure one of them.
+    $backUrl = BillingRoute::configuredUrl(
+        config('mollie-billing.admin_back_url') ?: config('mollie-billing.dashboard_url'),
+    );
 @endphp
 <!DOCTYPE html>
 {{-- `lang` reflects the active locale (pinned by config `mollie-billing.admin_locale`
@@ -38,11 +46,13 @@
         <flux:spacer />
 
         {{-- App-provided header components (e.g. a language switcher). Keyed by
-             index so Livewire keeps them apart across re-renders. A switcher only
-             has an effect while `mollie-billing.admin_locale` is null — a pinned
-             admin locale wins over whatever the switcher sets. --}}
+             index so Livewire keeps them apart across re-renders — the directive
+             only picks up a literal `key(...)` call, a bare third argument is
+             dropped. A switcher only has an effect while
+             `mollie-billing.admin_locale` is null — a pinned admin locale wins
+             over whatever the switcher sets. --}}
         @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
-            @livewire($headerComponent, [], 'billing-header-'.$i)
+            @livewire($headerComponent, [], key('billing-header-'.$i))
         @endforeach
 
         <flux:dropdown position="bottom" align="end">
@@ -73,6 +83,14 @@
         </flux:navlist>
 
         <flux:spacer />
+
+        @if ($backUrl)
+            <flux:navlist variant="outline">
+                <flux:navlist.item icon="arrow-left" href="{{ $backUrl }}">
+                    {{ __('billing::admin.nav.back_to_app') }}
+                </flux:navlist.item>
+            </flux:navlist>
+        @endif
 
         @if (Route::has('logout'))
             <flux:navlist variant="outline">

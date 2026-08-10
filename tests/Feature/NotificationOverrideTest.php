@@ -14,6 +14,12 @@ use Illuminate\Notifications\Notification as BaseNotification;
 use Illuminate\Support\Facades\Notification;
 
 beforeEach(function (): void {
+    // Midday, fixed — same reason as ProcessTrialLifecycleJobTest: the trial-ending
+    // notice window is a whole calendar day, and the "ends tomorrow" fixture below is
+    // `now + 1 day + 2 hours`. After 22:00 UTC that lands past the window and the
+    // notification correctly does not fire.
+    test()->travelTo(BillingTime::nowUtc()->startOfDay()->addHours(12));
+
     Notification::fake();
 
     MollieBilling::notifyBillingAdminsUsing(fn ($billable): array => [$billable]);

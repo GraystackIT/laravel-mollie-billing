@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Commands;
 
+use Cron\CronExpression;
 use GraystackIT\MollieBilling\Concerns\HasBilling;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\AuditCategory;
@@ -11,8 +12,10 @@ use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Support\BillingAuditMap;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Console\Command;
+use Illuminate\Routing\Exceptions\UrlGenerationException;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use GraystackIT\MollieBilling\Support\BillingRoute;
 
 class CheckConfigCommand extends Command
 {
@@ -34,6 +37,27 @@ class CheckConfigCommand extends Command
     private function checkBillingConfig(): void
     {
         $scope = 'mollie-billing';
+
+        // Both accept `route:some.name`, and both are read from a layout — where a route that
+        // does not exist would be a 500 on every page rather than a missing link.
+        // BillingRoute::configuredUrl() degrades to null for exactly that reason, which makes
+        // this the only place the typo is visible.
+        foreach (['dashboard_url', 'admin_back_url'] as $urlKey) {
+            $value = config('mollie-billing.'.$urlKey);
+
+            if (! is_string($value) || ! str_starts_with(trim($value), 'route:')) {
+                continue;
+            }
+
+            $routeName = substr(trim($value), 6);
+
+            if ($routeName === '' || ! \Illuminate\Support\Facades\Route::has($routeName)) {
+                $this->addError($scope, "{$urlKey} names route [{$routeName}], which is not registered — the link will be hidden.");
+            }
+        }
+
+        $this->checkAdminBackUrlIsReachable($scope);
+        $this->checkWebhookRouteIsMounted($scope);
 
         $billableModel = config('mollie-billing.billable_model');
         if (! is_string($billableModel) || $billableModel === '') {
@@ -63,9 +87,42 @@ class CheckConfigCommand extends Command
         }
 
         $planChangeMode = config('mollie-billing.plan_change_mode');
+        $validModes = implode(', ', array_map(fn (PlanChangeMode $m) => $m->value, PlanChangeMode::cases()));
+
         if (! $planChangeMode instanceof PlanChangeMode) {
-            $valid = implode(', ', array_map(fn (PlanChangeMode $m) => $m->value, PlanChangeMode::cases()));
-            $this->addError($scope, "plan_change_mode is invalid. Valid values: {$valid}.");
+            $this->addError($scope, "plan_change_mode is invalid. Valid values: {$validModes}.");
+        }
+
+        // The config file degrades an unrecognised env value to the default rather than
+        // throwing during `register()` — which used to take the whole app down, this
+        // command included. That makes a typo silent, so it is named here instead. The
+        // case names (`Immediate`, `EndOfPeriod`) are the likely mistake: the docs used
+        // to print them, and they are not the backing values.
+        // Read from the process environment rather than through `env()`: this has to work
+        // on an install whose config is cached, where `env()` outside a config file
+        // returns null and the typo would go unreported exactly when it is hardest to find.
+        $rawMode = $_SERVER['BILLING_PLAN_CHANGE_MODE']
+            ?? $_ENV['BILLING_PLAN_CHANGE_MODE']
+            ?? (getenv('BILLING_PLAN_CHANGE_MODE') ?: null);
+
+        if (is_string($rawMode) && $rawMode !== '' && PlanChangeMode::tryFrom(strtolower(trim($rawMode))) === null) {
+            // The enum's case names are the likely mistake — the docs printed them for a
+            // while — so name the backing value they meant instead of only listing all three.
+            $suggestion = null;
+            foreach (PlanChangeMode::cases() as $case) {
+                if (strcasecmp($case->name, trim($rawMode)) === 0) {
+                    $suggestion = $case->value;
+                    break;
+                }
+            }
+
+            $this->addError(
+                $scope,
+                "BILLING_PLAN_CHANGE_MODE [{$rawMode}] is not a valid plan change mode — falling back to "
+                .PlanChangeMode::UserChoice->value.'. '
+                .($suggestion !== null ? "Did you mean [{$suggestion}]? " : '')
+                ."Valid values: {$validModes}."
+            );
         }
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
@@ -129,11 +186,71 @@ class CheckConfigCommand extends Command
         $this->validateCheckoutCountries($scope);
         $this->validateAdditionalCountries($scope);
         $this->validateBillingTimezone($scope);
-        $this->validateOverageJobTime($scope);
+        $this->validateQueue($scope);
+        $this->validateWalletLock($scope);
+        $this->validateCacheLocks($scope);
+        $this->checkAdminRoutesAreMounted($scope);
+        $this->validateScheduleTimes($scope);
+        $this->validateCurrencySymbol($scope, $currency);
         $this->validateUsageThreshold($scope);
         $this->validateIpBlock($scope, $driver);
         $this->validateLegacyRolloverKeys($scope);
         $this->validateAudit($scope);
+    }
+
+    /**
+     * Warn when the admin panel's back link names a route it cannot build a URL for.
+     *
+     * `admin_back_url` falls back to `dashboard_url`, and on a tenant-prefixed mount that is
+     * typically `route:tenant.dashboard` — correct for the portal, where the current request
+     * supplies `{organization}`, but unbuildable from the admin panel, which is mounted
+     * outside that prefix. Console runs have no route parameters either, so generating the
+     * URL here reproduces exactly what the panel's layout faces.
+     *
+     * @param  string  $scope  Config file the issue is reported against
+     */
+    /**
+     * The webhook route is the one mounting step nothing else can survive without.
+     *
+     * Every payment the package creates carries `webhookUrl: route(BillingRoute::webhook())`,
+     * so an app that mounted the portal and the checkout but not the webhook throws
+     * `RouteNotFoundException` on the very first payment attempt — a 500 in checkout, with
+     * nothing in the logs pointing at a missing route registration. `BillingRoute::webhook()`
+     * falls back to the bare name when it finds no match, so it cannot report this itself.
+     */
+    private function checkWebhookRouteIsMounted(string $scope): void
+    {
+        if (\Illuminate\Support\Facades\Route::has(BillingRoute::webhook())) {
+            return;
+        }
+
+        $this->addError(
+            $scope,
+            'The Mollie webhook route is not mounted. Add MollieBilling::webhookRoutes() to routes/api.php '
+            .'(or any group WITHOUT the `web` middleware — Mollie calls it server-to-server, with no session '
+            .'and no CSRF token). Without it every checkout fails with RouteNotFoundException [billing.webhook].'
+        );
+    }
+
+    private function checkAdminBackUrlIsReachable(string $scope): void
+    {
+        $value = config('mollie-billing.admin_back_url') ?: config('mollie-billing.dashboard_url');
+
+        if (! is_string($value) || ! str_starts_with(trim($value), 'route:')) {
+            return;
+        }
+
+        $routeName = substr(trim($value), 6);
+
+        if ($routeName === '' || ! \Illuminate\Support\Facades\Route::has($routeName)) {
+            return;
+        }
+
+        try {
+            route($routeName);
+        } catch (UrlGenerationException) {
+            $this->addWarning($scope, "admin_back_url resolves to route [{$routeName}], which needs parameters the admin panel cannot supply — the back link will be hidden there. Point BILLING_ADMIN_BACK_URL at a parameterless route or a plain URL.");
+        }
     }
 
     private function validateAudit(string $scope): void
@@ -282,9 +399,25 @@ class CheckConfigCommand extends Command
     private function validateSerialNumberPrefixes(string $scope): void
     {
         $prefixes = (array) config('mollie-billing.invoices.serial_number.prefix', []);
+        $slots = substr_count((string) config('mollie-billing.invoices.serial_number.format', 'PP-YYCCCCCC'), 'P');
+
         foreach (['invoice', 'credit_note', 'one_time_order'] as $kind) {
             if (! isset($prefixes[$kind])) {
                 $this->addWarning($scope, "invoices.serial_number.prefix.{$kind} is not defined — defaults will be used.");
+
+                continue;
+            }
+
+            // A prefix longer than its `P` run is now truncated by the generator, which keeps
+            // the sequence intact but silently shortens what the operator configured — so say
+            // so here, where it can still be fixed.
+            if (strlen((string) $prefixes[$kind]) > $slots) {
+                $this->addError($scope, sprintf(
+                    'invoices.serial_number.prefix.%s [%s] is longer than the %d "P" slot(s) in the format — it will be truncated.',
+                    $kind,
+                    (string) $prefixes[$kind],
+                    $slots,
+                ));
             }
         }
     }
@@ -304,6 +437,41 @@ class CheckConfigCommand extends Command
         foreach (['street', 'city', 'postal_code', 'country'] as $key) {
             if (empty($address[$key])) {
                 $this->addWarning($scope, "invoices.seller.address.{$key} is empty — generated invoices will be incomplete.");
+            }
+        }
+
+        $this->validateSellerCountry($scope);
+    }
+
+    /**
+     * The seller country decides domestic VAT versus cross-border reverse charge, so
+     * a value that is set but not a valid ISO-3166-1 alpha-2 code is an error rather
+     * than a warning: at runtime VatCalculationService refuses it and falls back to
+     * charging VAT, which is recoverable — but every B2B invoice until someone
+     * notices carries the wrong treatment. This is the place a typo should be loud.
+     */
+    private function validateSellerCountry(string $scope): void
+    {
+        $keys = [
+            'mollie-billing.vat.seller_country',
+            'mollie-billing.invoices.seller.address.country',
+        ];
+
+        foreach ($keys as $key) {
+            $value = config($key);
+
+            if ($value === null || (is_string($value) && trim($value) === '')) {
+                continue;
+            }
+
+            if (! is_string($value) || preg_match('/^[A-Za-z]{2}$/', trim($value)) !== 1) {
+                $shown = is_scalar($value) ? (string) $value : gettype($value);
+
+                $this->addError($scope, sprintf(
+                    '%s is "%s", which is not an ISO-3166-1 alpha-2 country code. Reverse charge is refused while it stays malformed, so every cross-border B2B supply is invoiced with domestic VAT.',
+                    str_replace('mollie-billing.', '', $key),
+                    $shown,
+                ));
             }
         }
     }
@@ -360,6 +528,133 @@ class CheckConfigCommand extends Command
         }
     }
 
+    /**
+     * Every queued job and notification in the package is routed onto this connection.
+     * A typo in BILLING_QUEUE_CONNECTION is invisible until the first dispatch, which
+     * then throws `InvalidArgumentException: The [xyz] queue connection has not been
+     * configured` — so nothing gets retried, nothing gets charged, nothing gets swept.
+     */
+    private function validateQueue(string $scope): void
+    {
+        $connection = config('mollie-billing.queue.connection');
+
+        // null / '' is the documented "fall back to the framework default".
+        if ($connection !== null && $connection !== '') {
+            if (! is_string($connection)) {
+                $this->addError($scope, 'queue.connection must be a string connection name, or null to use the framework default; got ['.var_export($connection, true).'].');
+            } elseif (! array_key_exists($connection, (array) config('queue.connections', []))) {
+                $this->addError($scope, "queue.connection [{$connection}] is not defined in config/queue.php connections — every queued billing job would throw on dispatch. Set BILLING_QUEUE_CONNECTION to a configured connection or leave it unset.");
+            }
+        }
+
+        $queue = config('mollie-billing.queue.name');
+
+        if ($queue !== null && $queue !== '' && ! is_string($queue)) {
+            $this->addError($scope, 'queue.name must be a string queue name, or null to use the framework default; got ['.var_export($queue, true).'].');
+        }
+    }
+
+    /**
+     * The wallet lock is what keeps two processes from billing the same units twice.
+     *
+     * bavix defaults `wallet.lock.driver` to `array`, which is a per-process store: the
+     * lock it takes around a balance update is invisible to every other process. That is
+     * fine for a single-process install and wrong for every other one — this package has a
+     * web request recording usage while a queue worker charges the overage against the
+     * same wallet, and the balance both of them read is what the customer is billed from.
+     *
+     * A warning rather than an error, because it depends on the deployment: a sync queue
+     * and one web worker genuinely have nothing to serialise. Reported whenever the queue
+     * is not `sync`, which is the closest thing to "more than one process" that can be
+     * read from config.
+     */
+    private function validateWalletLock(string $scope): void
+    {
+        $driver = config('wallet.lock.driver');
+
+        // No bavix config published at all: it ships its own default, which is `array`.
+        $driver = is_string($driver) && $driver !== '' ? $driver : 'array';
+
+        if ($driver !== 'array') {
+            return;
+        }
+
+        $queue = (string) (config('mollie-billing.queue.connection') ?: config('queue.default', 'sync'));
+
+        if ($queue === 'sync') {
+            return;
+        }
+
+        $this->addWarning($scope, sprintf(
+            'wallet.lock.driver is [array] while the billing queue runs on [%s]. '
+            .'The array store is per-process, so bavix takes a lock no other process can see — '
+            .'a request recording usage and the worker charging the overage can interleave on the '
+            .'same wallet, and the balance this package bills from is the result. '
+            .'Set WALLET_LOCK_DRIVER to a shared store (redis, memcached, database).',
+            $queue,
+        ));
+    }
+
+    /**
+     * The package's own money-path locks are cache locks, so the cache store decides.
+     *
+     * `UpdateSubscription`, `RefundInvoiceService` and `SyncSeatsJob` each serialise on a
+     * `Cache::lock()` — that is what replaced the long transaction they used to hold, and
+     * it is the only thing standing between two concurrent plan changes, two refund clicks
+     * or two seat deltas. On the `array` store that lock lives in one process's memory, and
+     * on `null` it does not exist at all: every caller gets it, and both changes proceed.
+     *
+     * Reported for the same deployment shape as the wallet lock — anything but a sync queue
+     * means more than one process is running.
+     */
+    private function validateCacheLocks(string $scope): void
+    {
+        $store = (string) config('cache.default', 'file');
+        $driver = (string) (config("cache.stores.{$store}.driver") ?: $store);
+
+        if (! in_array($driver, ['array', 'null'], true)) {
+            return;
+        }
+
+        $queue = (string) (config('mollie-billing.queue.connection') ?: config('queue.default', 'sync'));
+
+        if ($queue === 'sync' && $driver === 'array') {
+            return;
+        }
+
+        $this->addWarning($scope, sprintf(
+            'The default cache store [%s] uses the [%s] driver, and this package serialises '
+            .'its money paths with Cache::lock(): plan changes (billing:subscription-change), '
+            .'refunds (billing:invoice-refund) and seat deltas (billing:seat-sync). '
+            .'%s Point CACHE_STORE at a shared, lock-capable store (redis, memcached, database, file).',
+            $store,
+            $driver,
+            $driver === 'null'
+                ? 'The null driver grants every lock, so those guards do nothing at all.'
+                : 'The array driver keeps the lock in one process\'s memory, so a second process takes it too.',
+        ));
+    }
+
+    /**
+     * Auto-load off and nothing mounted means there is no admin panel at all.
+     *
+     * Switching `routes.auto_load_admin` off is how an app puts the panel under its own
+     * middleware, with `MollieBilling::adminRoutes()` inside its own group. Forgetting the
+     * second half leaves every admin URL 404ing, and nothing at boot says so.
+     */
+    private function checkAdminRoutesAreMounted(string $scope): void
+    {
+        if (config('mollie-billing.routes.auto_load_admin', true)) {
+            return;
+        }
+
+        if (\Illuminate\Support\Facades\Route::has(BillingRoute::admin('dashboard'))) {
+            return;
+        }
+
+        $this->addWarning($scope, 'routes.auto_load_admin is false and no admin route is registered — the admin panel is unreachable. Call MollieBilling::adminRoutes() inside your own route group, or turn the auto-load back on.');
+    }
+
     private function validateBillingTimezone(string $scope): void
     {
         $tz = (string) config('mollie-billing.billing_timezone', 'UTC');
@@ -368,11 +663,47 @@ class CheckConfigCommand extends Command
         }
     }
 
-    private function validateOverageJobTime(string $scope): void
+    /**
+     * Every value that feeds the scheduler, not just overage_job_time. An invalid
+     * `trial_lifecycle_job_time` or `cleanup.cron_expression` makes `schedule:run`
+     * throw for the *entire application's* schedule, so reporting the config valid is
+     * the worst possible outcome.
+     */
+    private function validateScheduleTimes(string $scope): void
     {
-        $time = (string) config('mollie-billing.overage_job_time', '02:00');
-        if (! preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $time)) {
-            $this->addError($scope, "overage_job_time [{$time}] must be in HH:MM (24-hour) format.");
+        foreach (['overage_job_time' => '02:00', 'trial_lifecycle_job_time' => '02:05'] as $key => $default) {
+            $time = (string) config("mollie-billing.{$key}", $default);
+
+            if (! preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $time)) {
+                $this->addError($scope, "{$key} [{$time}] must be in HH:MM (24-hour) format.");
+            }
+        }
+
+        $cron = (string) config('mollie-billing.cleanup.cron_expression', '*/15 * * * *');
+
+        if (! CronExpression::isValidExpression($cron)) {
+            $this->addError($scope, "cleanup.cron_expression [{$cron}] is not a valid cron expression.");
+        }
+    }
+
+    /**
+     * `currency_symbol` overrides the symbol for *every* currency, so a leftover
+     * value from an earlier currency renders the wrong symbol on every price and
+     * every invoice.
+     */
+    private function validateCurrencySymbol(string $scope, string $currency): void
+    {
+        $symbol = config('mollie-billing.currency_symbol');
+
+        if (! is_string($symbol) || $symbol === '') {
+            return;
+        }
+
+        $expected = ['EUR' => '€', 'USD' => '$', 'GBP' => '£'];
+        $known = $expected[strtoupper($currency)] ?? null;
+
+        if ($known !== null && trim($symbol) !== $known) {
+            $this->addWarning($scope, "currency_symbol [{$symbol}] does not match currency [{$currency}] (expected [{$known}]). Leave BILLING_CURRENCY_SYMBOL unset to derive it from `currency`.");
         }
     }
 
@@ -483,8 +814,16 @@ class CheckConfigCommand extends Command
                 $this->addError($scope, "{$where}.hidden must be a boolean.");
             }
 
-            if (! isset($plan['tier']) || ! is_int($plan['tier'])) {
-                $this->addError($scope, "{$where}.tier must be an integer (used to compare plan rank).");
+            // Absent is fine, malformed is not. `tier` is the consuming app's own plan
+            // rank — nothing in the package reads it, and up/downgrade is derived from the
+            // prorata amounts — so a config without it is complete, and failing the command
+            // over it blocked deploys on a field that changes nothing. A value that *is*
+            // there but is not an integer is still a config error, because whatever reads
+            // it will compare it.
+            if (! isset($plan['tier'])) {
+                $this->addWarning($scope, "{$where}.tier is not set — the package does not read it, but your own plan-rank comparisons will have nothing to compare.");
+            } elseif (! is_int($plan['tier'])) {
+                $this->addError($scope, "{$where}.tier must be an integer (your app's plan rank).");
             } elseif (empty($plan['hidden'])) {
                 // Only visible plans form the offered ladder, so only they can make
                 // its ranking ambiguous. A hidden internal plan is free to mirror a
@@ -499,6 +838,18 @@ class CheckConfigCommand extends Command
             if (array_key_exists('usage_rollover', $plan)) {
                 $this->addError($scope, "{$where}.usage_rollover is no longer supported. Use `usage_rollover_fallback` (env: BILLING_USAGE_ROLLOVER_FALLBACK) and per-type overrides in `mollie-billing-plans.usage_types`.");
             }
+
+            // ConfigSubscriptionCatalog reads both of these only from
+            // intervals.{monthly|yearly} and has no plan-level fallback, so a map put
+            // here resolves every quota to 0 and makes no overage chargeable — while
+            // the config still looked valid.
+            foreach (['included_usages', 'usage_overage_prices'] as $intervalOnlyKey) {
+                if (array_key_exists($intervalOnlyKey, $plan)) {
+                    $this->addError($scope, "{$where}.{$intervalOnlyKey} is not read at plan level. Move it into each interval (e.g. {$where}.intervals.monthly.{$intervalOnlyKey}) — the catalog resolves it per (plan, interval) with no plan-level fallback.");
+                }
+            }
+
+            $this->validateUsageTypesAcrossIntervals($scope, $where, (array) ($plan['intervals'] ?? []));
 
             if (isset($plan['included_seats']) && (! is_int($plan['included_seats']) || $plan['included_seats'] < 1)) {
                 $this->addError($scope, "{$where}.included_seats must be a positive integer.");
@@ -541,6 +892,70 @@ class CheckConfigCommand extends Command
     /**
      * @param  array<string, mixed>  $interval
      */
+    /**
+     * A usage type sold on one interval of a plan and forgotten on the other.
+     *
+     * Quotas and overage prices are keyed by (plan, interval) with no fallback, which is
+     * deliberate — a yearly quota is not twelve monthlies. The cost of that is a config
+     * shape with no symptom until somebody switches interval: the quota resolves to 0, and
+     * with no overage price on that side the hard cap turns the customer's next metered
+     * call into an exception. Same plan, same subscription, feature gone.
+     *
+     * Deliberately asymmetric quotas are normal, so this only reports a type that is
+     * *absent from both maps* on one side while being present on the other.
+     *
+     * @param  array<string, mixed>  $intervals
+     */
+    private function validateUsageTypesAcrossIntervals(string $scope, string $where, array $intervals): void
+    {
+        $declared = [];
+
+        foreach ($intervals as $intervalKey => $interval) {
+            if (! is_array($interval)) {
+                continue;
+            }
+
+            foreach (['included_usages', 'usage_overage_prices'] as $mapKey) {
+                foreach (array_keys((array) ($interval[$mapKey] ?? [])) as $type) {
+                    if (is_string($type) && $type !== '') {
+                        $declared[strtolower($type)][(string) $intervalKey] = $type;
+                    }
+                }
+            }
+        }
+
+        $intervalKeys = array_values(array_filter(
+            array_keys($intervals),
+            static fn ($k): bool => is_string($k) && is_array($intervals[$k] ?? null),
+        ));
+
+        if (count($intervalKeys) < 2) {
+            return;
+        }
+
+        foreach ($declared as $seen) {
+            $missing = array_values(array_diff($intervalKeys, array_keys($seen)));
+
+            if ($missing === []) {
+                continue;
+            }
+
+            $type = reset($seen);
+
+            $this->addWarning($scope, sprintf(
+                '%s sells usage type [%s] on [%s] but declares it nowhere under [%s]. '
+                .'Quotas and overage prices are resolved per (plan, interval) with no fallback, so a '
+                .'customer switching to %s loses the type entirely — quota 0, and with no overage price '
+                .'there the next metered call is refused.',
+                $where,
+                $type,
+                implode(', ', array_keys($seen)),
+                implode(', ', $missing),
+                implode('/', $missing),
+            ));
+        }
+    }
+
     private function validatePlanInterval(string $scope, string $where, string $intervalKey, array $interval): void
     {
         $base = "{$where}.intervals.{$intervalKey}";
@@ -614,7 +1029,13 @@ class CheckConfigCommand extends Command
             if (($overage[$type] ?? null) === false) {
                 continue;
             }
-            $this->addWarning($scope, "{$base}.usage_overage_prices defines [{$type}] but {$base}.included_usages has no matching entry — quota will default to 0.");
+            // Two readings, and only the operator knows which was meant. Priced with no
+            // quota is pay-per-use: every unit is billed, the wallet only ever goes
+            // negative, and the package handles it — the debit is allowed, the period-end
+            // pass charges it, the plan-change rebalance bills what is owed. It is also
+            // exactly what a forgotten `included_usages` entry looks like, and then the
+            // customer is billed per unit for something they were promised an allowance of.
+            $this->addWarning($scope, "{$base}.usage_overage_prices defines [{$type}] but {$base}.included_usages has no matching entry, so the quota is 0 and every unit is billed at the overage price. That is a valid pay-per-use type — add `'{$type}' => 0` to included_usages to say so deliberately, or the allowance you meant to grant.");
         }
     }
 

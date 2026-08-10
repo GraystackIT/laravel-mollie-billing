@@ -42,6 +42,7 @@ return [
     'vies_unavailable' => 'VIES is currently unreachable. Please try again in a few minutes.',
     'vies_validation_failed' => 'The VAT number is not registered as valid in VIES. Please check your input and try again.',
     'vat_verified' => 'VAT number verified — reverse-charge applies.',
+    'vat_verified_domestic' => 'VAT number verified. This is a domestic supply, so VAT is charged.',
     'vat_correct_or_clear' => 'Please correct the VAT number or leave it blank.',
 
     // Step 2: plan
@@ -67,6 +68,7 @@ return [
     'addons_heading' => 'Add-ons',
     'addons_description' => 'Extra capabilities you can enable on top of your plan.',
     'extra_seats' => 'Additional seats',
+    'seats_not_available' => 'This plan does not offer additional seats on the selected billing interval.',
     'extra_seat_price' => 'Each extra seat:',
 
     // Step 4: confirm
@@ -94,6 +96,10 @@ return [
     'processing' => 'Processing…',
     'continue' => 'Continue',
 
+    'coupon_trial_days_added' => '+:days days of trial (:code)',
+
+    'interval_not_offered' => 'This plan is not available on the selected billing interval.',
+
     // Coupon errors
     'coupon_empty' => 'Please enter a coupon code.',
     'coupon_already_applied' => 'Remove the current coupon before adding a new one.',
@@ -107,8 +113,10 @@ return [
     'coupon_interval_mismatch' => 'This coupon does not apply to the selected billing interval.',
     'coupon_addon_mismatch' => 'This coupon does not apply to the selected add-ons.',
     'coupon_product_mismatch' => 'This coupon does not apply to the selected product.',
+    'coupon_usage_mismatch' => 'This coupon only applies to specific metered usage, which this order does not include.',
     'coupon_min_order' => 'The order does not meet the minimum amount for this coupon.',
     'coupon_requires_billable' => 'This coupon cannot be applied during checkout.',
+    'coupon_requires_trial' => 'This coupon extends a trial, and the selected plan does not offer one.',
     'coupon_recurring_conflict' => 'Another recurring coupon is already active on this subscription.',
     'coupon_requires_active_subscription' => 'An active subscription is required to redeem this coupon.',
     'coupon_too_close_to_charge' => 'The next charge is too close to safely apply this coupon. Please try again after the next billing date.',
@@ -132,6 +140,8 @@ return [
     // Errors
     'error_billable_creation' => 'Could not create the billing account. Please try again.',
     'error_no_billable' => 'Could not resolve the billing account. Please try again.',
+    'promotion_expired' => 'That promotional code is no longer valid, so it has not been applied.',
+    'error_already_in_progress' => 'Your checkout is already being processed. Please wait a moment before trying again.',
     'error_payment_creation' => 'Could not create the payment. Please try again.',
     'error_unexpected' => 'An unexpected error occurred. Please try again or contact support.',
 ];

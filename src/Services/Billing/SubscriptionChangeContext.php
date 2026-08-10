@@ -46,6 +46,15 @@ class SubscriptionChangeContext
          * deliberate programmatic moves. Never true for user-initiated changes.
          */
         public readonly bool $allowHiddenPlan = false,
+        /**
+         * True only for the Phase 2 re-validation of a change that is already pending.
+         *
+         * That path has to be exempt from the one-pending-change rule — its own marker is
+         * by definition present. It used to be recognised by both prorata amounts being 0,
+         * which is also true of a switch between two equally priced plans, so exactly that
+         * switch walked past the guard while another change's payment was in flight.
+         */
+        public readonly bool $isPendingReapply = false,
     ) {}
 
     /**
@@ -102,6 +111,7 @@ class SubscriptionChangeContext
             couponCode: $data['coupon_code'] ?? null,
             seatsExplicit: true, // Seats were pre-computed in Phase 1
             allowHiddenPlan: (bool) ($data['allow_hidden_plan'] ?? false),
+            isPendingReapply: true,
         );
     }
 }

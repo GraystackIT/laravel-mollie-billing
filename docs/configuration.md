@@ -24,7 +24,8 @@ Global settings. Most values can be overridden via ENV variables — the default
 | `favicon_url` | `BILLING_FAVICON_URL` | URL of the favicon used by the portal views. |
 | `primary_color` | `BILLING_PRIMARY_COLOR` | Flux/Tailwind color name (`teal`, `indigo`, …). Default: `teal`. |
 | `company_name` | — | Default: `APP_NAME`. Used in mails and views. |
-| `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard. |
+| `dashboard_url` | `BILLING_DASHBOARD_URL` | Target of the portal logo link and of the portal sidebar's "Back to dashboard" item. Accepts a URL or `route:<name>` (e.g. `route:dashboard`). `null` → the logo links back to the billing dashboard and the sidebar item is hidden. |
+| `admin_back_url` | `BILLING_ADMIN_BACK_URL` | Target of the **admin panel** sidebar's "Back to app" item. Same two forms. Unset falls back to `dashboard_url`, so a single-app install configures one value; set it explicitly when staff administer from somewhere other than where customers land. Both are resolved by `BillingRoute::configuredUrl()`, which returns `null` for a `route:` name that is not registered — a missing link rather than a 500 on every page of the panel. `billing:check-config` reports that as an **error**. |
 | `checkout_back_url` | `BILLING_CHECKOUT_BACK_URL` | Default target of the "Back" link in the checkout when no explicit `$backUrl` is set. |
 | `header_components` | — | Array of Livewire component aliases rendered in the portal, checkout and admin headers (e.g. a language switcher). Default: `[]`. See below. |
 | `admin_locale` | `BILLING_ADMIN_LOCALE` | Locale the admin panel renders in. `null` (default) follows the application locale. Set a fixed locale (e.g. `en`) to pin the panel. See below. |
@@ -98,14 +99,15 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | Key | ENV | Description |
 |-----|-----|-------------|
 | `redirect_after_return` | `BILLING_REDIRECT_AFTER_RETURN` | URL to redirect to after a successful Mollie return. |
-| `require_payment_method_for_zero_amount` | `BILLING_REQUIRE_PM_ZERO` | When `true`, a mandate is required even for 0 € plans (so later paid changes can charge it). Default: `true`. |
-| `currency` | `BILLING_CURRENCY` | ISO-4217 code. Amounts in `mollie-billing-plans.php` and coupons are interpreted in this currency. Default: `EUR`. |
-| `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Display symbol, used by `Support\BillingMoney` (and therefore the admin panel) whenever an amount is rendered in the package currency. Leave empty to fall back to a symbol derived from `currency`. Default: `€`. |
+| `checkout_country_fallback` | `BILLING_CHECKOUT_COUNTRY_FALLBACK` | VAT country used when a billable has none persisted at the moment something has to be priced. Distinct from `default_billing_country`, which only pre-selects a dropdown: this one decides the rate actually charged. Checkout and webhook read the same key, because when they disagreed a paid order could not be invoiced at all and Mollie re-delivered the webhook forever. Default: `DE`. |
+| `max_seats` | `BILLING_MAX_SEATS` | Largest seat count a single change may request; `SeatCountExceedsMaximumException` above it. The portal's number input is client-side only and `SyncSeats` clamped nothing but the lower bound, so a mistyped order of magnitude reached the pricing code and raised a prorata charge in the millions. Default: `1000`. |
+| `currency` | `BILLING_CURRENCY` | ISO-4217 code. Amounts in `mollie-billing-plans.php` and coupons are interpreted in this currency, in its smallest unit. How many minor units make up one major unit is read off the currency itself (`Support\BillingMoney::minorUnitFactor()`), so a 0-decimal currency works: with `JPY`, `2900` is ¥2900 and goes out to Mollie as `2900`, not `29.00`. The admin refund field, the OSS export and `LifecycleSimulator` all scale by the same helper, so a 3-decimal currency such as `KWD` is exact too — `1.500 KWD` is read as 1500 fils. Default: `EUR`. |
+| `currency_symbol` | `BILLING_CURRENCY_SYMBOL` | Optional override for the display symbol used by `Support\BillingMoney` wherever an amount is rendered. Unset (the default) derives the symbol from `currency`: `EUR` → `€`, `USD` → `$`, `GBP` → `£`, anything else → the ISO code followed by a space. Only set this when the derived symbol is wrong for your currency (e.g. `Fr.` for CHF) — a value here applies to the configured currency regardless of which one that is. |
 | `allow_overage_default` | `BILLING_ALLOW_OVERAGE` | Default for `Billable::allowsBillingOverage()`. Overridable per billable. |
-| `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `Immediate` / `EndOfPeriod` / `UserChoice`. Controls when plan changes are applied. Default: `UserChoice`. |
+| `plan_change_mode` | `BILLING_PLAN_CHANGE_MODE` | `immediate` / `end_of_period` / `user_choice` — the enum's **backing values**, not its case names. Controls when plan changes are applied. An unrecognised value falls back to `user_choice` and is reported by `billing:check-config`. Default: `user_choice`. |
 | `mollie_api_key` | `BILLING_MOLLIE_KEY` | Mollie API key. Alias for `MOLLIE_KEY` from `mollie/laravel-mollie` — when set, the package propagates it into `mollie.key` at boot so you can keep all settings on the `BILLING_*` prefix. Leave empty to keep using `MOLLIE_KEY` directly. |
 | `mollie_locale` | `BILLING_MOLLIE_LOCALE` | Locale for Mollie hosted pages. `null` lets Mollie auto-detect. |
-| `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Set before the first migration** — affects FK column shapes. Default: `uuid`. |
+| `billable_key_type` | `BILLING_BILLABLE_KEY_TYPE` | `uuid` / `ulid` / `int`. **Set before the first migration** — affects FK column shapes. Anything other than `int` also retypes bavix's `wallets.holder` / `transactions.payable` morphs, which means dropping and re-creating the indexes on them (including the `unique(holder_type, holder_id, slug)` constraint). Default: `uuid`. |
 | `user_key_type` | `BILLING_USER_KEY_TYPE` | `uuid` / `ulid` / `int`. Primary key type of your auth user model — used for columns like `billing_country_mismatches.resolved_by_user_id`. **Set before the first migration**. Default: `int`. |
 | `overage_job_time` | `BILLING_OVERAGE_JOB_TIME` | Time of day (`HH:MM`) for `PrepareOverageCommand`. Default: `02:00`. |
 | `trial_lifecycle_job_time` | `BILLING_TRIAL_LIFECYCLE_JOB_TIME` | Time of day (`HH:MM`) for `ProcessTrialLifecycleJob`. Sends trial-ending notifications and expires stale trials. Default: `02:05`. |
@@ -114,12 +116,15 @@ ISO-3166-1 alpha-2 fallback for the country dropdown when there is no persisted 
 | `usage_rollover_fallback` | `BILLING_USAGE_ROLLOVER_FALLBACK` | Fallback for usage types that have no explicit entry under `usage_types` in `mollie-billing-plans.php`. When `true`, unused credits of such types carry over to the next billing period; when `false`, the wallet is reset to the plan's included quota on each renewal. Default: `false`. |
 | `admin_kpi_cache_ttl` | `BILLING_ADMIN_KPI_TTL` | TTL of the admin-panel KPI cache (seconds). Default: `300`. |
 | `show_yearly_savings` | `BILLING_SHOW_YEARLY_SAVINGS` | Shows the computed savings (yearly vs. monthly) in the plan selector. Default: `true`. |
+| *(framework)* `cache.default` | `CACHE_STORE` | Not a package setting, but the package's plan-change, refund and seat-delta guards are `Cache::lock()`s on the default store. The `array` driver keeps the lock in one process's memory and `null` grants it to everyone — in both cases two concurrent changes proceed. `billing:check-config` warns. |
+| *(bavix)* `wallet.lock.driver` | `WALLET_LOCK_DRIVER` | Also not a package setting. Defaults to the per-process `array` store, so a request recording usage and the queue worker charging the overage are not serialised against each other on the same wallet. `billing:check-config` warns when the queue is not `sync`. |
+| `routes.auto_load_admin` | `BILLING_AUTO_LOAD_ADMIN_ROUTES` | Whether the service provider registers the admin-panel routes (`/billing/admin/*`) itself. Default: `true`. Set `false` when you mount them yourself with `MollieBilling::adminRoutes()` inside your own route group — leaving it on registers the same URIs twice, and the auto-loaded ones match first, so your middleware stack never runs. |
 | `local_subscription.allow_one_time_orders` | `BILLING_LOCAL_ALLOW_ONE_TIME_ORDERS` | Whether free / Local subscribers may purchase one-time products. Default: `false` — purchase attempts throw `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons with an upgrade hint. Set `true` if your free plan is a default tier monetised through token packs etc. Paid add-ons and extra seats remain blocked on Local subs regardless of this flag (no mandate available). |
 | `billing_timezone` | `BILLING_TIMEZONE` | IANA timezone for the customer-portal display (fallback when `Billable::getBillingTimezone()` is not overridden). Persistence and computation always remain UTC; the admin panel also renders UTC. Default: `UTC`. See [docs/timezone.md](timezone.md). |
 | `cleanup.enabled` | `BILLING_CLEANUP_ORPHANED_ENABLED` | Master switch for `CleanupOrphanedBillablesJob`. Default: `true`. |
 | `cleanup.threshold_minutes` | `BILLING_CLEANUP_ORPHANED_THRESHOLD_MINUTES` | Minimum age before an orphaned billable is eligible for deletion. Default: `60`. |
 | `cleanup.cron_expression` | `BILLING_CLEANUP_ORPHANED_CRON` | Cron expression for the cleanup schedule. Default: `*/15 * * * *` (every 15 minutes). |
-| `past_due_max_days` | `BILLING_PAST_DUE_MAX_DAYS` | Days a billable may sit in `past_due` before `PrepareUsageOverageJob` Pass 3a auto-cancels the subscription (`past_due → cancelled` with `subscription_ends_at = now`, then Pass 3b finalises to `expired` on the next run). Recovery (Mollie retries succeeding, manual portal payment) still works up to the cutoff. Set to `0` to disable and keep the legacy behavior (PastDue lives forever until manual action). Default: `30`. See [docs/lifecycle-and-cleanup.md](lifecycle-and-cleanup.md). |
+| `past_due_max_days` | `BILLING_PAST_DUE_MAX_DAYS` | Days a billable may sit in `past_due` before `PrepareUsageOverageJob` Pass 4 auto-cancels the subscription (`past_due → cancelled` with `subscription_ends_at = now`, then Pass 1 finalises to `expired` on the next run). Recovery (Mollie retries succeeding, manual portal payment) still works up to the cutoff. Set to `0` to disable and keep the legacy behavior (PastDue lives forever until manual action). Default: `30`. See [docs/lifecycle-and-cleanup.md](lifecycle-and-cleanup.md). |
 
 ### Audit trail (`audit`)
 
@@ -150,6 +155,7 @@ PDF invoices are generated locally via `elegantly/laravel-invoices` and stored o
 ```php
 'invoices' => [
     'disk' => env('BILLING_INVOICE_DISK', 'local'),
+    'locale' => env('BILLING_INVOICE_LOCALE'),   // null → app.fallback_locale
     'path' => 'billing/invoices',           // → {disk}/billing/invoices/{YYYY/MM}/{serial}.pdf
     'logo' => env('BILLING_INVOICE_LOGO'),
     'seller' => [ /* company master data */ ],
@@ -172,7 +178,9 @@ Supported `logo` formats:
 - absolute path: `/var/www/public/logo.png`
 - data URI: `data:image/png;base64,…`
 
-Serial numbers are issued atomically by `InvoiceNumberGenerator`.
+Serial numbers are issued atomically by `InvoiceNumberGenerator`: the number is allocated and the row inserted inside one transaction, so two concurrent webhooks cannot mint the same serial.
+
+`invoices.locale` pins the language a PDF renders in. This matters because `InvoiceDownloadController` regenerates a PDF whose stored file has gone missing — without a pinned locale that regeneration follows whatever locale the triggering request ran in, so a German invoice re-downloaded from the admin panel came back with English labels and `€1,234.56`, permanently overwriting the archived document. Each invoice also stores its own `locale`, which wins over the config value; rows created before that column existed fall back to it.
 
 ### IP geolocation
 
@@ -239,6 +247,11 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
 ### VAT / OSS
 
 ```php
+'vat' => [
+    'seller_country' => env('BILLING_SELLER_COUNTRY'),                    // ISO-3166-1 alpha-2
+    'require_seller_country' => env('BILLING_REQUIRE_SELLER_COUNTRY', false),
+],
+
 'vat_rate_overrides' => [
     // 'DE' => 19.0,
 ],
@@ -254,6 +267,18 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
 ],
 ```
 
+- `vat.seller_country` — **your own** country. Reverse charge under Art. 196 VAT Directive applies to cross-border B2B supplies only, so this is what separates a domestic business customer (owes domestic VAT) from a cross-border one (0%, reverse charge). Falls back to `invoices.seller.address.country`. While neither is set the package logs a warning and grants reverse charge on VIES validity alone — which invoices a customer in your own country at 0% and under-declares your domestic output VAT. `VatCalculationService` owns the decision in two forms, and nothing outside it may re-implement either: `reverseChargeApplies()` for a billable with a *persisted* VIES validation (what the portal, the invoice and the preview price from), and `reverseChargeCountriesQualify()` for the country half alone, which is what a form needs while the number being typed is not saved yet. The checkout's net/gross display and the verification message both read the second one. A copy of that policy is how the two came apart before: the message promised reverse charge on a domestic supply while the total beside it correctly charged VAT.
+- `vat.require_seller_country` — set `true` to refuse reverse charge entirely while no seller country is known, instead of the backwards-compatible fallback above.
+
+  There are three states, not two, and `require_seller_country` only governs the middle one:
+
+  | `vat.seller_country` | Reverse charge for a VIES-valid B2B customer |
+  |---|---|
+  | a valid alpha-2 code (`AT`, `de`, `" DE "`) | cross-border → 0%, domestic → your own VAT rate |
+  | unset (and no `invoices.seller.address.country`) | granted unless `require_seller_country` is `true`; a warning is logged |
+  | set but malformed (`AUT`, `Austria`, `de-AT`, `A1`) | **refused regardless of `require_seller_country`**, and logged once per offending value |
+
+  The malformed case is deliberately not covered by the compat allowance: the operator opted into the setting, and the old behaviour silently reverse-charged every domestic B2B supply at 0% with the seller paying that VAT out of pocket — which cannot be unwound, while an over-charged invoice can (credit note plus correction). `billing:check-config` reports a malformed value as an **error**, which is where a typo should stop you. Validation is structural (two ASCII letters), not a registry lookup, so GB/CH/NO sellers stay configurable.
 - `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code.
 - `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list.
 - `oss.disk` — Laravel filesystem disk where generated OSS protocol CSVs are stored. Works with any S3-compatible private bucket; the admin portal hands out a short-lived presigned URL via `Storage::temporaryUrl()`. When `null`, the disk configured under `invoices.disk` is reused.
@@ -271,7 +296,7 @@ OSS exports run as a queued job (`GenerateOssExportJob`) — admins click "Gener
 ],
 ```
 
-All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `RevokeMollieMandateJob`, `RetrySubscriptionPatchJob`, `RetryRefundLineJob`, `CleanupStalePendingProrataChangeJob`, `CleanupStalePendingCountryCorrectionJob`, `PruneProcessedWebhooksJob`, `ApplyScheduledChangesJob`, `SyncSeatsJob`, `GenerateOssExportJob`) and the queued `PlanChangeFailedNotification` are dispatched onto this connection/queue.
+All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `RevokeMollieMandateJob`, `RetrySubscriptionPatchJob`, `RetryRefundLineJob`, `CleanupStalePendingProrataChangeJob`, `CleanupStalePendingCountryCorrectionJob`, `CleanupStalePendingOverageChargeJob`, `PruneProcessedWebhooksJob`, `ApplyScheduledChangesJob`, `SyncSeatsJob`, `GenerateOssExportJob`) and the queued `PlanChangeFailedNotification` are dispatched onto this connection/queue.
 
 Both keys default to `null`, which falls back to the framework default connection (`config('queue.default')`) and the default queue name. Set `BILLING_QUEUE_NAME=billing` (and a dedicated worker) when you want to isolate billing work from the rest of your application's queue.
 
@@ -329,7 +354,7 @@ Each plan is keyed by its `planCode`.
 |-------|-------------|
 | `name`, `description` | Display values. If a translation exists under `billing::plans.<code>.{name,description}` it overrides these. |
 | `hidden` *(optional)* | Boolean, default `false`. Keeps the plan out of the checkout plan step and the portal's plan-change screen, and refuses it as a change target server-side. See [Hidden plans](#hidden-plans). |
-| `tier` | Integer. Higher = more expensive/larger. Declares plan rank for your own app's use; the package itself only validates it (`billing:check-config` warns when two visible plans share a tier). Up-/downgrade behaviour in `UpdateSubscription` is derived from the prorata amounts, not from `tier`. |
+| `tier` | Optional integer. Higher = more expensive/larger. Declares plan rank for your own app's use; the package itself never reads it. `billing:check-config` warns when it is absent and when two visible plans share a tier, and errors only when a value is present but not an integer. Up-/downgrade behaviour in `UpdateSubscription` is derived from the prorata amounts, not from `tier`. |
 | `included_seats` | Number of seats included in the base price. `SyncSeats` charges anything above this as additional seats. |
 | `feature_keys` | List of feature keys from the `features` block. Resolved together with addon features by `FeatureAccess`. |
 | `allowed_addons` | Whitelist of addons. Other addons cannot be enabled on this plan. |
@@ -348,6 +373,16 @@ Each plan is keyed by its `planCode`.
 | `usage_overage_prices` | ✓ | Map `usage_type => price_in_cents_per_unit`. Charged once a wallet goes negative. Use `false` instead of a price to declare that a quota deliberately has no overage — see below. |
 
 > **Important:** `included_usages`, `usage_overage_prices`, and `trial_days` live **inside** each `intervals.{monthly|yearly}` block, not at plan level. `SubscriptionCatalogInterface` lookups are always keyed by `(planCode, interval)`.
+
+#### A plan does not have to offer both intervals
+
+Declaring only `monthly` (or only `yearly`) is valid — `billing:check-config` requires at least one. Every customer-facing surface narrows itself accordingly: the checkout's interval toggle only lists intervals the selected plan is sold in and disappears entirely when there is just one, `?interval=` is ignored when the plan does not offer it, and the plan-change screen rejects the pair.
+
+This matters because the price getters cannot express "not sold": `basePriceNet()` and `addonPriceNet()` return `0` for an interval that has no block, exactly as they do for a genuinely free plan. Ask `SubscriptionCatalogInterface::planOffersInterval()` / `addonOffersInterval()` whenever the interval comes from user input — `StartSubscriptionCheckout` throws `IntervalNotOfferedException` rather than trusting a zero, because an unpriced pair used to be activated as a free plan.
+
+The change path enforces the same rule: `UpdateSubscription::update()` (via `ValidateSubscriptionChange`) and `ScheduleSubscriptionChange::schedule()` both throw `IntervalNotOfferedException` when the *target* plan or one of the target addons does not sell the target interval. It fires only when plan or interval actually move — an existing customer whose interval you later remove from the catalog can still change seats and addons.
+
+The same applies to addons: an addon whose `intervals` block omits an interval is not enabled on that interval.
 
 #### Declaring a quota with no overage
 
@@ -395,7 +430,7 @@ app(UpdateSubscription::class)->update($billable, new SubscriptionUpdateRequest(
 
 The override exists **only** on the typed `SubscriptionUpdateRequest` — as the constructor argument above or via `->withAllowHiddenPlan()`. `SubscriptionUpdateRequest::from()` ignores an `allow_hidden_plan` key in array payloads on purpose: it overrides an authorization check, so an app that forwards `request()->all()` into `update()` must not be able to hand a caller a hidden plan. Once set, it is carried through scheduled and deferred changes so a move that was deliberately allowed is not rejected later when it is applied.
 
-> **Note for custom catalogs:** apps that implement `SubscriptionCatalogInterface` themselves (instead of extending `ConfigSubscriptionCatalog`) must add `visiblePlans()` and `planIsHidden()`.
+> **Note for custom catalogs:** apps that implement `SubscriptionCatalogInterface` themselves (instead of extending `ConfigSubscriptionCatalog`) must add `visiblePlans()`, `planIsHidden()`, `planOffersInterval()` and `addonOffersInterval()`. The two `*OffersInterval()` methods must answer whether the interval is *sold*, not whether its price is non-zero — a free plan is sold at 0.
 
 ### `usage_types`
 

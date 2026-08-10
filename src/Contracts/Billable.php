@@ -99,7 +99,7 @@ interface Billable
     public function billingInvoices(): MorphMany;
     public function latestBillingInvoice(): ?BillingInvoice;
     public function nextBillingDate(): ?CarbonInterface;
-    public function totalBillingSpentGross(): int;
+    public function totalBillingSpentGross(?string $currency = null): int;
     public function redeemedBillingCoupons(): MorphMany;
 
     // Plan metadata (human-readable, for UI)
@@ -162,7 +162,7 @@ interface Billable
     public function scopeBillableOrderByEmail(Builder $query, string $direction): Builder;
 
     // Subscription management (actions)
-    public function cancelBillingSubscription(bool $immediately = false): void;
+    public function cancelBillingSubscription(bool $immediately = false, ?string $reason = null): void;
     public function changeBillingPlan(string $planCode, string $interval): void;
     public function resubscribeBillingPlan(): void;
     public function enableBillingAddon(string $addonCode, ?string $couponCode = null, ?array $couponCodes = null): void;

@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
-use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 
 return [
     'billable_model' => env('BILLING_BILLABLE_MODEL'),
@@ -17,6 +16,12 @@ return [
     // links to the billing dashboard itself. Supports a plain URL string or a named
     // route via the 'route:' prefix, e.g. 'route:dashboard'.
     'dashboard_url' => env('BILLING_DASHBOARD_URL'),
+
+    // Where the admin panel's "Back" link in the sidebar leads. Same two forms as
+    // `dashboard_url` — a plain URL or `route:some.name`. Left unset it falls back to
+    // `dashboard_url`, so a single-app install configures one value; set it explicitly when
+    // staff administer from somewhere other than where customers land.
+    'admin_back_url' => env('BILLING_ADMIN_BACK_URL'),
 
     // Livewire components rendered in the portal header (left of the theme
     // switcher), in the checkout header (left of the "Back" link) and in the
@@ -48,22 +53,70 @@ return [
     // billable country is persisted yet and the IP-based lookup yields no result.
     'default_billing_country' => env('BILLING_DEFAULT_COUNTRY', 'AT'),
 
+    'vat' => [
+        // Your own country (ISO-3166-1 alpha-2). Reverse charge under Art. 196 VAT
+        // Directive is cross-border only, so without this a customer in your own
+        // country holding a valid VAT ID is invoiced at 0% instead of domestic VAT.
+        // Falls back to invoices.seller.address.country; when neither is set the
+        // package logs a warning and grants reverse charge on VIES validity alone.
+        'seller_country' => env('BILLING_SELLER_COUNTRY'),
+
+        // Refuse reverse charge entirely while no seller country is known, instead
+        // of falling back to the pre-0.4 behaviour above.
+        'require_seller_country' => env('BILLING_REQUIRE_SELLER_COUNTRY', false),
+    ],
+
+    // VAT country used when a billable has none persisted at the moment we have to
+    // price something. Deliberately separate from `default_billing_country`, which
+    // only pre-selects a dropdown: this one decides the rate actually charged, and
+    // checkout and webhook MUST agree on it or a paid order cannot be invoiced.
+    'checkout_country_fallback' => env('BILLING_CHECKOUT_COUNTRY_FALLBACK', 'DE'),
+
     'redirect_after_return' => env('BILLING_REDIRECT_AFTER_RETURN'),
 
-    'require_payment_method_for_zero_amount' => env('BILLING_REQUIRE_PM_ZERO', true),
 
     // Package-wide currency (ISO-4217). Prices in mollie-billing-plans.php and coupon amounts
     // are interpreted in this currency. Mollie payments, sales invoices and BillingInvoice
     // persist this code. The EU VAT/OSS system (mpociot/vat-calculator, VIES, OSS export)
     // is EU-only but the currency itself is independent of it.
+    /*
+     * Largest seat count a single change may request.
+     *
+     * The portal's number input is client-side only and `SyncSeats` clamped nothing but
+     * the lower bound, so a mistyped order of magnitude (or a `$wire.set()`) reached
+     * `SubscriptionAmount::net()` and raised a prorata charge in the millions. Checkout has
+     * capped the equivalent field at 100 all along; this is the same intent for the change
+     * path. Raise it if you sell to organisations that large.
+     */
+    'max_seats' => (int) env('BILLING_MAX_SEATS', 1000),
+
     'currency' => env('BILLING_CURRENCY', 'EUR'),
-    'currency_symbol' => env('BILLING_CURRENCY_SYMBOL', '€'),
+    // Leave unset to let BillingMoney derive the symbol from `currency` (EUR → €,
+    // USD → $, GBP → £, anything else → the ISO code). Only set this to override
+    // that, e.g. 'CHF ' or 'Fr.' — a hardcoded value here would otherwise be used
+    // for every currency.
+    'currency_symbol' => env('BILLING_CURRENCY_SYMBOL'),
+
+    'routes' => [
+        // The admin panel's routes (`/billing/admin/*`) are registered by the service
+        // provider. Set this to false when you mount them yourself with
+        // `MollieBilling::adminRoutes()` inside your own route group — otherwise both
+        // registrations exist, the auto-loaded ones match first, and your middleware
+        // stack never runs.
+        'auto_load_admin' => env('BILLING_AUTO_LOAD_ADMIN_ROUTES', true),
+    ],
 
     // Invoice PDF generation and storage. PDFs are generated locally via elegantly/laravel-invoices
     // and stored on the configured Laravel filesystem disk.
     'invoices' => [
         // Laravel filesystem disk for storing generated PDF invoices.
         'disk' => env('BILLING_INVOICE_DISK', 'local'),
+
+        // Locale the PDF is rendered in. Pinned per invoice so a regenerated
+        // document matches the archived one — without it the PDF would follow
+        // whatever locale the request that triggered the (re)generation ran in.
+        // Falls back to app.fallback_locale.
+        'locale' => env('BILLING_INVOICE_LOCALE'),
 
         // Base path within the disk. Invoices are stored as {path}/{YYYY/MM}/{serial}.pdf.
         'path' => 'billing/invoices',
@@ -124,13 +177,20 @@ return [
     // Default for Billable::allowsBillingOverage() — overridable per billable.
     'allow_overage_default' => env('BILLING_ALLOW_OVERAGE', true),
 
-    // Controls how plan changes are applied:
-    // Immediate    — always applied immediately (with prorata billing)
-    // EndOfPeriod  — always scheduled for the end of the current period
-    // UserChoice   — the user decides (both options shown in the portal)
-    'plan_change_mode' => PlanChangeMode::from(
-        env('BILLING_PLAN_CHANGE_MODE', PlanChangeMode::UserChoice->value)
-    ),
+    // Controls how plan changes are applied. Note the values are the snake_case
+    // backing values, not the enum case names:
+    // immediate      — always applied immediately (with prorata billing)
+    // end_of_period  — always scheduled for the end of the current period
+    // user_choice    — the user decides (both options shown in the portal)
+    //
+    // `tryFrom`, not `from`: this file is evaluated inside the service provider's
+    // `mergeConfigFrom()`, so a typo in the env value used to throw a ValueError during
+    // `register()` — every request and every artisan call dead, including the
+    // `billing:check-config` that would have named the problem. It degrades to the
+    // default instead, and check-config reports the offending raw value.
+    'plan_change_mode' => PlanChangeMode::tryFrom(
+        strtolower(trim((string) env('BILLING_PLAN_CHANGE_MODE', PlanChangeMode::UserChoice->value)))
+    ) ?? PlanChangeMode::UserChoice,
 
     // Mollie API key. When set, propagates to `mollie.key` so the underlying
     // `mollie/laravel-mollie` package picks it up. Leave empty to keep using
@@ -258,12 +318,15 @@ return [
     ],
 
     // Auto-cancel of subscriptions stuck in `past_due`. After this many days
-    // without a successful recovery payment, PrepareUsageOverageJob Pass 3
+    // without a successful recovery payment, PrepareUsageOverageJob's Pass 4
     // transitions the billable to `cancelled` with `subscription_ends_at = now`.
-    // The next Pass 3 run then flips `cancelled → expired`, releasing access
-    // permanently. Recovery (PastDue → Active) still works as long as Mollie
-    // succeeds within this window. Set BILLING_PAST_DUE_MAX_DAYS=0 to disable
-    // the auto-cancel (PastDue then lives forever until manual action).
+    // Pass 1 of the *next* run then flips `cancelled → expired` and clears the
+    // plan-scoped fields, releasing access permanently — the expiry pass runs
+    // before the auto-cancel precisely so both never happen in one invocation,
+    // which used to make `cancelled` unobservable. Recovery (PastDue → Active)
+    // still works as long as Mollie succeeds within this window. Set
+    // BILLING_PAST_DUE_MAX_DAYS=0 to disable the auto-cancel (PastDue then lives
+    // forever until manual action).
     'past_due_max_days' => (int) env('BILLING_PAST_DUE_MAX_DAYS', 30),
 
     'usage_threshold_percent' => env('BILLING_USAGE_THRESHOLD', 80),
@@ -307,6 +370,12 @@ return [
     // RetryUsageOverageChargeJob, RevokeMollieMandateJob, …).
     // null on either key falls back to the framework default
     // (queue.default connection / "default" queue name).
+    //
+    // Everything routed here is also dispatched after-commit. Almost all of it is
+    // enqueued from inside a DB::transaction, and a worker that dequeues first loses
+    // the race twice over: a notification whose invoice row does not exist yet fails
+    // its model lookup and is dropped into failed_jobs with no retry, and a Mollie
+    // PATCH can land for a change the transaction then rolls back.
     'queue' => [
         'connection' => env('BILLING_QUEUE_CONNECTION'),
         'name' => env('BILLING_QUEUE_NAME'),

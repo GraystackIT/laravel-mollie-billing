@@ -28,7 +28,17 @@ class FeatureAccess
         return (bool) array_intersect($features, $this->resolveFeatures($billable));
     }
 
-    /** @return array<int, string> */
+    /**
+     * Deliberately a catalog question — "what does this plan and its addons
+     * include" — and not an access decision. Route access is governed by
+     * `RequireActiveSubscription`; an expired subscription loses its features
+     * because the expiry transition clears the plan code, not because this
+     * resolver second-guesses the subscription state. Consuming apps use
+     * `hasPlanFeature()` to gate navigation and modules, so mixing the two here
+     * turns every unsubscribed-but-plan-assigned billable dark.
+     *
+     * @return array<int, string>
+     */
     public function resolveFeatures(Billable $billable): array
     {
         $planCode = $billable->getBillingSubscriptionPlanCode();

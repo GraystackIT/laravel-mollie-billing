@@ -13,13 +13,18 @@ class DisableAddon
     ) {
     }
 
+    /**
+     * Remove one addon from whatever is active *at the time of the write*.
+     *
+     * Same reasoning as EnableAddon: `update()` takes an absolute list, so read and write
+     * must share one critical section — the change lock, entered with a closure payload,
+     * never a `DB::transaction` wrapped around the Mollie pipeline. See
+     * {@see EnableAddon::handle()} for the full scenario.
+     */
     public function handle(Billable $billable, string $addonCode): void
     {
-        $current = $billable->getActiveBillingAddonCodes();
-        $next = array_values(array_diff($current, [$addonCode]));
-
-        $this->updateSubscription->update($billable, [
-            'addons' => $next,
+        $this->updateSubscription->update($billable, fn (Billable $locked): array => [
+            'addons' => array_values(array_diff($locked->getActiveBillingAddonCodes(), [$addonCode])),
         ]);
     }
 }

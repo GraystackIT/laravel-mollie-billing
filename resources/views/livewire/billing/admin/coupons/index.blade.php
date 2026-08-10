@@ -16,6 +16,8 @@ new class extends Component {
 
     public array $selected = [];
 
+    private const ALLOWED_SORTS = ['code', 'name', 'type', 'redemptions_count', 'valid_until', 'active', 'created_at'];
+
     public function updatingSearch(): void
     {
         $this->resetPage();
@@ -23,6 +25,10 @@ new class extends Component {
 
     public function sort(string $column): void
     {
+        if (! in_array($column, self::ALLOWED_SORTS, true)) {
+            return;
+        }
+
         if ($this->sortBy === $column) {
             $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
         } else {
@@ -42,13 +48,15 @@ new class extends Component {
 
     public function with(): array
     {
+        $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
+
         return [
             'coupons' => Coupon::query()
                 ->when($this->search !== '', fn ($q) => $q
                     ->where(fn ($w) => $w
                         ->where('code', 'like', '%'.strtoupper($this->search).'%')
                         ->orWhere('name', 'like', '%'.$this->search.'%')))
-                ->orderBy($this->sortBy, $this->sortDirection)
+                ->orderBy($sortBy, $this->sortDirection)
                 ->paginate(20),
         ];
     }

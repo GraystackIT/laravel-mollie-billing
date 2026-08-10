@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Support;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\MollieBilling;
+use Illuminate\Routing\Exceptions\UrlGenerationException;
 
 class BillingRoute
 {
@@ -128,6 +129,58 @@ class BillingRoute
     }
 
     /** Reset cached prefixes (for testing). */
+    /**
+     * Resolve a configured URL that may name a route instead of spelling out a path.
+     *
+     * `BILLING_DASHBOARD_URL` and `BILLING_ADMIN_BACK_URL` both accept either a plain URL or
+     * `route:some.name`, and both layouts used to expand that themselves — two copies of the
+     * same three lines, which is how the portal and the admin panel would drift.
+     *
+     * A named route that does not exist returns null rather than throwing. It is read from a
+     * layout, so an `UrlGenerationException` there is a 500 on every page of the panel; a
+     * missing back link is a typo an operator can see and fix. `billing:check-config` reports
+     * the same mistake as an error, which is where it should stop you.
+     *
+     * A route that *does* exist but needs parameters we cannot supply degrades the same way,
+     * and that is the more likely mistake: `route:tenant.dashboard` is the natural value for
+     * `dashboard_url` on a tenant-prefixed mount, where the portal's own route parameters fill
+     * `{organization}` in. The admin panel is mounted outside that prefix, so the same value —
+     * inherited by `admin_back_url` through its fallback — has nothing to fill it with.
+     */
+    public static function configuredUrl(?string $value): ?string
+    {
+        if ($value === null || trim($value) === '') {
+            return null;
+        }
+
+        $value = trim($value);
+
+        if (! str_starts_with($value, 'route:')) {
+            return $value;
+        }
+
+        $name = substr($value, 6);
+
+        if ($name === '' || ! \Illuminate\Support\Facades\Route::has($name)) {
+            \Illuminate\Support\Facades\Log::warning('Configured URL names a route that does not exist', [
+                'value' => $value,
+            ]);
+
+            return null;
+        }
+
+        try {
+            return route($name);
+        } catch (UrlGenerationException $e) {
+            \Illuminate\Support\Facades\Log::warning('Configured URL names a route whose parameters cannot be resolved here', [
+                'value' => $value,
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
     public static function flush(): void
     {
         self::$dashboardPrefix = null;

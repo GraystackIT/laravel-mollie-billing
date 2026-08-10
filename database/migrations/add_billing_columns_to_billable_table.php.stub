@@ -51,7 +51,10 @@ return new class extends Migration
                 'subscription_ends_at' => fn () => $table->timestamp('subscription_ends_at')->nullable(),
                 'active_addon_codes' => fn () => $table->json('active_addon_codes')->nullable(),
                 'subscription_meta' => fn () => $table->json('subscription_meta')->nullable(),
-                'subscription_status' => fn () => $table->string('subscription_status')->default(SubscriptionStatus::New->value),
+                // Indexed: every scheduler pass filters on it (PrepareUsageOverageJob
+                // passes 1/3/4, ProcessTrialLifecycleJob, CleanupOrphanedBillablesJob),
+                // which is four full scans of the billable table per run without it.
+                'subscription_status' => fn () => $table->string('subscription_status')->default(SubscriptionStatus::New->value)->index(),
                 'scheduled_change_at' => fn () => $table->timestamp('scheduled_change_at')->nullable()->index(),
                 'allows_billing_overage' => fn () => $table->boolean('allows_billing_overage')->nullable(),
             ];
@@ -62,11 +65,44 @@ return new class extends Migration
                 }
             }
         });
+
+        // Backfill the subscription_status index for tables created by an earlier
+        // version of this stub, where the column already exists (and is therefore
+        // skipped above) but carries no index.
+        if (! $this->hasIndexOn($tableName, 'subscription_status')) {
+            Schema::table($tableName, function (Blueprint $table): void {
+                $table->index('subscription_status');
+            });
+        }
     }
 
     public function down(): void
     {
         // Intentionally a no-op: this migration adds columns to the app's billable table.
         // Rolling back would be destructive to app data. Operators drop columns manually if needed.
+    }
+
+    /**
+     * Whether any index already covers the given column as its first key — including
+     * a composite one the app may have added itself, which serves these lookups too.
+     */
+    private function hasIndexOn(string $table, string $column): bool
+    {
+        try {
+            $indexes = Schema::getIndexes($table);
+        } catch (\Throwable) {
+            // Driver cannot introspect indexes — skip rather than risk a duplicate.
+            return true;
+        }
+
+        foreach ($indexes as $index) {
+            $columns = (array) ($index['columns'] ?? []);
+
+            if (($columns[0] ?? null) === $column) {
+                return true;
+            }
+        }
+
+        return false;
     }
 };

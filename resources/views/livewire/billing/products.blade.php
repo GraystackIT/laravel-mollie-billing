@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
@@ -10,10 +11,12 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     public bool $processing = false;
 
     /** @var array<string, array<int, string>> applied coupon codes per product */
@@ -30,6 +33,27 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read which products the tenant has
+     * already bought, or probe coupon validity against it. Withholding the billable falls
+     * through to the same empty state as "none resolved"; `purchase()` keeps resolving it
+     * unguarded so it can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function applyCoupon(string $productCode, CouponService $service): void
@@ -53,7 +77,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -72,9 +96,12 @@ new class extends Component {
                 'productCodes' => [$productCode],
                 'orderAmountNet' => $remainingNet,
                 'existingCouponIds' => $this->resolveAppliedCouponIds($current),
+                // SinglePayment only. A one-time order has no recurring charge for a
+                // Recurring coupon to discount, and StartOneTimeOrderCheckout rejects
+                // one — so offering it here accepted a code at the field and then
+                // failed the purchase it was entered for.
                 'allowed_types' => [
                     \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
-                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
                 ],
             ]);
         } catch (InvalidCouponException $e) {
@@ -187,6 +214,7 @@ new class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
@@ -206,6 +234,20 @@ new class extends Component {
         if (! $billable) return;
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
+        // The product code arrives from the client, so the filtering `with()` does is
+        // no guard: a `onetimeonly` product the billable has already paid for is gone
+        // from the card list but still purchasable by a crafted call, and nothing
+        // downstream re-checks — StartOneTimeOrderCheckout knows the flag but never
+        // consults it.
+        if (! in_array($productCode, $billable->availableBillingProducts(), true)) {
+            // Flux Pro is a hard runtime dependency but ships under `suggest`, so it is
+            // absent from this package's own test environment — and a guard that cannot
+            // run under test is a guard nobody can prove works.
+            $this->toast(__('billing::portal.products.unavailable'), 'danger');
+
+            return;
+        }
 
         $this->processing = true;
 
@@ -230,15 +272,15 @@ new class extends Component {
                 $this->processing = false;
                 $this->appliedCouponCodes[$productCode] = [];
                 $this->couponInputs[$productCode] = '';
-                \Flux::toast(__('billing::portal.products.success'), variant: 'success');
+                $this->toast(__('billing::portal.products.success'), 'success');
                 $this->dispatch('product-purchased', productCode: $productCode);
                 return;
             }
 
-            \Flux::toast(__('billing::portal.products.error'), variant: 'danger');
+            $this->toast(__('billing::portal.products.error'), 'danger');
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.products.error'), variant: 'danger');
+            $this->toast(__('billing::portal.products.error'), 'danger');
         }
 
         $this->processing = false;
@@ -246,10 +288,9 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
 
         $availableCodes = $billable?->availableBillingProducts() ?? [];
         $boughtCodes = $billable?->boughtBillingProducts() ?? [];
@@ -360,6 +401,24 @@ new class extends Component {
             'boughtGroups' => $boughtGroups,
             'currencySymbol' => $currencySymbol,
             'reverseCharge' => $reverseCharge,
+            // At the same scale as the prices they sit next to. `couponDiscounts` is net —
+            // that is what the order is priced on — while `price_net` above is already
+            // grossed for a B2C customer. Rendering the two together showed a €120.00 price
+            // with a −€20.00 discount for a 20 % coupon that actually takes €24.00 off, so
+            // the arithmetic on screen did not add up to the amount charged.
+            'couponDiscountsDisplay' => collect($this->couponDiscounts)
+                ->map(function (int $discountNet) use ($reverseCharge, $vatService, $country, $billable): int {
+                    if ($discountNet <= 0 || $reverseCharge || $billable === null) {
+                        return $discountNet;
+                    }
+
+                    try {
+                        return (int) $vatService->calculate($country, $discountNet, $billable)['gross'];
+                    } catch (\Throwable) {
+                        return $discountNet;
+                    }
+                })
+                ->all(),
             'localBlocksProducts' => $localBlocksProducts,
             'isAccessGrant' => $isAccessGrant,
         ];
@@ -436,7 +495,7 @@ new class extends Component {
                                 <div class="flex items-center gap-6 sm:shrink-0">
                                     <div class="text-right">
                                         <div class="flex items-baseline gap-1">
-                                            <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($product['price_net'] / 100, 2) }}</span>
+                                            <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($product['price_net']) }}</span>
                                         </div>
                                         <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                                     </div>
@@ -466,7 +525,7 @@ new class extends Component {
                                     <flux:text>
                                         {{ __('billing::portal.products.confirm.body', [
                                             'product' => $product['name'],
-                                            'price' => $currencySymbol . number_format($product['price_net'] / 100, 2),
+                                            'price' => BillingMoney::format($product['price_net']),
                                         ]) }}
                                     </flux:text>
                                 </div>
@@ -506,7 +565,7 @@ new class extends Component {
 
                                     @if (($couponDiscounts[$product['code']] ?? 0) > 0)
                                         <flux:text class="text-xs text-emerald-600 dark:text-emerald-400">
-                                            −{{ $currencySymbol }}{{ number_format(($couponDiscounts[$product['code']] ?? 0) / 100, 2) }} {{ __('billing::portal.coupon_discount_applied') }}
+                                            −{{ BillingMoney::format($couponDiscountsDisplay[$product['code']] ?? $couponDiscounts[$product['code']] ?? 0) }} {{ __('billing::portal.coupon_discount_applied') }}
                                         </flux:text>
                                     @endif
 
@@ -583,7 +642,7 @@ new class extends Component {
                                 {{-- Right: price (no button) --}}
                                 <div class="flex items-center sm:shrink-0">
                                     <div class="text-right">
-                                        <span class="text-2xl font-bold tabular-nums tracking-tight text-zinc-400 dark:text-zinc-500">{{ $currencySymbol }}{{ number_format($product['price_net'] / 100, 2) }}</span>
+                                        <span class="text-2xl font-bold tabular-nums tracking-tight text-zinc-400 dark:text-zinc-500">{{ BillingMoney::format($product['price_net']) }}</span>
                                     </div>
                                 </div>
                             </div>

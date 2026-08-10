@@ -2,9 +2,13 @@
 
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use Illuminate\Database\Eloquent\Model;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 
 new class extends Component {
+    /** Locked: the credit always lands on the billable whose tab is open. */
+    #[Locked]
     public mixed $billableId = null;
     public string $creditType = '';
     public int $creditUnits = 0;
@@ -12,7 +16,10 @@ new class extends Component {
     public ?string $flash = null;
     public ?string $error = null;
 
-    public function mount(mixed $billableId = null, SubscriptionCatalogInterface $catalog): void
+    // Container-injected parameter first: an optional parameter ahead of a required
+    // one is deprecated in PHP 8.3. Livewire resolves mount arguments by name and
+    // type, so the order is free.
+    public function mount(SubscriptionCatalogInterface $catalog, mixed $billableId = null): void
     {
         $this->billableId = $billableId;
         $this->creditType = $catalog->allUsageTypes()[0] ?? '';
@@ -29,7 +36,7 @@ new class extends Component {
         return $class ? $class::find($this->billableId) : null;
     }
 
-    public function credit(WalletUsageService $service): void
+    public function credit(WalletUsageService $service, SubscriptionCatalogInterface $catalog): void
     {
         $this->flash = $this->error = null;
         $b = $this->billable();
@@ -38,11 +45,31 @@ new class extends Component {
             $this->error = __('billing::admin.billables.wallet.flash.pick_usage_type');
             return;
         }
+
+        // An unknown usage type is not a no-op: resolveWallet() creates a wallet for
+        // whatever slug it is handed, and nothing in the catalog will ever charge,
+        // recharge or reset that wallet again.
+        if (! in_array($this->creditType, $catalog->allUsageTypes(), true)) {
+            $this->error = __('billing::admin.billables.wallet.flash.unknown_usage_type', ['type' => $this->creditType]);
+            return;
+        }
+
         if ($this->creditUnits <= 0) {
             $this->error = __('billing::admin.billables.wallet.flash.units_positive');
             return;
         }
         $service->credit($b, $this->creditType, $this->creditUnits, $this->creditReason ?: __('billing::admin.billables.wallet.default_reason'));
+
+        // Register as purchased balance, exactly like the Credits-coupon path: a
+        // renewal with rollover disabled rebuilds the wallet from quota + purchased
+        // remaining, so an unregistered goodwill credit would silently evaporate.
+        if ($b instanceof Model) {
+            $wallet = $b->getWallet($this->creditType);
+            if ($wallet !== null) {
+                WalletUsageService::addPurchasedBalance($wallet, $this->creditUnits);
+            }
+        }
+
         $this->flash = __('billing::admin.billables.wallet.flash.credited', [
             'units' => $this->creditUnits,
             'type' => $this->creditType,

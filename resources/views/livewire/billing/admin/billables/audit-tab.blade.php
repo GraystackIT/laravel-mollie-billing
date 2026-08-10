@@ -3,12 +3,15 @@
 use GraystackIT\MollieBilling\Enums\AuditCategory;
 use GraystackIT\MollieBilling\Support\BillingAuditEntry;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Livewire\WithPagination;
 
 new class extends Component {
     use WithPagination;
 
+    /** Locked: the trail read here belongs to the billable whose page is open, not to whichever id comes back. */
+    #[Locked]
     public mixed $billableId = null;
     public string $category = '';
 

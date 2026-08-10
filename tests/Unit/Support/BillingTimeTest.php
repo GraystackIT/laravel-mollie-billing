@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
-use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 

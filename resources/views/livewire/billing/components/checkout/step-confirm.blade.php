@@ -1,7 +1,10 @@
 @php($plan = $this->selectedPlan())
-@php($currencySymbol = config('mollie-billing.currency_symbol', '€'))
 @php($trialApplies = $this->trialApplies($plan_code, $interval))
-@php($trialDays = $trialApplies ? $this->planTrialDays($plan_code, $interval) : 0)
+{{-- Plan days plus whatever an applied TrialExtension coupon adds: the activation
+     redeems that coupon against the trial it just started, so the customer really
+     does get the sum. Advertising the plan's own length here promised less than
+     they get and, worse, named the wrong first-charge date. --}}
+@php($trialDays = $trialApplies ? $this->planTrialDays($plan_code, $interval) + (int) ($applied_coupon['trial_days'] ?? 0) : 0)
 @php($trialFirstChargeDate = $trialDays > 0 ? \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays($trialDays)->translatedFormat('d. M Y') : null)
 
 @if ($trialDays > 0)
@@ -133,20 +136,30 @@
             @if ($applied_coupon !== null)
                 <div class="flex items-baseline justify-between text-sm">
                     <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.subtotal') }}</span>
-                    <span class="tabular-nums">{{ $currencySymbol }}{{ number_format($this->subtotalNet() / 100, 2) }}</span>
+                    <span dusk="confirm-subtotal" class="tabular-nums">{{ $money($this->subtotalNet()) }}</span>
                 </div>
-                <div class="flex items-baseline justify-between text-sm">
-                    <span class="text-emerald-700 dark:text-emerald-400">
-                        {{ __('billing::checkout.discount', ['code' => $applied_coupon['code']]) }}
-                    </span>
-                    <span class="tabular-nums text-emerald-700 dark:text-emerald-400">
-                        −{{ $currencySymbol }}{{ number_format(($applied_coupon['discount_net'] ?? 0) / 100, 2) }}
-                    </span>
-                </div>
+                {{-- A trial-extension coupon buys days, not money. Showing it as
+                     "−0.00" made a valid coupon look like it had done nothing. --}}
+                @if ((int) ($applied_coupon['trial_days'] ?? 0) > 0)
+                    <div class="flex items-baseline justify-between text-sm">
+                        <span class="text-emerald-700 dark:text-emerald-400">
+                            {{ __('billing::checkout.coupon_trial_days_added', ['days' => $applied_coupon['trial_days'], 'code' => $applied_coupon['code']]) }}
+                        </span>
+                    </div>
+                @else
+                    <div class="flex items-baseline justify-between text-sm">
+                        <span class="text-emerald-700 dark:text-emerald-400">
+                            {{ __('billing::checkout.discount', ['code' => $applied_coupon['code']]) }}
+                        </span>
+                        <span dusk="confirm-discount" class="tabular-nums text-emerald-700 dark:text-emerald-400">
+                            −{{ $money($applied_coupon['discount_net'] ?? 0) }}
+                        </span>
+                    </div>
+                @endif
             @endif
             <div class="flex items-baseline justify-between text-sm">
                 <span class="text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.net') }}</span>
-                <span class="tabular-nums">{{ $currencySymbol }}{{ number_format($totals['net'] / 100, 2) }}</span>
+                <span dusk="confirm-net" class="tabular-nums">{{ $money($totals['net']) }}</span>
             </div>
             @if ($totals['reverseCharge'])
                 <div class="flex items-baseline justify-between text-sm">
@@ -158,15 +171,15 @@
                     <span class="text-zinc-500 dark:text-zinc-400">
                         {{ __('billing::checkout.vat_with_rate', ['rate' => rtrim(rtrim(number_format($totals['rate'], 1), '0'), '.')]) }}
                     </span>
-                    <span class="tabular-nums">{{ $currencySymbol }}{{ number_format($totals['vat'] / 100, 2) }}</span>
+                    <span dusk="confirm-vat" class="tabular-nums">{{ $money($totals['vat']) }}</span>
                 </div>
             @endif
             <div class="flex items-baseline justify-between border-t border-zinc-200 pt-3 dark:border-white/10">
                 <span class="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     {{ __('billing::checkout.total') }}
                 </span>
-                <span class="text-2xl font-semibold tracking-tight tabular-nums">
-                    €{{ number_format($totals['gross'] / 100, 2) }}
+                <span dusk="confirm-total" class="text-2xl font-semibold tracking-tight tabular-nums">
+                    {{ $money($totals['gross']) }}
                 </span>
             </div>
         </div>

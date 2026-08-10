@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="./vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         failOnWarning="false">
+    <!--
+        Talks to Mollie for real. Needs MOLLIE_KEY=test_… and a network, which is why it is
+        not in phpunit.xml.dist: a CI run without credentials must stay green.
+    -->
+    <testsuites>
+        <testsuite name="Sandbox">
+            <directory>tests/Sandbox</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

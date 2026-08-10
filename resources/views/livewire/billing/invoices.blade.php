@@ -4,6 +4,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Livewire\Component;
@@ -17,34 +18,64 @@ new class extends Component {
         return MollieBilling::resolveBillable(request());
     }
 
-    public function with(): array
+    /**
+     * Read gate for everything this page renders.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's invoice history and
+     * coupon redemptions. Withholding the billable falls through to the same empty state
+     * as "none resolved".
+     */
+    private function readableBillable(): ?Billable
     {
         $billable = $this->resolveBillable();
-        $currency = config('mollie-billing.currency_symbol', '€');
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
+    }
+
+    public function with(): array
+    {
+        $billable = $this->readableBillable();
 
         if (! $billable) {
-            return ['invoices' => null, 'currency' => $currency, 'stats' => null, 'billable' => null, 'redemptions' => collect()];
+            return ['invoices' => null, 'stats' => null, 'billable' => null, 'redemptions' => collect()];
         }
 
         $invoices = $billable->billingInvoices()->latest()->paginate(20);
 
         $query = $billable->billingInvoices();
 
+        // The headline figures are rendered with a single currency symbol, so they may
+        // only add up rows that carry that currency. A billable charged in more than one
+        // (a BILLING_CURRENCY change mid-life) otherwise had 20.00 GBP and 10.00 EUR
+        // reported as "€30.00". Scoping to the configured currency rather than grouping
+        // per currency keeps one set of numbers on the card row — the customer is billed
+        // in the current currency from here on, and every historical row is still shown
+        // with its own symbol in the table below.
+        $currency = BillingMoney::normalizeCurrency(null);
+        $inCurrency = fn () => $query->clone()->where('currency', $currency);
+
         // Brutto-Summen: Charge-Invoices (paid) tragen positives amount_gross,
         // Refund-Invoices (refunded) tragen negatives amount_gross.
-        $paidGross = (int) $query->clone()
+        $paidGross = (int) $inCurrency()
             ->where('status', InvoiceStatus::Paid)
             ->where('amount_gross', '>', 0)
             ->sum('amount_gross');
-        $refundGross = (int) $query->clone()
+        $refundGross = (int) $inCurrency()
             ->where('status', InvoiceStatus::Refunded)
             ->where('amount_gross', '<', 0)
             ->sum('amount_gross'); // negativ
         $spentGross = $paidGross + $refundGross; // Saldo = bezahlt − gutschriften
 
-        $fmt = fn (int $cents) => $currency . number_format($cents / 100, 2);
+        $fmt = fn (int $cents): string => BillingMoney::format($cents, $currency);
 
         $stats = [
+            // Counts every invoice regardless of currency — the table below lists them all.
             'total' => $query->count(),
             'spent' => $fmt($spentGross),
             'paid' => $fmt($paidGross),
@@ -62,7 +93,6 @@ new class extends Component {
 
         return [
             'invoices' => $invoices,
-            'currency' => $currency,
             'stats' => $stats,
             'billable' => $billable,
             'redemptions' => $redemptions,
@@ -109,19 +139,19 @@ new class extends Component {
                             <flux:card class="p-5!">
                                 <flux:subheading>{{ __('billing::portal.invoice.total_spent') }}</flux:subheading>
                                 <div class="mt-3">
-                                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['spent'] }}</span>
+                                    <span dusk="stats-spent" class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['spent'] }}</span>
                                 </div>
                             </flux:card>
                             <flux:card class="p-5!">
                                 <flux:subheading>{{ __('billing::portal.invoice.total_paid') }}</flux:subheading>
                                 <div class="mt-3">
-                                    <span class="text-3xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{{ $stats['paid'] }}</span>
+                                    <span dusk="stats-paid" class="text-3xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{{ $stats['paid'] }}</span>
                                 </div>
                             </flux:card>
                             <flux:card class="p-5!">
                                 <flux:subheading>{{ __('billing::portal.invoice.total_credits') }}</flux:subheading>
                                 <div class="mt-3">
-                                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['credits'] }}</span>
+                                    <span dusk="stats-credits" class="text-3xl font-bold tabular-nums tracking-tight">{{ $stats['credits'] }}</span>
                                 </div>
                             </flux:card>
                         </div>
@@ -141,14 +171,14 @@ new class extends Component {
                             </flux:table.columns>
                             <flux:table.rows>
                                 @foreach ($invoices as $invoice)
-                                    <flux:table.row>
+                                    <flux:table.row dusk="invoice-row-{{ $invoice->id }}">
                                         <flux:table.cell class="tabular-nums">{{ BillingTime::display($invoice->created_at, $billable)->translatedFormat('d. M Y') }}</flux:table.cell>
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->invoice_kind?->color() ?? 'zinc'">{{ $invoice->invoice_kind?->label() ?? '—' }}</flux:badge>
                                         </flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums">{{ $currency }}{{ number_format($invoice->amount_net / 100, 2) }}</flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums text-zinc-400">{{ $currency }}{{ number_format($invoice->amount_vat / 100, 2) }}</flux:table.cell>
-                                        <flux:table.cell class="text-right tabular-nums font-medium">{{ $currency }}{{ number_format($invoice->amount_gross / 100, 2) }}</flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums"><span dusk="invoice-{{ $invoice->id }}-net">{{ BillingMoney::format($invoice->amount_net, $invoice->currency) }}</span></flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums text-zinc-400"><span dusk="invoice-{{ $invoice->id }}-vat">{{ BillingMoney::format($invoice->amount_vat, $invoice->currency) }}</span></flux:table.cell>
+                                        <flux:table.cell class="text-right tabular-nums font-medium"><span dusk="invoice-{{ $invoice->id }}-gross">{{ BillingMoney::format($invoice->amount_gross, $invoice->currency) }}</span></flux:table.cell>
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->status->color()">{{ $invoice->status->label() }}</flux:badge>
                                         </flux:table.cell>
@@ -188,7 +218,7 @@ new class extends Component {
                                         $coupon = $redemption->coupon;
                                         $benefit = match (true) {
                                             $redemption->discount_amount_net > 0
-                                                => $currency . number_format($redemption->discount_amount_net / 100, 2),
+                                                => BillingMoney::format($redemption->discount_amount_net, $coupon?->currency),
                                             ($redemption->trial_days_added ?? 0) > 0
                                                 => trans_choice('billing::portal.redemptions.benefit_days', (int) $redemption->trial_days_added, ['days' => $redemption->trial_days_added]),
                                             ($redemption->grant_days_added ?? 0) > 0

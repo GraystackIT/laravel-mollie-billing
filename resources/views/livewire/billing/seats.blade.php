@@ -2,12 +2,14 @@
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Exceptions\SeatCountExceedsMaximumException;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Livewire\Component;
 
 new class extends Component {
@@ -26,7 +28,7 @@ new class extends Component {
 
     public function mount(): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if ($billable) {
             $this->seatCount = $billable->getBillingSeatCount();
         }
@@ -35,6 +37,27 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's seat count, or probe
+     * coupon validity against it. Withholding the billable falls through to the same empty
+     * state as "none resolved"; `syncSeats()` keeps resolving it unguarded so it can still
+     * answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     private function ensureMinSeats(): void
@@ -86,7 +109,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -194,6 +217,7 @@ new class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
@@ -216,7 +240,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -230,12 +254,28 @@ new class extends Component {
         $this->couponWarnings = (array) ($preview['warnings'] ?? []);
     }
 
+    /**
+     * The lowest seat count this screen may offer.
+     *
+     * Not just the plan's included quota: seats already handed to team members cannot be
+     * given back by moving a counter. `ValidateSubscriptionChange` refuses such a change,
+     * and without this clamp the screen happily proposed it — the customer would click
+     * "Update seats", see an error, and the number they had typed would be a refund the
+     * package was never going to pay.
+     */
     private function minSeats(): int
     {
         $billable = $this->resolveBillable();
         $planCode = $billable?->getBillingSubscriptionPlanCode();
 
-        return $planCode ? app(SubscriptionCatalogInterface::class)->includedSeats($planCode) : 0;
+        if ($planCode === null) {
+            return 0;
+        }
+
+        return max(
+            app(SubscriptionCatalogInterface::class)->includedSeats($planCode),
+            $billable->getUsedBillingSeats(),
+        );
     }
 
     public function syncSeats(): void
@@ -263,6 +303,11 @@ new class extends Component {
             $this->couponError = null;
             $this->couponDiscountNet = null;
             $this->couponWarnings = [];
+        } catch (SeatCountExceedsMaximumException $e) {
+            // Its own message: the generic error banner left the customer guessing which
+            // number the form would accept.
+            $this->flash = __('billing::portal.seats_flash.too_many', ['max' => $e->maximum]);
+            $this->flashSuccess = false;
         } catch (\Throwable $e) {
             report($e);
             $this->flash = __('billing::portal.flash.error');
@@ -272,12 +317,11 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
         $planCode = $billable?->getBillingSubscriptionPlanCode();
         $interval = $billable?->getBillingSubscriptionInterval() ?? 'monthly';
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
 
         $includedSeats = $planCode ? $catalog->includedSeats($planCode) : 0;
         $seatPriceNet = $planCode ? $catalog->seatPriceNet($planCode, $interval) : null;
@@ -435,7 +479,7 @@ new class extends Component {
                         </div>
                     </div>
                     <div class="mt-3">
-                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($seatPrice / 100, 2) }}</span>
+                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($seatPrice) }}</span>
                     </div>
                     <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                 </flux:card>
@@ -492,21 +536,21 @@ new class extends Component {
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-600 dark:text-zinc-300">
                                             {{ $extraSeats }} {{ __('billing::portal.seats_extra') }}
-                                            <span class="text-zinc-400">&times; {{ $currencySymbol }}{{ number_format($seatPrice / 100, 2) }}</span>
+                                            <span class="text-zinc-400">&times; {{ BillingMoney::format($seatPrice) }}</span>
                                         </span>
-                                        <span class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ $currencySymbol }}{{ number_format($extraCost / 100, 2) }}</span>
+                                        <span dusk="seats-extra-cost" class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ BillingMoney::format($extraCost) }}</span>
                                     </div>
                                 @endif
                                 @if (($couponDiscountNet ?? 0) > 0)
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.discount') }}</span>
-                                        <span class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ $currencySymbol }}{{ number_format($couponDiscountNet / 100, 2) }}</span>
+                                        <span dusk="seats-discount" class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">−{{ BillingMoney::format($couponDiscountNet) }}</span>
                                     </div>
                                 @endif
                                 <flux:separator class="my-1!" />
                                 <div class="flex items-center justify-between">
                                     <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.seats_total_cost') }}</span>
-                                    <span class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ $currencySymbol }}{{ number_format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0)) / 100, 2) }}</span>
+                                    <span dusk="seats-total" class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ BillingMoney::format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0))) }}</span>
                                 </div>
                                 <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
 

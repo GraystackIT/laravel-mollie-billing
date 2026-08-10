@@ -2,13 +2,17 @@
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
+use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Log;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 new class extends Component {
     /** Tick budget before we stop polling and show the timeout state. */
@@ -48,11 +52,75 @@ new class extends Component {
             return;
         }
 
-        $billable = MollieBilling::resolveBillable(request());
+        $billable = $this->authorizedBillable();
 
         if ($billable?->hasAccessibleBillingSubscription()) {
             $this->activated = true;
         }
+    }
+
+    /**
+     * The billable this requester may actually see.
+     *
+     * On a package route `resolveBillable()` falls back to matching any query
+     * parameter against a billable's route key, so `?org=<someone-else>` resolved a
+     * stranger. This page then reported *their* activation state and asked Mollie
+     * about *their* pending payment. Reads go through the same authorization the
+     * portal components apply.
+     */
+    private function authorizedBillable(): ?Billable
+    {
+        $billable = MollieBilling::resolveBillable(request());
+
+        if ($billable !== null && MollieBilling::authorizes(request(), $billable)) {
+            return $billable;
+        }
+
+        // An anonymous signup has no owner yet, so `authorizes()` fails closed for the
+        // very customer who just paid — which is why routes/web.php deliberately keeps
+        // this route out of the `billing.portal` group. Applying the same gate here undid
+        // that exemption silently: the page polled, found nothing, and after ~90 seconds
+        // showed "this is taking longer than expected" plus a Logout button, seconds after
+        // the webhook had activated the subscription.
+        //
+        // The claim used instead is the session stamp the checkout wrote for this browser.
+        return $this->checkoutSubject($billable);
+    }
+
+    /**
+     * The billable this browser checked out for, if the request does not contradict it.
+     *
+     * Deliberately narrow: the stamp is only honoured when the resolver either agrees or
+     * resolved nothing at all, so a `?organization=<stranger>` guess still cannot make
+     * this page report someone else's activation state.
+     */
+    private function checkoutSubject(?Billable $resolved): ?Billable
+    {
+        $stamp = session(StartSubscriptionCheckout::CHECKOUT_SUBJECT_SESSION_KEY);
+
+        if (! is_array($stamp) || ! isset($stamp['class'], $stamp['id'])) {
+            return null;
+        }
+
+        $class = (string) $stamp['class'];
+        $class = Relation::getMorphedModel($class) ?? $class;
+
+        if (! is_a($class, Billable::class, true) || ! is_a($class, Model::class, true)) {
+            return null;
+        }
+
+        /** @var (Billable&Model)|null $subject */
+        $subject = $class::withoutGlobalScope(BillingScope::class)->find($stamp['id']);
+
+        if ($subject === null) {
+            return null;
+        }
+
+        if ($resolved !== null && (string) $resolved->getKey() !== (string) $subject->getKey()) {
+            return null;
+        }
+
+        return $subject;
     }
 
     public function checkStatus(): void
@@ -74,7 +142,7 @@ new class extends Component {
         }
 
         try {
-            $billable = MollieBilling::resolveBillable(request());
+            $billable = $this->authorizedBillable();
 
             if ($billable === null) {
                 if ($this->pollCount >= self::MAX_POLL_TICKS) {
@@ -151,7 +219,7 @@ new class extends Component {
         }
 
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             Log::warning('Return-page one-time-order status probe failed', [
                 'payment_id' => $paymentId,
@@ -191,7 +259,7 @@ new class extends Component {
         }
 
         try {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
         } catch (\Throwable $e) {
             // Mollie API hiccup — don't fail the page over it; let the next
             // tick retry. The webhook will still resolve eventually.
@@ -207,6 +275,13 @@ new class extends Component {
         if (in_array($status, ['failed', 'canceled', 'expired'], true)) {
             $this->failed = true;
             $this->failureReason = $status;
+
+            // The marker led this probe to the payment; the webhook leaves it in
+            // place for exactly that (see MollieWebhookController). Now that the
+            // failure has been surfaced, this page is its last consumer — clear
+            // it so a later checkout attempt starts from a clean slate.
+            $billable->clearPendingFirstPayment();
+
             return;
         }
 
@@ -235,7 +310,11 @@ new class extends Component {
         $billable = MollieBilling::resolveBillable(request());
         $params = $billable ? MollieBilling::resolveUrlParameters($billable) : [];
 
-        return route(BillingRoute::name('checkout'), $params);
+        // checkout() rather than name('checkout'): on a multi-tenant mount the portal
+        // sits under a tenant prefix while checkout is registered separately, so the
+        // prefixed name does not exist — this link 500'd on the one screen whose job
+        // is recovering a failed payment.
+        return route(BillingRoute::checkout(), $params);
     }
 
     public function pollInterval(): string

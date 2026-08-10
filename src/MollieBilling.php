@@ -57,6 +57,9 @@ class MollieBilling
 
     protected static ?MollieBillingFake $fake = null;
 
+    /** The application instance `$fake` was built for — see fake(). */
+    protected static ?object $fakeApp = null;
+
     public static function authUsing(Closure $callback): void
     {
         self::$authCallback = $callback;
@@ -107,6 +110,29 @@ class MollieBilling
     }
 
     /**
+     * Only what the app's own `resolveBillableUsing()` callback returns — never the
+     * query-parameter fallback.
+     *
+     * The two answers mean different things, and an unauthorized requester has to be
+     * handled differently for each. When the app's resolver names a billable, the
+     * request genuinely belongs to it (tenant middleware ran, the URL says so), so a
+     * refused authorization is a 403: this user may not do billing here. The
+     * query-parameter fallback is a *guess* — it matches any unreserved parameter
+     * against a route key — so a refused authorization there means only "that guess
+     * was not yours", and the caller should carry on as if nothing was resolved.
+     *
+     * Conflating the two either leaked a stranger's data (ignoring the refusal) or
+     * silently created a second billable for a member who is simply not the billing
+     * manager (403-ing everything).
+     */
+    public static function resolveBillableFromCallback(Request $request): ?Billable
+    {
+        return self::$resolveBillableCallback !== null
+            ? (self::$resolveBillableCallback)($request)
+            : null;
+    }
+
+    /**
      * Reserved query parameters used by package routes that must NEVER be
      * interpreted as billable-model lookup values.
      */
@@ -124,12 +150,29 @@ class MollieBilling
             return null;
         }
 
-        // Route parameters first — a route-bound model takes precedence and
-        // is already an instance.
-        foreach ($request->route()?->parameters() ?? [] as $value) {
-            if ($value instanceof Billable) {
-                return $value;
+        // Route parameters first — a route-bound model came from the router's own
+        // binding, so it is safe on any route and takes precedence.
+        // hasParameters() guard: Route::parameters() throws when the route object was
+        // never bound to a request, which happens for synthetically built requests.
+        $route = $request->route();
+
+        if ($route !== null && $route->hasParameters()) {
+            foreach ($route->parameters() as $value) {
+                if ($value instanceof Billable) {
+                    return $value;
+                }
             }
+        }
+
+        // The query-parameter scan below is confined to the package's own routes.
+        // It cannot know which parameter names the host app uses, so on an app route
+        // it would iterate arbitrary request input: `?x=<slug-of-a-foreign-org>` used
+        // to satisfy the `billing.feature` gate in RequirePlanFeature, and an
+        // innocent `?utm_campaign=spring` gated the visitor against whichever billable
+        // happened to be named "spring". No reserved list can cover that, because the
+        // parameters belong to the app, not to us.
+        if (! self::requestTargetsPackageRoute($request)) {
+            return null;
         }
 
         $key = $model->getRouteKeyName();
@@ -145,6 +188,17 @@ class MollieBilling
             if (! is_string($value) || $value === '') {
                 continue;
             }
+
+            // A value that cannot be this key is not worth a query. With the default integer
+            // key, `where('id', 'newsletter')` is a hard error on PostgreSQL (22P02, invalid
+            // input syntax for type integer) — an unhandled QueryException, i.e. a 500 on
+            // /billing/checkout for any URL carrying `?utm_source=`, `?fbclid=` or `?gclid=`,
+            // which is how marketing traffic actually arrives at a checkout. Where it does not
+            // error it is still one wasted query per unreserved parameter.
+            if ($key === $model->getKeyName() && $model->getKeyType() === 'int' && ! ctype_digit($value)) {
+                continue;
+            }
+
             $found = $model->newQuery()->where($key, $value)->first();
             if ($found instanceof Billable) {
                 return $found;
@@ -152,6 +206,28 @@ class MollieBilling
         }
 
         return null;
+    }
+
+    /**
+     * Whether this request is for one of the package's own routes — checkout,
+     * portal, return, admin, promotion — the only contexts the query-parameter
+     * fallback was built for.
+     *
+     * Route names are the primary signal. Synthetic requests built with
+     * Request::create() carry no bound route, so the package's URI prefix is used
+     * as a secondary signal for them.
+     */
+    private static function requestTargetsPackageRoute(Request $request): bool
+    {
+        $route = $request->route();
+
+        if ($route !== null) {
+            $name = $route->getName();
+
+            return is_string($name) && str_contains($name, 'billing.');
+        }
+
+        return str_contains('/'.trim($request->path(), '/').'/', '/billing/');
     }
 
     /** @return iterable<int, mixed> */
@@ -207,7 +283,13 @@ class MollieBilling
         return (self::$urlParametersCallback)($billable);
     }
 
-    /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:Closure}> */
+    /**
+     * @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:Closure, enter?:Closure}>
+     *
+     * `validate` runs when the step is left forwards; the optional `enter` runs whenever the
+     * step is arrived at, in either direction, so a step whose state can go stale while the
+     * user is elsewhere can re-establish it.
+     */
     public static function resolveCheckoutSteps(): array
     {
         return self::$checkoutStepsCallback ? (self::$checkoutStepsCallback)() : [];
@@ -323,6 +405,28 @@ class MollieBilling
         self::$notificationMap = [];
     }
 
+    /**
+     * Reset every app-supplied callback. These live in statics, so in a test run
+     * they outlive the application instance that registered them: a closure that
+     * still queries a rolled-back billable then decides authorization and billable
+     * resolution for unrelated later tests, which is why failures moved around as
+     * file order changed. Call from tearDown().
+     */
+    public static function flushCallbacks(): void
+    {
+        self::$authCallback = null;
+        self::$resolveBillableCallback = null;
+        self::$notifyBillingAdminsCallback = null;
+        self::$notifyAdminCallback = null;
+        self::$ipGeolocationCallback = null;
+        self::$createBillableCallback = null;
+        self::$beforeCheckoutCallback = null;
+        self::$afterCheckoutCallback = null;
+        self::$checkoutStepsCallback = null;
+        self::$urlParametersCallback = null;
+        self::$cleanupOrphanedBillableCallback = null;
+    }
+
     public static function checkoutUrl(?string $backUrl = null, ?string $plan = null, ?string $interval = null): string
     {
         $params = [];
@@ -376,14 +480,52 @@ class MollieBilling
         return app(StartOneTimeOrderCheckout::class);
     }
 
+    /**
+     * The fake binds Event/Notification fakes and container singletons into the
+     * *current* application, so it is memoised per application instance rather than
+     * for the whole process — otherwise the second test in a run received a fake
+     * wired to the previous test's already-torn-down container.
+     */
     public static function fake(): MollieBillingFake
     {
-        return self::$fake ??= new MollieBillingFake;
+        $app = app();
+
+        if (self::$fake === null || self::$fakeApp !== $app) {
+            self::$fakeApp = $app;
+            self::$fake = new MollieBillingFake;
+        }
+
+        return self::$fake;
     }
 
     public static function resetFake(): void
     {
         self::$fake = null;
+        self::$fakeApp = null;
+    }
+
+    /**
+     * Locale for Mollie's hosted checkout pages (`mollie-billing.mollie_locale`),
+     * or null to let Mollie auto-detect from the customer's browser. Passed as the
+     * `locale:` argument of CreatePaymentRequest by the checkout services.
+     */
+    public static function mollieLocale(): ?string
+    {
+        $locale = config('mollie-billing.mollie_locale');
+
+        return is_string($locale) && $locale !== '' ? $locale : null;
+    }
+
+    /**
+     * Tenant-scoped portal routes (dashboard, plan, invoices, return). Mount inside the
+     * route group that carries auth + tenant resolution middleware.
+     *
+     * `routes()` is the documented name for this in the README; `dashboardRoutes()`
+     * is the descriptive alias. They mount the same route file.
+     */
+    public static function routes(): void
+    {
+        self::dashboardRoutes();
     }
 
     /**

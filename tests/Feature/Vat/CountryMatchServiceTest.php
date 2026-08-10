@@ -27,7 +27,10 @@ beforeEach(function (): void {
     // Test double for RefundInvoiceService that skips the real Mollie HTTP call.
     $this->app->bind(RefundInvoiceService::class, function ($app): RefundInvoiceService {
         return new class ($app->make(InvoiceService::class), $app->make(WalletUsageService::class)) extends RefundInvoiceService {
-            protected function callMollieRefund(string $paymentId, int $grossCents, string $description): void {}
+            protected function callMollieRefund(string $paymentId, int $grossCents, string $description, string $currency): ?string
+            {
+                return 'rf_fake_'.$paymentId;
+            }
         };
     });
 

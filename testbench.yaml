@@ -1,0 +1,30 @@
+## Testbench + Testbench-Dusk configuration for the browser test suite.
+##
+## The Dusk HTTP server boots its application from THIS file (plus the two
+## workbench providers), not from the TestCase's defineEnvironment() — anything
+## the served app must know therefore lives in WorkbenchServiceProvider, which
+## both the server process and the test process load.
+
+providers:
+  - Livewire\LivewireServiceProvider
+  - Flux\FluxServiceProvider
+  - FluxPro\FluxProServiceProvider
+  - Mpociot\VatCalculator\VatCalculatorServiceProvider
+  - Bavix\Wallet\WalletServiceProvider
+  - Elegantly\Invoices\InvoiceServiceProvider
+  - Spatie\Activitylog\ActivitylogServiceProvider
+  - Mollie\Laravel\MollieServiceProvider
+  - GraystackIT\MollieBilling\MollieBillingServiceProvider
+  - Workbench\App\Providers\WorkbenchServiceProvider
+
+migrations: false
+
+workbench:
+  start: '/'
+  install: false
+  discovers:
+    web: false
+    api: false
+    commands: false
+    components: false
+    views: false

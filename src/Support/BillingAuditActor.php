@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Support;
 
+use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -43,14 +44,25 @@ final class BillingAuditActor
     }
 
     /**
-     * True when the current request is handled by one of the package's admin
-     * routes. Resolved through BillingRoute so a mounted prefix (e.g.
-     * `tenant.billing.admin.`) is honoured.
+     * True when the current request is operator work.
+     *
+     * Two signals, because neither covers both request shapes. The route name covers the
+     * initial page load and is resolved through BillingRoute so a mounted prefix (e.g.
+     * `tenant.billing.admin.`) is honoured. It does *not* cover anything after that: an
+     * admin panel built on Livewire never navigates again, and every later button is a
+     * POST to `/livewire/update` — so every mutation an operator made was filed against
+     * them as a customer action. AuthorizeBillingAdmin is in Livewire's persistent
+     * middleware list and therefore runs on those requests too; the attribute it sets is
+     * what carries the context through.
      */
     private static function inAdminContext(): bool
     {
         if (! app()->bound('request')) {
             return false;
+        }
+
+        if (request()->attributes->get(AuthorizeBillingAdmin::CONTEXT_ATTRIBUTE) === true) {
+            return true;
         }
 
         $name = request()->route()?->getName();

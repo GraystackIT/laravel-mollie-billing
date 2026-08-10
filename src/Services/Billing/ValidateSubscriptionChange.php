@@ -9,11 +9,11 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
+use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
-use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use Illuminate\Database\Eloquent\Model;
@@ -38,7 +38,6 @@ class ValidateSubscriptionChange
 {
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
-        private readonly ChargeUsageOverageDirectly $overageService,
     ) {}
 
     /**
@@ -56,6 +55,7 @@ class ValidateSubscriptionChange
     {
         $this->validateSubscriptionEstablished($billable);
         $this->validateTargetPlanNotHidden($billable, $context);
+        $this->validateTargetIsSold($billable, $context);
         $this->validateSeats($billable, $context);
         $this->validateAddons($billable, $context);
         $this->validateLocalSubscriptionExtras($billable, $context);
@@ -140,6 +140,37 @@ class ValidateSubscriptionChange
     }
 
     /**
+     * Refuse a target the catalog does not actually sell.
+     *
+     * `basePriceNet()` and `seatPriceNet()` cannot express "not offered" — they answer
+     * `0`/`null` for an unknown (plan, interval) pair, and every pricing path downstream
+     * reads that as *free*. `isFreePlan()` then becomes true, which takes the change into
+     * the free-downgrade branch: the Mollie subscription is cancelled and a real refund is
+     * issued, before the enum cast on `subscription_interval` rejects the value and rolls
+     * the local transaction back. The billable is left looking Active and subscribed while
+     * nothing bills it at Mollie any more.
+     *
+     * `StartSubscriptionCheckout` has guarded this since the interval toggle turned out to
+     * be enough to obtain a paid plan for nothing; the change path is the same kind of
+     * surface, since `SubscriptionUpdateRequest::from()` is documented as taking request
+     * input. Only checked when plan or interval actually move: an unchanged pair is already
+     * the billable's reality, and refusing to touch seats or addons because the catalog
+     * dropped an interval underneath an existing customer helps nobody.
+     *
+     * @throws IntervalNotOfferedException
+     */
+    protected function validateTargetIsSold(Billable $billable, SubscriptionChangeContext $context): void
+    {
+        if (! $context->planChanged && ! $context->intervalChanged) {
+            return;
+        }
+
+        if (! $this->catalog->planOffersInterval($context->newPlan, $context->newInterval)) {
+            throw new IntervalNotOfferedException($context->newPlan, $context->newInterval);
+        }
+    }
+
+    /**
      * Validate seat count for the target plan.
      *
      * Two block conditions when the new plan does not support extra seats
@@ -182,6 +213,22 @@ class ValidateSubscriptionChange
             ) {
                 throw new SeatDowngradeRequiredException($billable, $context->newSeats, $newIncludedSeats);
             }
+
+            // The floor the auto-derive branch below has always enforced, applied here too.
+            //
+            // Only this branch is reachable from the portal's seats screen, and it had no
+            // such check: an org with ten members assigned could set the counter to one and
+            // the change went through — a prorata refund for nine seats paid out while every
+            // one of those members kept working, because the package never revokes seats, it
+            // only counts what the host app reports through `getUsedBillingSeats()`. The
+            // customer has to release the members first; that is exactly what this exception
+            // says, and the same rule the non-explicit branch applies.
+            $usedSeats = $billable->getUsedBillingSeats();
+
+            if ($context->newSeats < $usedSeats) {
+                throw new SeatDowngradeRequiredException($billable, $usedSeats, $context->newSeats);
+            }
+
             return;
         }
 
@@ -266,14 +313,28 @@ class ValidateSubscriptionChange
      */
     protected function validateAddons(Billable $billable, SubscriptionChangeContext $context): void
     {
-        if (! $context->planChanged) {
+        if ($context->planChanged) {
+            $context->newAddons = array_values(array_filter(
+                $context->newAddons,
+                fn (string $code) => $this->catalog->planAllowsAddon($context->newPlan, $code),
+            ));
+        }
+
+        // Same zero-price trap as the plan itself (see validateTargetIsSold): an addon
+        // the target interval does not sell prices at 0, so switching to yearly used to
+        // hand out a monthly-only addon for free, forever. Filtering it out silently
+        // would be the other kind of wrong — the customer asked for it and is willing to
+        // pay — so this refuses the change instead. Only when plan or interval move; an
+        // unchanged pair is what the billable already has.
+        if (! $context->planChanged && ! $context->intervalChanged) {
             return;
         }
 
-        $context->newAddons = array_values(array_filter(
-            $context->newAddons,
-            fn (string $code) => $this->catalog->planAllowsAddon($context->newPlan, $code),
-        ));
+        foreach ($context->newAddons as $code) {
+            if (! $this->catalog->addonOffersInterval($code, $context->newInterval)) {
+                throw new IntervalNotOfferedException($code, $context->newInterval, 'addon');
+            }
+        }
     }
 
     /**
@@ -358,11 +419,40 @@ class ValidateSubscriptionChange
      */
     protected function validateMollieReadiness(Billable $billable, SubscriptionChangeContext $context): void
     {
-        if (! $context->isMollie || $context->prorataChargeNet <= 0) {
+        if (! $context->isMollie) {
             return;
         }
 
         if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        // The one-pending-change rule holds for a credit-only change too, and that is
+        // where it used to fall through: the whole method returned early at
+        // `prorataChargeNet <= 0`, so a downgrade (charge 0, credit > 0) issued while
+        // another change's charge was still in flight passed unchallenged. The executor
+        // then reported `in_flight` without composing the refund, and `update()` — which
+        // reads "is a charge pending?" straight off the meta — attached the downgrade to
+        // the OTHER change's payment id. When that payment settled, Phase 2 applied the
+        // other change's intent, cleared the marker, and the downgrade evaporated: no
+        // plan switch, no credit refund, no failure event, and any coupon stacked on it
+        // redeemed against the wrong invoice.
+        //
+        // Exempt only the Phase 2 re-validation, which is told so explicitly. It used to be
+        // recognised by both prorata amounts being 0 — but so is a switch between two plans
+        // priced the same, and that switch then walked past this guard into precisely the
+        // failure described above.
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (! $context->isPendingReapply && (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change']))) {
+            throw new InvalidSubscriptionStateException(
+                'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
+            );
+        }
+
+        // Everything below is about being able to CREATE a charge, so it stays scoped
+        // to changes that actually cost money.
+        if ($context->prorataChargeNet <= 0) {
             return;
         }
 
@@ -372,17 +462,9 @@ class ValidateSubscriptionChange
             );
         }
 
-        $meta = $billable->getBillingSubscriptionMeta();
-
         if (empty($meta['mollie_subscription_id'])) {
             throw new InvalidSubscriptionStateException(
                 'Cannot create a deferred upgrade — no mollie_subscription_id in subscription meta.'
-            );
-        }
-
-        if (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change'])) {
-            throw new InvalidSubscriptionStateException(
-                'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
             );
         }
     }

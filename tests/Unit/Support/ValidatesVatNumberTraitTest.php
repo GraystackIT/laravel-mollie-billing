@@ -69,11 +69,46 @@ it('marks the VAT number valid on a successful VIES check', function (): void {
 
     $vat = Mockery::mock(VatCalculationService::class);
     $vat->shouldReceive('validateVatNumber')->once()->with('ATU12345678')->andReturnTrue();
+    $vat->shouldReceive('reverseChargeCountriesQualify')->andReturnTrue();
 
     $host->validateVatNumberLive($vat);
 
     expect($host->vatNumberValid)->toBeTrue();
     expect($host->errors)->toBeEmpty();
+});
+
+it('promises reverse charge only when the countries actually differ', function (): void {
+    // Cross-border inside the EU: reverse charge, net prices, and the message may say so.
+    $host = makeVatTraitHost();
+    $host->vat_number = 'ATU12345678';
+
+    $vat = Mockery::mock(VatCalculationService::class);
+    $vat->shouldReceive('validateVatNumber')->andReturnTrue();
+    $vat->shouldReceive('reverseChargeCountriesQualify')->with('AT')->andReturnTrue();
+
+    $host->validateVatNumberLive($vat);
+
+    expect($host->vatStatusMessage)->toBe(__('billing::checkout.vat_verified'));
+});
+
+it('does not promise reverse charge on a domestic supply', function (): void {
+    // The customer sits in the seller's own country. The number is valid, VIES confirms it,
+    // and the sale still carries domestic VAT — which the checkout total correctly shows. The
+    // message used to say "reverse-charge applies" right above that gross figure: a tax
+    // statement contradicted by the very invoice it precedes.
+    $host = makeVatTraitHost();
+    $host->vat_number = 'ATU12345678';
+
+    $vat = Mockery::mock(VatCalculationService::class);
+    $vat->shouldReceive('validateVatNumber')->andReturnTrue();
+    $vat->shouldReceive('reverseChargeCountriesQualify')->with('AT')->andReturnFalse();
+
+    $host->validateVatNumberLive($vat);
+
+    expect($host->vatNumberValid)->toBeTrue()
+        ->and($host->vatStatusMessage)->toBe(__('billing::checkout.vat_verified_domestic'))
+        ->and($host->vatStatusMessage)->not->toContain('Reverse')
+        ->and($host->vatStatusMessage)->not->toContain('reverse');
 });
 
 it('flags VIES outage as indeterminate (no error, no green check)', function (): void {

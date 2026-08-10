@@ -10,20 +10,63 @@ use Livewire\Component;
 use Livewire\WithPagination;
 
 new class extends Component {
+    /**
+     * Widest span the daily series is built for.
+     *
+     * A little over a year: enough for every legitimate view of a yearly subscription, and
+     * a hard ceiling on how much work a date input can ask the render path for.
+     */
+    private const MAX_RANGE_DAYS = 400;
+
     use WithPagination;
 
     public string $usageType = '';
     public ?string $dateFrom = null;
     public ?string $dateTo = null;
 
+    /**
+     * A `Y-m-d` day from client input, or null. Never throws.
+     */
+    private static function parseDay(?string $value): ?\Carbon\Carbon
+    {
+        if ($value === null || trim($value) === '') {
+            return null;
+        }
+
+        try {
+            return \Carbon\Carbon::createFromFormat('Y-m-d', trim($value)) ?: null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
     }
 
-    public function mount(): void
+    /**
+     * Read gate for everything this page renders.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's wallet transactions.
+     * Withholding the billable falls through to the same empty state as "none resolved".
+     */
+    private function readableBillable(): ?Billable
     {
         $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
+    }
+
+    public function mount(): void
+    {
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -50,7 +93,7 @@ new class extends Component {
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
 
         if (! $billable) {
             return ['transactions' => null, 'usageTypes' => [], 'stats' => null, 'billable' => null, 'meters' => []];
@@ -112,8 +155,10 @@ new class extends Component {
 
         $baseQuery = Transaction::query()
             ->whereIn('wallet_id', $walletIds)
-            ->when($this->dateFrom, fn ($q) => $q->whereDate('created_at', '>=', $this->dateFrom))
-            ->when($this->dateTo, fn ($q) => $q->whereDate('created_at', '<=', $this->dateTo));
+            // Through the same parser the chart uses, so the table and the graph cannot end up
+            // describing different ranges.
+            ->when(self::parseDay($this->dateFrom), fn ($q, $from) => $q->whereDate('created_at', '>=', $from->toDateString()))
+            ->when(self::parseDay($this->dateTo), fn ($q, $to) => $q->whereDate('created_at', '<=', $to->toDateString()));
 
         $query = (clone $baseQuery)->latest();
 
@@ -140,10 +185,24 @@ new class extends Component {
             ->mapWithKeys(fn ($r) => [(string) $r->day => abs((int) $r->amt)])
             ->all();
 
-        $rangeStart = $this->dateFrom ? \Carbon\Carbon::parse($this->dateFrom)->startOfDay() : null;
-        $rangeEnd = $this->dateTo ? \Carbon\Carbon::parse($this->dateTo)->endOfDay() : null;
+        // Parsed defensively: both are plain `wire:model` properties, so anything the input
+        // (or a client) sends arrives here verbatim, and `Carbon::parse()` throws on what it
+        // cannot read — in the render path, which turns the customer's own usage page into a
+        // 500 they cannot navigate out of.
+        $rangeStart = self::parseDay($this->dateFrom)?->startOfDay();
+        $rangeEnd = self::parseDay($this->dateTo)?->endOfDay();
         $series = [];
         if ($rangeStart && $rangeEnd && $rangeEnd->gte($rangeStart)) {
+            // Clamped before the loop, because the loop builds one array entry per day of
+            // whatever the two date inputs say. They are plain `wire:model` properties on a
+            // bare `<input type="date">`, and browsers accept years far outside anything
+            // sensible — a mistyped year (or a crafted payload) asked for millions of
+            // iterations, exhausting memory in the render path and leaving the customer's
+            // own usage page a 500 they cannot navigate out of.
+            if ($rangeStart->diffInDays($rangeEnd) > self::MAX_RANGE_DAYS) {
+                $rangeStart = $rangeEnd->copy()->subDays(self::MAX_RANGE_DAYS)->startOfDay();
+            }
+
             $cursor = $rangeStart->copy();
             while ($cursor->lte($rangeEnd)) {
                 $key = $cursor->format('Y-m-d');
@@ -263,7 +322,8 @@ new class extends Component {
                     :included="$meter['included']"
                     :balance="$meter['balance']"
                     :purchased-balance="$meter['purchased_balance']"
-                    :key="'history-meter-'.$meter['type']"
+                    {{-- Balances in the key — see the dashboard's meters for why. --}}
+                    :key="'history-meter-'.$meter['type'].'-'.$meter['balance'].'-'.$meter['purchased_balance']"
                 />
             @endforeach
         </div>

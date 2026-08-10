@@ -14,14 +14,17 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Str;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class StartOneTimeOrderCheckout
 {
@@ -165,9 +168,22 @@ class StartOneTimeOrderCheckout
             return $this->completeInline($billable, $productCode, $priceNet, $resolvedCoupons);
         }
 
-        $country = $billable->getBillingCountry() ?? 'DE';
+        $country = $billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
         $vatResult = $this->vatService->calculate($country, $netForCharge, $billable);
-        $amountGross = $vatResult['gross'];
+
+        // OneTimeOrderHandler books this payment as a product line plus one negative
+        // line per coupon, and the invoice header sums their VAT — so the amount we
+        // collect is assembled from the same lines. See
+        // BillingMoney::grossWithLineVat(); rounding the discounted total instead
+        // leaves the customer paying a cent more or less than the invoice states.
+        $lineNets = [$priceNet];
+        foreach ($resolvedCoupons as $entry) {
+            if ((int) $entry['discount'] > 0) {
+                $lineNets[] = -(int) $entry['discount'];
+            }
+        }
+
+        $amountGross = BillingMoney::grossWithLineVat($lineNets, (float) $vatResult['rate']);
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $urlParams = MollieBilling::resolveUrlParameters($billable);
@@ -179,13 +195,14 @@ class StartOneTimeOrderCheckout
         // checkout's outcome to whoever shares the session.
         $orderToken = Str::random(32);
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: $this->catalog->productName($productCode) ?? $productCode,
-            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), array_merge($urlParams, [
                 'origin' => 'products',
                 self::ORDER_TOKEN_PARAM => $orderToken,
             ])),
+            locale: MollieBilling::mollieLocale(),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: array_merge($customMetadata, [
                 'billable_type' => $billable->getMorphClass(),
@@ -253,12 +270,21 @@ class StartOneTimeOrderCheckout
             'period_end' => $now->toIso8601String(),
         ]];
 
+        // VAT is allocated from the *cumulative* discount rather than per line, so the
+        // per-line roundings always add up to the product's own VAT. Rounding each
+        // discount independently makes a fully-covered order book ±1 cent — an invoice
+        // with amount_gross = -1 for something that cost the customer nothing.
+        $discountTotal = 0;
+        $vatAllocated = 0;
+
         foreach ($resolvedCoupons as $entry) {
             if ($entry['discount'] <= 0) {
                 continue;
             }
             $discount = (int) $entry['discount'];
-            $couponVat = (int) round($discount * $rate / 100);
+            $discountTotal += $discount;
+            $couponVat = (int) round($discountTotal * $rate / 100) - $vatAllocated;
+            $vatAllocated += $couponVat;
             $lineItems[] = [
                 'kind' => 'coupon',
                 'code' => (string) $entry['coupon']->code,
@@ -275,32 +301,52 @@ class StartOneTimeOrderCheckout
             ];
         }
 
-        $invoice = $this->invoiceService->createInvoice(
-            billable: $billable,
-            kind: InvoiceKind::OneTimeOrder,
-            molliePaymentId: null,
-            mollieSubscriptionId: null,
-            lineItems: $lineItems,
-            periodStart: $now,
-            periodEnd: $now,
-        );
+        // Invoice and redemptions in one transaction, and a refused redemption aborts the
+        // whole thing.
+        //
+        // Inline means no money changed hands: the coupons ARE the consideration. So
+        // logging a failed redeem and delivering anyway gave the goods away — two tabs on
+        // a `max_redemptions_per_billable = 1` coupon both passed the lock-free validate(),
+        // both wrote a 0-EUR invoice, one redeem() won the coupon lock and the other's
+        // exception was swallowed, and the wallet was credited twice. Two token packs, one
+        // redemption on record. Same for a `max_redemptions` race against another billable.
+        //
+        // The Mollie-paid path deliberately keeps logging instead: there the money really
+        // cleared, so refusing to fulfil would take the customer's payment and give
+        // nothing back.
+        $invoice = DB::transaction(function () use (
+            $billable, $productCode, $priceNet, $resolvedCoupons, $lineItems, $now
+        ): BillingInvoice {
+            $invoice = $this->invoiceService->createInvoice(
+                billable: $billable,
+                kind: InvoiceKind::OneTimeOrder,
+                molliePaymentId: null,
+                mollieSubscriptionId: null,
+                lineItems: $lineItems,
+                periodStart: $now,
+                periodEnd: $now,
+                // Rendered after the commit below. A refused redemption rolls the invoice
+                // row back but cannot roll back a file, so the PDF outlived the invoice it
+                // documented — a serial number on disk that the books have no record of.
+                deferDocument: true,
+            );
 
-        foreach ($resolvedCoupons as $entry) {
-            try {
+            foreach ($resolvedCoupons as $entry) {
+                // Not caught: a redemption that cannot be recorded is a coupon that was
+                // not available, and this order has nothing else paying for it.
                 $this->couponService->redeem($entry['coupon'], $billable, [
                     'productCodes' => [$productCode],
                     'orderAmountNet' => $priceNet,
                     'discount_amount_net' => (int) $entry['discount'],
                     'invoice_id' => (int) $invoice->id,
                 ]);
-            } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::warning('One-time order inline coupon redemption failed', [
-                    'product_code' => $productCode,
-                    'coupon_code' => $entry['coupon']->code,
-                    'error' => $e->getMessage(),
-                ]);
             }
-        }
+
+            return $invoice;
+        });
+
+        // Committed — the invoice exists for good, so it may have its document.
+        $this->invoiceService->issueInvoiceDocument($invoice, $billable);
 
         $usageType = $this->catalog->productUsageType($productCode);
         $quantity = $this->catalog->productQuantity($productCode);

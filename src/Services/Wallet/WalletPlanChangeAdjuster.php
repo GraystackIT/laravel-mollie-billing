@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Services\Wallet;
 
+use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Rebalances wallets when a subscription's plan or interval changes.
@@ -26,19 +30,59 @@ class WalletPlanChangeAdjuster
     ) {
     }
 
+    /**
+     * Rebalance the wallets for a plan/interval change.
+     *
+     * The proration baseline is the **old** billing period. Callers save the new
+     * plan, the new interval and sometimes a new period start *before* calling
+     * this, so it cannot be read back off the model — pass `$oldPeriodStart` and
+     * `$oldPeriodEnd` explicitly.
+     *
+     * Fallbacks when they are omitted:
+     *   - `$oldPeriodStart` falls back to the model's `subscription_period_starts_at`;
+     *   - `$oldPeriodEnd` is derived from that start plus **`$oldInterval`**, never
+     *     from `nextBillingDate()` (which would already use the new interval);
+     *   - if the derived period turns out not to have elapsed at all, the excess
+     *     computation is skipped entirely instead of treating a whole period's
+     *     legitimate in-quota usage as excess. A reset `subscription_period_starts_at`
+     *     is the usual cause, and the real baseline is then unrecoverable — billing
+     *     a charge out of missing data is never the safe direction.
+     *
+     * @param  CarbonInterface|null  $oldPeriodStart  start of the period being left
+     * @param  CarbonInterface|null  $oldPeriodEnd  end of the period being left
+     * @param  bool  $deferOverageCharge  Return the unresolved overage instead of charging it.
+     *                                    Callers inside a transaction MUST set this and pass the
+     *                                    result to {@see chargeDeferredOverage()} after the
+     *                                    commit — the charge posts a real Mollie payment, and a
+     *                                    rollback then leaves money collected with no snapshot
+     *                                    that any retry or sweep can find.
+     * @return array<int, array<string, mixed>> the deferred overage line items, empty otherwise
+     */
     public function adjust(
         Billable $billable,
         string $oldPlan,
         string $oldInterval,
         string $newPlan,
         string $newInterval,
-    ): void {
+        ?CarbonInterface $oldPeriodStart = null,
+        ?CarbonInterface $oldPeriodEnd = null,
+        bool $deferOverageCharge = false,
+    ): array {
         if (! ($billable instanceof Model)) {
-            return;
+            return [];
         }
 
-        $periodStart = $billable->getBillingPeriodStartsAt();
-        $periodEnd = $billable->nextBillingDate();
+        $boundariesExplicit = $oldPeriodStart !== null;
+        $periodStart = $oldPeriodStart ?? $billable->getBillingPeriodStartsAt();
+        $periodEnd = $oldPeriodEnd ?? $this->derivePeriodEnd($periodStart, $oldInterval);
+
+        $prorationUsable = $this->prorationIsUsable(
+            $billable,
+            $boundariesExplicit,
+            $periodStart,
+            $periodEnd,
+        );
+
         $overageLineItems = [];
 
         foreach ($billable->wallets()->get() as $wallet) {
@@ -55,15 +99,35 @@ class WalletPlanChangeAdjuster
             $purchasedRemaining = WalletUsageService::computePurchasedRemaining($purchasedBalance, $balance);
             $planOnlyBalance = $balance - $purchasedRemaining;
 
+            // Units an in-flight period-end overage charge is already collecting.
+            //
+            // They are part of `$excess` (the wallet is negative by exactly them), so
+            // charging them again here would bill the same consumption twice — and the debt
+            // itself has to survive the rebalance, because `settleOverageWallets()` credits
+            // the quantity back when that charge settles. Clearing the debt first made the
+            // credit land on a non-negative balance and handed the customer free capacity,
+            // permanently for a rollover type.
+            $pendingOverage = $this->pendingOverageQuantityFor($billable, $slug);
+
+            // Not gated on the old plan including any of this type. A usage type may be
+            // priced without an included quota at all — every unit is billed and the wallet
+            // only ever goes negative — and that shape computed no excess, so the rebalance
+            // below reset the wallet to the new plan's quota and the consumed, unbilled debt
+            // disappeared. A plan change was a way to use the metered feature for free.
+            // With `$oldIncluded === 0` the prorated entitlement is 0 and the excess is the
+            // whole debt, which is exactly right; whether it can be billed is decided by
+            // the overage price further down, as it always was.
             $excess = 0;
-            if ($periodStart !== null && $periodEnd !== null && $oldIncluded > 0) {
+            if ($prorationUsable) {
+                /** @var CarbonInterface $periodStart */
+                /** @var CarbonInterface $periodEnd */
                 $result = BillingPolicy::computeUsageOverageForPlanChange(
                     $oldIncluded,
                     $planOnlyBalance,
                     $periodStart,
                     $periodEnd,
                 );
-                $excess = $result['excess'];
+                $excess = max(0, $result['excess'] - $pendingOverage);
             }
 
             $rolloverCredits = $rollover ? max(0, $planOnlyBalance - $oldIncluded) : 0;
@@ -79,6 +143,13 @@ class WalletPlanChangeAdjuster
                         'kind' => 'overage',
                         'code' => $slug,
                         'type' => $slug,
+                        // The wallet is clamped to 0 right here, so these units are already
+                        // accounted for — the customer is paying for consumption that has
+                        // happened, not buying capacity. `settleOverageWallets()` credits
+                        // `quantity` back for a period-end charge, where the balance is still
+                        // negative and needs clearing; doing that here would land the credit
+                        // on 0 and hand out free units (permanently, for a rollover type).
+                        'settles_wallet' => false,
                         'label' => (string) __('billing::portal.invoice_line_overage', [
                             'type' => $this->catalog->usageTypeName($slug),
                         ]),
@@ -95,12 +166,18 @@ class WalletPlanChangeAdjuster
                 $wallet->deposit(abs($balance), ['type' => $slug, 'reason' => 'plan_change_reset']);
             }
 
-            if ($targetBalance > 0) {
-                $wallet->deposit($targetBalance, ['type' => $slug, 'reason' => 'plan_change_credit']);
+            // The in-flight charge's debt is carried into the new period rather than
+            // forgiven — see `$pendingOverage` above.
+            $finalBalance = $targetBalance - $pendingOverage;
+
+            if ($finalBalance > 0) {
+                $wallet->deposit($finalBalance, ['type' => $slug, 'reason' => 'plan_change_credit']);
+            } elseif ($finalBalance < 0) {
+                $wallet->forceWithdraw(abs($finalBalance), ['type' => $slug, 'reason' => 'plan_change_pending_overage']);
             }
 
             // purchased_balance must not exceed the actual wallet balance.
-            WalletUsageService::setPurchasedBalance($wallet, min($purchasedRemaining, max(0, $targetBalance)));
+            WalletUsageService::setPurchasedBalance($wallet, min($purchasedRemaining, max(0, $finalBalance)));
         }
 
         // Create wallets for usage types that are new in the target plan.
@@ -111,8 +188,243 @@ class WalletPlanChangeAdjuster
             }
         }
 
-        if ($overageLineItems !== [] && $billable->hasMollieMandate()) {
-            $this->overageService->handleExplicit($billable, $overageLineItems);
+        if ($overageLineItems === []) {
+            return [];
         }
+
+        if ($deferOverageCharge) {
+            return $overageLineItems;
+        }
+
+        $this->chargeDeferredOverage($billable, $overageLineItems);
+
+        return [];
+    }
+
+    /**
+     * Charge the overage `adjust()` could not resolve against the new plan's quota.
+     *
+     * Split out so a caller that rebalances inside a transaction can commit first: this
+     * posts a real Mollie payment, and a rollback afterwards would drop the `usage_overage`
+     * snapshot and the `pending` status the payment is reconciled through — leaving a
+     * charge that settles into an invoice nothing can match, while the (restored) negative
+     * balance is charged again by the next nightly sweep.
+     *
+     * @param  array<int, array<string, mixed>>  $overageLineItems
+     */
+    public function chargeDeferredOverage(Billable $billable, array $overageLineItems): void
+    {
+        if ($overageLineItems === [] || ! ($billable instanceof Model)) {
+            return;
+        }
+
+        if (! $billable->hasMollieMandate()) {
+            $this->restoreUnchargedExcess($billable, $overageLineItems, 'no_mandate');
+
+            return;
+        }
+
+        // The wallets are already zeroed at this point, so the charge can no
+        // longer be reconstructed from them. handleExplicit() persists the
+        // line items and marks the charge pending, which is what makes a
+        // declined payment recoverable via ChargeUsageOverageDirectly::retry().
+        try {
+            $result = $this->overageService->handleExplicit($billable, $overageLineItems);
+        } catch (\Throwable $e) {
+            // Restoring the excess assumes the charge did not happen. After a throw that is not
+            // known: `charge()` posts the payment before it can store the id, so a read timeout
+            // on the response leaves a payment Mollie may well be collecting. Putting the debt
+            // back on the wallet then had the next nightly sweep charge it a second time while
+            // the first payment settled into its own invoice — and for a plan-change line the
+            // webhook does not credit the units back (`settles_wallet: false`), so nothing
+            // cancelled it out. The customer paid twice.
+            //
+            // The debt stays where `handleExplicit()` left it — in the pending snapshot, marked
+            // as unknown — and `CleanupStalePendingOverageChargeJob` asks Mollie which of the
+            // two happened.
+            if ($this->overageService->paymentMayExist($billable)) {
+                Log::error('Plan-change overage charge failed after the payment was posted — leaving the debt for reconciliation', [
+                    'billable_id' => $billable->getKey(),
+                    'line_items' => $overageLineItems,
+                    'exception' => $e->getMessage(),
+                ]);
+
+                return;
+            }
+
+            $this->restoreUnchargedExcess($billable, $overageLineItems, 'exception: '.$e->getMessage());
+
+            return;
+        }
+
+        if (! $result->wasCharged()) {
+            Log::warning('Plan-change overage was not charged', [
+                'billable_id' => $billable->getKey(),
+                'outcome' => $result->outcome->value,
+                'line_items' => $overageLineItems,
+            ]);
+
+            $this->restoreUnchargedExcess($billable, $overageLineItems, $result->outcome->value);
+        }
+    }
+
+    /**
+     * Put excess back on the wallet when the charge for it did not happen.
+     *
+     * `adjust()` clamps the wallet to 0 and hands the excess over as line items, on the
+     * assumption that a charge collects them. When it does not — another charge is still in
+     * flight (the snapshot is a single slot), no mandate, an API failure — those units were
+     * simply gone: zero balance, nothing in the snapshot, no sweep able to find them. That
+     * is silent revenue loss, and it contradicts what `handleExplicit()` promises ("the
+     * excess stays on the wallet as a negative balance, which the next period-end sweep
+     * charges once the slot is free").
+     *
+     * @param  array<int, array<string, mixed>>  $overageLineItems
+     */
+    private function restoreUnchargedExcess(Billable $billable, array $overageLineItems, string $reason): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $restored = [];
+
+        $skipped = [];
+
+        foreach ($overageLineItems as $line) {
+            $type = (string) ($line['type'] ?? $line['code'] ?? '');
+            $quantity = (int) ($line['quantity'] ?? 0);
+
+            if ($type === '' || $quantity <= 0) {
+                $skipped[] = ['type' => $type, 'quantity' => $quantity, 'why' => 'malformed_line'];
+
+                continue;
+            }
+
+            $wallet = $billable->getWallet($type);
+
+            if ($wallet === null) {
+                $skipped[] = ['type' => $type, 'quantity' => $quantity, 'why' => 'wallet_missing'];
+
+                continue;
+            }
+
+            $wallet->forceWithdraw($quantity, [
+                'type' => $type,
+                'reason' => 'plan_change_excess_uncharged',
+            ]);
+
+            $restored[$type] = $quantity;
+        }
+
+        if ($restored !== []) {
+            Log::warning('Plan-change overage left on the wallet for the next period-end sweep', [
+                'billable_id' => $billable->getKey(),
+                'reason' => $reason,
+                'units' => $restored,
+            ]);
+        }
+
+        // A line this method cannot put back is revenue that is simply gone — the wallet was
+        // already clamped to 0 by `adjust()`, and nothing else holds these units. The
+        // warning above fires only when at least one line *was* restored, so a wholly
+        // unrestorable set used to pass in total silence: no balance, no snapshot, no log.
+        if ($skipped !== []) {
+            Log::error('Plan-change overage could not be restored — these units are lost', [
+                'billable_id' => $billable->getKey(),
+                'reason' => $reason,
+                'skipped' => $skipped,
+            ]);
+        }
+    }
+
+    /**
+     * Units of `$usageType` an in-flight period-end overage charge is already collecting.
+     *
+     * Only a `pending` snapshot counts, and only lines that settle the wallet: a
+     * plan-change line carries `settles_wallet: false` because its units were already
+     * cleared off the balance, so it must not be subtracted a second time here.
+     */
+    private function pendingOverageQuantityFor(Billable $billable, string $usageType): int
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
+            return 0;
+        }
+
+        $snapshot = (array) ($meta[ChargeUsageOverageDirectly::META_KEY] ?? []);
+        $lines = (array) ($snapshot['line_items'] ?? []);
+        $total = 0;
+
+        foreach ($lines as $line) {
+            if (! is_array($line) || ($line['settles_wallet'] ?? true) === false) {
+                continue;
+            }
+
+            $type = (string) ($line['type'] ?? $line['code'] ?? '');
+
+            if (strcasecmp($type, $usageType) !== 0) {
+                continue;
+            }
+
+            $total += max(0, (int) ($line['quantity'] ?? 0));
+        }
+
+        return $total;
+    }
+
+    /**
+     * End of the period being left: start + the *old* interval.
+     */
+    private function derivePeriodEnd(?CarbonInterface $periodStart, string $oldInterval): ?CarbonInterface
+    {
+        if ($periodStart === null) {
+            return null;
+        }
+
+        return strtolower($oldInterval) === SubscriptionInterval::Yearly->value
+            ? BillingTime::addInterval($periodStart, 'yearly')
+            : BillingTime::addInterval($periodStart, 'monthly');
+    }
+
+    /**
+     * Whether the resolved boundaries can carry a prorated entitlement.
+     *
+     * Derived boundaries with a zero elapsed fraction mean the period start was
+     * overwritten before this ran: the prorated entitlement would be 0 and every
+     * unit consumed in the old period would be billed as excess.
+     */
+    private function prorationIsUsable(
+        Model $billable,
+        bool $boundariesExplicit,
+        ?CarbonInterface $periodStart,
+        ?CarbonInterface $periodEnd,
+    ): bool {
+        if ($periodStart === null || $periodEnd === null) {
+            return false;
+        }
+
+        if ($boundariesExplicit) {
+            return true;
+        }
+
+        $elapsedFraction = round(1.0 - BillingPolicy::prorataFactor($periodStart, $periodEnd), 6);
+
+        if ($elapsedFraction > 0.0) {
+            return true;
+        }
+
+        Log::warning(
+            'WalletPlanChangeAdjuster: no elapsed time in the derived old period — skipping usage proration. '
+            .'Pass $oldPeriodStart/$oldPeriodEnd from the caller to bill plan-change excess.',
+            [
+                'billable_id' => $billable->getKey(),
+                'period_start' => $periodStart->toIso8601String(),
+                'period_end' => $periodEnd->toIso8601String(),
+            ]
+        );
+
+        return false;
     }
 }

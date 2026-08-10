@@ -57,7 +57,7 @@
                      so a locale switch has to be reachable before signup. --}}
                 <div class="flex items-center gap-4">
                     @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
-                        @livewire($headerComponent, [], 'billing-header-'.$i)
+                        @livewire($headerComponent, [], key('billing-header-'.$i))
                     @endforeach
 
                     <flux:link :href="$resolvedBackUrl" class="text-sm" icon="arrow-left">
@@ -68,6 +68,18 @@
 
             {{-- Content --}}
             <main class="relative z-10 mx-auto flex w-full max-w-5xl flex-col px-6 pb-16 pt-4 lg:px-0 lg:pt-8">
+                {{-- A redirect into the checkout carries its reason here — see layouts/portal.blade.php. --}}
+
+                @if (session('billing_status'))
+
+                    <div class="mb-6">
+
+                        <flux:callout variant="warning" icon="exclamation-triangle" inline>{{ session('billing_status') }}</flux:callout>
+
+                    </div>
+
+                @endif
+
                 @livewire($livewireComponent)
             </main>            
         </div>

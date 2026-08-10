@@ -42,6 +42,7 @@ return [
     'vies_unavailable' => 'VIES ist gerade nicht erreichbar. Bitte versuchen Sie es in ein paar Minuten erneut.',
     'vies_validation_failed' => 'Die USt-IdNr. ist in VIES nicht als gültig registriert. Bitte prüfen Sie die Eingabe und versuchen Sie es erneut.',
     'vat_verified' => 'USt-IdNr. verifiziert — Reverse-Charge wird angewendet.',
+    'vat_verified_domestic' => 'USt-IdNr. verifiziert. Inlandsleistung — die USt. wird berechnet.',
     'vat_correct_or_clear' => 'Bitte korrigieren Sie die USt-IdNr. oder lassen Sie das Feld leer.',
 
     // Step 2: plan
@@ -67,6 +68,7 @@ return [
     'addons_heading' => 'Add-ons',
     'addons_description' => 'Zusätzliche Funktionen, die Sie zu Ihrem Plan hinzufügen können.',
     'extra_seats' => 'Zusätzliche Plätze',
+    'seats_not_available' => 'Dieser Tarif bietet im gewählten Abrechnungsintervall keine zusätzlichen Sitzplätze an.',
     'extra_seat_price' => 'Jeder zusätzliche Platz:',
 
     // Step 4: confirm
@@ -94,6 +96,10 @@ return [
     'processing' => 'Wird verarbeitet…',
     'continue' => 'Weiter',
 
+    'coupon_trial_days_added' => '+:days Tage Testphase (:code)',
+
+    'interval_not_offered' => 'Dieser Plan ist im gewählten Abrechnungsintervall nicht verfügbar.',
+
     // Coupon errors
     'coupon_empty' => 'Bitte geben Sie einen Gutscheincode ein.',
     'coupon_already_applied' => 'Entfernen Sie den aktuellen Gutschein, bevor Sie einen neuen hinzufügen.',
@@ -107,8 +113,10 @@ return [
     'coupon_interval_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Abrechnungsintervall.',
     'coupon_addon_mismatch' => 'Dieser Gutschein gilt nicht für die gewählten Add-ons.',
     'coupon_product_mismatch' => 'Dieser Gutschein gilt nicht für das gewählte Produkt.',
+    'coupon_usage_mismatch' => 'Dieser Gutschein gilt nur für bestimmte verbrauchsabhängige Leistungen, die diese Bestellung nicht enthält.',
     'coupon_min_order' => 'Die Bestellung erreicht nicht den Mindestbetrag für diesen Gutschein.',
     'coupon_requires_billable' => 'Dieser Gutschein kann beim Checkout nicht angewendet werden.',
+    'coupon_requires_trial' => 'Dieser Gutschein verlängert eine Testphase; der gewählte Plan bietet keine an.',
     'coupon_recurring_conflict' => 'Auf diesem Abonnement ist bereits ein anderer wiederkehrender Gutschein aktiv.',
     'coupon_requires_active_subscription' => 'Zum Einlösen dieses Gutscheins ist ein aktives Abonnement erforderlich.',
     'coupon_too_close_to_charge' => 'Die nächste Abrechnung steht zu kurz bevor, um diesen Gutschein noch sicher anzuwenden. Bitte versuchen Sie es nach der nächsten Abrechnung erneut.',
@@ -132,6 +140,8 @@ return [
     // Errors
     'error_billable_creation' => 'Das Abrechnungskonto konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
     'error_no_billable' => 'Das Abrechnungskonto konnte nicht aufgelöst werden. Bitte versuchen Sie es erneut.',
+    'promotion_expired' => 'Dieser Aktionscode ist nicht mehr gültig und wurde daher nicht angewendet.',
+    'error_already_in_progress' => 'Ihr Checkout wird bereits verarbeitet. Bitte warten Sie einen Moment, bevor Sie es erneut versuchen.',
     'error_payment_creation' => 'Die Zahlung konnte nicht erstellt werden. Bitte versuchen Sie es erneut.',
     'error_unexpected' => 'Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
 ];

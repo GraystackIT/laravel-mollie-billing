@@ -40,6 +40,19 @@ jobs:
         run: |
           composer config --global --unset github-oauth.github.com || true
 
+      # Flux Pro is commercial and there is no licence on CI. Both halves have to go: the
+      # dev requirement, and the `composer.fluxui.dev` repository — Composer loads every
+      # configured repository's package list before it resolves anything, so the repository
+      # alone answers 401 and fails the install before a single package is considered.
+      #
+      # Nothing is lost here. The browser suite is the only thing that needs Flux to render
+      # a screen, and it lives behind its own `phpunit.dusk.xml`; `phpunit.xml.dist` lists
+      # only tests/Feature and tests/Unit, which pass with Flux absent.
+      - name: Drop the commercial browser-suite dependency (no licence on CI)
+        run: |
+          composer remove --dev livewire/flux-pro --no-update --no-interaction
+          composer config --unset repositories.flux-pro
+
       - name: Install dependencies
         env:
           COMPOSER_AUTH: '{}'

@@ -17,6 +17,7 @@ use GraystackIT\MollieBilling\Notifications\UsageThresholdNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 
 class WalletUsageService
@@ -37,7 +38,9 @@ class WalletUsageService
             return;
         }
 
-        DB::transaction(function () use ($billable, $type, $quantity, $reason): void {
+        $thresholdPercent = null;
+
+        DB::transaction(function () use ($billable, $type, $quantity, $reason, &$thresholdPercent): void {
             // Billable row first, wallet second — the same acquisition order the
             // subscription-change path uses (UpdateSubscription locks the billable,
             // then WalletPlanChangeAdjuster mutates the wallets), so the two can
@@ -103,15 +106,57 @@ class WalletUsageService
                 ));
             }
 
-            // Threshold notification.
-            $this->maybeNotifyThreshold($billable, $type, $balanceAfter);
+            // Threshold marker only — the mail itself is sent after the commit.
+            $thresholdPercent = $this->markThresholdNotified($billable, $type, $balanceAfter);
         });
+
+        // Deliberately outside the transaction: UsageThresholdNotification is not
+        // queued, so a mail-transport failure used to propagate out of debit()'s
+        // transaction and roll the forceWithdraw back — recorded usage was lost
+        // because an email failed, and since the marker rolled back too, every
+        // subsequent debit above the threshold retried the same failing send.
+        if ($thresholdPercent !== null) {
+            $this->sendThresholdNotification($billable, $type, $thresholdPercent);
+        }
     }
 
     /**
      * Credit (top up) a quantity into the named usage wallet. Used to seed the
      * included quota at activation time, at each renewal and for coupon credits.
      */
+    /**
+     * Credit a rollover renewal's quota, clamping the purchased balance first.
+     *
+     * A rollover type never zeroes its wallet, so nothing else ever brings
+     * `purchased_balance` down — and it is purchased units that survive resets and plan
+     * changes. Left unclamped, a stale value re-attributes each new period's plan quota to
+     * "purchased": a wallet whose 500 bought units were fully consumed still reported 500
+     * purchased, so the next 100-unit renewal read as 100 purchased (and 100/100 of the plan
+     * quota consumed although nothing was), a later upgrade computed its target balance 500
+     * units too high, and every subsequent non-rollover reset re-credited them forever.
+     *
+     * The webhook renewal has always clamped; `PrepareUsageOverageJob::resetLocalQuota()` —
+     * the Local path — did not, which is how the two came apart. Both call this now, and
+     * `SyncPurchasedBalanceCommand`'s history replay treats the same reason as a clamp point.
+     */
+    public function creditRollover(Billable $billable, string $type, int $quantity, ?string $reason = null): void
+    {
+        if ($quantity <= 0) {
+            return;
+        }
+
+        $wallet = $billable->getWallet($type);
+
+        if ($wallet !== null) {
+            self::setPurchasedBalance($wallet, self::computePurchasedRemaining(
+                self::getPurchasedBalance($wallet),
+                (int) $wallet->balanceInt,
+            ));
+        }
+
+        $this->credit($billable, $type, $quantity, $reason ?? 'subscription_renewal_rollover');
+    }
+
     public function credit(Billable $billable, string $type, int $quantity, ?string $reason = null): void
     {
         if ($quantity <= 0) {
@@ -138,11 +183,21 @@ class WalletUsageService
      * reset: the remaining purchased balance is computed and added on
      * top of the new plan quota.
      */
-    public function resetAndCredit(Billable $billable, string $type, int $quota, string $reason = 'renewal'): void
-    {
+    /**
+     * @param  bool  $preserveDebt  Keep a negative balance instead of forgiving it.
+     *                              Pass this when an overage charge for these units is
+     *                              still in flight — see below.
+     */
+    public function resetAndCredit(
+        Billable $billable,
+        string $type,
+        int $quota,
+        string $reason = 'renewal',
+        bool $preserveDebt = false,
+    ): void {
         $previousBalance = 0;
 
-        DB::transaction(function () use ($billable, $type, $quota, &$previousBalance): void {
+        DB::transaction(function () use ($billable, $type, $quota, $preserveDebt, &$previousBalance): void {
             $wallet = $this->resolveWallet($billable, $type);
             $wallet->newQuery()->whereKey($wallet->getKey())->lockForUpdate()->first();
             $wallet->refresh();
@@ -155,13 +210,32 @@ class WalletUsageService
 
             if ($previousBalance > 0) {
                 $wallet->forceWithdraw($previousBalance, ['type' => $type, 'reason' => 'period_reset']);
-            } elseif ($previousBalance < 0) {
+            } elseif ($previousBalance < 0 && ! $preserveDebt) {
                 $wallet->deposit(abs($previousBalance), ['type' => $type, 'reason' => 'period_reset']);
             }
 
+            // The quota goes on top of whatever is left. Normally that is zero, because
+            // the branch above just levelled the wallet — but when the debt is preserved
+            // it is still negative, so the deposit lands on it: −37 + 100 = 63.
+            //
+            // A negative balance means unpaid debt, and forgiving it while the charge for
+            // exactly those units is still settling paid the customer twice: the reset
+            // zeroed the debt, then `settleOverageWallets()` credited the charged quantity
+            // on top, so every overage cycle handed out that quantity as free units. With
+            // SEPA the renewal regularly settles first, because Mollie creates it about
+            // two days ahead while the overage charge is created the day before it.
             $newBalance = $quota + $purchasedRemaining;
+
             if ($newBalance > 0) {
-                $wallet->deposit($newBalance, ['type' => $type, 'reason' => 'credit']);
+                // `period_credit`, not the generic `credit` that `credit()` also writes.
+                // SyncPurchasedBalanceCommand anchors its "purchases this period" window
+                // on the renewal's own bookkeeping, and a wallet that renews at exactly
+                // balance 0 leaves no `period_reset` — the branch above only fires for a
+                // non-zero balance. The window then reached back into earlier periods and
+                // resurrected long-consumed purchased credits, which every later reset
+                // re-credited. This deposit always happens when there is anything to
+                // credit, so it is the marker that is actually there.
+                $wallet->deposit($newBalance, ['type' => $type, 'reason' => self::PERIOD_CREDIT_REASON]);
             }
 
             self::setPurchasedBalance($wallet, $purchasedRemaining);
@@ -179,10 +253,18 @@ class WalletUsageService
     // shows up as "consumption".
 
     /**
+     * The renewal's own quota deposit. Distinct from the generic `credit`, so the
+     * period boundary is identifiable in the transaction log even when the balance
+     * happened to be exactly zero and no `period_reset` was written.
+     */
+    public const PERIOD_CREDIT_REASON = 'period_credit';
+
+    /**
      * Transaction reasons that represent bookkeeping, not real consumption.
      */
     public const NON_USAGE_REASONS = [
         'credit',
+        self::PERIOD_CREDIT_REASON,
         'period_reset',
         'plan_change',
         'plan_change_reset',
@@ -194,6 +276,10 @@ class WalletUsageService
         'subscription_renewal_rollover',
         'subscription_trial_start',
         'coupon_credit',
+        // Overage that has been paid for is credited back to the wallet. The
+        // consumption was already counted when it was debited — counting the
+        // settlement too would report every overage unit twice.
+        'overage_settlement',
     ];
 
     /**
@@ -318,10 +404,17 @@ class WalletUsageService
         return $wallet;
     }
 
-    private function maybeNotifyThreshold(Billable $billable, string $type, int $balanceAfter): void
+    /**
+     * Claim the once-per-period threshold notification for this usage type.
+     *
+     * Runs inside the debit transaction so two concurrent debits cannot both
+     * claim it. Returns the usage percentage to notify about, or null when the
+     * threshold is not reached or was already claimed this period.
+     */
+    private function markThresholdNotified(Billable $billable, string $type, int $balanceAfter): ?int
     {
         if (! $billable instanceof Model) {
-            return;
+            return null;
         }
 
         $included = $this->catalog->includedUsage(
@@ -331,7 +424,7 @@ class WalletUsageService
         );
 
         if ($included <= 0) {
-            return;
+            return null;
         }
 
         $used = max(0, $included - $balanceAfter);
@@ -339,32 +432,67 @@ class WalletUsageService
         $threshold = (int) config('mollie-billing.usage_threshold_percent', 80);
 
         if ($percent < $threshold) {
-            return;
+            return null;
         }
 
         $meta = $billable->getBillingSubscriptionMeta();
         $notified = $meta['usage_threshold_notified_at'][$type] ?? null;
         $periodStart = $billable->getBillingPeriodStartsAt();
+        $currentPeriod = $periodStart?->toIso8601String();
 
-        $alreadyNotified = $notified !== null
-            && $periodStart !== null
-            && Carbon::parse((string) $notified)->setTimezone('UTC')->greaterThanOrEqualTo($periodStart);
+        // Which period the last warning belongs to, recorded rather than inferred from a
+        // timestamp comparison. The anchor is not always in the past: the nightly pass
+        // refills the wallets the evening before a renewal and moves
+        // `subscription_period_starts_at` to tomorrow 00:00, and a marker written today is
+        // never >= tomorrow — so the dedupe silently stopped working for the rest of the
+        // day and every debit above the threshold re-sent the same mail.
+        $notifiedPeriod = $meta['usage_threshold_notified_period'][$type] ?? null;
+
+        $alreadyNotified = $notifiedPeriod !== null
+            ? $notifiedPeriod === $currentPeriod
+            // Rows written before the companion key existed still dedupe the old way,
+            // which is correct for every anchor that is in the past.
+            : ($notified !== null
+                && $periodStart !== null
+                && Carbon::parse((string) $notified)->setTimezone('UTC')->greaterThanOrEqualTo($periodStart));
 
         if ($alreadyNotified) {
-            return;
+            return null;
         }
 
         $meta['usage_threshold_notified_at'][$type] = BillingTime::nowUtc()->toIso8601String();
+        $meta['usage_threshold_notified_period'][$type] = $currentPeriod;
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
-        $recipients = MollieBilling::notifyBillingAdmins($billable);
-        $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
+        return $percent;
+    }
 
-        if ($recipients !== []) {
+    /**
+     * Send the threshold notification. Never throws: recorded usage must not
+     * depend on the mail transport being up. The marker is already committed, so
+     * a failed send is not retried on the next debit — it is logged instead.
+     */
+    private function sendThresholdNotification(Billable $billable, string $type, int $percent): void
+    {
+        try {
+            $recipients = MollieBilling::notifyBillingAdmins($billable);
+            $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
+
+            if ($recipients === []) {
+                return;
+            }
+
             Notification::send(
                 $recipients,
                 MollieBilling::resolveNotification(UsageThresholdNotification::class, $billable, $type, $percent),
             );
+        } catch (\Throwable $e) {
+            Log::warning('Usage threshold notification failed', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'usage_type' => $type,
+                'percent' => $percent,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 }

@@ -9,11 +9,12 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Convert a local (free / coupon-granted) subscription into a Mollie subscription.
@@ -65,10 +66,11 @@ class UpgradeLocalToMollie
         $amountGross = (int) $request['amount_gross'];
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: "Upgrade to {$request['plan_code']}",
-            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            locale: MollieBilling::mollieLocale(),
             cancelUrl: route(BillingRoute::name('plan'), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: [

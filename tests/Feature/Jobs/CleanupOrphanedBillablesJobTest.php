@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Jobs\RevokeMollieMandateJob;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Event;
+use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
@@ -166,6 +167,12 @@ it('runs the cleanupOrphanedBillableUsing closure when registered', function ():
 
 it('revokes the Mollie mandate when one was captured before abandonment', function (): void {
     Bus::fake([RevokeMollieMandateJob::class]);
+
+    // No pending-payment marker, but a Mollie customer exists — the job asks Mollie
+    // whether that customer ever paid before it deletes anything.
+    Mollie::shouldReceive('send')
+        ->withArgs(fn ($req) => $req instanceof GetPaginatedCustomerPaymentsRequest)
+        ->andReturn([]);
 
     $orphan = TestBillable::create([
         'name' => 'Mandate Co',

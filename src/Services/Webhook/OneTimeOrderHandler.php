@@ -11,18 +11,31 @@ use GraystackIT\MollieBilling\Events\OneTimeOrderFailed;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
 class OneTimeOrderHandler
 {
+    /**
+     * Country the checkout fell back to when the billable had none. The invoice
+     * has to state the VAT that was actually charged, so both sides read the same
+     * config key — InvoiceService resolves the country as `getBillingCountry() ?? ''`,
+     * which VatCalculationService rejects, hence we persist it here first.
+     */
+    protected function checkoutCountryFallback(): string
+    {
+        return (string) config('mollie-billing.checkout_country_fallback', 'DE');
+    }
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly SubscriptionCatalogInterface $catalog,
         protected readonly CouponService $couponService,
         protected readonly InvoiceService $salesInvoiceService,
         protected readonly WalletUsageService $walletService,
+        protected readonly VatCalculationService $vatService,
     ) {
     }
 
@@ -111,6 +124,26 @@ class OneTimeOrderHandler
             }
         }
 
+        $this->ensureBillingCountry($billable);
+
+        // The line items above are rebuilt from the catalog and from coupons
+        // re-validated right now — a coupon that expired since checkout, a price
+        // an admin changed, a per-billable limit consumed by a parallel order all
+        // make them disagree with what Mollie collected. The payment wins.
+        $expectedNet = $priceNet - $totalDiscountNet;
+        $vat = $this->vatService->calculate(
+            (string) ($billable->getBillingCountry() ?? ''),
+            $expectedNet,
+            $billable,
+        );
+        $lineItems = $this->support->reconcileWithPaidAmount(
+            $payment,
+            $billable,
+            $lineItems,
+            $expectedNet,
+            (float) ($vat['rate'] ?? 0.0),
+        );
+
         $invoice = $this->salesInvoiceService->createForPayment($payment, 'one_time_order', $lineItems, $billable);
 
         foreach ($resolvedCoupons as $entry) {
@@ -141,25 +174,61 @@ class OneTimeOrderHandler
         ]);
 
         if ($usageType !== null && $quantity !== null && $quantity > 0) {
-            $this->walletService->credit($billable, $usageType, $quantity, 'one_time_order:'.$productCode);
+            // Wrapped, unlike before. The invoice exists by now, so an uncaught throw
+            // here produced a 500 whose re-delivery short-circuits on the invoice guard —
+            // and everything after the invoice never ran again. The customer had paid for
+            // credits, the coupons were redeemed, and the wallet was never credited.
+            // Logged loudly rather than rethrown: rethrowing would make Mollie re-deliver
+            // a payment whose invoice already exists, which the guard then swallows
+            // anyway.
+            try {
+                $this->walletService->credit($billable, $usageType, $quantity, 'one_time_order:'.$productCode);
 
-            if ($billable instanceof Model) {
-                $wallet = $billable->getWallet($usageType);
-                if ($wallet !== null) {
-                    WalletUsageService::addPurchasedBalance($wallet, $quantity);
+                if ($billable instanceof Model) {
+                    $wallet = $billable->getWallet($usageType);
+                    if ($wallet !== null) {
+                        WalletUsageService::addPurchasedBalance($wallet, $quantity);
+                    }
                 }
-            }
 
-            Log::info('One-time order: wallet credited', [
-                'product_code' => $productCode,
-                'usage_type' => $usageType,
-                'quantity' => $quantity,
-            ]);
+                Log::info('One-time order: wallet credited', [
+                    'product_code' => $productCode,
+                    'usage_type' => $usageType,
+                    'quantity' => $quantity,
+                ]);
+            } catch (\Throwable $e) {
+                Log::error('One-time order: wallet credit failed — the customer paid for credits they did not receive', [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'invoice_id' => (int) $invoice->id,
+                    'product_code' => $productCode,
+                    'usage_type' => $usageType,
+                    'quantity' => $quantity,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         event(new OneTimeOrderCompleted($billable, $invoice, $productCode, $metadata));
         event(new PaymentSucceeded($billable, $invoice));
         $this->support->notifyInvoiceAvailable($billable, $invoice);
+    }
+
+    /**
+     * A billable without a billing country was charged with the checkout's
+     * fallback country, but the invoice pipeline resolves the country as
+     * `getBillingCountry() ?? ''` and VatCalculationService throws
+     * NonEuCountryException on an empty country — before the invoice is saved.
+     * The controller then deletes the reservation and returns 500, so Mollie
+     * retries forever, `invoiceAlreadyExistsForPayment()` never becomes true and
+     * the order never completes: no invoice, no wallet credit, no
+     * OneTimeOrderCompleted. Persisting the country the charge used resolves the
+     * asymmetry and keeps the invoice's VAT equal to the VAT collected.
+     */
+    protected function ensureBillingCountry(Billable $billable): void
+    {
+        // One implementation, on WebhookSupport: every handler that invoices a charge needs
+        // it, and the two copies would have drifted.
+        $this->support->ensureBillingCountry($billable);
     }
 
     /**

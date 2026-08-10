@@ -77,6 +77,10 @@ it('ends the trial when a prorata charge is paid for a Trial billable (matches p
                     'days_remaining' => 365,
                 ]],
                 'intent' => [
+                    // Real intents always carry these — PlanChangeIntent::toArray()
+                    // writes them and fromArray() resolves the billable from them.
+                    'billable_type' => \GraystackIT\MollieBilling\Testing\TestBillable::class,
+                    'billable_id' => $billable->getKey(),
                     'current_plan' => 'starter',
                     'current_interval' => 'monthly',
                     'new_plan' => 'standard',
@@ -115,7 +119,7 @@ it('ends the trial when a prorata charge is paid for a Trial billable (matches p
     $invoiceService->shouldReceive('createInvoice')->andReturn($fakeInvoice);
 
     $patcher = Mockery::mock(MollieSubscriptionPatcher::class);
-    $patcher->shouldReceive('updateForIntent')->andReturnNull();
+    $patcher->shouldReceive('updateForIntent')->andReturnTrue();
 
     $walletAdjuster = Mockery::mock(WalletPlanChangeAdjuster::class);
     $walletAdjuster->shouldReceive('adjust')->andReturnNull();

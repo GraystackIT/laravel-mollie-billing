@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 
 /**
  * Composer input. Standalone-constructible — no coupling to SubscriptionChangeContext.
@@ -43,7 +44,11 @@ final class PlanChangeIntent
     public function toArray(): array
     {
         return [
-            'billable_type' => $this->billable->getMorphClass(),
+            // The class name, not getMorphClass(): fromArray() and
+            // RetrySubscriptionPatchJob resolve this as a class, and under
+            // Relation::enforceMorphMap() an alias fails class_exists() — the retry then
+            // no-ops without clearing its marker and Mollie keeps charging the old amount.
+            'billable_type' => $this->billable::class,
             'billable_id' => $this->billable->getKey(),
             'current_plan' => $this->currentPlan,
             'new_plan' => $this->newPlan,
@@ -65,8 +70,17 @@ final class PlanChangeIntent
     public static function fromArray(array $data): self
     {
         $billableClass = (string) $data['billable_type'];
+
+        // Scope-free: this is reached from RetrySubscriptionPatchJob and from the
+        // prorata webhook, neither of which has the request or tenant context an
+        // app-defined applyBillingScope() keys off. With the scope applied, findOrFail()
+        // throws on every one of the job's attempts until it gives up and clears the
+        // marker — so the Mollie PATCH never lands and the stale price is charged with
+        // nothing left to retry.
         /** @var Billable $billable */
-        $billable = $billableClass::query()->findOrFail($data['billable_id']);
+        $billable = $billableClass::query()
+            ->withoutGlobalScope(BillingScope::class)
+            ->findOrFail($data['billable_id']);
 
         return new self(
             billable: $billable,

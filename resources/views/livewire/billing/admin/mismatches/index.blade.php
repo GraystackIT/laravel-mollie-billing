@@ -3,7 +3,9 @@
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -17,11 +19,21 @@ new class extends Component {
     public ?string $flash = null;
     public ?string $flashError = null;
 
+    /** Locked: which mismatch confirmResolve() writes to is decided by openResolve(), not by the browser. */
+    #[Locked]
     public ?int $resolvingId = null;
     public ?string $resolvingChosen = null;
+    public ?string $resolvingJustification = null;
     public ?string $resolvingError = null;
 
     private const ALLOWED_SORTS = ['id', 'tax_country_user', 'tax_country_payment', 'tax_country_ip', 'created_at', 'resolved_at'];
+
+    /**
+     * Cap for the operator's justification. It is persisted inside the billable's
+     * JSON subscription meta, so an unbounded textarea would grow a column that is
+     * read on every billing operation.
+     */
+    private const JUSTIFICATION_MAX = 500;
 
     public function updatingSearch(): void { $this->resetPage(); }
     public function updatingTab(): void { $this->resetPage(); }
@@ -49,6 +61,7 @@ new class extends Component {
 
         $this->resolvingId = $id;
         $this->resolvingChosen = null;
+        $this->resolvingJustification = null;
         $this->resolvingError = null;
 
         $this->dispatch('open-resolve-modal');
@@ -58,6 +71,7 @@ new class extends Component {
     {
         $this->resolvingId = null;
         $this->resolvingChosen = null;
+        $this->resolvingJustification = null;
         $this->resolvingError = null;
     }
 
@@ -70,6 +84,30 @@ new class extends Component {
         $chosen = strtoupper(trim((string) $this->resolvingChosen));
         if (strlen($chosen) !== 2) {
             $this->resolvingError = __('billing::admin.mismatches.modal.invalid_country');
+            return;
+        }
+
+        // Refused here as well as in the service, so the operator reads a translated
+        // sentence instead of the service's untranslated exception. Resolving refunds
+        // every linked invoice before it tries to re-issue, and a country the VAT
+        // calculator cannot price makes the re-issue impossible — the customer would be
+        // left fully refunded and never re-charged.
+        if (! app(VatCalculationService::class)->isInvoiceable($chosen)) {
+            $this->resolvingError = __('billing::admin.mismatches.modal.country_not_invoiceable', ['country' => $chosen]);
+            return;
+        }
+
+        // Resolving refunds and reissues every linked invoice at another country's
+        // VAT rate. That is a hand-made tax decision, so it is only accepted with a
+        // reason on record — the service also refuses an off-signal country without
+        // one, but that guard throws an untranslated message.
+        $justification = trim((string) $this->resolvingJustification);
+        if ($justification === '') {
+            $this->resolvingError = __('billing::admin.mismatches.modal.justification_required');
+            return;
+        }
+        if (mb_strlen($justification) > self::JUSTIFICATION_MAX) {
+            $this->resolvingError = __('billing::admin.mismatches.modal.justification_too_long', ['max' => self::JUSTIFICATION_MAX]);
             return;
         }
 
@@ -86,7 +124,7 @@ new class extends Component {
         }
 
         try {
-            $service->resolve($billable, $m, $chosen, auth()->user());
+            $service->resolve($billable, $m, $chosen, auth()->user(), $justification);
         } catch (\Throwable $e) {
             report($e);
             $this->resolvingError = $e->getMessage();
@@ -128,6 +166,7 @@ new class extends Component {
         return [
             'rows' => $base->orderBy($sortBy, $this->sortDirection)->paginate(20),
             'resolvingMismatch' => $resolvingMismatch,
+            'justificationMax' => self::JUSTIFICATION_MAX,
         ];
     }
 };
@@ -343,6 +382,19 @@ new class extends Component {
                     />
                     <flux:description>
                         {{ __('billing::admin.mismatches.modal.manual_description') }}
+                    </flux:description>
+                </flux:field>
+
+                <flux:field>
+                    <flux:label :badge="__('billing::admin.common.required')">{{ __('billing::admin.mismatches.modal.justification_label') }}</flux:label>
+                    <flux:textarea
+                        wire:model="resolvingJustification"
+                        :placeholder="__('billing::admin.mismatches.modal.justification_placeholder')"
+                        rows="3"
+                        :maxlength="$justificationMax"
+                    />
+                    <flux:description>
+                        {{ __('billing::admin.mismatches.modal.justification_description') }}
                     </flux:description>
                 </flux:field>
 

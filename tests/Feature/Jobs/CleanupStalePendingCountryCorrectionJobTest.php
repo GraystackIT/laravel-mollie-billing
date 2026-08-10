@@ -14,7 +14,6 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Testing\TestBillable;
-use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
@@ -42,12 +41,14 @@ beforeEach(function (): void {
             $app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class),
             $app->make(InvoiceNumberGenerator::class),
         ) extends InvoiceService {
-            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): void
+            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): bool
             {
                 $invoice->pdf_disk = 'local';
                 $invoice->pdf_path = 'billing/invoices/test/'.$invoice->serial_number.'.pdf';
                 $invoice->save();
                 Storage::disk('local')->put($invoice->pdf_path, 'fake-pdf');
+
+                return true;
             }
         };
     });
@@ -232,7 +233,7 @@ it('routes failed Mollie status into handleCountryCorrectionFailed on the webhoo
     (new CleanupStalePendingCountryCorrectionJob())->handle();
 });
 
-it('escalates entries stuck > 24h by routing through handleCountryCorrectionFailed', function (): void {
+it('escalates entries stuck past the hard limit by routing through handleCountryCorrectionFailed', function (): void {
     $b = makeCorrectionBillable();
     $mismatch = BillingCountryMismatch::create([
         'billable_type' => $b->getMorphClass(),
@@ -242,10 +243,10 @@ it('escalates entries stuck > 24h by routing through handleCountryCorrectionFail
         'tax_country_ip' => 'AT',
         'status' => CountryMismatchStatus::Resolved,
         'chosen_country' => 'AT',
-        'resolved_at' => now()->subHours(25),
+        'resolved_at' => now()->subDays(CleanupStalePendingCountryCorrectionJob::HARD_LIMIT_DAYS + 1),
     ]);
     $orig = makeOriginalInvoice($b, 'HU', 1900, 27.0);
-    seedPendingCorrection($b, $mismatch, $orig, 'tr_stuck', now()->subHours(25)->toIso8601String());
+    seedPendingCorrection($b, $mismatch, $orig, 'tr_stuck', now()->subDays(CleanupStalePendingCountryCorrectionJob::HARD_LIMIT_DAYS + 1)->toIso8601String());
 
     Mollie::shouldReceive('send')->once()->andReturnUsing(function () {
         $p = new \stdClass;
@@ -255,7 +256,7 @@ it('escalates entries stuck > 24h by routing through handleCountryCorrectionFail
         return $p;
     });
 
-    // The job must convert the 24h+ open status into a synthesised failure and
+    // The job must convert the long-stuck open status into a synthesised failure and
     // route through the webhook controller's failed handler, so the recovery
     // path (mismatch -> Pending, subscription cancel-at-period-end, notification)
     // runs the same code as a real failed-webhook would.
@@ -271,7 +272,7 @@ it('escalates entries stuck > 24h by routing through handleCountryCorrectionFail
     (new CleanupStalePendingCountryCorrectionJob())->handle();
 });
 
-it('keeps waiting on entries between 1h and 24h with pending Mollie status', function (): void {
+it('keeps waiting on entries between 1h and the hard limit with pending Mollie status', function (): void {
     $b = makeCorrectionBillable();
     $mismatch = BillingCountryMismatch::create([
         'billable_type' => $b->getMorphClass(),
@@ -298,4 +299,42 @@ it('keeps waiting on entries between 1h and 24h with pending Mollie status', fun
 
     $b->refresh();
     expect($b->getBillingSubscriptionMeta()['country_corrections']['tr_waiting'] ?? null)->not->toBeNull();
+});
+
+it('keeps waiting on a correction that is still settling at Mollie after a day', function (): void {
+    // SEPA Direct Debit sits at `pending` for several business days by design, and a
+    // bank transfer stays `open` until the money arrives. Escalating after 24h treats
+    // a perfectly live payment as failed: it cancels the customer's subscription at
+    // period end and mails the admins a "reissue failed" notice, for money that is on
+    // its way. The two structurally identical sweepers wait 7 and 14 days.
+    $b = makeCorrectionBillable();
+    $mismatch = BillingCountryMismatch::create([
+        'billable_type' => $b->getMorphClass(),
+        'billable_id' => $b->getKey(),
+        'tax_country_user' => 'HU',
+        'tax_country_payment' => 'AT',
+        'tax_country_ip' => 'AT',
+        'status' => CountryMismatchStatus::Resolved,
+        'chosen_country' => 'AT',
+        'resolved_at' => now()->subHours(30),
+    ]);
+    $orig = makeOriginalInvoice($b, 'HU', 1900, 27.0);
+    seedPendingCorrection($b, $mismatch, $orig, 'tr_sepa', now()->subHours(30)->toIso8601String());
+
+    Mollie::shouldReceive('send')->once()->andReturnUsing(function () {
+        $p = new \stdClass;
+        $p->id = 'tr_sepa';
+        $p->status = 'pending';
+        $p->metadata = (object) ['type' => 'country_correction'];
+
+        return $p;
+    });
+
+    (new CleanupStalePendingCountryCorrectionJob())->handle();
+
+    $b->refresh();
+
+    expect($b->getBillingSubscriptionMeta()['country_corrections']['tr_sepa'] ?? null)->not->toBeNull()
+        ->and($b->subscription_ends_at)->toBeNull()
+        ->and($mismatch->refresh()->status)->toBe(CountryMismatchStatus::Resolved);
 });

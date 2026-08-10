@@ -29,10 +29,16 @@ class BillableStateHelper
         self::force($billable, ['subscription_status' => SubscriptionStatus::PastDue]);
     }
 
+    /**
+     * Puts the billable into the state ProcessTrialLifecycleJob's expiry pass
+     * produces: PastDue, not Expired. Expired is only ever reached from Cancelled
+     * (PrepareUsageOverageJob's expiry pass), so a test built on an Expired trial
+     * asserted behaviour for a status expired trials never carry.
+     */
     public static function expireTrial(Billable $billable): void
     {
         self::force($billable, [
-            'subscription_status' => SubscriptionStatus::Expired,
+            'subscription_status' => SubscriptionStatus::PastDue,
             'trial_ends_at' => Carbon::now()->subDay(),
         ]);
     }

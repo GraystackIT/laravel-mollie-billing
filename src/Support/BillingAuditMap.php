@@ -65,6 +65,9 @@ final class BillingAuditMap
             Events\SubscriptionCancelled::class => self::make('subscription_cancelled', AuditCategory::Subscription,
                 fn (Events\SubscriptionCancelled $e): array => [
                     'immediately' => $e->immediately,
+                    // Present only for an operator-initiated cancel; a customer
+                    // cancelling from the portal states no reason.
+                    'reason' => self::truncate($e->reason),
                 ]),
 
             Events\SubscriptionResumed::class => self::make('subscription_resumed', AuditCategory::Subscription,
@@ -102,6 +105,14 @@ final class BillingAuditMap
                     'payment_id' => $e->paymentId,
                     'invoice_id' => $e->invoiceId,
                     'reason' => self::truncate($e->reason),
+                ]),
+
+            Events\RenewalCollectedForEndedSubscription::class => self::make('renewal_collected_for_ended_subscription', AuditCategory::Payment,
+                fn (Events\RenewalCollectedForEndedSubscription $e): array => [
+                    'payment_id' => $e->paymentId,
+                    'invoice_id' => $e->invoiceId,
+                    'amount' => $e->amountGross,
+                    'status' => $e->status,
                 ]),
 
             Events\PlanChanged::class => self::make('plan_changed', AuditCategory::Subscription,
@@ -253,6 +264,12 @@ final class BillingAuditMap
                     'new_mandate_id' => $e->newMandateId,
                 ]),
 
+            Events\MollieSubscriptionReferenceCleared::class => self::make('mollie_subscription_reference_cleared', AuditCategory::PaymentMethod,
+                fn (Events\MollieSubscriptionReferenceCleared $e): array => [
+                    'mollie_subscription_id' => $e->mollieSubscriptionId,
+                    'reason' => $e->reason,
+                ]),
+
             // ---------------------------------------------------------------
             // Coupons / grants
             // ---------------------------------------------------------------
@@ -330,6 +347,10 @@ final class BillingAuditMap
                 fn (Events\CountryMismatchResolved $e): array => [
                     'declared_country' => $e->mismatch->tax_country_user,
                     'payment_country' => $e->mismatch->tax_country_payment,
+                    // The two things an auditor actually asks of this entry: which
+                    // country won, and on what grounds. Neither was recorded.
+                    'chosen_country' => $e->mismatch->chosen_country,
+                    'justification' => self::truncate($e->justification),
                     'mismatch_id' => $e->mismatch->getKey(),
                 ]),
         ];

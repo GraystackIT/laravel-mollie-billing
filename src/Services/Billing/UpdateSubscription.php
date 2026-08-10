@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
 use GraystackIT\MollieBilling\Events\AddonEnabled;
 use GraystackIT\MollieBilling\Events\PlanChanged;
@@ -18,9 +19,14 @@ use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
 use Illuminate\Database\Eloquent\Model;
+use GraystackIT\MollieBilling\Exceptions\SubscriptionChangeInProgressException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class UpdateSubscription
 {
@@ -35,11 +41,95 @@ class UpdateSubscription
     ) {
     }
 
-    public function update(Billable $billable, array|SubscriptionUpdateRequest $request): array
+    /**
+     * Apply a subscription change.
+     *
+     * `$request` is normally an absolute description of the target state. Pass a
+     * **closure** instead when the payload can only be computed from the current
+     * state — enabling *one* addon, moving the seat count by a delta. The closure
+     * receives the billable refreshed under the change lock and returns the payload,
+     * so the read and the write share one critical section.
+     *
+     * That is the only correct way to express a relative mutation here. Computing the
+     * absolute list before calling is a lost update (two concurrent enables both read
+     * `[]`, the second overwrites the first, and an addon that was just paid for is
+     * silently disabled). Wrapping the call in `DB::transaction` to serialise the read
+     * — which is what the addon services used to do — is worse still: it puts every
+     * Mollie call this method makes inside a transaction that a later throw rolls back.
+     *
+     * @param  array<string, mixed>|SubscriptionUpdateRequest|\Closure(Billable): (array<string, mixed>|SubscriptionUpdateRequest)  $request
+     */
+    public function update(Billable $billable, array|SubscriptionUpdateRequest|\Closure $request): array
     {
+        if ($request instanceof \Closure) {
+            /** @var Model&Billable $billable */
+            return $this->withChangeLock($billable, function () use ($billable, $request): array {
+                $billable->refresh();
+
+                return $this->prepareAndRun($billable, SubscriptionUpdateRequest::from($request($billable)));
+            });
+        }
+
         $dto = SubscriptionUpdateRequest::from($request);
 
-        $this->validateApplyAt($dto);
+        $scheduled = $this->prepare($billable, $dto);
+
+        if ($scheduled !== null) {
+            return $scheduled;
+        }
+
+        /** @var Model&Billable $billable */
+        return $this->withChangeLock($billable, fn (): array => $this->runUpdate($billable, $dto));
+    }
+
+    /**
+     * Serialised per billable with a cache lock, not with one long transaction.
+     *
+     * `runUpdate()` reaches Mollie three times — applyProrata() creates payments and posts
+     * refunds, and the patcher cancels or PATCHes the subscription — and all three used
+     * to sit inside a single DB::transaction together with every local write. Anything
+     * throwing after the money moved therefore rolled the local half back while Mollie
+     * kept its half: a refund the customer had received with no credit note and
+     * `refunded_net` at 0, so the retry refunded again; a cancelled subscription with the
+     * local row still saying Mollie/Active. CLAUDE.md states the invariant for the
+     * activation path — "must never sit inside a transaction" — and this path violated it
+     * with the additional twist that its refund key was deliberately randomised.
+     *
+     * So the read-and-decide part and the Mollie part run with nothing held, and only the
+     * local writes are transactional (phase 3 re-takes the row lock and re-reads, because a
+     * job may have touched `subscription_meta` in between). The lock is what keeps two
+     * concurrent changes to the same billable apart — the job that the row lock used to
+     * serialise against still takes its own row lock inside phase 3.
+     *
+     * @param  \Closure(): array<string, mixed>  $body
+     * @return array<string, mixed>
+     */
+    private function withChangeLock(Billable $billable, \Closure $body): array
+    {
+        /** @var Model&Billable $billable */
+        $lock = Cache::lock('billing:subscription-change:'.$billable->getKey(), 180);
+
+        if (! $lock->get()) {
+            throw new SubscriptionChangeInProgressException($billable);
+        }
+
+        try {
+            return $body();
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * Everything `update()` does before the change lock, for a payload that is already
+     * known. Returns the scheduling result when the change is deferred to period end,
+     * or null when the caller should proceed with the immediate path.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function prepare(Billable $billable, SubscriptionUpdateRequest $dto): ?array
+    {
+        $applyAt = $this->resolveApplyAt($dto);
         $this->guardPeriodNotLapsed($billable, $dto);
 
         // Hidden-plan targets are rejected here, before the scheduling branch:
@@ -52,135 +142,285 @@ class UpdateSubscription
             $this->validator->assertPlanSelectable($billable, $dto->planCode);
         }
 
-        if ($dto->applyAt === 'end_of_period') {
+        if ($applyAt === 'end_of_period') {
+            // Safe to hand the caller's own dto over: `schedule()` stores its own array
+            // shape, and `apply()` replays it with `apply_at=immediate` + `internal=true`,
+            // so the resolved value never has to survive in the stored payload.
             $this->scheduleService->schedule($billable, $dto);
 
+            // The scheduler's own answer, not `nextBillingDate()`. For a trial it anchors on
+            // whichever of the two comes first — Mollie takes the first charge at the trial
+            // end, not at `period_start + interval` — so reporting the latter told a
+            // trialing customer their change lands on day 30 while it was written for day
+            // 14, and the confirmation they read was not what happened.
             return [
-                'scheduledFor' => $billable->nextBillingDate()?->toIso8601String(),
+                'scheduledFor' => $this->scheduleService->periodEndFor($billable)->toIso8601String(),
             ];
         }
 
+        return null;
+    }
+
+    /**
+     * The closure-payload equivalent of `update()`'s body, run with the change lock
+     * already held.
+     *
+     * @return array<string, mixed>
+     */
+    private function prepareAndRun(Billable $billable, SubscriptionUpdateRequest $dto): array
+    {
+        return $this->prepare($billable, $dto) ?? $this->runUpdate($billable, $dto);
+    }
+
+    /**
+     * The body of {@see update()}, once the change lock is held.
+     *
+     * Phase 1 (here) reads and decides, phase 2 talks to Mollie, phase 3 writes — see the
+     * note in `update()` for why they are not one transaction.
+     */
+    private function runUpdate(Billable $billable, SubscriptionUpdateRequest $dto): array
+    {
         /** @var Model&Billable $billable */
-        return DB::transaction(function () use ($billable, $dto): array {
+        $billable->refresh();
+
+        $context = $this->buildContext($billable, $dto);
+
+        // Centralized validation (seats, addons, wallets, Mollie readiness).
+        $this->validator->validate($billable, $context);
+
+        // Read back potentially mutated values from context.
+        $newSeats = $context->newSeats;
+        $newAddons = $context->newAddons;
+        $newNet = $context->newNet;
+
+        $seatsChanged = $newSeats !== $context->currentSeats;
+        $addonsAdded = array_values(array_diff($newAddons, $context->currentAddons));
+        $addonsRemoved = array_values(array_diff($context->currentAddons, $newAddons));
+
+        // Coupon — validate all applied codes (stackable). NO redeem here yet:
+        // the actual redemption depends on which path the update takes (sidegrade,
+        // deferred prorata charge, PATCH-only, free downgrade, …) — each path has
+        // a different correct value for `discount_amount_net` and a different
+        // `invoice_id` on the redemption record. We collect resolved coupons here,
+        // then dispatch redemptions per path below.
+        $couponApplied = null;
+        $couponsApplied = [];
+        /** @var array<int, \GraystackIT\MollieBilling\Models\Coupon> $resolvedCoupons */
+        $resolvedCoupons = [];
+        /** @var array<int, int> $perCouponRecurringDiscountNet */
+        $perCouponRecurringDiscountNet = [];
+        $existingCouponIds = [];
+        $remainingNet = $newNet;
+
+        foreach ($dto->couponCodes as $code) {
+            $coupon = $this->couponService->validate(
+                $code,
+                $billable,
+                [
+                    'planCode' => $context->newPlan,
+                    'interval' => $context->newInterval,
+                    'addonCodes' => $newAddons,
+                    'orderAmountNet' => $remainingNet,
+                    'existingCouponIds' => $existingCouponIds,
+                    // Only Recurring coupons are valid on plan-change / seat-sync /
+                    // addon-enable. SinglePayment is intentionally excluded — a 100%
+                    // single_payment would zero the prorata charge but leave the
+                    // local plan switched while Mollie's subscription still runs at
+                    // the old amount. Recurring covers every legitimate use case
+                    // here. For 100% single_payment use the Subscription Checkout
+                    // (Mandate-Only) or a One-Time-Order purchase.
+                    'allowed_types' => [\GraystackIT\MollieBilling\Enums\CouponType::Recurring],
+                ],
+            );
+            $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
+            $resolvedCoupons[] = $coupon;
+            $perCouponRecurringDiscountNet[] = $thisDiscount;
+            $existingCouponIds[] = $coupon->id;
+            $remainingNet = max(0, $remainingNet - $thisDiscount);
+        }
+
+        // The same predicate the patcher cancels on: "the target configuration bills
+        // nothing at all". Asking `planChanged && isFreePlan()` here while the patcher
+        // asked `isFreePlan()` alone is how the two came apart — a free plan with a
+        // paid addon had its Mollie subscription cancelled by the patcher while this
+        // kept source Mollie, status Active and the subscription id, so the customer
+        // kept the addon and was never billed again.
+        $downgradeToLocal = $context->isMollie && $context->newNet <= 0;
+
+        // Pro-rata: ProrataExecutor handles charge/refund/sidegrade + Mollie-Subscription-PATCH.
+        // For Mollie → Free, the patcher cancels the subscription.
+        //
+        // The composer's own verdict, not just the aggregate. `BillingPolicy::computeProrata()`
+        // nets the two sides against each other, so an equal-price plan switch — a documented,
+        // supported flavour ("same price, different plan → immediate") — reported 0 charge and
+        // 0 credit and the executor never ran. The composer meanwhile produced a full charge
+        // line for the new plan and a matching credit for the old one, and both were thrown
+        // away: no invoice, no `refunded_net`, no quantity consumed. Nothing recorded that the
+        // old plan line's remaining value now belongs to the new plan code — so it read as
+        // fully refundable for the rest of the period, and a later refund would pay out value
+        // already spent, while the next change in that period found no line for the plan it is
+        // now on and credited nothing.
+        $hasProrata = $context->isMollie
+            && ($context->prorataChargeNet > 0
+                || $context->prorataCreditNet > 0
+                || $this->composerWouldBook($billable, $context));
+
+        $prorataResult = null;
+        // Whether Mollie has been dealt with by the pro-rata pipeline. `$hasProrata`
+        // only says the *context* computed a pro-rata amount; the composer can still
+        // produce no effective line (everything rounds to 0, refund candidates missing
+        // or exhausted) and the executor then returns 'noop' without touching Mollie
+        // at all. Reading the branch off `$hasProrata` reported a PATCH that never ran
+        // — a monthly→yearly switch on the renewal day flipped the local interval
+        // while Mollie kept billing monthly — and on a free downgrade it dropped
+        // `mollie_subscription_id` for a subscription still live at Mollie, which then
+        // could never be cancelled again.
+        $prorataHandledByExecutor = false;
+        if ($hasProrata) {
+            $prorataResult = $this->applyProrata($billable, $context, $resolvedCoupons);
+            $billable->refresh();
+
+            // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
+            //
+            // Scoped to `deferred_charge`, because the marker is read off the meta and
+            // an `in_flight` result means the id sitting there belongs to a DIFFERENT
+            // change. Keying this call's `pending_plan_change` to that id made Phase 2
+            // apply the other change's intent, clear the marker and drop this one
+            // without a trace — no plan switch, no refund, no failure event. The
+            // validator now refuses that combination up front; this keeps the write
+            // honest if the two ever interleave anyway.
+            $hasPendingCharge = $prorataResult['path'] === 'deferred_charge'
+                && ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
+
+            $prorataHandledByExecutor = match ($prorataResult['path']) {
+                // The executor PATCHed Mollie itself.
+                'sidegrade', 'refund' => true,
+                // Phase 2 PATCHes once the charge clears — but only if a charge was
+                // really created; a fully coupon-covered line set creates none.
+                'deferred_charge' => $hasPendingCharge,
+                // 'in_flight': another change is already waiting on a Mollie charge and
+                // must not be patched over. 'noop': Mollie was not touched.
+                'in_flight' => true,
+                default => false,
+            };
+
+            // Only real plan switches (plan or interval) defer the local switch and surface
+            // the legacy `pending_plan_change` marker that the plan-change-modal cancel-button
+            // operates on. Seat/addon changes continue synchronously — they reach Mollie
+            // immediately anyway, and the webhook clears the `pending_prorata_change` marker.
+            if ($hasPendingCharge && ($context->planChanged || $context->intervalChanged)) {
+                $meta = $billable->getBillingSubscriptionMeta();
+                // Serialized via the context so every field Phase 2 reconstructs
+                // (incl. allow_hidden_plan) is carried — only the locals read back
+                // after validation and the stacked coupon codes are layered on top.
+                $meta['pending_plan_change'] = array_merge($context->toPendingArray(), [
+                    'seats' => $newSeats,
+                    'addons' => array_values($newAddons),
+                    'new_net' => $newNet,
+                    'coupon_codes' => $dto->couponCodes,
+                ]);
+                $meta['prorata_pending_payment_id'] = $billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
+                $billable->forceFill(['subscription_meta' => $meta])->save();
+
+                event(new \GraystackIT\MollieBilling\Events\PlanChangePending($billable, $meta['pending_plan_change'], (string) $meta['prorata_pending_payment_id']));
+
+                // Redemption for deferred charges happens in Phase-2 (applyPendingPlanChange)
+                // so the redemption record carries the actual prorata discount + invoice id.
+                return [
+                    'planChanged' => false,
+                    'intervalChanged' => false,
+                    'seatsChanged' => false,
+                    'addonsAdded' => [],
+                    'addonsRemoved' => [],
+                    'couponApplied' => null,
+                    'prorataChargeNet' => $context->prorataChargeNet,
+                    'prorataCreditNet' => 0,
+                    'mollieSubscriptionPatched' => false,
+                    'appliedAt' => null,
+                    'pendingPaymentConfirmation' => true,
+                    'scheduledFor' => null,
+                    'events' => [\GraystackIT\MollieBilling\Events\PlanChangePending::class],
+                ];
+            }
+        }
+
+        // ── Phase 2c: the remaining Mollie calls, still with nothing held ────────
+        // The cancel and the PATCH used to sit inside the phase-3 transaction. Both are
+        // HTTP calls that cannot be rolled back: a throw further down (a coupon whose
+        // redemption limit was exhausted in the meantime, a lock-wait timeout, an app
+        // listener) undid `mollie_subscription_id`, the addon list and the seat count
+        // while Mollie was already cancelled or already billing the new amount. The
+        // dispatch inside `queuePatchRetry()` had the mirror problem: the job could start
+        // against state the transaction then rolled back.
+        $cancelledAtMollie = true;
+        $mollieSubscriptionPatched = false;
+        $patchRetry = null;
+        $patchedAmountNet = null;
+
+        if ($billable instanceof Model) {
+            if ($downgradeToLocal) {
+                if ($prorataHandledByExecutor) {
+                    // The executor patched Mollie itself, and on a free target that PATCH is
+                    // a cancel. Its outcome has to be read here: assuming success dropped
+                    // `mollie_subscription_id` for a subscription that is still live, after
+                    // which nothing could target it again and Mollie kept charging the old
+                    // price every period. The patcher leaves a `pending_subscription_cancel`
+                    // marker for the retry job either way.
+                    $cancelledAtMollie = ($prorataResult['cancelled_at_mollie'] ?? true) === true;
+                } else {
+                    $cancelledAtMollie = $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
+                }
+            } elseif ($context->isMollie && ! $prorataHandledByExecutor && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
+                // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
+                // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
+                $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+                try {
+                    $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                    $mollieSubscriptionPatched = true;
+                } catch (\Throwable $e) {
+                    Log::warning('Mollie-Subscription PATCH failed — queued for retry', [
+                        'billable' => $billable->getKey(),
+                        'error' => $e->getMessage(),
+                    ]);
+                    $patchRetry = $this->queuePatchRetry($billable, $intent, $e);
+                }
+
+                $patchedAmountNet = $newNet;
+            } elseif ($context->isMollie && $prorataHandledByExecutor) {
+                $mollieSubscriptionPatched = $prorataResult['path'] === 'sidegrade'
+                    || $prorataResult['path'] === 'refund';
+                $patchedAmountNet = $newNet;
+            }
+        }
+
+        // ── Phase 3: every local write, in one transaction ───────────────────────
+        // The row lock is taken here rather than at the top: held from the top it would
+        // have spanned the Mollie calls above. Re-reading matters — MutatesBillingMeta
+        // writers (retry jobs, the overage sweep) and the patcher's own
+        // `pending_subscription_cancel` write may have committed a key in between, and
+        // the `subscription_meta` write below replaces the whole column.
+        /** @var array<int, array<string, mixed>> $deferredOverage */
+        $deferredOverage = [];
+
+        $result = DB::transaction(function () use (
+            $billable, $dto, $context, $resolvedCoupons, $perCouponRecurringDiscountNet,
+            $prorataResult, $downgradeToLocal,
+            $newSeats, $newAddons, $newNet, $addonsAdded, $addonsRemoved, $seatsChanged,
+            $couponsApplied, $cancelledAtMollie, $mollieSubscriptionPatched, $patchRetry,
+            $patchedAmountNet, &$deferredOverage,
+        ): array {
             if ($billable instanceof Model) {
+                // Scope-free: with an app-defined applyBillingScope() the scoped query
+                // can match nothing, and then this looks like it worked — first()
+                // quietly returns null, no row is locked, refresh() still loads fresh
+                // data (it uses newQueryWithoutScopes()) and the read-modify-write below
+                // runs unserialised.
                 $billable->newQuery()
+                    ->withoutGlobalScope(BillingScope::class)
                     ->whereKey($billable->getKey())
                     ->lockForUpdate()
                     ->first();
                 $billable->refresh();
-            }
-
-            $context = $this->buildContext($billable, $dto);
-
-            // Centralized validation (seats, addons, wallets, Mollie readiness).
-            $this->validator->validate($billable, $context);
-
-            // Read back potentially mutated values from context.
-            $newSeats = $context->newSeats;
-            $newAddons = $context->newAddons;
-            $newNet = $context->newNet;
-
-            $seatsChanged = $newSeats !== $context->currentSeats;
-            $addonsAdded = array_values(array_diff($newAddons, $context->currentAddons));
-            $addonsRemoved = array_values(array_diff($context->currentAddons, $newAddons));
-
-            // Coupon — validate all applied codes (stackable). NO redeem here yet:
-            // the actual redemption depends on which path the update takes (sidegrade,
-            // deferred prorata charge, PATCH-only, free downgrade, …) — each path has
-            // a different correct value for `discount_amount_net` and a different
-            // `invoice_id` on the redemption record. We collect resolved coupons here,
-            // then dispatch redemptions per path below.
-            $couponApplied = null;
-            $couponsApplied = [];
-            /** @var array<int, \GraystackIT\MollieBilling\Models\Coupon> $resolvedCoupons */
-            $resolvedCoupons = [];
-            /** @var array<int, int> $perCouponRecurringDiscountNet */
-            $perCouponRecurringDiscountNet = [];
-            $existingCouponIds = [];
-            $remainingNet = $newNet;
-
-            foreach ($dto->couponCodes as $code) {
-                $coupon = $this->couponService->validate(
-                    $code,
-                    $billable,
-                    [
-                        'planCode' => $context->newPlan,
-                        'interval' => $context->newInterval,
-                        'addonCodes' => $newAddons,
-                        'orderAmountNet' => $remainingNet,
-                        'existingCouponIds' => $existingCouponIds,
-                        // Only Recurring coupons are valid on plan-change / seat-sync /
-                        // addon-enable. SinglePayment is intentionally excluded — a 100%
-                        // single_payment would zero the prorata charge but leave the
-                        // local plan switched while Mollie's subscription still runs at
-                        // the old amount. Recurring covers every legitimate use case
-                        // here. For 100% single_payment use the Subscription Checkout
-                        // (Mandate-Only) or a One-Time-Order purchase.
-                        'allowed_types' => [\GraystackIT\MollieBilling\Enums\CouponType::Recurring],
-                    ],
-                );
-                $thisDiscount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
-                $resolvedCoupons[] = $coupon;
-                $perCouponRecurringDiscountNet[] = $thisDiscount;
-                $existingCouponIds[] = $coupon->id;
-                $remainingNet = max(0, $remainingNet - $thisDiscount);
-            }
-
-            $downgradeToLocal = $context->isMollie
-                && $context->planChanged
-                && $this->catalog->isFreePlan($context->newPlan, $context->newInterval);
-
-            // Pro-rata: ProrataExecutor handles charge/refund/sidegrade + Mollie-Subscription-PATCH.
-            // For Mollie → Free, the patcher cancels the subscription.
-            $hasProrata = ($context->prorataChargeNet > 0 || $context->prorataCreditNet > 0)
-                && $context->isMollie;
-
-            $prorataResult = null;
-            if ($hasProrata) {
-                $prorataResult = $this->applyProrata($billable, $context, $resolvedCoupons);
-                $billable->refresh();
-
-                // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
-                $hasPendingCharge = ! empty($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null);
-
-                // Only real plan switches (plan or interval) defer the local switch and surface
-                // the legacy `pending_plan_change` marker that the plan-change-modal cancel-button
-                // operates on. Seat/addon changes continue synchronously — they reach Mollie
-                // immediately anyway, and the webhook clears the `pending_prorata_change` marker.
-                if ($hasPendingCharge && ($context->planChanged || $context->intervalChanged)) {
-                    $meta = $billable->getBillingSubscriptionMeta();
-                    // Serialized via the context so every field Phase 2 reconstructs
-                    // (incl. allow_hidden_plan) is carried — only the locals read back
-                    // after validation and the stacked coupon codes are layered on top.
-                    $meta['pending_plan_change'] = array_merge($context->toPendingArray(), [
-                        'seats' => $newSeats,
-                        'addons' => array_values($newAddons),
-                        'new_net' => $newNet,
-                        'coupon_codes' => $dto->couponCodes,
-                    ]);
-                    $meta['prorata_pending_payment_id'] = $billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
-                    $billable->forceFill(['subscription_meta' => $meta])->save();
-
-                    event(new \GraystackIT\MollieBilling\Events\PlanChangePending($billable, $meta['pending_plan_change'], (string) $meta['prorata_pending_payment_id']));
-
-                    // Redemption for deferred charges happens in Phase-2 (applyPendingPlanChange)
-                    // so the redemption record carries the actual prorata discount + invoice id.
-                    return [
-                        'planChanged' => false,
-                        'intervalChanged' => false,
-                        'seatsChanged' => false,
-                        'addonsAdded' => [],
-                        'addonsRemoved' => [],
-                        'couponApplied' => null,
-                        'prorataChargeNet' => $context->prorataChargeNet,
-                        'prorataCreditNet' => 0,
-                        'mollieSubscriptionPatched' => false,
-                        'appliedAt' => null,
-                        'pendingPaymentConfirmation' => true,
-                        'scheduledFor' => null,
-                        'events' => [\GraystackIT\MollieBilling\Events\PlanChangePending::class],
-                    ];
-                }
             }
 
             // Redeem all validated coupons now — paths that did NOT defer a charge.
@@ -220,51 +460,65 @@ class UpdateSubscription
             }
             $couponApplied = $couponsApplied !== [] ? $couponsApplied[0] : null;
 
-            $mollieSubscriptionPatched = false;
+            // Declared out here because the wallet adjuster below reads them outside the
+            // `instanceof Model` block that assigns them. Left unset they arrived as
+            // null, which silently turned off usage proration via
+            // WalletPlanChangeAdjuster's boundaries-explicit check.
+            $oldPeriodStart = null;
+            $oldPeriodEnd = null;
 
             if ($billable instanceof Model) {
+                // Read after the lock+refresh above, so the patcher's own
+                // `pending_subscription_cancel` / phase-2c writes are included rather than
+                // overwritten by the whole-column write below.
                 $meta = $billable->getBillingSubscriptionMeta();
 
-                if ($downgradeToLocal) {
-                    if (! $hasProrata) {
-                        $this->subscriptionPatcher->cancelForFreeDowngrade($billable);
-                    }
-                    // Free downgrade tears down the Mollie subscription — any active
-                    // recurring-coupon marker no longer applies (no future charges).
-                    unset(
-                        $meta['mollie_subscription_id'],
-                        $meta['pending_amount_net'],
-                        $meta['pending_amount_recorded_at'],
-                        $meta['active_recurring_coupon'],
-                    );
-                } elseif ($context->isMollie && ! $hasProrata && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-                    // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
-                    // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
-                    $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
-                    try {
-                        $this->subscriptionPatcher->updateForIntent($billable, $intent);
-                        $mollieSubscriptionPatched = true;
-                    } catch (\Throwable $e) {
-                        Log::warning('Mollie-Subscription PATCH failed — queued for retry', [
-                            'billable' => $billable->getKey(),
-                            'error' => $e->getMessage(),
-                        ]);
-                        $meta['pending_subscription_patch'] = [
-                            'intent' => $intent->toArray(),
-                            'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
-                            'last_error' => $e->getMessage(),
-                        ];
-                    }
+                if ($patchRetry !== null) {
+                    $meta['pending_subscription_patch'] = $patchRetry;
+                }
 
-                    $meta['pending_amount_net'] = $newNet;
-                    $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
-                } elseif ($context->isMollie && $hasProrata) {
-                    $mollieSubscriptionPatched = true;
-                    $meta['pending_amount_net'] = $newNet;
+                if ($patchedAmountNet !== null) {
+                    $meta['pending_amount_net'] = $patchedAmountNet;
                     $meta['pending_amount_recorded_at'] = BillingTime::nowUtc()->toIso8601String();
                 }
 
+                if ($downgradeToLocal) {
+                    // `$cancelledAtMollie` says whether the subscription is definitively gone
+                    // at Mollie (phase 2c). Dropping the id on a failed cancel orphaned a live
+                    // subscription that kept charging the old price with nothing able to
+                    // target it any more.
+
+                    // The same hygiene ActivateLocalSubscription performs — this is the
+                    // other way onto a Local subscription, and it used to clear three
+                    // keys where its sibling cleared ten. What survived was not inert:
+                    //
+                    // - `past_due_since` + a PastDue status that the write below never
+                    //   normalised. `guardPeriodNotLapsed` exempts PastDue and a free
+                    //   target prices at 0, so the downgrade went through, the source
+                    //   flipped to Local and the status stayed PastDue — which
+                    //   `hasAccessibleBillingSubscription()` refuses, and no renewal will
+                    //   ever come to recover a Local subscription. The stale dunning clock
+                    //   then auto-cancelled and expired the row.
+                    // - `scheduled_change` / `scheduled_change_at`: the daily dispatcher
+                    //   kept applying an upgrade the validator refuses for a Local plan,
+                    //   and `apply()` re-threw without clearing the column, so it failed
+                    //   every night forever.
+                    // - `next_charge_date_override`: outranks the period anchor in
+                    //   `nextBillingDate()`, deferring the free plan's quota recharge.
+                    $meta = SubscriptionMetaHygiene::forFreshSubscription($meta);
+
+                    if ($cancelledAtMollie) {
+                        unset($meta['mollie_subscription_id']);
+                    }
+                }
+
                 $meta['seat_count'] = $newSeats;
+
+                // The wallet adjuster prorates the old plan's entitlement over the
+                // OLD period, so capture it before the write below moves the interval
+                // (and, on a downgrade to free, the period start itself).
+                $oldPeriodStart = $billable->getBillingPeriodStartsAt();
+                $oldPeriodEnd = $billable->nextBillingDate();
 
                 $billable->forceFill([
                     'subscription_plan_code' => $context->newPlan,
@@ -275,12 +529,31 @@ class UpdateSubscription
                         'subscription_source' => SubscriptionSource::Local,
                         'subscription_period_starts_at' => BillingTime::nowUtc(),
                         'subscription_ends_at' => null,
+                        // Normalised, like ActivateLocalSubscription does. A PastDue or
+                        // Trial status carried into a Local free plan is unrecoverable:
+                        // access is refused and no renewal will ever arrive to clear it.
+                        'subscription_status' => SubscriptionStatus::Active,
+                        'trial_ends_at' => null,
+                        // Cleared with the meta entry above — the period-end dispatcher
+                        // keys off this column alone.
+                        'scheduled_change_at' => null,
                     ] : []),
                 ])->save();
             }
 
             if ($context->planChanged || $context->intervalChanged) {
-                $this->walletAdjuster->adjust($billable, $context->currentPlan, $context->currentInterval, $context->newPlan, $context->newInterval);
+                // The rebalance itself is local and belongs in this transaction; the charge
+                // for whatever it could not resolve is a Mollie call and is handed back out.
+                $deferredOverage = $this->walletAdjuster->adjust(
+                    $billable,
+                    $context->currentPlan,
+                    $context->currentInterval,
+                    $context->newPlan,
+                    $context->newInterval,
+                    $oldPeriodStart,
+                    $oldPeriodEnd,
+                    deferOverageCharge: true,
+                );
             }
 
             return $this->dispatchEventsAndBuildResult(
@@ -288,6 +561,10 @@ class UpdateSubscription
                 $seatsChanged, $couponApplied, $mollieSubscriptionPatched,
             );
         });
+
+        $this->walletAdjuster->chargeDeferredOverage($billable, $deferredOverage);
+
+        return $result;
     }
 
     /**
@@ -298,6 +575,27 @@ class UpdateSubscription
      *         prorata charge as additional negative lines (kind=coupon).
      * @return array{path: string, invoice: ?\GraystackIT\MollieBilling\Models\BillingInvoice}
      */
+    /**
+     * Whether the composer has anything to book even though the aggregate nets to zero.
+     *
+     * Only asked when the aggregate says "nothing to do", so the extra compose() is paid for
+     * exactly on the change that would otherwise be dropped. `applyProrata()` composes again
+     * from its own intent — the lines are not threaded through, because that intent carries
+     * the resolved coupons and this one deliberately does not.
+     */
+    protected function composerWouldBook(Billable $billable, SubscriptionChangeContext $context): bool
+    {
+        $intent = $this->buildIntent($billable, $context, $context->newSeats, $context->newAddons);
+
+        foreach (app(ProrataComposer::class)->compose($intent) as $line) {
+            if ($line->amountNet !== 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     protected function applyProrata(Billable $billable, SubscriptionChangeContext $context, array $resolvedCoupons = []): array
     {
         $intent = $this->buildIntent(
@@ -384,9 +682,12 @@ class UpdateSubscription
     private function applyCouponDiscountsToProrataLines(array $lines, array $resolvedCoupons, SubscriptionChangeContext $context): array
     {
         // Net prorata charge: charge-direction lines minus refund-direction lines.
-        // The Mollie charge that will actually fire is the SUM of all charge-direction
-        // line amounts (positive and negative); refunds are netted there. Coupons can
-        // only meaningfully reduce that final net charge.
+        // The Mollie charge that fires collects the charge-direction lines *only* —
+        // ProrataExecutor::partition() routes the refund-direction lines to separate
+        // Mollie refunds (InvoiceService::createCharge() vs createRefund()), they are
+        // not netted into the payment. Netting them here is nevertheless the right
+        // bound for a coupon: what the change costs the customer is charge minus
+        // refunds, and a discount larger than that would hand out money.
         $chargeNet = 0;
         $vatRate = 0.0;
         $periodStart = null;
@@ -394,16 +695,27 @@ class UpdateSubscription
         $daysActive = 0;
         $daysRemaining = 0;
 
+        // The rate the discount has to carry is the rate of what it discounts, so it is
+        // taken from a charge-direction line — any of them, not just a `plan` one. Keyed on
+        // `kind === 'plan'`, a seat-only or addon-only change (which emits no plan line at
+        // all) left the rate at 0.0: the coupon line was booked with no VAT while the lines
+        // it offsets carried 20 %, so the customer was charged VAT on the undiscounted
+        // amount and the invoice's totals no longer added up. A refund-direction line is the
+        // fallback only — its rate is the *original* invoice's, which a country correction
+        // can have moved away from the one being charged now.
+        $fallbackVatRate = 0.0;
+
         foreach ($lines as $line) {
-            if ($line->direction === 'charge') {
-                $chargeNet += $line->amountNet;
-            } else {
-                // Refund-direction lines are negative against the customer's invoice
-                // already; for the purposes of "what is being charged now" we net them.
-                $chargeNet += $line->amountNet;
-            }
-            if ($line->kind === 'plan' && $line->vatRate > 0 && $vatRate === 0.0) {
-                $vatRate = (float) $line->vatRate;
+            // Direction-agnostic: refund lines already carry a negative amountNet, so
+            // adding every line is the netting described above.
+            $chargeNet += $line->amountNet;
+
+            if ($line->vatRate > 0) {
+                if ($line->direction === 'charge' && $vatRate === 0.0) {
+                    $vatRate = (float) $line->vatRate;
+                } elseif ($fallbackVatRate === 0.0) {
+                    $fallbackVatRate = (float) $line->vatRate;
+                }
             }
             if ($periodStart === null) {
                 $periodStart = $line->periodStart;
@@ -411,6 +723,10 @@ class UpdateSubscription
                 $daysActive = $line->daysActive;
                 $daysRemaining = $line->daysRemaining;
             }
+        }
+
+        if ($vatRate === 0.0) {
+            $vatRate = $fallbackVatRate;
         }
 
         if ($chargeNet <= 0 || $periodStart === null || $periodEnd === null) {
@@ -480,11 +796,37 @@ class UpdateSubscription
             newInterval: $context->newInterval,
             currentSeats: $context->currentSeats,
             newSeats: $newSeats,
-            currentAddons: array_fill_keys($context->currentAddons, 1),
-            newAddons: array_fill_keys(array_values($newAddons), 1),
-            forceResetStartDate: $billable->isBillingPastDue()
-                && ($context->planChanged || $context->intervalChanged),
+            // Real quantities, not 1. `SubscriptionAmount::net()`/`lineItems()` read
+            // `getBillingAddonQuantity()` — their docblock promises apps overriding it are
+            // honoured "consistently in every place where pricing is calculated" — and the
+            // composer multiplies by the intent's quantity. Hardcoding 1 here priced the
+            // prorata window for one unit while the recurring window billed three: the
+            // preview quoted 27,00 for the addon, Mollie was asked for 9,00, and two thirds
+            // of the old addon were never credited.
+            currentAddons: $this->addonQuantities($billable, $context->currentAddons),
+            newAddons: $this->addonQuantities($billable, array_values($newAddons)),
+            forceResetStartDate: BillingPolicy::isPastDueReset($billable, $context->planChanged, $context->intervalChanged),
         );
+    }
+
+    /**
+     * Map addon codes to the quantity the app actually bills them at.
+     *
+     * Mirrors `PreviewService::currentAddonQuantities()`, which has read the real value all
+     * along — the divergence between the two is what made preview and charge disagree.
+     *
+     * @param  array<int, string>  $codes
+     * @return array<string, int>
+     */
+    private function addonQuantities(Billable $billable, array $codes): array
+    {
+        $out = [];
+
+        foreach ($codes as $code) {
+            $out[(string) $code] = $billable->getBillingAddonQuantity((string) $code) ?: 1;
+        }
+
+        return $out;
     }
 
     public function cancelScheduledChange(Billable $billable): void
@@ -519,9 +861,42 @@ class UpdateSubscription
             return [];
         }
 
-        return DB::transaction(function () use ($billable, $pendingData, $pendingProrataChargeLines, $chargeInvoice): array {
+        // The same state rule ProrataChargeHandler::APPLICABLE_STATES enforces, and for the
+        // reason its comment gives: force-filling plan/interval/addon fields onto a Cancelled
+        // or Expired row resurrects the plan-scoped fields the expiry pass wipes, which hands
+        // `@planFeature` and the `billing.feature` middleware back to a subscription that has
+        // ended. This path is the legacy twin of that handler — reached from
+        // SingleChargeHandler for `type` metadata the package no longer emits — and it never
+        // had the guard.
+        // Phrased as the states that are *out* rather than the ones that are in: this path
+        // is also reached for a billable whose status has not been written yet, which is not
+        // an ended subscription and must keep working.
+        if (in_array($billable->getBillingSubscriptionStatus(), [
+            SubscriptionStatus::Cancelled,
+            SubscriptionStatus::Expired,
+        ], true)) {
+            Log::warning('Pending plan change not applied — the subscription no longer runs', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'status' => $billable->getBillingSubscriptionStatus()?->value,
+            ]);
+
+            return [];
+        }
+
+        // Phase 1: read and decide under a short lock. Same three-phase shape as
+        // `update()` — see `withChangeLock()` for why the Mollie call in phase 2 must not
+        // be inside a transaction that a later throw rolls back.
+        /** @var array{context: SubscriptionChangeContext, isMollie: bool, oldPeriodStart: ?\Carbon\CarbonInterface, oldPeriodEnd: ?\Carbon\CarbonInterface, newSeats: int, newAddons: array<int, string>, newNet: int, seatsChanged: bool, addonsAdded: array<int, string>, addonsRemoved: array<int, string>} $decision */
+        $decision = DB::transaction(function () use ($billable, $pendingData): array {
             if ($billable instanceof Model) {
+                // Scope-free: with an app-defined applyBillingScope() the scoped query can
+                // match nothing, and then this looks like it worked — first() quietly
+                // returns null, no row is locked, refresh() still loads fresh data (it uses
+                // newQueryWithoutScopes()) and the read-modify-write below runs
+                // unserialised. Every other lock read in the package bypasses the scope for
+                // this reason.
                 $billable->newQuery()
+                    ->withoutGlobalScope(BillingScope::class)
                     ->whereKey($billable->getKey())
                     ->lockForUpdate()
                     ->first();
@@ -534,36 +909,76 @@ class UpdateSubscription
             // Re-validate: state may have changed between Phase 1 and webhook.
             $this->validator->validate($billable, $context);
 
-            $newSeats = $context->newSeats;
             $newAddons = $context->newAddons;
-            $newNet = $context->newNet;
-
-            $currentSeats = $billable->getBillingSeatCount();
             $currentAddons = $billable->getActiveBillingAddonCodes();
-            $seatsChanged = $newSeats !== $currentSeats;
-            $addonsAdded = array_values(array_diff($newAddons, $currentAddons));
-            $addonsRemoved = array_values(array_diff($currentAddons, $newAddons));
 
-            $mollieSubscriptionPatched = false;
+            return [
+                'context' => $context,
+                'isMollie' => $isMollie,
+                // Captured before any write below moves the interval — the wallet
+                // adjuster prorates the old entitlement over the OLD period.
+                'oldPeriodStart' => $billable->getBillingPeriodStartsAt(),
+                'oldPeriodEnd' => $billable->nextBillingDate(),
+                'newSeats' => $context->newSeats,
+                'newAddons' => $newAddons,
+                'newNet' => $context->newNet,
+                'seatsChanged' => $context->newSeats !== $billable->getBillingSeatCount(),
+                'addonsAdded' => array_values(array_diff($newAddons, $currentAddons)),
+                'addonsRemoved' => array_values(array_diff($currentAddons, $newAddons)),
+            ];
+        });
 
-            if ($isMollie && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-                $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
-                try {
-                    $this->subscriptionPatcher->updateForIntent($billable, $intent);
-                    $mollieSubscriptionPatched = true;
-                } catch (\Throwable $e) {
-                    Log::warning('Mollie-Subscription PATCH failed in applyPendingPlanChange — queued for retry', [
-                        'billable' => $billable->getKey(),
-                        'error' => $e->getMessage(),
-                    ]);
-                    $meta = $billable->getBillingSubscriptionMeta();
-                    $meta['pending_subscription_patch'] = [
-                        'intent' => $intent->toArray(),
-                        'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
-                        'last_error' => $e->getMessage(),
-                    ];
-                    $billable->forceFill(['subscription_meta' => $meta])->save();
-                }
+        $context = $decision['context'];
+        $newSeats = $decision['newSeats'];
+        $newAddons = $decision['newAddons'];
+        $newNet = $decision['newNet'];
+        $seatsChanged = $decision['seatsChanged'];
+        $addonsAdded = $decision['addonsAdded'];
+        $addonsRemoved = $decision['addonsRemoved'];
+        $oldPeriodStart = $decision['oldPeriodStart'];
+        $oldPeriodEnd = $decision['oldPeriodEnd'];
+
+        // Phase 2: the Mollie PATCH, with nothing held.
+        $mollieSubscriptionPatched = false;
+        $patchRetry = null;
+
+        if ($decision['isMollie'] && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
+            $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+            try {
+                $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                $mollieSubscriptionPatched = true;
+            } catch (\Throwable $e) {
+                Log::warning('Mollie-Subscription PATCH failed in applyPendingPlanChange — queued for retry', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+                $patchRetry = $this->queuePatchRetry($billable, $intent, $e);
+            }
+        }
+
+        // Phase 3: every local write.
+        /** @var array<int, array<string, mixed>> $deferredOverage */
+        $deferredOverage = [];
+
+        $result = DB::transaction(function () use (
+            $billable, $pendingProrataChargeLines, $chargeInvoice, $context, $newSeats,
+            $newAddons, $newNet, $seatsChanged, $addonsAdded, $addonsRemoved,
+            $oldPeriodStart, $oldPeriodEnd, $mollieSubscriptionPatched, $patchRetry,
+            &$deferredOverage,
+        ): array {
+            if ($billable instanceof Model) {
+                $billable->newQuery()
+                    ->withoutGlobalScope(BillingScope::class)
+                    ->whereKey($billable->getKey())
+                    ->lockForUpdate()
+                    ->first();
+                $billable->refresh();
+            }
+
+            if ($patchRetry !== null) {
+                $meta = $billable->getBillingSubscriptionMeta();
+                $meta['pending_subscription_patch'] = $patchRetry;
+                $billable->forceFill(['subscription_meta' => $meta])->save();
             }
 
             // Clear pending state.
@@ -582,14 +997,19 @@ class UpdateSubscription
                 'subscription_meta' => $meta,
             ])->save();
 
-            // See update() — addons don't carry included usages.
+            // See update() — addons don't carry included usages. The rebalance is local
+            // and belongs here; the charge for what it cannot resolve is a Mollie call and
+            // is handed back out to run after the commit.
             if ($context->planChanged || $context->intervalChanged) {
-                $this->walletAdjuster->adjust(
+                $deferredOverage = $this->walletAdjuster->adjust(
                     $billable,
                     $context->currentPlan,
                     $context->currentInterval,
                     $context->newPlan,
                     $context->newInterval,
+                    $oldPeriodStart,
+                    $oldPeriodEnd,
+                    deferOverageCharge: true,
                 );
             }
 
@@ -691,6 +1111,10 @@ class UpdateSubscription
                 $seatsChanged, $couponApplied, $mollieSubscriptionPatched,
             );
         });
+
+        $this->walletAdjuster->chargeDeferredOverage($billable, $deferredOverage);
+
+        return $result;
     }
 
     /**
@@ -711,14 +1135,24 @@ class UpdateSubscription
     }
 
     /**
-     * User-initiated cancel of a pending plan change. Cancels the open Mollie
-     * payment if Mollie still allows it (some methods like paypal report
-     * isCancelable=false — those expire on their own), then clears the local
-     * pending state.
+     * User-initiated cancel of a pending plan change. Cancels the open Mollie payment if
+     * Mollie still allows it (some methods like PayPal report isCancelable=false — those
+     * expire on their own), then clears the local pending state.
      *
-     * Returns true if the Mollie payment was cancelled via API, false if it
-     * could not be cancelled (already final, not cancelable, or not found).
-     * Local state is cleared in either case.
+     * Returns true if the Mollie payment was cancelled via API, false otherwise.
+     *
+     * Three outcomes, because "we cleared the local state" is only safe for one of them:
+     *
+     *  - Cancelled, or already dead at Mollie (canceled/expired/failed): clear, done.
+     *  - Already **paid or authorized**: the local state is left untouched and false is
+     *    returned. The money is in; the webhook still has to apply the change, and
+     *    clearing `pending_plan_change` here would make ProrataChargeHandler::paid()
+     *    return early — the customer charged for a plan change that never happens, with
+     *    no invoice, no refund and no alert.
+     *  - Still open but not cancelable, or the lookup/cancel threw: the local state is
+     *    cleared (the customer asked for that) but the payment is recorded under
+     *    `subscription_meta['orphaned_prorata_payment']` together with the plan-change
+     *    payload, and the admins are notified. The paid path reconciles from that marker.
      */
     public function cancelPendingPlanChange(Billable $billable): bool
     {
@@ -730,17 +1164,33 @@ class UpdateSubscription
         $paymentId = (string) ($meta['prorata_pending_payment_id'] ?? '');
 
         $cancelled = false;
+        $orphanReason = null;
+
         if ($paymentId !== '') {
             try {
-                $payment = \Mollie\Laravel\Facades\Mollie::send(
+                $payment = MollieCall::send(
                     new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId),
                 );
 
+                $status = (string) ($payment->status ?? '');
+
+                if (in_array($status, ['paid', 'authorized'], true)) {
+                    Log::warning('Pending plan change cancel refused — the prorata payment has already settled', [
+                        'billable' => $billable->getKey(),
+                        'payment_id' => $paymentId,
+                        'status' => $status,
+                    ]);
+
+                    return false;
+                }
+
                 if (($payment->isCancelable ?? false) === true) {
-                    \Mollie\Laravel\Facades\Mollie::send(
+                    MollieCall::send(
                         new \Mollie\Api\Http\Requests\CancelPaymentRequest($paymentId),
                     );
                     $cancelled = true;
+                } elseif (! in_array($status, ['canceled', 'expired', 'failed'], true)) {
+                    $orphanReason = 'not_cancelable';
                 }
             } catch (\Throwable $e) {
                 Log::warning('Pending plan change cancel: Mollie payment lookup/cancel failed — clearing local state anyway', [
@@ -748,12 +1198,102 @@ class UpdateSubscription
                     'payment_id' => $paymentId,
                     'error' => $e->getMessage(),
                 ]);
+
+                $orphanReason = 'lookup_failed';
             }
+        }
+
+        if ($orphanReason !== null) {
+            $this->recordOrphanedProrataPayment($billable, $paymentId, $orphanReason);
         }
 
         $this->clearPendingPlanChange($billable);
 
         return $cancelled;
+    }
+
+    /**
+     * Remember a prorata payment that may still settle after the local pending state was
+     * cleared, so the paid path has something to reconcile against instead of returning
+     * early on an empty pending state.
+     *
+     * Read by ProrataChargeHandler::reportOrphanedCharge(): when the payment settles
+     * anyway, `pending_prorata_change` is empty, so the handler matches this marker on
+     * the payment id, folds the reason and the intended change into the admin alert and
+     * clears it. The refund itself stays manual — reversing a plan change the customer
+     * cancelled is a product decision, not something to automate behind their back.
+     */
+    private function recordOrphanedProrataPayment(Billable $billable, string $paymentId, string $reason): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        // At most one prorata payment can be pending at a time (there is a single
+        // `prorata_pending_payment_id`), so this replaces rather than accumulates.
+        $meta['orphaned_prorata_payment'] = [
+            'payment_id' => $paymentId,
+            'reason' => $reason,
+            'cancelled_at' => BillingTime::nowUtc()->toIso8601String(),
+            'pending_plan_change' => $meta['pending_plan_change'] ?? null,
+            'prorata_charge_lines' => $meta['pending_prorata_change']['charge_lines'] ?? null,
+        ];
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        Log::error('Prorata payment orphaned by a user-initiated plan-change cancel — may still settle', [
+            'billable' => $billable->getKey(),
+            'payment_id' => $paymentId,
+            'reason' => $reason,
+        ]);
+
+        $admins = \GraystackIT\MollieBilling\MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins !== []) {
+            \Illuminate\Support\Facades\Notification::send($admins, \GraystackIT\MollieBilling\MollieBilling::resolveNotification(
+                \GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification::class,
+                'Plan change cancelled locally while its Mollie payment could still settle',
+                [
+                    'billable_type' => $billable->getMorphClass(),
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $paymentId,
+                    'reason' => $reason,
+                ],
+            ));
+        }
+    }
+
+    /**
+     * Persist the retry marker for a failed Mollie PATCH *and* queue the retry.
+     *
+     * The marker alone is only read by the hourly SweepPendingRetriesJob; dispatching here
+     * drains it promptly instead. The job is ShouldBeUnique per (billable, patch), so the
+     * sweep finding the same marker later is a no-op while this chain is in flight.
+     *
+     * `billable_type` is normalised to the configured billable FQCN: both
+     * PlanChangeIntent::fromArray() and RetrySubscriptionPatchJob resolve the row by class
+     * name, which a morph-map alias from getMorphClass() would not satisfy.
+     *
+     * @return array<string, mixed>  the marker to store under `pending_subscription_patch`
+     */
+    private function queuePatchRetry(Billable $billable, PlanChangeIntent $intent, \Throwable $e): array
+    {
+        $intentData = [
+            ...$intent->toArray(),
+            'billable_type' => (string) config('mollie-billing.billable_model'),
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+        ];
+        $firstAttemptAt = BillingTime::nowUtc()->toIso8601String();
+
+        \GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob::dispatch($intentData, $firstAttemptAt);
+
+        return [
+            'intent' => $intentData,
+            'first_attempt_at' => $firstAttemptAt,
+            'last_error' => $e->getMessage(),
+        ];
     }
 
     /**
@@ -791,7 +1331,7 @@ class UpdateSubscription
         $hasChanges = $planChanged || $intervalChanged || $newSeats !== $currentSeats
             || array_diff($newAddons, $currentAddons) || array_diff($currentAddons, $newAddons);
 
-        $isPastDueReset = $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+        $isPastDueReset = BillingPolicy::isPastDueReset($billable, $planChanged, $intervalChanged);
 
         if ($isPastDueReset) {
             // Past-Due: the current period was never paid (last charge failed).
@@ -850,24 +1390,34 @@ class UpdateSubscription
     ): array {
         $events = [];
 
+        // Dispatched after the commit, never inside it. `update()` wraps the whole change —
+        // including applyProrata(), which creates real Mollie payments and posts real
+        // refunds — in one transaction, and events are the documented extension seam. A
+        // synchronous app listener that threw therefore rolled back the credit note, the
+        // `refunded_net` increment and the seat count while Mollie had already paid the
+        // customer; the user retried, the composer saw `refunded_net = 0` and the refund
+        // went out a second time. `DB::afterCommit()` runs immediately when no transaction
+        // is open, so the direct callers are unaffected.
+        $announce = function (object $event) use (&$events): void {
+            $events[] = $event::class;
+
+            DB::afterCommit(fn () => event($event));
+        };
+
         if ($context->planChanged || $context->intervalChanged) {
-            event(new PlanChanged($billable, $context->currentPlan ?: null, $context->newPlan, $context->newInterval));
-            $events[] = PlanChanged::class;
+            $announce(new PlanChanged($billable, $context->currentPlan ?: null, $context->newPlan, $context->newInterval));
         }
 
         if ($seatsChanged) {
-            event(new SeatsChanged($billable, $context->currentSeats, $newSeats));
-            $events[] = SeatsChanged::class;
+            $announce(new SeatsChanged($billable, $context->currentSeats, $newSeats));
         }
 
         foreach ($addonsAdded as $code) {
-            event(new AddonEnabled($billable, (string) $code));
-            $events[] = AddonEnabled::class;
+            $announce(new AddonEnabled($billable, (string) $code));
         }
 
         foreach ($addonsRemoved as $code) {
-            event(new AddonDisabled($billable, (string) $code));
-            $events[] = AddonDisabled::class;
+            $announce(new AddonDisabled($billable, (string) $code));
         }
 
         $diff = [
@@ -878,8 +1428,7 @@ class UpdateSubscription
             'addonsRemoved' => $addonsRemoved,
         ];
 
-        event(new SubscriptionUpdated($billable, $dto->toArray(), $diff));
-        $events[] = SubscriptionUpdated::class;
+        $announce(new SubscriptionUpdated($billable, $dto->toArray(), $diff));
 
         return [
             'planChanged' => $context->planChanged,
@@ -922,13 +1471,33 @@ class UpdateSubscription
         return array_values($addons);
     }
 
-    private function validateApplyAt(SubscriptionUpdateRequest $dto): void
+    /**
+     * The `apply_at` this change actually runs with, after `plan_change_mode`.
+     *
+     * Two things the flat check got wrong:
+     *
+     * - It governed **every** change. A seat adjustment and an addon toggle are not plan
+     *   changes, and `SyncSeats`/`EnableAddon`/`DisableAddon` send no `apply_at` at all —
+     *   so on an install with `plan_change_mode = end_of_period` every click on "Update
+     *   seats", "Add add-on" and "Remove add-on" threw `Immediate plan changes are not
+     *   allowed.` The mode is named, documented and configured for plan changes.
+     * - It could not tell "the caller asked for immediate" from "the caller said
+     *   nothing". `changeBillingPlan()` — the documented API — says nothing, and was
+     *   refused rather than scheduled, which is what the mode means.
+     */
+    private function resolveApplyAt(SubscriptionUpdateRequest $dto): string
     {
         // Internal re-entries (e.g. ScheduleSubscriptionChange::apply() at period
         // end) bypass the user-input mode check — they need to call update()
         // with apply_at=immediate even when the configured mode is EndOfPeriod.
         if ($dto->internal) {
-            return;
+            return $dto->applyAt;
+        }
+
+        $movesPlan = $dto->planCode !== null || $dto->interval !== null;
+
+        if (! $movesPlan) {
+            return $dto->applyAt;
         }
 
         $mode = config('mollie-billing.plan_change_mode', PlanChangeMode::UserChoice);
@@ -938,8 +1507,14 @@ class UpdateSubscription
         }
 
         if ($dto->applyAt !== 'end_of_period' && $mode === PlanChangeMode::EndOfPeriod) {
-            throw new \RuntimeException('Immediate plan changes are not allowed.');
+            if ($dto->applyAtExplicit) {
+                throw new \RuntimeException('Immediate plan changes are not allowed.');
+            }
+
+            return 'end_of_period';
         }
+
+        return $dto->applyAt;
     }
 
     /**
@@ -964,6 +1539,18 @@ class UpdateSubscription
     private function guardPeriodNotLapsed(Billable $billable, SubscriptionUpdateRequest $dto): void
     {
         if ($dto->internal || $billable->isBillingPastDue()) {
+            return;
+        }
+
+        // A trial has no billing period to lapse. The guard's premise is that a renewal
+        // webhook advances `subscription_period_starts_at`, so `nextBillingDate()` stays in
+        // the future — during a trial that anchor is the mandate-capture time and Mollie
+        // charges at the trial end instead, so a trial configured longer than one interval
+        // walks past it with nothing wrong. The customer was then told to "wait for the
+        // renewal to complete" for a renewal that is neither due nor late, and could not
+        // change their plan for the rest of the trial. Nothing is given away by allowing
+        // it: nothing has been paid for the period, so a prorata of 0 is the right answer.
+        if ($billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial) {
             return;
         }
 

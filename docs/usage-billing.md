@@ -45,7 +45,18 @@ Defined per plan per interval inside `intervals.{monthly|yearly}`:
 
 Note: usage quotas are plan-scoped only. Addons do not contribute `included_usages`. See `SubscriptionCatalogInterface::includedUsage()` for details.
 
-The `included_usages` and `usage_overage_prices` keys must line up — a quota without a price is hard-capped at the quota (nothing could be collected past it), and a price without a quota means the wallet starts at 0. Run `php artisan billing:check-config` to detect such mismatches (it also verifies that any `products.*.usage_type` exists in some plan's usage types).
+The two maps combine, and every combination means something:
+
+| `included_usages` | `usage_overage_prices` | Behaviour |
+|---|---|---|
+| `100` | `5` | Allowance of 100, then 5 cents per unit. The wallet goes negative and the period-end pass charges it. |
+| `100` | absent or `false` | **Hard cap.** `debit()` refuses to go past the allowance and raises `UsageLimitReached` / throws — nothing could collect a negative balance, so none is created. |
+| absent or `0` | `5` | **Pay-per-use.** No allowance; every unit is billed. The wallet only ever goes negative, and the period-end charge, the dunning ladder and the plan-change rebalance all handle it — they iterate wallets, not quotas. |
+| absent | absent | The type is not sold on this plan. Debits are capped at whatever balance exists (purchased credits only). |
+
+Run `php artisan billing:check-config` to check them: it reports a quota without a price, a price without a quota (naming both readings), and a type declared on one interval of a plan but not the other. It also verifies that any `products.*.usage_type` exists in some plan's usage types.
+
+**Quotas are per (plan, interval) with no fallback**, deliberately — a yearly allowance is not twelve monthly ones. The cost is a config shape with no symptom until somebody switches interval: a type declared under `monthly` and forgotten under `yearly` resolves to quota 0 there, and with no overage price on that side the hard cap turns the customer's next metered call into an exception. `check-config` warns about exactly this shape.
 
 When a quota is *meant* to have no overage (typical for internal and supplier plans), declare it as `'Tokens' => false` in `usage_overage_prices` rather than leaving the key out. Runtime behaviour is identical — `usageOveragePrice()` returns `null` either way, and the quota is hard-capped — but the explicit `false` tells `check-config` that the missing price is deliberate, so it stops warning. See [Declaring a quota with no overage](configuration.md#declaring-a-quota-with-no-overage).
 
@@ -115,6 +126,19 @@ On each billing period renewal (Mollie webhook payment or local subscription res
 
 In both cases, purchased credits that were not consumed survive the renewal.
 
+### An unpaid overage debt survives the renewal
+
+A negative balance is unpaid debt, and the reset does **not** forgive it while the charge for exactly those units is still settling. It used to: the reset zeroed the debt, then the overage payment's webhook credited the charged quantity on top, so every overage cycle handed the customer that quantity as free units. With SEPA the renewal usually settles first, because Mollie creates the renewal about two days ahead while the overage charge is created the day before it.
+
+| Period | Action | Balance |
+|--------|--------|---------|
+| Month 1 | Quota 100, used 137 | −37 |
+| Month 1, day 29 | Overage charge created for 37 units (unsettled) | −37 |
+| Month 2 start | Reset **keeps the debt**, credits 100 | 63 |
+| Month 2, day 2 | Overage payment settles, credits 37 | 100 |
+
+Decided per usage type, from the pending-charge snapshot: a type the charge did not cover gets its ordinary reset, and a cycle that already gave up (status `failed`) is not "in flight" — that debt was written off with the past-due transition, so preserving it would strand the wallet negative forever.
+
 ### Examples
 
 **Without rollover, no purchased credits** (`usage_types.<type>.rollover = false`):
@@ -180,7 +204,8 @@ planOnlyBalance    = currentBalance - purchasedRemaining
 
 elapsedFraction    = 1 - prorataFactor(periodStart, periodEnd)
 proratedOldQuota   = round(oldIncluded * elapsedFraction)
-excess             = max(0, proratedOldQuota - planOnlyBalance)
+actuallyUsed       = max(0, oldIncluded - planOnlyBalance)
+excess             = max(0, actuallyUsed - proratedOldQuota)
 rolloverCredits    = rollover ? max(0, planOnlyBalance - oldIncluded) : 0
 targetBalance      = newIncluded + rolloverCredits + purchasedRemaining - excess
 ```
@@ -209,7 +234,7 @@ If `targetBalance < 0`, the remainder is charged as overage via `ChargeUsageOver
 | Normal usage | 1000/yr | 6mo (50%) | 300 | 700 | 500 | 0 | 600 | **600** | 0 |
 | All consumed | 1000/yr | 6mo (50%) | 1000 | 0 | 500 | 500 | 600 | **100** | 0 |
 | Heavy overage | 1000/yr | 6mo (50%) | 1100 | -100 | 500 | 600 | 600 | **0** | 0 |
-| Excess > new quota | 1000/yr | 3mo (25%) | 1000 | 0 | 250 | 250 | 200 | **0** | 50 |
+| Excess > new quota | 1000/yr | 3mo (25%) | 1000 | 0 | 249 | 751 | 200 | **0** | 551 |
 | Nothing used | 1000/yr | 6mo (50%) | 0 | 1000 | 500 | 0 | 600 | **600** | 0 |
 
 ### Examples With Purchased Credits
@@ -334,7 +359,9 @@ Non-usage reasons are listed in `WalletUsageService::NON_USAGE_REASONS`; dynamic
 php artisan billing:sync-purchased-balance
 ```
 
-Backfills `purchased_balance` on all wallets from transaction history (one-time orders + coupon credits). Run once after upgrading to a version that tracks purchased credits separately. Safe to re-run.
+Backfills `purchased_balance` on all wallets from transaction history (one-time orders + coupon credits). Run once after upgrading to a version that tracks purchased credits separately. Safe to re-run — `--dry-run` shows what would change, `--force` skips the prompt.
+
+It replays the wallet's whole transaction history rather than summing a window: purchases add, and every renewal clamps the running total against the balance it found — exactly what `resetAndCredit()` does. A window cannot answer this, because `resetAndCredit()` deliberately *carries* an unconsumed purchase forward by re-persisting `purchased_balance`, so a pack bought last period and still unused has no transaction in this one. Summing the window produced 0 and this command wrote it, after which the next renewal withdrew the whole balance and credited only the plan quota — credits the customer had paid for, gone. Rollover wallets failed the other way: their renewal writes `subscription_renewal_rollover`, which matched no anchor at all, so the reconciliation ran against the wallet's lifetime and relabelled plan units as purchased.
 
 ## Extension Points
 
@@ -342,3 +369,122 @@ Backfills `purchased_balance` on all wallets from transaction history (one-time 
 - **Custom validation:** Bind your own `ValidateSubscriptionChange` to customize overage handling during plan changes
 - **Event listeners:** React to `WalletReset`, `WalletCredited`, `OverageCharged` for logging, notifications, etc.
 - **Usage type names:** Add translations to `resources/lang/{locale}/usages.php` or override `usageTypeName()` in a custom catalog
+
+### Only one overage charge at a time
+
+`subscription_meta.usage_overage` is a **single slot**, and the wallets deliberately stay
+negative until the charge covering them settles — with SEPA that is days, not seconds. So
+every entry point that rebuilds line items from the wallets has to ask first whether a
+payment is already in flight, or the same debt goes to Mollie twice: each settles into its
+own invoice (the webhook's idempotency is per payment id) and each credits the units again,
+while the second charge's snapshot *overwrites* the first — inheriting its `created_at`, its
+dunning cycle and its counted-payments list, and leaving the overwritten payment invisible to
+`CleanupStalePendingOverageChargeJob`, which only ever polls the id currently in the slot.
+
+`ChargeUsageOverageDirectly::handle()`, `handleExplicit()` (the plan-change path) and
+`PrepareUsageOverageJob::safeCharge()` all carry that guard. The one exception is
+`retry()`: it is driven by the very snapshot the guard keys off, so applying it there would
+make every retry a permanent no-op. The guard releases on settlement, not on a timer — an
+invoice for the pending payment id means the money arrived and whatever debt is left is new.
+
+The path this used to be missing on is the ordinary one: the nightly period-end sweep creates
+the charge, the customer cancels immediately the next morning
+(`CancelSubscription::handle(immediately: true)`, reached from the portal *and* from the
+past-due auto-cancel in `PrepareUsageOverageJob`), and Mollie collected both.
+
+### A retry cannot buy a second payment
+
+The in-flight guard above keys off the persisted `payment_id`, and there is one window where
+that id does not exist yet: `charge()` writes the snapshot, calls Mollie, and only then stores
+the id. A call that throws *after* Mollie created the payment — a read timeout on the response
+is the ordinary case, not an exotic one — leaves a `pending` snapshot with `payment_id: null`,
+which `anotherChargeIsInFlight()` deliberately does not treat as in flight. So
+`RetryUsageOverageChargeJob` came back 60 seconds later and charged the same debt again.
+
+The charge therefore carries an **idempotency key** that is stable across the retries of one
+dunning cycle:
+
+```
+usage-overage:{billable_type}:{billable_id}:{cycle_started_at}:{gross_in_cents}
+```
+
+Mollie replays the original response for a repeated key instead of acting twice, so the retry
+is answered with the payment that already exists and learns the id it lost. Each part earns
+its place:
+
+| Part | Why |
+|---|---|
+| `cycle_started_at` | The snapshot's `created_at`, which `persistPendingCharge()` inherits while a cycle continues and only re-mints after a cycle has failed. So p1 → p2 → p3 of one cycle share a key, and the next cycle's legitimate charge does not. |
+| `gross_in_cents` | Mollie answers **400** to a reused key whose parameters differ. If more usage accrued between two attempts the amount moves, and this makes that a new key rather than a rejected request. |
+| the billable | Two customers can never collide. |
+
+Mollie caches a key for **one hour**. That covers this ladder — `backoff()` is
+`[60, 300, 900]`, so all three retries land inside ~21 minutes — and deliberately not the
+nightly sweep, which is a day later and a genuinely new decision about a debt that is still
+owed. Set through `MollieCall::send($request, $key)`, which also clears it afterwards: the
+SDK clears the key from a *response* middleware, and a throw never reaches that, so a failed
+call would otherwise leave its key on the shared client for the next mutating request to
+carry.
+
+### …and beyond that hour, Mollie is asked
+
+The key protects the retry ladder. It cannot protect the sweep that runs a day later, and that
+is the same debt: a `CreatePaymentRequest` that left the process without an answer leaves a
+`pending` snapshot with `payment_id: null`, which is indistinguishable from "we never asked".
+Both readings cost money — silence the debt, or charge it twice — so the state is marked
+instead of guessed:
+
+```
+subscription_meta.usage_overage.payment_unknown_at   # ISO-8601, set when the answer was lost
+```
+
+While it is set, nobody charges. `anotherChargeIsInFlight()` counts the snapshot as in flight
+even though there is no id to name it by; `WalletPlanChangeAdjuster::chargeDeferredOverage()`
+does **not** hand the excess back to the wallet (doing so is what the next sweep then charged
+a second time, and a plan-change line is never credited back by the webhook because it carries
+`settles_wallet: false`); and `PrepareUsageOverageJob`'s retry pass skips it rather than
+sending it through a ladder that is only safe inside the idempotency window.
+
+`CleanupStalePendingOverageChargeJob` resolves it, by asking the only party that knows —
+Mollie's payment list for that customer:
+
+| Mollie's answer | What happens |
+|---|---|
+| A payment matching the snapshot (metadata `type: overage` + billable, the same gross, created no earlier than the snapshot) | Its id is adopted into the snapshot and the ordinary flow takes over: poll the status, replay a lost `paid` delivery, write off a `failed` one. |
+| No such payment | The request never arrived. The marker is dropped and the debt is an ordinary un-charged one again, chargeable by the next cycle. |
+| 404 / 410 for the customer | The customer was deleted at Mollie, so no payment of theirs survives either. Marker dropped, same as above. |
+| Mollie unreachable | Nothing is decided. Tomorrow's run asks again — an unanswered question is not evidence of absence. |
+
+This branch runs on its own, much shorter clock: `RECONCILE_UNKNOWN_AFTER_HOURS = 1`, against the
+72 hours the other branches wait out. Those 72 hours buy patience for a delivery that is still
+coming (Mollie retries its webhook for hours, a SEPA debit takes days). Here nothing is coming,
+the question is answerable as soon as Mollie can be reached — and until it is answered this
+billable's overage cannot be charged at all, so waiting three days would freeze the money for
+nothing. One hour, so the two cheaper resolutions get to run first: Mollie's idempotency window
+(a key is cached for an hour) and `RetryUsageOverageChargeJob`'s ladder (`[60, 300, 900]`),
+either of which may turn the unknown into a known payment id on its own.
+
+### A charge whose webhook never arrived
+
+`usage_overage_status = pending` with a `payment_id` means "a charge exists and its outcome
+belongs to the webhook". Both of `PrepareUsageOverageJob`'s own passes skip such a snapshot,
+which is right while the payment is in flight — and was permanent when the delivery was lost
+(a Mollie outage, or app downtime past Mollie's retry window). The charge was never
+collected, `hasUnsettledOverageFor()` stayed true so every renewal carried the negative
+balance into the new period, and every future overage for that billable was silenced.
+
+`CleanupStalePendingOverageChargeJob` (daily, 04:15 UTC) closes that. After
+`STALE_AFTER_HOURS` (72) it asks Mollie:
+
+- **`paid`** — replays the delivery through the webhook controller, so the invoice, the
+  wallet settlement and the events are exactly what the webhook would have produced. The
+  invoice guard makes a duplicate a no-op.
+- **`failed` / `canceled` / `expired`** — writes the snapshot off as `failed` and notifies
+  the admins. The wallet debt stays outstanding, but the next cycle may charge for it again
+  instead of being silenced.
+- **still `open`/`pending` past `HARD_LIMIT_DAYS` (14)** — the same write-off. A payment
+  stuck that long is not going to settle.
+- **an invoice already exists** — the webhook did run and only the snapshot was left behind:
+  the snapshot and the dunning budget are cleared.
+
+Mollie being unreachable is not a verdict; the next pass asks again.

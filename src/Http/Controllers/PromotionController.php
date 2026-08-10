@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
+use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -20,9 +21,15 @@ class PromotionController extends Controller
         if ($coupon && $coupon->isWithinValidity(BillingTime::nowUtc()) && $coupon->hasGlobalRedemptionsLeft()) {
             session(['billing.auto_apply_coupon' => $coupon->code]);
         } else {
-            session()->flash('billing.promotion_status', 'expired_or_invalid');
+            // Read by the checkout layout. Under `billing.promotion_status` nothing read it,
+            // so a customer following an expired promo link arrived at the full price with
+            // no hint that the code had not applied.
+            session()->flash('billing_status', __('billing::checkout.promotion_expired'));
         }
 
-        return redirect()->route(BillingRoute::checkout());
+        return redirect()->route(
+            BillingRoute::checkout(),
+            MollieBilling::resolveUrlParameters(),
+        );
     }
 }

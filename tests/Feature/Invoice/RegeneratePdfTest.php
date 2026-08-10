@@ -19,13 +19,15 @@ beforeEach(function (): void {
     // Stub PDF generation: write a deterministic placeholder file instead of running DOMPDF.
     $this->app->bind(InvoiceService::class, function ($app): InvoiceService {
         return new class ($app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class), $app->make(InvoiceNumberGenerator::class)) extends InvoiceService {
-            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): void
+            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): bool
             {
                 $invoice->pdf_disk = 'local';
                 $invoice->pdf_path = 'billing/invoices/test/'.$invoice->serial_number.'-'.uniqid().'.pdf';
                 $invoice->save();
 
                 Storage::disk('local')->put($invoice->pdf_path, 'rendered-pdf-bytes');
+
+                return true;
             }
         };
     });
@@ -106,25 +108,31 @@ it('regenerates a PDF even when none existed before', function (): void {
     Event::assertDispatched(InvoicePdfRegenerated::class);
 });
 
-it('returns false and skips the event when the renderer fails', function (): void {
+it('keeps the archived document and skips the event when the renderer fails', function (): void {
     Event::fake([InvoicePdfRegenerated::class]);
 
     // Override with a stub that silently fails to write a PDF.
     $this->app->bind(InvoiceService::class, function ($app): InvoiceService {
         return new class ($app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class), $app->make(InvoiceNumberGenerator::class)) extends InvoiceService {
-            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): void
+            protected function generateAndStorePdf(BillingInvoice $invoice, \GraystackIT\MollieBilling\Contracts\Billable $billable): bool
             {
-                // Renderer failure path — log + leave pdf_path null.
+                // Renderer failure path — logs and writes nothing.
+                return false;
             }
         };
     });
 
     $invoice = makeInvoiceWithPdf();
+    $previousPath = $invoice->pdf_path;
 
     $success = app(InvoiceService::class)->regeneratePdf($invoice);
 
-    expect($success)->toBeFalse();
-    expect($invoice->fresh()->hasPdf())->toBeFalse();
+    // The archived document survives. Deleting it before knowing the new render would
+    // succeed left the invoice with no document at all and no copy anywhere — for a
+    // failure as ordinary as an unknown currency code or an S3 hiccup.
+    expect($success)->toBeFalse()
+        ->and($invoice->fresh()->pdf_path)->toBe($previousPath)
+        ->and(Storage::disk('local')->exists($previousPath))->toBeTrue();
 
     Event::assertNotDispatched(InvoicePdfRegenerated::class);
 });

@@ -58,6 +58,7 @@ return [
     // Payments
     'payment_succeeded' => 'Payment received',
     'payment_failed' => 'Payment failed: :reason',
+    'renewal_collected_for_ended_subscription' => 'A renewal was collected for a subscription that no longer runs (:status) — needs refunding',
     'payment_amount_mismatch' => 'Paid amount differs from the expected amount',
     'duplicate_payment_received' => 'Duplicate payment received and ignored',
     'checkout_started' => 'Checkout started',
@@ -75,6 +76,7 @@ return [
 
     // Payment method
     'mandate_updated' => 'Payment method updated',
+    'mollie_subscription_reference_cleared' => 'Subscription no longer exists at Mollie — reference cleared',
 
     // Promo codes / grants
     'coupon_redeemed' => 'Promo code :code redeemed',

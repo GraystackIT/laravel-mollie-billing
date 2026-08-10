@@ -27,10 +27,7 @@
         }
     }
 
-    $dashboardUrl = config('mollie-billing.dashboard_url');
-    if ($dashboardUrl && str_starts_with($dashboardUrl, 'route:')) {
-        $dashboardUrl = route(substr($dashboardUrl, 6));
-    }
+    $dashboardUrl = BillingRoute::configuredUrl(config('mollie-billing.dashboard_url'));
 @endphp
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="h-full">
@@ -62,7 +59,7 @@
         {{-- App-provided header components (e.g. a language switcher). Keyed by
              index so Livewire keeps them apart across re-renders. --}}
         @foreach (config('mollie-billing.header_components', []) as $i => $headerComponent)
-            @livewire($headerComponent, [], 'billing-header-'.$i)
+            @livewire($headerComponent, [], key('billing-header-'.$i))
         @endforeach
 
         <flux:dropdown position="bottom" align="end">
@@ -138,6 +135,18 @@
     </flux:sidebar>
 
     <flux:main container>
+        {{-- Redirects into the portal carry their reason here. RequirePlanFeature,
+             RequireResolvedCountryMismatch and PromotionController each flashed a message
+             under a key of their own invention — `billing.status`, `billing_status`,
+             `billing.promotion_status` — and no view read any of them, so a customer
+             bounced off a gated feature, an unresolved country check or an expired promo
+             link landed on the dashboard with no explanation at all. --}}
+        @if (session('billing_status'))
+            <div class="mb-6">
+                <flux:callout variant="warning" icon="exclamation-triangle" inline>{{ session('billing_status') }}</flux:callout>
+            </div>
+        @endif
+
         @livewire($livewireComponent)
     </flux:main>
 

@@ -6,18 +6,15 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\AddonDisabled;
-use GraystackIT\MollieBilling\Events\AddonEnabled;
 use GraystackIT\MollieBilling\Events\PlanChanged;
 use GraystackIT\MollieBilling\Events\SeatsChanged;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeScheduled;
 use GraystackIT\MollieBilling\Events\SubscriptionUpdated;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
-use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\ValidateSubscriptionChange;
-use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Testing\TestBillable;
@@ -450,4 +447,52 @@ it('caps wallet balance on downgrade to plan with less usage quota', function ()
     expect((int) $wallet->balanceInt)->toBe(27);
 
     \Carbon\Carbon::setTestNow();
+});
+
+it('reports the date the change is actually scheduled for during a trial', function (): void {
+    // `ScheduleSubscriptionChange` anchors a trial's period end on the *earlier* of
+    // `nextBillingDate()` and the trial end, because that is when Mollie takes the first
+    // charge. `update()` reported `nextBillingDate()` regardless, so the portal told a
+    // trialing customer their change lands on day 30 while it was written for day 14 —
+    // and the confirmation they read was simply not what happened.
+    $billable = makeMollieProBillable(5);
+    $billable->forceFill([
+        'subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Trial,
+        'subscription_period_starts_at' => now()->subDays(2),
+        'trial_ends_at' => now()->addDays(12),
+    ])->save();
+
+    $result = app(UpdateSubscription::class)->update($billable->refresh(), [
+        'seats' => 3,
+        'apply_at' => 'end_of_period',
+    ]);
+
+    $scheduledAt = $billable->refresh()->scheduled_change_at;
+
+    expect($scheduledAt)->not->toBeNull()
+        ->and($result['scheduledFor'])->toBe($scheduledAt->toIso8601String());
+});
+
+it('lets a trialing customer change plan even past the interval-derived anchor', function (): void {
+    // The lapsed-period guard rests on a premise that only holds for a paid subscription:
+    // the renewal webhook advances `subscription_period_starts_at`, so `nextBillingDate()`
+    // stays in the future. During a trial the anchor is the mandate-capture time and there
+    // is no renewal to wait for — Mollie charges at the trial end — so a trial configured
+    // longer than one interval walks past that date and the customer was told to "wait for
+    // the renewal to complete" for a renewal that is not due and not late.
+    $billable = makeMollieProBillable(5);
+    $billable->forceFill([
+        'subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Trial,
+        // 45-day trial on a monthly plan: day 33, so capture + 1 month is behind us.
+        'subscription_period_starts_at' => now()->subDays(33),
+        'trial_ends_at' => now()->addDays(12),
+    ])->save();
+
+    $result = app(UpdateSubscription::class)->update($billable->refresh(), [
+        'seats' => 6,
+        'apply_at' => 'immediate',
+    ]);
+
+    expect($billable->refresh()->getBillingSeatCount())->toBe(6)
+        ->and($result)->toBeArray();
 });

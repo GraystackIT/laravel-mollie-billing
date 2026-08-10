@@ -13,6 +13,24 @@ This document provides an overview of the subscription states and transitions in
 | `cancelled` | User-initiated cancellation, active until end of period |
 | `expired` | Subscription ended (trial expired or cancellation period over) |
 
+### What a transition must clear
+
+`subscription_meta` carries clocks, schedules and pricing that belong to *one* subscription. A transition that leaves them behind does not leave something inert — the next unattended pass acts on them:
+
+| Key | What reads it, if it survives |
+|---|---|
+| `past_due_since`, `payment_failure` | The auto-cancel clock. A stale date meant one later failed renewal was cancelled the same night, with a zero-day dunning window. |
+| `scheduled_change`, `scheduled_change_at` | The period-end dispatcher, which keys off the column alone. |
+| `next_charge_date_override` | `nextBillingDate()`, outranking the period anchor — it defers a free plan's quota recharge. |
+| `active_recurring_coupon` | `CreateSubscription` on a later upgrade, granting a discount campaign nobody applied. |
+
+`Support\SubscriptionMetaHygiene` holds these lists so a new transition cannot forget one:
+
+- `forFreshSubscription()` — everything above. Used by `ActivateLocalSubscription` and the downgrade to a free plan, i.e. wherever a *new* subscription begins.
+- `withoutDunningEpisode()` — the dunning keys only. Used by `CreateSubscription` (pricing and scheduling belong to its caller there: the 100 %-coverage coupon path writes `active_recurring_coupon` *before* the call so the Mollie start date can be deferred past the free periods) and by a payment that clears while the billable is PastDue.
+
+Identity keys are never cleared. `mollie_subscription_id` and `pending_subscription_cancel` are the only handles on a subscription that may still be live at Mollie — dropping either orphans it, and it keeps charging with nothing able to target it.
+
 ## Subscription Sources
 
 | Source | Description |
@@ -67,7 +85,9 @@ Key properties:
 - **Mollie's first real charge** fires at `startDate = now + trial_days`. When that webhook arrives, `handleSubscriptionPaymentPaid` flips status from `trial` to `active`, consumes any parked SinglePayment coupon (discounts the line items + creates a redemption), and lets the recurring marker apply for the first time.
 - **Trials never repeat for a returning customer**. Once `mollie_mandate_id` is set, the trial branch is skipped — even on a fresh checkout — and the customer pays the full first period.
 
-If the trial expires without a successful first charge (mandate failure, mandate revoked, customer never paid), `ProcessTrialLifecycleJob` flips the billable to `past_due`, dispatches `TrialExpired`, and notifies via `TrialExpiredNotification`. `RequireActiveSubscription` then routes the user back to checkout.
+If the trial expires without a successful first charge (mandate failure, mandate revoked, customer never paid), `ProcessTrialLifecycleJob` flips the billable to `past_due` **and stamps `past_due_since`**, dispatches `TrialExpired`, and notifies via `TrialExpiredNotification`. `RequireActiveSubscription` then routes the user back to checkout.
+
+The stamp is what keeps the row moving: `PrepareUsageOverageJob`'s auto-cancel pass keys off `past_due_since` alone, so without it the billable stayed in `past_due` indefinitely — never reaching `cancelled → expired` and therefore never reaching the plan-field wipe that closes `hasPlanFeature()`. For the same reason the job's local-quota reset (Case C) skips `past_due`: a past-due local subscription is not renewing, but `nextBillingDate()` keeps cycling for it, so it used to collect a fresh month of consumable quota on every anniversary.
 
 If a mandate exists but Mollie's first charge has simply not fallen due yet (`startDate` in the future) at the moment the local trial expires, the billable can sit in `past_due` while Mollie still shows the subscription as `active`. The `MollieSubscriptionGate` (called from `BillingPortalController::checkout`) detects this and redirects to the dashboard instead of opening the checkout — re-entering `CreateSubscriptionRequest` would 422 with "same description already exists". The dashboard surfaces the scheduled charge date and offers a "Charge now" button that PATCHes Mollie's subscription `startDate` to today. Stale `mollie_subscription_id` entries (Mollie reports `canceled`/`completed`/`suspended` or 404) are removed from `subscription_meta` so the next checkout cleanly creates a new subscription. Lookups are cached for 60 seconds.
 

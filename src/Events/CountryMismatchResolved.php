@@ -14,10 +14,17 @@ class CountryMismatchResolved
     use Dispatchable;
     use SerializesModels;
 
+    /**
+     * `$justification` is the operator's free-text reason. It carries on the event
+     * rather than being read back off the billable because the audit listener needs
+     * it: resolving a mismatch is a tax decision made by hand, and the log recorded
+     * that it happened but never why.
+     */
     public function __construct(
         public readonly Billable $billable,
         public readonly BillingCountryMismatch $mismatch,
         public readonly mixed $resolvedBy,
+        public readonly ?string $justification = null,
     ) {
     }
 }

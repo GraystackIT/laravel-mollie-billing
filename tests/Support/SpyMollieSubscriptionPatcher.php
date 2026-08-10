@@ -18,16 +18,22 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
     /** @var array<int, array<int, mixed>> */
     public static array $calls = [];
 
-    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
+    /**
+     * @var bool Flip to false to simulate an unreachable Mollie — the caller must then
+     *           keep `mollie_subscription_id` rather than orphaning a live subscription.
+     */
+    public static bool $cancelSucceeds = true;
+
+    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): bool
     {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
 
         if ($catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
-            self::$calls[] = ['cancel', $customerId, $subscriptionId];
-            SpyUpdateSubscription::$calls[] = ['cancel', $customerId, $subscriptionId];
-            return;
+            // Through cancelForFreeDowngrade(), so `$cancelSucceeds` reaches the caller the
+            // same way the real patcher's return value does.
+            return $this->cancelForFreeDowngrade($billable);
         }
 
         $payload = [
@@ -35,17 +41,25 @@ class SpyMollieSubscriptionPatcher extends MollieSubscriptionPatcher
             'interval' => $intent->newInterval,
             'addons' => array_keys($intent->newAddons),
             'seats' => $intent->newSeats,
+            // Recorded because it decides whether Mollie's charge DATE moves, not just
+            // the amount — the difference between a converted trial being charged once
+            // and being charged twice for the same days.
+            'force_reset_start_date' => $intent->forceResetStartDate,
         ];
         self::$calls[] = ['update', $customerId, $subscriptionId, $payload];
         SpyUpdateSubscription::$calls[] = ['update', $customerId, $subscriptionId, $payload];
+
+        return true;
     }
 
-    public function cancelForFreeDowngrade(Billable $billable): void
+    public function cancelForFreeDowngrade(Billable $billable): bool
     {
         $customerId = $billable->getMollieCustomerId() ?? 'cust_test';
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? 'sub_test');
         self::$calls[] = ['cancel', $customerId, $subscriptionId];
         SpyUpdateSubscription::$calls[] = ['cancel', $customerId, $subscriptionId];
+
+        return self::$cancelSucceeds;
     }
 
     public function updateRecurringAmount(

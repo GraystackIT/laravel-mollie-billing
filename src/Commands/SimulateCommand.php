@@ -96,6 +96,16 @@ class SimulateCommand extends Command
         ],
     ];
 
+    private bool $listenersRegistered = false;
+
+    private bool $recording = false;
+
+    /** @var array<int, string> */
+    private array $observedEvents = [];
+
+    /** @var array<int, string> */
+    private array $observedNotifications = [];
+
     public function handle(Application $app, LifecycleSimulator $sim): int
     {
         if ($app->environment('production')) {
@@ -120,6 +130,10 @@ class SimulateCommand extends Command
 
         $billable = $this->resolveBillableFromOptions($sim);
         if ($billable === null) {
+            // Without this the command exited 1 with no output at all whenever
+            // --billable was omitted.
+            $this->error('--billable=<id> is required for a non-interactive run. Omit the flow argument to pick one interactively.');
+
             return self::FAILURE;
         }
 
@@ -210,20 +224,7 @@ class SimulateCommand extends Command
 
         $before = $this->snapshot($billable);
 
-        $observedEvents = [];
-        $observedNotifications = [];
-
-        // Wildcard listeners receive the event name as the first argument. We
-        // filter to class-named events because that's what `event(new …)`
-        // produces — string-keyed events (e.g. eloquent.*) are noise here.
-        Event::listen('*', function (string $eventName) use (&$observedEvents): void {
-            if (class_exists($eventName)) {
-                $observedEvents[] = $eventName;
-            }
-        });
-        Event::listen(NotificationSent::class, function (NotificationSent $e) use (&$observedNotifications): void {
-            $observedNotifications[] = $e->notification::class;
-        });
+        $this->startRecording();
 
         $skipped = false;
 
@@ -264,12 +265,12 @@ class SimulateCommand extends Command
                     break;
             }
         } catch (Throwable $e) {
-            $this->detachListeners();
+            $this->stopRecording();
             $this->error("Flow [{$flow}] failed: {$e->getMessage()}");
             return false;
         }
 
-        $this->detachListeners();
+        $this->stopRecording();
 
         if ($skipped) {
             $this->note('skipped');
@@ -281,15 +282,52 @@ class SimulateCommand extends Command
         }
         $after = $this->snapshot($billable);
 
-        $this->showResult($expectation, $before, $after, $observedEvents, $observedNotifications);
+        $this->showResult($expectation, $before, $after, $this->observedEvents, $this->observedNotifications);
 
         return true;
     }
 
-    private function detachListeners(): void
+    /**
+     * Start recording dispatched events and sent notifications for the next flow.
+     *
+     * The listeners are registered exactly once and then left in place: they are
+     * gated by `$recording`, so nothing has to be removed afterwards. The previous
+     * implementation called `Event::forget('*')` and
+     * `Event::forget(NotificationSent::class)` after every flow, which dropped
+     * *every* wildcard listener in the process (Telescope's EventWatcher registers
+     * one) and every app listener for NotificationSent for the rest of the command.
+     */
+    private function startRecording(): void
     {
-        Event::forget('*');
-        Event::forget(NotificationSent::class);
+        $this->observedEvents = [];
+        $this->observedNotifications = [];
+        $this->recording = true;
+
+        if ($this->listenersRegistered) {
+            return;
+        }
+
+        $this->listenersRegistered = true;
+
+        // Wildcard listeners receive the event name as the first argument. We
+        // filter to class-named events because that's what `event(new …)`
+        // produces — string-keyed events (e.g. eloquent.*) are noise here.
+        Event::listen('*', function (string $eventName): void {
+            if ($this->recording && class_exists($eventName)) {
+                $this->observedEvents[] = $eventName;
+            }
+        });
+
+        Event::listen(NotificationSent::class, function (NotificationSent $e): void {
+            if ($this->recording) {
+                $this->observedNotifications[] = $e->notification::class;
+            }
+        });
+    }
+
+    private function stopRecording(): void
+    {
+        $this->recording = false;
     }
 
     /**
@@ -396,8 +434,10 @@ class SimulateCommand extends Command
         $this->line("  → Mollie payment: <info>{$result['payment_id']}</info> ({$result['status']})");
         if ($result['invoice_id'] !== null) {
             $this->line("  → Invoice created: <info>#{$result['invoice_id']}</info>");
+        } elseif ($result['status'] !== 'paid') {
+            $this->warn("  → No invoice created — the sandbox payment ended as '{$result['status']}', not 'paid'.");
         } else {
-            $this->warn('  → No invoice created (payment was not paid, or webhook short-circuited).');
+            $this->warn('  → No invoice created although the payment is paid — check the log for the renewal handler error.');
         }
 
         return true;

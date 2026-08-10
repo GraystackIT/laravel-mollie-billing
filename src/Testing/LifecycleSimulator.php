@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Testing;
 
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
@@ -13,6 +14,9 @@ use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
 use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
+use GraystackIT\MollieBilling\Scopes\BillingScope;
+use GraystackIT\MollieBilling\Services\Webhook\SubscriptionPaymentHandler;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
@@ -20,8 +24,8 @@ use Illuminate\Http\Request;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
 use RuntimeException;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Drives subscription-lifecycle transitions deterministically on staging/test systems.
@@ -29,7 +33,9 @@ use RuntimeException;
  * Most flows mutate DB fields so that the matching daily job (PrepareUsageOverageJob or
  * ProcessTrialLifecycleJob) picks the billable up on a synchronous dispatch. The renewal
  * flow is the exception: it creates a real recurring payment in the Mollie sandbox and
- * then invokes our webhook controller with that payment id.
+ * then runs it through SubscriptionPaymentHandler, the handler a real renewal webhook
+ * would reach (see renewal() for why the controller cannot route a standalone payment
+ * there). `replayWebhook()` is the flow that does go through the controller.
  *
  * Not for production: callers must gate on app environment before using.
  */
@@ -49,7 +55,9 @@ class LifecycleSimulator
     {
         $class = $this->billableClass();
 
-        $billable = $class::query()->find($id);
+        // Scope-free like the scheduled jobs this simulator drives: the CLI has no
+        // request or tenant context for an app-defined applyBillingScope() to key off.
+        $billable = $class::withoutGlobalScope(BillingScope::class)->find($id);
         if ($billable === null) {
             throw new RuntimeException("Billable [{$class}] with id [{$id}] not found.");
         }
@@ -72,7 +80,7 @@ class LifecycleSimulator
         $class = $this->billableClass();
         $term = trim($term);
 
-        $query = $class::query()->limit(20)->orderBy('id', 'desc');
+        $query = $class::withoutGlobalScope(BillingScope::class)->limit(20)->orderBy('id', 'desc');
 
         if ($term !== '') {
             $query->where(function ($q) use ($term): void {
@@ -157,12 +165,16 @@ class LifecycleSimulator
 
         $billable->recordBillingUsage($usageType, $units, 'lifecycle_simulator');
 
-        // Pass 1 only charges billables whose next billing date is tomorrow.
+        // Pass 1 Case A requires nextBillingDate() to fall inside tomorrow's window, and
+        // nextBillingDate() is period_starts_at + one interval — so the anchor is tomorrow
+        // minus one interval, subtracted with the same clamping the forward step uses. Plain
+        // subMonth() overflows: run on 31 March or 31 May the window missed entirely, and the
+        // simulator reported the overage pipeline as broken when it was not.
+        $interval = $billable->getBillingSubscriptionInterval();
+        $periodStart = BillingTime::subInterval(BillingTime::nowUtc()->addDay(), $interval);
+
         $this->force($billable, [
-            'subscription_period_starts_at' => BillingTime::nowUtc()
-                ->subMonth()
-                ->addDay()
-                ->subDay(), // period started ~1 month ago, so next billing ≈ tomorrow
+            'subscription_period_starts_at' => $periodStart,
         ]);
 
         PrepareUsageOverageJob::dispatchSync();
@@ -197,7 +209,16 @@ class LifecycleSimulator
 
     /**
      * Create a real recurring payment in the Mollie sandbox, wait until it's paid,
-     * then invoke our webhook controller with that payment id.
+     * then run it through the renewal handler.
+     *
+     * The payment is created standalone, so Mollie does not attach a `subscriptionId`
+     * to it — and `MollieWebhookController::route()` only reaches
+     * SubscriptionPaymentHandler when that field is non-empty. Handing the payment to
+     * the controller therefore routed it to FirstPaymentHandler, which returned
+     * immediately for lack of `plan_code`: the sandbox customer was charged and
+     * nothing was booked. We instead attach the billable's own
+     * `mollie_subscription_id` (exactly what a real renewal webhook carries) and
+     * invoke the renewal handler directly.
      *
      * @return array{payment_id:string, status:string, invoice_id:int|null}
      */
@@ -212,23 +233,37 @@ class LifecycleSimulator
             );
         }
 
-        $currency = (string) config('mollie-billing.currency', 'EUR');
-        $gross = $amountGrossOverride
-            ?? $this->estimateRenewalGross($billable);
-        $amountValue = number_format($gross, 2, '.', '');
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+        if ($subscriptionId === '') {
+            throw new RuntimeException(
+                'Billable has no mollie_subscription_id — the renewal path only exists for '
+                .'Mollie-backed subscriptions. Complete a paid checkout first.'
+            );
+        }
 
-        $created = Mollie::send(new CreatePaymentRequest(
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+
+        // Minor units all the way to the Mollie call, scaled by the configured
+        // currency. `number_format(…, 2)` sent a JPY renewal at 1/100 of its value and
+        // a KWD one at 10×, so the simulated renewal reconciled against nothing and
+        // fired PaymentAmountMismatch — which is exactly the signal the simulator
+        // exists to let an operator trust. The override stays a major-unit float
+        // because that is what `billing:simulate --gross=29.90` types.
+        $grossMinor = $amountGrossOverride !== null
+            ? (int) round($amountGrossOverride * BillingMoney::minorUnitFactor($currency))
+            : $this->estimateRenewalGrossMinor($billable);
+        $amountValue = BillingMoney::mollieAmount($grossMinor, $currency);
+
+        $created = MollieCall::send(new CreatePaymentRequest(
             description: 'Simulated subscription renewal',
             amount: new Money($currency, $amountValue),
             metadata: [
-                'type' => 'subscription_renewal_sim',
                 'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
                 'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             ],
             sequenceType: 'recurring',
             mandateId: $mandateId,
             customerId: $customerId,
-            webhookUrl: route(BillingRoute::webhook()),
         ));
 
         $paymentId = (string) ($created->id ?? '');
@@ -237,8 +272,16 @@ class LifecycleSimulator
         }
 
         $payment = $this->waitForPaid($paymentId);
+        $status = (string) ($payment->status ?? 'unknown');
 
-        $this->invokeWebhook($paymentId);
+        if ($status === 'paid') {
+            $payment->subscriptionId = $subscriptionId;
+
+            app(SubscriptionPaymentHandler::class)->paid($payment, $billable, [
+                'plan_code' => $billable->getBillingSubscriptionPlanCode(),
+                'interval' => $billable->getBillingSubscriptionInterval(),
+            ]);
+        }
 
         $invoice = BillingInvoice::query()
             ->where('mollie_payment_id', $paymentId)
@@ -246,7 +289,7 @@ class LifecycleSimulator
 
         return [
             'payment_id' => $paymentId,
-            'status' => (string) ($payment->status ?? 'unknown'),
+            'status' => $status,
             'invoice_id' => $invoice?->id !== null ? (int) $invoice->id : null,
         ];
     }
@@ -282,7 +325,7 @@ class LifecycleSimulator
         $payment = null;
 
         while (time() < $deadline) {
-            $payment = Mollie::send(new GetPaymentRequest($paymentId));
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
             $status = (string) ($payment->status ?? '');
 
             if (in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
@@ -299,7 +342,8 @@ class LifecycleSimulator
         return $payment;
     }
 
-    private function estimateRenewalGross(Billable $billable): float
+    /** Gross in integer minor units — what the VAT service already returns. */
+    private function estimateRenewalGrossMinor(Billable $billable): int
     {
         $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
         $vatService = app(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class);
@@ -312,16 +356,30 @@ class LifecycleSimulator
             : 0;
         $seats = $catalog->includedSeats($planCode) + $extraSeats;
 
-        $net = \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
-            $catalog, $billable, $planCode, $interval, $seats, $addonCodes
-        );
-        $vat = $vatService->calculate(
-            (string) ($billable->getBillingCountry() ?? ''),
-            $net,
-            $billable,
+        // Per line, because that is how the invoice books it: `round(Σ net × rate)` and
+        // `Σ round(net × rate)` are not the same number — 550 + 550 at 19% is 1309 the
+        // first way and 1310 the second. Rounding once over the sum made `billing:simulate`
+        // print a figure a cent or two off the charge that then arrived, on the one screen
+        // whose whole job is telling an operator what to expect.
+        $lines = \GraystackIT\MollieBilling\Support\SubscriptionAmount::lineItems(
+            $catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes
         );
 
-        return ((int) $vat['gross']) / 100;
+        $rate = (float) $vatService->calculate(
+            (string) ($billable->getBillingCountry() ?? ''),
+            \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
+                $catalog, $billable, $planCode, $interval, $seats, $addonCodes
+            ),
+            $billable,
+        )['rate'];
+
+        return \GraystackIT\MollieBilling\Support\BillingMoney::grossWithLineVat(
+            array_map(
+                static fn (array $line): int => (int) ($line['amount_net'] ?? $line['total_net'] ?? 0),
+                $lines,
+            ),
+            $rate,
+        );
     }
 
     private function force(Billable $billable, array $attributes): void

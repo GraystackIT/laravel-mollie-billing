@@ -76,8 +76,10 @@ it('forbids purchasing a product when authorization is denied', function (): voi
 });
 
 it('forbids applying a plan change when authorization is denied', function (): void {
-    Livewire::test('mollie-billing::plan-change')
-        ->set('selectedPlan', 'pro')
+    // Passed at mount, not via set(): `selectedPlan` is #[Locked], because a
+    // client-substituted code prices as free and turns the change into a
+    // refund-and-cancel downgrade.
+    Livewire::test('mollie-billing::plan-change', ['selectedPlan' => 'pro'])
         ->call('applyChange')
         ->assertForbidden();
 });

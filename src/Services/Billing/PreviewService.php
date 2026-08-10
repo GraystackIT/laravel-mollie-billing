@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 
 class PreviewService
@@ -59,7 +60,15 @@ class PreviewService
 
         // Auto-filter incompatible addons when the plan changes.
         $incompatibleAddons = [];
-        $newAddons = $dto->addons ?? $currentAddons;
+        // Normalised first. `SubscriptionUpdateRequest` passes `addons` through untouched
+        // and `UpdateSubscription::normalizeAddonCodes()` documents support for both a
+        // list of codes and a code => quantity map — and the package's own addons screen
+        // passes the list form. Read as a map, its integer keys made every addon vanish
+        // from `newPriceNet`, from the line items and from the intent: the coupon discount
+        // was quoted against the plan alone (−5,80 shown, −6,80 charged), and with another
+        // addon already active the composer emitted refund lines for one the customer was
+        // keeping.
+        $newAddons = self::normalizeAddonQuantities($dto->addons) ?? $currentAddons;
 
         if ($planChanged) {
             $filteredAddons = [];
@@ -129,8 +138,13 @@ class PreviewService
         // Coupon handling — iterate over all applied coupon codes (stackable).
         // We split the resolution into two separate discount totals:
         //   - $couponDiscountNet         applies to the recurring price (only Recurring-type)
-        //   - $prorataCouponDiscountNet  applies to the prorata charge ("due now") and is
-        //                                fed by both Recurring AND SinglePayment coupons.
+        //   - $prorataCouponDiscountNet  applies to the prorata charge ("due now"), fed by
+        //                                the same Recurring coupons. SinglePayment codes are
+        //                                refused by validate() below (`allowed_types`), the
+        //                                same way UpdateSubscription refuses them — so the
+        //                                branch that used to collect them here was
+        //                                unreachable, and it was also the copy missing the
+        //                                `min(…, $remainingProrata)` clamp its live twin has.
         // Other coupon types (Credits, TrialExtension, AccessGrant, PeriodExtension)
         // have no monetary effect on plan changes and are silently skipped here —
         // they get redeemed in `UpdateSubscription::update()` for their side effects.
@@ -140,9 +154,6 @@ class PreviewService
         $remainingRecurring = $newNet;
         /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
         $resolvedRecurringCoupons = [];
-        /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> */
-        $resolvedSinglePaymentCoupons = [];
-
         foreach ($dto->couponCodes as $code) {
             try {
                 $coupon = $this->couponService->validate(
@@ -177,8 +188,6 @@ class PreviewService
                             'total_net' => -$thisDiscount,
                         ];
                     }
-                } elseif ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment) {
-                    $resolvedSinglePaymentCoupons[] = ['coupon' => $coupon, 'discount' => 0];
                 }
             } catch (InvalidCouponException $e) {
                 $warnings[] = 'Coupon '.$code.' is not applicable: '.$e->getMessage();
@@ -203,7 +212,7 @@ class PreviewService
         $prorataCreditNet = 0;
         $prorataRemainingDays = 0;
         $prorataTotalDays = 0;
-        $isPastDueReset = $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+        $isPastDueReset = BillingPolicy::isPastDueReset($billable, $planChanged, $intervalChanged);
 
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
@@ -232,11 +241,10 @@ class PreviewService
         }
 
         // Coupon discounts on the prorata charge ("due now"):
-        //   - Both Recurring and SinglePayment coupons apply their discount rate
-        //     directly against the prorata charge net (the actual money flowing
-        //     "now"), not against the full recurring net. The recurring coupon's
-        //     ongoing discount on future renewals is independent and lives in
-        //     the active_recurring_coupon marker.
+        //   - A Recurring coupon's rate applies directly against the prorata charge net
+        //     (the actual money flowing "now"), not against the full recurring net. Its
+        //     ongoing discount on future renewals is independent and lives in the
+        //     active_recurring_coupon marker.
         //   - All discounts are capped at the remaining prorata charge net so
         //     the line can never go negative.
         $remainingProrata = $prorataChargeNet;
@@ -253,17 +261,6 @@ class PreviewService
             }
         }
         unset($entry);
-        foreach ($resolvedSinglePaymentCoupons as &$entry) {
-            if ($remainingProrata <= 0) {
-                break;
-            }
-            $thisDiscount = $this->couponService->computeRecurringDiscount($entry['coupon'], $remainingProrata);
-            if ($thisDiscount > 0) {
-                $entry['discount'] = $thisDiscount;
-                $prorataCouponDiscountNet += $thisDiscount;
-                $remainingProrata -= $thisDiscount;
-            }
-        }
         unset($entry);
 
         $prorataChargeNet = max(0, $prorataChargeNet - $prorataCouponDiscountNet);
@@ -273,7 +270,7 @@ class PreviewService
         // The actual VIES check happens at checkout / billing-data save — by the
         // time we render the plan-change preview, that decision is already made
         // and persisted as a BillingVatValidation. calculate() reads it directly.
-        $country = $billable->getBillingCountry() ?? 'DE';
+        $country = $billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
 
         // Apply an existing active recurring coupon marker to the preview as well —
         // the user keeps seeing the discount they signed up for across plan/seat
@@ -314,32 +311,59 @@ class PreviewService
             $warnings[] = 'VAT calculation unavailable: '.$e->getMessage();
         }
 
-        // VAT on prorata amount (due now). Always derived from the invoice that
-        // paid for the current period — see UpdateSubscription::prorataVat().
-        // Falls back to the live billable VAT only when no period invoice exists
-        // yet (e.g. local→Mollie upgrade where no payment has been made).
-        $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $vat['rate']];
-        $prorataNet = $prorataChargeNet > 0 ? $prorataChargeNet : ($prorataCreditNet > 0 ? $prorataCreditNet : 0);
-        if ($prorataNet > 0) {
-            // VAT-Rate aus dem Plan-Line-Item der laufenden Periode (Per-Item-VAT).
-            $candidates = BillingInvoice::currentPeriodLines($billable, 'plan', $currentPlan);
-            if (! empty($candidates)) {
-                $first = $candidates[0];
-                $line = $first['invoice']->lineItem($first['line_index']) ?? [];
-                $rate = (float) ($line['vat_rate'] ?? 0);
-                $vatAmount = (int) round($prorataNet * $rate / 100);
-                $prorataVat = [
-                    'net' => $prorataNet,
-                    'vat' => $vatAmount,
-                    'gross' => $prorataNet + $vatAmount,
-                    'rate' => $rate,
-                ];
-            } else {
-                try {
-                    $prorataVat = $this->vatService->calculate($country, $prorataNet, $billable);
-                } catch (\Throwable) {
-                    $prorataVat = ['net' => $prorataNet, 'vat' => 0, 'gross' => $prorataNet, 'rate' => 0.0];
-                }
+        // The gross of the recurring total, with VAT per line — not one rounding over
+        // the summed net that `calculate()` returns.
+        //
+        // `grossTotal` is not only displayed: the Local→Mollie upgrade charges exactly
+        // this figure (`plan-change.blade.php::confirmAndPay()`). The webhook that
+        // books it rebuilds the same lines and sums their per-line VAT, so the two
+        // roundings disagreed — 4 lines at 5.50 € and 19 % charge 26.18 while the
+        // invoice books 26.20. That fired PaymentAmountMismatch on a legitimate
+        // payment and, worse, left `refundFully()` asking Mollie for more than the
+        // payment held, so the refund was rejected and the invoice could never be
+        // closed out. `recurringLineNets()` is the declared authority for this
+        // breakdown (see CreateSubscription), so the charge, the Mollie subscription
+        // amount and the invoice now all round the same way.
+        $recurringGross = BillingMoney::grossWithLineVat(
+            MollieSubscriptionPatcher::recurringLineNets(
+                $this->catalog,
+                $billable,
+                $newPlan,
+                $newInterval,
+                // Codes, not the code => quantity map: SubscriptionAmount::lineItems()
+                // iterates the values and reads each quantity off the billable.
+                array_keys($newAddons),
+                max(0, $newSeats - $newIncludedSeats),
+                $netForRecurring,
+            ),
+            (float) $vat['rate'],
+        );
+
+        // Two rates, because the two sides of a prorata are two different supplies.
+        //
+        // The credit reverses part of an invoice that was already issued, so it carries that
+        // invoice's line rate — a customer who has since become reverse-charge-eligible still
+        // gets back the VAT they actually paid. The charge is a *new* supply and is priced by
+        // `ProrataComposer::planChargeLine()` through `liveVat()`, i.e. the billable's
+        // current country and reverse-charge state. Applying the old invoice's rate to it
+        // reported VAT on a supply that carries none (and the wrong amount whenever a rate
+        // changed), which the aggregate figures rendered as "due now".
+        $creditRate = (float) $vat['rate'];
+        $candidates = BillingInvoice::currentPeriodLines($billable, 'plan', $currentPlan);
+
+        if (! empty($candidates)) {
+            $first = $candidates[0];
+            $line = $first['invoice']->lineItem($first['line_index']) ?? [];
+            $creditRate = (float) ($line['vat_rate'] ?? 0);
+        }
+
+        $prorataVat = ['net' => 0, 'vat' => 0, 'gross' => 0, 'rate' => $creditRate];
+
+        if ($prorataChargeNet > 0) {
+            try {
+                $prorataVat = $this->vatService->calculate($country, $prorataChargeNet, $billable);
+            } catch (\Throwable) {
+                $prorataVat = ['net' => $prorataChargeNet, 'vat' => 0, 'gross' => $prorataChargeNet, 'rate' => 0.0];
             }
         }
 
@@ -369,7 +393,14 @@ class PreviewService
             $proratedOldQuota = 0;
             $actuallyUsed = max(0, $currentQuota - $planOnlyBalance);
 
-            if ($periodStart !== null && $periodEnd !== null && $currentQuota > 0 && $planChanged) {
+            // No `$planChanged` here: included quotas are keyed by (plan, interval), so an
+            // interval switch changes the quota exactly as much as a plan switch does.
+            // `WalletPlanChangeAdjuster` and `validateWalletUsage()` both gate on the old
+            // quota alone and both run for interval-only changes — so the preview was the
+            // one path that skipped the calculation, and it is the only one that has to
+            // tell the customer. It quoted €0.00 for usage and the change then charged the
+            // prorated excess.
+            if ($periodStart !== null && $periodEnd !== null && $currentQuota > 0) {
                 $usageProrata = BillingPolicy::computeUsageOverageForPlanChange(
                     $currentQuota,
                     $planOnlyBalance,
@@ -405,11 +436,22 @@ class PreviewService
             ];
         }
 
-        // VAT on usage overage
+        // VAT on usage overage — per line, exactly as the charge that follows builds it.
+        // `ChargeUsageOverageDirectly` grosses one line per metered usage type through
+        // BillingMoney::grossWithLineVat(), so grossing the summed net here quoted a figure
+        // the customer would not be charged: with several usage types the per-line residuals
+        // add up, and the preview is what the confirm screen shows before the money moves.
         $usageOverageChargeGross = 0;
         if ($usageOverageChargeNet > 0) {
             try {
-                $usageOverageChargeGross = (int) $this->vatService->calculate($country, $usageOverageChargeNet, $billable)['gross'];
+                $rate = (float) $this->vatService->calculate($country, $usageOverageChargeNet, $billable)['rate'];
+
+                $overageLineNets = array_values(array_filter(
+                    array_map(static fn (array $change): int => (int) ($change['overage_total_net'] ?? 0), $usageChanges),
+                    static fn (int $net): bool => $net > 0,
+                ));
+
+                $usageOverageChargeGross = BillingMoney::grossWithLineVat($overageLineNets, $rate);
             } catch (\Throwable) {
                 $usageOverageChargeGross = $usageOverageChargeNet;
             }
@@ -447,19 +489,25 @@ class PreviewService
             'prorataChargeGross' => $prorataChargeNet > 0 ? (int) $prorataVat['gross'] : 0,
             'prorataChargeVat' => $prorataChargeNet > 0 ? (int) $prorataVat['vat'] : 0,
             'prorataCreditNet' => $prorataCreditNet,
-            'prorataCreditGross' => $prorataCreditNet > 0 ? (int) $prorataVat['gross'] : 0,
-            'isPastDueReset' => $isPastDueReset,
-            'currentPeriodCredit' => $periodStart !== null && $periodEnd !== null
-                ? (int) round($currentNet * $prorataFactor)
+            'prorataCreditVat' => $prorataCreditNet > 0 ? (int) round($prorataCreditNet * $creditRate / 100) : 0,
+            'prorataCreditGross' => $prorataCreditNet > 0
+                ? $prorataCreditNet + (int) round($prorataCreditNet * $creditRate / 100)
                 : 0,
+            'isPastDueReset' => $isPastDueReset,
+            // The credit that is actually being given, not "what a full period would be
+            // worth". On a past-due reset the factor is forced to 1.0 while
+            // `prorataCreditNet` is deliberately 0 — nothing was paid — so this reported a
+            // full-period credit in the one case where there is none.
+            'currentPeriodCredit' => $isPastDueReset ? 0 : ($periodStart !== null && $periodEnd !== null
+                ? (int) round($currentNet * $prorataFactor)
+                : 0),
             'usageOverageChargeNet' => $usageOverageChargeNet,
             'usageOverageChargeGross' => $usageOverageChargeGross,
             'couponDiscountNet' => $couponDiscountNet,
             'vatRate' => $vat['rate'],
-            'vatAmount' => $vat['vat'],
-            'grossTotal' => $vat['gross'],
-            'reverseCharge' => abs((float) $vat['rate']) < 0.001
-                && $billable->currentVatValidation()?->valid === true,
+            'vatAmount' => $recurringGross - $netForRecurring,
+            'grossTotal' => $recurringGross,
+            'reverseCharge' => $this->vatService->reverseChargeApplies($billable, $country),
             'lineItems' => $lineItems,
             'warnings' => $warnings,
             'errors' => $errors,
@@ -487,7 +535,7 @@ class PreviewService
                 $newSeats,
                 $currentAddons,
                 $newAddons,
-                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons, $resolvedSinglePaymentCoupons),
+                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons),
             ),
         ];
     }
@@ -495,29 +543,22 @@ class PreviewService
     /**
      * Build the per-coupon discount lines for the prorata charge ("due now").
      *
-     * Both Recurring and SinglePayment coupons here render the discount that was
-     * actually applied to the prorata charge — already pre-computed in the
-     * loop above (`$entry['prorataDiscount']` for recurring, `$entry['discount']`
-     * for first-payment). No further scaling here.
+     * Renders the discount that was actually applied to the prorata charge — already
+     * pre-computed in the loop above as `$entry['prorataDiscount']`. No further scaling
+     * here.
      *
      * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int, prorataDiscount?: int}>  $recurringCoupons
-     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>  $singlePaymentCoupons
      * @return list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>
      */
-    private function buildProrataCouponDiscountLines(
-        array $recurringCoupons,
-        array $singlePaymentCoupons,
-    ): array {
+    private function buildProrataCouponDiscountLines(array $recurringCoupons): array
+    {
         $out = [];
+
         foreach ($recurringCoupons as $entry) {
             $proratedDiscount = (int) ($entry['prorataDiscount'] ?? 0);
+
             if ($proratedDiscount > 0) {
                 $out[] = ['coupon' => $entry['coupon'], 'discount' => $proratedDiscount];
-            }
-        }
-        foreach ($singlePaymentCoupons as $entry) {
-            if ((int) $entry['discount'] > 0) {
-                $out[] = ['coupon' => $entry['coupon'], 'discount' => (int) $entry['discount']];
             }
         }
 
@@ -725,6 +766,32 @@ class PreviewService
         }
 
         return $items;
+    }
+
+    /**
+     * Bring an `addons` payload into the one shape this service reads: code => quantity.
+     *
+     * Mirrors `UpdateSubscription::normalizeAddonCodes()`, which accepts both forms.
+     *
+     * @param  array<int|string, mixed>|null  $addons
+     * @return array<string, int>|null
+     */
+    private static function normalizeAddonQuantities(?array $addons): ?array
+    {
+        if ($addons === null) {
+            return null;
+        }
+
+        if (array_is_list($addons)) {
+            return array_fill_keys(array_map('strval', $addons), 1);
+        }
+
+        $normalised = [];
+        foreach ($addons as $code => $quantity) {
+            $normalised[(string) $code] = (int) $quantity;
+        }
+
+        return $normalised;
     }
 
     /**

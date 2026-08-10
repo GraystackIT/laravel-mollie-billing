@@ -7,16 +7,23 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Jobs\RetrySubscriptionCancelJob;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
+use Illuminate\Support\Facades\Notification;
+use Mollie\Api\Exceptions\ApiException;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Responsible for Mollie subscription changes for future periods.
@@ -28,6 +35,8 @@ use Mollie\Laravel\Facades\Mollie;
  */
 class MollieSubscriptionPatcher
 {
+    use \GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -38,31 +47,53 @@ class MollieSubscriptionPatcher
      * - newPlan = Free → cancelForFreeDowngrade()
      * - otherwise → updateRecurringAmount() with new plan/seats/addons
      */
-    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): void
+    /**
+     * @return bool Whether Mollie now reflects the intent. Only the free-downgrade branch
+     *              can answer false: the cancel is best-effort and leaves a
+     *              `pending_subscription_cancel` marker, and the caller must NOT drop
+     *              `mollie_subscription_id` on a subscription that is still live — nothing
+     *              could ever target it again, and Mollie keeps charging the old price.
+     */
+    public function updateForIntent(Billable $billable, PlanChangeIntent $intent): bool
     {
-        if ($this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
-            $this->cancelForFreeDowngrade($billable);
-            return;
-        }
-
         $extraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
         $totalSeats = $this->catalog->includedSeats($intent->newPlan) + $extraSeats;
         $newAddons = array_keys($intent->newAddons);
 
+        // Cancel only when the whole target configuration bills nothing — not merely when
+        // the plan's own base and seat prices are zero. `isFreePlan()` answers yes for a
+        // free plan that still carries a paid addon, so removing an *addon* from such a
+        // subscription cancelled it at Mollie while UpdateSubscription (which asks
+        // `planChanged && isFreePlan`) kept source Mollie, status Active and the
+        // subscription id: the customer kept the plan and was never billed again, and the
+        // next change patched a subscription that no longer existed.
+        $targetNet = SubscriptionAmount::net(
+            $this->catalog,
+            $billable,
+            $intent->newPlan,
+            $intent->newInterval,
+            $totalSeats,
+            $newAddons,
+        );
+
+        if ($targetNet <= 0) {
+            return $this->cancelForFreeDowngrade($billable);
+        }
+
         // Preserve any active recurring coupon discount across plan/seat/addon
         // changes — otherwise the PATCH would silently undo the campaign price.
+        // Through CouponService, which is the only place that knows whether the marker
+        // is still redeemable. This mirror checked existence only, so a coupon an admin
+        // had deactivated — the documented way to resolve a `recurring_conflict` — or
+        // one whose window had closed but whose renewal had not run yet was re-applied
+        // to Mollie by any seat, addon or plan PATCH. Mollie then collected the
+        // discounted amount for at least one more period, the invoice reconciled down to
+        // it, and PaymentAmountMismatch fired on a payment nobody had asked to discount.
         $couponDiscountNet = 0;
         $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
         if (is_array($marker)) {
-            $baseNet = SubscriptionAmount::net(
-                $this->catalog,
-                $billable,
-                $intent->newPlan,
-                $intent->newInterval,
-                $totalSeats,
-                $newAddons,
-            );
-            $couponDiscountNet = $this->markerDiscount($marker, $baseNet);
+            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $targetNet);
         }
 
         $this->updateRecurringAmount(
@@ -75,6 +106,9 @@ class MollieSubscriptionPatcher
             couponDiscountNet: $couponDiscountNet,
             forceResetStartDate: $intent->forceResetStartDate,
         );
+
+        // `updateRecurringAmount()` throws on failure, so reaching here means Mollie took it.
+        return true;
     }
 
     /**
@@ -95,7 +129,7 @@ class MollieSubscriptionPatcher
         }
 
         return new Date(
-            $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth()
+            BillingTime::addInterval(BillingTime::nowUtc(), $interval)
         );
     }
 
@@ -106,30 +140,6 @@ class MollieSubscriptionPatcher
      *
      * @param  array<string,mixed>  $marker
      */
-    private function markerDiscount(array $marker, int $netAmount): int
-    {
-        if ($netAmount <= 0) {
-            return 0;
-        }
-
-        $type = (string) ($marker['discount_type'] ?? '');
-        $value = (int) ($marker['discount_value'] ?? 0);
-
-        $baseAmount = isset($marker['base_amount_net'])
-            ? min((int) $marker['base_amount_net'], $netAmount)
-            : $netAmount;
-
-        if ($type === 'percentage') {
-            return (int) round($baseAmount * $value / 100);
-        }
-
-        if ($type === 'fixed') {
-            return min($value, $baseAmount);
-        }
-
-        return 0;
-    }
-
     /**
      * PATCH the Mollie subscription with the new aggregated recurring amount.
      *
@@ -191,8 +201,17 @@ class MollieSubscriptionPatcher
             $billable,
         );
 
+        // The renewal this PATCH prices is invoiced per line (SubscriptionPaymentHandler
+        // → InvoiceService::createForPayment), and that header VAT is the sum of the
+        // per-line VAT. The recurring amount therefore has to be built from the same
+        // lines — see BillingMoney::grossWithLineVat() for what the two roundings cost.
+        $amountGross = BillingMoney::grossWithLineVat(
+            self::recurringLineNets($this->catalog, $billable, $planCode, $interval, $addons, $extraSeats, $amountNet),
+            (float) $vat['rate'],
+        );
+
         $currency = (string) config('mollie-billing.currency', 'EUR');
-        $value = number_format(((int) $vat['gross']) / 100, 2, '.', '');
+        $value = BillingMoney::mollieAmount($amountGross, $currency);
 
         $metadata = [
             'billable_type' => $billable->getMorphClass(),
@@ -215,12 +234,12 @@ class MollieSubscriptionPatcher
         $startDate = match (true) {
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
             $intervalChanged || $forceResetStartDate => new Date(
-                $interval === 'yearly' ? BillingTime::nowUtc()->addYear() : BillingTime::nowUtc()->addMonth()
+                BillingTime::addInterval(BillingTime::nowUtc(), $interval)
             ),
             default => null,
         };
 
-        Mollie::send(new MollieUpdateSubscriptionRequest(
+        MollieCall::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             amount: new Money($currency, $value),
@@ -232,11 +251,118 @@ class MollieSubscriptionPatcher
     }
 
     /**
+     * Net amount per invoice line for a recurring charge of this configuration.
+     *
+     * Mirrors what SubscriptionPaymentHandler will put on the renewal invoice —
+     * one line per plan / seat block / addon, plus a negative coupon line for
+     * whatever the discount takes off — so the amount Mollie collects and the
+     * amount the invoice books round identically. Shared with CreateSubscription:
+     * a subscription created at Σ round(line) and later patched to
+     * round(Σ line), or the other way round, would change price by a cent for no
+     * reason the customer can see.
+     *
+     * @param  array<int, string>  $addons
+     * @param  int  $chargedNet  the net the subscription is actually billed at
+     * @return list<int>
+     */
+    public static function recurringLineNets(
+        SubscriptionCatalogInterface $catalog,
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        int $chargedNet,
+    ): array {
+        /** @var list<int> $lineNets */
+        $lineNets = array_map(
+            static fn (array $line): int => (int) $line['total_net'],
+            SubscriptionAmount::lineItems($catalog, $billable, $planCode, $interval, $extraSeats, $addons),
+        );
+
+        $catalogNet = array_sum($lineNets);
+
+        if ($catalogNet === $chargedNet) {
+            return $lineNets;
+        }
+
+        if ($catalogNet > $chargedNet) {
+            $lineNets[] = $chargedNet - $catalogNet;
+
+            return $lineNets;
+        }
+
+        // Nothing in the catalog lines accounts for a charge *above* their total, so
+        // there is no breakdown to round per line — the total is all we know.
+        return [$chargedNet];
+    }
+
+    /**
      * Shifts the date of the next Mollie billing into the future by the given
      * number of days. Used by the PeriodExtension coupon type.
      * After a successful PATCH an override is set in the subscription meta so
      * that `nextBillingDate()` returns the shifted value.
      */
+    /**
+     * Move the next charge to an absolute date: local write now, Mollie PATCH after the
+     * caller's transaction commits.
+     *
+     * The two coupon types that extend a period — PeriodExtension and TrialExtension —
+     * both used to PATCH Mollie from inside `CouponService::redeem()`'s transaction.
+     * Anything throwing afterwards (the redemption insert, a `CouponRedeemed` listener)
+     * rolled back the redemption row, the incremented `redemptions_count` and the local
+     * dates — while Mollie had already moved the charge. The customer kept the free
+     * period, the campaign slot was still free, and applying the code again extended a
+     * second time. Same rule as everywhere else: a transaction can be rolled back, an
+     * HTTP call to a payment provider cannot.
+     *
+     * The target is absolute on purpose. `pushNextChargeDate()` adds days to whatever
+     * Mollie is currently set to, so a retry after a partial failure extends twice; an
+     * absolute date can be re-sent as often as needed, which is what lets the failure
+     * path leave a `pending_subscription_patch` marker for the hourly sweep.
+     */
+    public function deferNextChargeDate(Billable $billable, \Carbon\CarbonInterface $target): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $utc = Carbon::instance($target)->setTimezone('UTC');
+
+        // Written inside the caller's transaction, so the date the customer is shown and
+        // the redemption that bought it stand or fall together.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($utc): array {
+            $meta['next_charge_date_override'] = $utc->toIso8601String();
+
+            return $meta;
+        });
+
+        DB::afterCommit(function () use ($billable, $utc): void {
+            try {
+                $this->setNextChargeDate($billable, $utc);
+            } catch (\Throwable $e) {
+                Log::warning('Mollie next-charge-date PATCH failed — queued for retry', [
+                    'billable' => $billable->getKey(),
+                    'target' => $utc->toIso8601String(),
+                    'error' => $e->getMessage(),
+                ]);
+
+                // Local state says the charge moved; Mollie still holds the old date and
+                // would collect early. SweepPendingRetriesJob picks this up hourly.
+                $this->mutateBillingMeta($billable, function (array $meta) use ($utc, $e): array {
+                    $meta['pending_subscription_patch'] = [
+                        'reason' => 'next_charge_date',
+                        'target' => $utc->toIso8601String(),
+                        'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                        'last_error' => $e->getMessage(),
+                    ];
+
+                    return $meta;
+                });
+            }
+        });
+    }
+
     public function pushNextChargeDate(Billable $billable, int $days): void
     {
         if (! ($billable instanceof Model) || $days <= 0) {
@@ -257,7 +383,7 @@ class MollieSubscriptionPatcher
         $current = $billable->nextBillingDate() ?? BillingTime::nowUtc();
         $newDate = $current->copy()->addDays($days);
 
-        Mollie::send(new MollieUpdateSubscriptionRequest(
+        MollieCall::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             startDate: new Date($newDate),
@@ -297,7 +423,7 @@ class MollieSubscriptionPatcher
 
         $newDate = $target->copy();
 
-        Mollie::send(new MollieUpdateSubscriptionRequest(
+        MollieCall::send(new MollieUpdateSubscriptionRequest(
             customerId: $customerId,
             subscriptionId: $subscriptionId,
             startDate: new Date($newDate),
@@ -311,23 +437,87 @@ class MollieSubscriptionPatcher
     /**
      * Cancels the Mollie subscription on a free downgrade. Tolerant of API failures.
      */
-    public function cancelForFreeDowngrade(Billable $billable): void
+    /**
+     * Cancel the Mollie subscription a downgrade to a free plan makes obsolete.
+     *
+     * Returns whether the subscription is definitively gone at Mollie. The caller must
+     * keep `mollie_subscription_id` when it is not: this used to swallow every failure
+     * and log, while `UpdateSubscription` dropped the id regardless — so with Mollie
+     * unreachable for that one call the subscription stayed active, charged the old
+     * plan's price every period against a now-free billable, and with the id gone no
+     * later cancel could target it. Same failure mode `CancelSubscription` was given a
+     * `pending_subscription_cancel` marker and a retry job for; this path had neither.
+     */
+    public function cancelForFreeDowngrade(Billable $billable): bool
     {
         $customerId = $billable->getMollieCustomerId();
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
 
         if ($customerId === null || $subscriptionId === '') {
-            return;
+            return true;
         }
 
         try {
-            Mollie::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
+            MollieCall::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
+
+            return true;
+        } catch (ApiException $e) {
+            // Already gone is the outcome we wanted.
+            if (in_array($e->getCode(), [404, 410], true)) {
+                return true;
+            }
+
+            $error = $e->getMessage();
         } catch (\Throwable $e) {
-            Log::warning('Mollie subscription cancel during free-downgrade failed', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'subscription_id' => $subscriptionId,
-                'error' => $e->getMessage(),
-            ]);
+            $error = $e->getMessage();
         }
+
+        Log::error('Mollie subscription cancel during free-downgrade failed — it may keep charging', [
+            'billable' => $billable instanceof Model ? $billable->getKey() : null,
+            'subscription_id' => $subscriptionId,
+            'error' => $error,
+        ]);
+
+        if (! ($billable instanceof Model)) {
+            return false;
+        }
+
+        $marker = [
+            'mollie_customer_id' => $customerId,
+            'mollie_subscription_id' => $subscriptionId,
+            'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+            'last_error' => $error,
+        ];
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['pending_subscription_cancel'] = $marker;
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+
+        // Dispatched as well as marked: the marker alone is only read by the hourly
+        // sweep, and every period until then is a period the customer is charged for a
+        // plan they no longer have.
+        RetrySubscriptionCancelJob::dispatch(
+            (string) config('mollie-billing.billable_model'),
+            $billable->getKey(),
+            $customerId,
+            $subscriptionId,
+            $marker['first_attempt_at'],
+        );
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins !== []) {
+            Notification::send($admins, MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'Mollie subscription cancel failed during a downgrade to a free plan — it may still be charging',
+                $marker + [
+                    'billable_type' => $billable->getMorphClass(),
+                    'billable_id' => $billable->getKey(),
+                ],
+            ));
+        }
+
+        return false;
     }
 }

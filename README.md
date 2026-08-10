@@ -15,7 +15,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 
 - Mollie subscriptions, mandates and webhooks (built on Mollie's official Laravel SDK v4 with typed request objects)
 - VAT calculation, VIES validation and OSS export (`mpociot/vat-calculator`)
-- Country-mismatch reconciliation: three-way reconciliation of user-declared, payment-derived, and IP-derived country at every recurring payment. If the user country matches none of the other signals, the subscription is set to cancel-at-period-end, the billable is notified by email, and the user can self-correct via a dashboard modal (refund + reissue at the corrected VAT rate). B2B billables with a VIES-validated VAT number bypass the check (reverse-charge makes the bank country fiscally irrelevant). Manual admin override available. See [docs/vat-handling.md](docs/vat-handling.md).
+- Country-mismatch reconciliation: three-way reconciliation of user-declared, payment-derived, and IP-derived country at every recurring payment. If the user country matches none of the other signals, the subscription is set to cancel-at-period-end, the billable is notified by email, and the user can self-correct via a dashboard modal (refund + reissue at the corrected VAT rate). B2B billables with a VIES-validated VAT number bypass the check (reverse-charge makes the bank country fiscally irrelevant). An admin can override the decision with any ISO-2 code, against a required written justification that lands in the audit trail. See [docs/vat-handling.md](docs/vat-handling.md).
 - Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`), with case-insensitive usage-type lookups
 - Direct overage charging with retry and `past_due` state
 - Five coupon types — `SinglePayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
@@ -51,7 +51,7 @@ Publish the config and migrations:
 ```bash
 php artisan vendor:publish --tag=mollie-billing-config       # mollie-billing.php + mollie-billing-plans.php
 php artisan vendor:publish --tag=mollie-billing-migrations
-php artisan vendor:publish --tag=mollie-billing-views        # optional: override Blade/Livewire views
+php artisan vendor:publish --tag=mollie-billing-views        # optional: override Blade views (see the caveat under Customization)
 php artisan vendor:publish --tag=billing-lang                # optional: override translations
 ```
 
@@ -126,10 +126,12 @@ BILLING_CURRENCY=EUR
 either works. The package propagates `BILLING_MOLLIE_KEY` into `mollie.key` so
 your `.env` stays on the `BILLING_*` prefix.
 
-Mount the package routes in `routes/web.php`. The three route groups serve different scopes and need different middleware:
+Mount the package routes. The groups serve different scopes and need different middleware:
 
 ```php
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+
+// routes/web.php
 
 // Customer portal — needs auth + your tenant resolution middleware
 Route::middleware(['web', 'auth', 'tenant'])->group(function () {
@@ -147,7 +149,20 @@ Route::middleware(['web', 'auth'])->group(function () {
 });
 ```
 
-The admin routes are auto-loaded by the service provider as well, so you only need to call `adminRoutes()` if you want them under a custom middleware stack.
+```php
+// routes/api.php — or any group WITHOUT the `web` middleware
+
+// Mollie webhook. REQUIRED: every payment the package creates carries this URL, so
+// without it the very first checkout throws RouteNotFoundException [billing.webhook]
+// before it ever reaches Mollie. Mollie calls it server-to-server — no session, no
+// CSRF token, no tenant slug — so it must not sit inside the `web` group.
+MollieBilling::webhookRoutes();
+```
+
+Run `php artisan billing:check-config` after mounting: it verifies the webhook route
+exists, among the rest of the configuration.
+
+The admin routes are auto-loaded by the service provider as well, so you only need to call `adminRoutes()` if you want them under a custom middleware stack — and then set `mollie-billing.routes.auto_load_admin` to `false` (env `BILLING_AUTO_LOAD_ADMIN_ROUTES`), otherwise both registrations exist, the auto-loaded ones match the URI first and your middleware never runs. `MollieBilling::promotionRoutes()` is optional — mount it (without tenant scoping) if you use coupon auto-apply links.
 
 ### Multi-tenant URL prefixes
 
@@ -190,13 +205,24 @@ If your billable model needs custom logic beyond the global resolver, you can st
 Tell the facade how to resolve the current billable for the authenticated user — usually in `AppServiceProvider::boot()`:
 
 ```php
+use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
+use Illuminate\Http\Request;
 
 MollieBilling::resolveBillableUsing(fn () => auth()->user()?->currentOrganization);
-MollieBilling::authUsing(fn () => auth()->check());
+
+// The second argument is the point: this callback is asked "may THIS requester act on THIS
+// billable", and every cross-tenant defence in the package delegates to it — the portal
+// middleware, the invoice download, the checkout's prefill gate. A closure that ignores
+// `$billable` and only checks `auth()->check()` answers yes for every tenant, which turns the
+// checkout route's query-parameter fallback (documented below) into a read of any tenant's
+// billing data by route key. Compare the billable against the requester.
+MollieBilling::authUsing(
+    fn (Request $request, Billable $billable): bool => $request->user()?->belongsToBillable($billable) ?? false,
+);
 ```
 
-> **Checkout-route fallback:** the checkout route is mounted outside any tenant prefix, so a typical `resolveBillableUsing` closure that reads from a tenant context returns `null` there. When that happens the package falls back to looking up the billable from the request's query parameters, matching against the billable model's `getRouteKeyName()`. A returning customer hitting `/billing/checkout?organization=acme-corp` therefore re-uses the existing billable instead of being asked for the company details again. Reserved query keys (`back`, `plan`, `interval`, `redirect`, `token`) are skipped.
+> **Checkout-route fallback:** the checkout route is mounted outside any tenant prefix, so a typical `resolveBillableUsing` closure that reads from a tenant context returns `null` there. When that happens the package falls back to looking up the billable from the request's query parameters, matching against the billable model's `getRouteKeyName()`. A returning customer hitting `/billing/checkout?organization=acme-corp` therefore re-uses the existing billable instead of being asked for the company details again. Reserved query keys (`back`, `plan`, `interval`, `redirect`, `token`) are skipped. That fallback is a *guess*, so it is gated: the checkout adopts the resolved billable's billing data only when `authUsing()` authorizes the requester for it. Without that, `?organization=<someone-else>` disclosed their address and VAT number. A billable named by your own `resolveBillableUsing()` closure is treated differently — the request genuinely belongs to it, so a refused authorization answers 403 instead of quietly starting a fresh checkout.
 
 Customize `config/mollie-billing-plans.php` to define your plans, addons and feature keys.
 
@@ -345,6 +371,28 @@ Each step definition requires:
 | `description` | `string` | Subheading text below the headline. |
 | `view` | `string` | Blade view name to `@include` for this step's form fields. |
 | `validate` | `Closure` | *(optional)* Receives the Livewire `Component` instance. Throw a `ValidationException` (or call `$component->validate(...)`) to block navigation. |
+| `enter` | `Closure` | *(optional)* Receives the Livewire `Component` instance whenever the step is arrived at — forwards **and** backwards. Use it for state that cannot be trusted once the customer has been elsewhere. |
+
+**Steps that gate on something outside the form.** A step verifying an email address, a phone
+number or an external account has state the form itself does not hold, and two things follow
+from that:
+
+- Its complaint clears itself. `next()` and `back()` reset the error bag before they do
+  anything, so a message keyed on something no later `validate()` rule touches does not outlive
+  the problem it described.
+- It is told when it becomes current again. `enter` runs on every arrival, so a verification
+  that no longer holds after a Back can be dropped and re-requested:
+
+```php
+'enter' => function (Component $component): void {
+    // Whatever was confirmed before the customer navigated away is no longer current.
+    $component->customData['email_confirmed'] = false;
+    $component->customData['confirmation_sent'] = false;
+},
+```
+
+`enter` fires on a re-entry into the step just left as well, so it has to be safe to run
+repeatedly — do not send an email from it; set the state that lets the customer ask for one.
 
 **Binding form data** — The checkout component exposes a `public array $customData = []` property. Use `wire:model` with dot notation in your step view:
 
@@ -394,6 +442,15 @@ php artisan vendor:publish --tag=mollie-billing-views
 
 Views are published to `resources/views/vendor/mollie-billing/`. SFC files use the ⚡ prefix convention (e.g. `⚡checkout.blade.php`).
 
+**What publishing does and does not override.** Ordinary Blade views (layouts, partials,
+invoice templates) resolve through Laravel's view finder, so a published copy wins.
+Livewire *components* do not: Livewire 4 resolves a namespaced component from the single
+view path the package registers with `Livewire::addNamespace()`, and its finder has no
+notion of a vendor override. Editing a published `⚡…blade.php` therefore changes nothing
+for those screens. To replace one, register your own component under your own namespace
+and point the route (or `header_components`) at it — the package's services, events and
+facade callbacks are the supported seams, and none of them requires touching a view.
+
 To add your own Livewire component (e.g. a language switcher) to the portal, checkout and
 admin headers, use `mollie-billing.header_components` instead of publishing the layouts:
 
@@ -431,7 +488,7 @@ Highlights of `config/mollie-billing.php`:
 
 | Key | Purpose |
 | --- | --- |
-| `currency` | Default currency for prices and invoices (e.g. `EUR`). |
+| `currency` | Default currency for prices and invoices (e.g. `EUR`). Every amount in the package is an integer in this currency's **smallest unit**, and how many of those make up one major unit is read off the currency itself — so `2900` is €29.00 under `EUR` but ¥2900 under `JPY`. |
 | `logo_url` | Logo displayed in checkout and portal headers. |
 | `primary_color` | Accent color for checkout UI (hex, e.g. `#6366f1`). |
 | `dashboard_url` | URL the portal logo links to (e.g. your app's main dashboard). Supports `route:` prefix. |
@@ -839,8 +896,8 @@ Every state change dispatches a Laravel event so apps can react via listeners. N
 - `SubscriptionCreated`, `SubscriptionCancelled`, `SubscriptionExpired`, `SubscriptionResumed`
 - `PlanChanged`, `SubscriptionUpdated`, `SubscriptionChangeScheduled`
 - `TrialStarted`, `TrialConverted`, `TrialExpired`, `TrialExtended`
-- `MandateUpdated`
-- `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`, `DuplicatePaymentReceived`
+- `MandateUpdated`, `MollieSubscriptionReferenceCleared`
+- `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`, `DuplicatePaymentReceived`, `RenewalCollectedForEndedSubscription`
 - `InvoiceCreated`, `InvoiceRefunded`, `CreditNoteIssued`, `InvoicePdfRegenerated`
 - `OverageCharged`, `OverageChargeFailed`
 - `CouponRedeemed`, `GrantRevoked`
@@ -860,15 +917,42 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use GraystackIT\MollieBilling\Testing\BillableStateHelper;
 
-MollieBilling::fake();
+$fake = MollieBilling::fake();
 
 $billable = TestBillable::factory()->create();
 BillableStateHelper::onPaidPlan($billable, 'pro', 'monthly');
 
 $billable->recordBillingUsage('api_calls', 1_500);
 
-MollieBilling::assertSubscriptionStarted($billable);
+$fake->assertSubscriptionCreated($billable);
 ```
+
+`MollieBilling::fake()` swaps in Mollie's `MockMollieClient`, so nothing reaches the
+network — register the responses your flow needs on the returned fake. It also fakes
+events and notifications, which is what backs `assertEventDispatched()` and
+`assertNotificationSent()`. Call `MollieBilling::resetFake()` in `tearDown()`: the fake
+is memoised per application instance, and the package's callbacks
+(`resolveBillableUsing()`, `authUsing()`, …) live in statics that otherwise outlive the
+test that registered them.
+
+### Browser tests
+
+The package also ships a **Chrome end-to-end suite** that drives the real checkout,
+portal and admin UI against a fake Mollie — 32 scenarios from signup through renewals,
+plan changes, overage, VAT numbers and the country mismatch, each one screenshotted
+into a browsable gallery. It lives outside the default run because it needs Chrome and
+a Flux Pro licence:
+
+```bash
+composer browser:driver    # once: ChromeDriver for your Chrome
+composer browser:assets    # once (and after view changes): Vite build
+composer test:browser
+composer browser:gallery && open tests/Browser/screenshots/index.html
+```
+
+This is the only suite that can render a portal screen at all: Flux Pro ships under
+`suggest` (commercial licence), so the feature suite above runs without it. See
+[docs/browser-testing.md](docs/browser-testing.md).
 
 ## Commands
 
@@ -922,6 +1006,26 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
 - [Audit Trail](docs/audit.md) — per-billable timeline, localizable storage format, categories, retention, adding new events
 - [Testing Lifecycle Flows](docs/testing-flows.md) — `billing:simulate` and `billing:webhook-replay` for reproducing every lifecycle transition on staging
+- [Browser Testing](docs/browser-testing.md) — the Chrome end-to-end suite: workbench app, fake Mollie, writing scenarios, screenshot gallery
+- [Decisions](docs/decisions.md) — behaviour that looks like a defect and is not: enforced invariants, deliberate choices, and findings that were investigated and refuted
+
+### Testing against Mollie for real
+
+```bash
+composer test:sandbox     # needs MOLLIE_KEY=test_… and a network
+```
+
+The feature suite fakes the Mollie facade and the browser suite fakes the SDK's HTTP
+adapter, so both answer with whatever they were told. The sandbox suite sends the requests
+this package builds to the real API and checks the responses carry the fields the code
+reads — including the €0 mandate capture a trial signup depends on, which the API accepts
+only under conditions no fake can enforce.
+
+It refuses any key that is not `test_`, and cancels every subscription it creates by
+sweeping the customers it created rather than by remembering ids a failing test never
+reached. It cannot cover webhook *delivery* (Mollie needs a public URL), a settled payment
+(a test-mode direct debit stays `pending`), or a real renewal (Mollie's scheduler runs
+daily).
 
 ## Architecture
 

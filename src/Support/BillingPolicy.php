@@ -5,10 +5,34 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Support;
 
 use Carbon\CarbonInterface;
+use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 
 class BillingPolicy
 {
+    /**
+     * Whether a change on this billable is a past-due reset rather than a mid-period
+     * adjustment.
+     *
+     * The last recurring charge failed, so the current period was never paid: moving
+     * plan or interval from there is a fresh start — full first period of the new
+     * configuration, nothing to refund. Seats and addons are *not* a reset. They are an
+     * adjustment to a period the customer already holds, and treating them as a reset
+     * charged the full list price of plan + all seats + all addons instead of the
+     * prorated delta (a €3.55 extra seat became €34.00), while leaving Mollie's
+     * schedule untouched so the same period was charged again a fortnight later.
+     *
+     * Lives here because three call sites have to agree on it — `ProrataComposer`,
+     * `UpdateSubscription::buildContext()` and `PreviewService::previewUpdate()`. They
+     * used to spell it out separately, and the composer's copy was missing the
+     * plan/interval condition, so the preview and the charge disagreed by a factor of
+     * ten on the same change.
+     */
+    public static function isPastDueReset(Billable $billable, bool $planChanged, bool $intervalChanged): bool
+    {
+        return $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+    }
+
     /**
      * Whole-day breakdown of a billing period: total length and days left from
      * now to periodEnd. Used as the basis for prorata factor and for surfacing

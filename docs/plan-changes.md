@@ -13,8 +13,48 @@ Plan changes are handled by `UpdateSubscription::update()` and come in three fla
 | **Downgrade** (lower price) | User selects a cheaper plan | Immediate or scheduled to end of period |
 | **Mollie → Free downgrade** | Paid user selects a free plan | Cancels Mollie subscription, switches source to Local |
 | **Past-Due reset** | User on `past_due` selects any paid plan (same or different) | Charges the full first period of the new plan, resets the cycle |
-| **Zero-cost change** | Same price, different plan/interval | Immediate |
+| **Zero-cost change** | Same price, different plan/interval | Immediate, booked as a saldo-zero switch invoice settled against the paying one |
 | **Free → Free change** | Both source and target are free plans | Immediate, source stays Local |
+
+### Two changes inside one period
+
+A mid-period change is *priced* against the whole period (`newNet × remaining / total`) but
+*buys* only the days that are left, and the line it writes is stamped with the window it
+actually bought — `[now, period_end]`, not `[period_start, period_end]`. That stamp is what a
+later change in the same period reads: `ProrataComposer` derives each credit from the line's
+own window, so an amount that bought 21 days is divided by 21 days, not by 31.
+
+A change whose two sides cancel out is still booked. `BillingPolicy::computeProrata()` nets
+charge against credit, so an equal-price plan switch reports 0/0 — but the composer produces a
+full charge for the new plan and a matching credit for the old one, and those have to be
+recorded: the old plan line's remaining value now belongs to the new plan code, so it is no
+longer refundable. `InvoiceService::createPlanSwitchInvoice()` writes them as one invoice whose
+header nets to zero and increments `refunded_net` on the invoices it credits.
+
+That switch invoice has no `mollie_payment_id` of its own — the new plan's days were paid for
+out of the *previous* invoice, and `mollie_payment_id` is unique because that uniqueness is the
+webhook's idempotency guard. The settlement is therefore recorded as a relationship:
+`billing_invoices.settled_by_invoice_id` points at the invoice whose payment covers it, set only
+when there is exactly one such invoice and it covers the switch's charges in full.
+
+Everything that has to answer "can this be refunded, and against what" follows that pointer:
+
+- `BillingInvoice::currentPeriodLines()` offers an invoice as a refund candidate if it collected
+  a payment **or** is settled by one that did.
+- `refundableBaseNet()` / `refundableBaseGross()` read a settled invoice line by line (its own
+  charges, i.e. lines without a `parent_invoice_id`) rather than from its header, which nets to
+  zero by construction. Every other invoice is still measured by its header — that is the money
+  Mollie actually took, and lines can legitimately state something else.
+- `InvoiceService::createRefund()` posts to `refundablePaymentId()`, so the refund lands on the
+  payment that physically holds the money.
+
+The books stay balanced across the pair: a switch only gets the pointer when its charge is fully
+covered by credits booked against the source invoice, so the source's remaining refundable base
+drops by exactly what the switch's base gains. A 2900 renewal switched on day 11 leaves
+`935 + 1965 = 2900`, and a downgrade on day 20 credits `1965 × 12/21 = 1123` out of the switch.
+
+If the pointer cannot be set (several source invoices, or a charge larger than its credits) the
+switch stays unrefundable, exactly as before.
 
 ## Deferred Upgrade Flow
 
@@ -60,6 +100,11 @@ Phase 2b — Webhook: payment failed
 ## Validation Rules
 
 All validation is centralized in `ValidateSubscriptionChange`. It runs in both Phase 1 (pre-flight) and Phase 2 (before applying). Apps can override it via `app->bind`.
+
+Two rules are worth calling out because they are easy to trip over:
+
+- **One pending change at a time.** A change that moves money (a prorata charge *or* a credit) is refused while `pending_plan_change` / `pending_prorata_change` is set. This covers credit-only downgrades, not just charges — a second change keyed to the first one's payment id was applied as the first one's intent and lost without a trace.
+- **A settled charge is never applied to a subscription that no longer runs.** If the billable is Cancelled or Expired by the time Phase 2 arrives, the plan is not applied: the money is invoiced, `PlanChangeFailed` is dispatched and admins are notified for a manual refund. Applying it would resurrect the plan-scoped fields the expiry wipe removes, handing feature access back to an ended subscription.
 
 ### Established Subscription
 
@@ -110,6 +155,10 @@ When the billing interval stays the same (e.g. monthly → monthly):
 
 - **Upgrade** (`newNet > currentNet`): `charge = (newNet - currentNet) * factor`
 - **Downgrade** (`newNet < currentNet`): `credit = (currentNet - newNet) * factor`
+
+**The period boundary does not move.** The factor covers only the remainder of the *current* window, and Mollie's charge date is left untouched (the PATCH changes the amount, not the cadence). So `subscription_period_starts_at` stays where it was, and the change's invoice is stamped with the existing period. Phase 2 re-anchoring the period here made `nextBillingDate()` report a date Mollie does not charge on, and a seat added afterwards was prorated against that phantom window while the real renewal billed the same days again.
+
+Two exceptions do open a new window, and both also move Mollie's schedule: an interval change, and the [past-due reset](#past-due-reset). A plan change that converts an in-flight trial is a third case where the *schedule* moves — Mollie's `startDate` is the trial end, and the charge has just paid for the rest of the local period, so the first recurring charge is pushed one full period out.
 
 ### Interval Changes
 
@@ -171,9 +220,15 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 3. Sets `subscription_source = local`, `subscription_status = active`, `subscription_ends_at = null`, `subscription_period_starts_at = now()`.
 4. Skips `syncMollieSubscription()`.
 5. Runs `WalletPlanChangeAdjuster` to reduce plan credits to the free-plan quota; `purchased_balance` is preserved.
-6. Refunds any prorata credit via `refundProrataCredit()` if `apply_at = immediate` and a mandate is still available.
+6. Refunds any prorata credit through `ProrataExecutor` → `InvoiceService::createRefund()` if `apply_at = immediate` and a mandate is still available.
 
 `config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` with `internal=true` to bypass the user-input mode check).
+
+### When "end of period" falls
+
+`ScheduleSubscriptionChange::schedule()` anchors on `nextBillingDate()`, except **on a trial**, where it takes the earlier of `nextBillingDate()` and `trial_ends_at`. A trial's first charge lands on `trial_ends_at` (day 14), not on the period anniversary (day 30) — anchoring on the latter applied the change in the middle of the first paid period, and since `apply()` re-enters as an `internal` immediate update the lapsed-period guard is waived, so it raised the very prorata charge the customer scheduled the change to avoid.
+
+`schedule()` refuses (`InvalidSubscriptionStateException`) for any status `apply()` would not act on — i.e. anything other than `active`, `trial`, `past_due`. A cancelled-in-grace customer used to get a "scheduled for &lt;date&gt;" confirmation for a change the daily dispatcher then silently discarded; the path for them is to resubscribe.
 
 ## Past-Due Reset
 
@@ -305,3 +360,26 @@ Plan definitions, pricing, quotas, and addon compatibility all come from `Subscr
 | Paid extras on a Local subscription | Throws `LocalSubscriptionDoesNotSupportPaidExtrasException`. UI surfaces this as a callout that links to the plan-change page. |
 | Change onto a plan marked `hidden` | Throws `HiddenPlanNotSelectableException` — for immediate *and* scheduled (`apply_at => end_of_period`) changes, the latter before anything is stored. Staying on a hidden plan and changing interval within it are allowed. Deliberate programmatic moves pass a typed `SubscriptionUpdateRequest` with `allowHiddenPlan: true` — array payloads cannot enable the override. See [Hidden plans](configuration.md#hidden-plans). |
 | Second plan change while one is pending | `InvalidSubscriptionStateException` thrown. |
+
+## Transaction boundaries
+
+`UpdateSubscription::update()` reaches Mollie three times — `applyProrata()` creates payments
+and posts refunds, and the patcher cancels or PATCHes the subscription. None of those may sit
+inside a database transaction: a transaction can be rolled back, an HTTP call to a payment
+provider cannot, and a rollback after the money moved is exactly how a refund came to be paid
+out twice.
+
+So the method runs in three phases, with a **cache lock** (`billing:subscription-change:{id}`)
+providing the serialisation a long transaction used to:
+
+1. **Decide** — row lock in a short transaction: build the context, validate, resolve coupons.
+2. **Talk to Mollie** — nothing held.
+3. **Write** — a second short transaction that re-takes the row lock and re-reads
+   `subscription_meta`, because a job (a retry, the overage sweep) may have committed a key in
+   between and the write below replaces the whole column.
+
+A concurrent change to the same billable is refused with `SubscriptionChangeInProgressException`
+rather than queued: it would otherwise sit on a worker for the length of a payment plus a
+PATCH, and its seats, addons and prorata amounts are stale by the time it gets its turn.
+Events are dispatched through `DB::afterCommit()` for the same underlying reason — a throwing
+listener must not be able to undo settled money.

@@ -11,10 +11,18 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\CountryResolver;
-use Illuminate\Support\Facades\DB;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\Sanitize;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Livewire\Attributes\Layout;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
+use Mollie\Api\Http\Requests\GetPaymentRequest;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     use ValidatesVatNumber;
@@ -28,6 +36,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public string $billing_city = '';
     public string $billing_country = '';
     public ?string $vat_number = null;
+
+    /**
+     * Outcome of the last server-side VIES check. Locked: this flag alone decides
+     * whether the customer is charged net (reverse charge) instead of gross, so a
+     * client-supplied `true` would strip the VAT off the Mollie payment.
+     */
+    #[Locked]
     public ?bool $vatNumberValid = null;
     public ?string $vatStatusMessage = null;
 
@@ -54,16 +69,39 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public ?string $errorMessage = null;
     public bool $processing = false;
 
-    /** The billable created in the billing-address step (stored as ID + class for Livewire serialisation). */
+    /**
+     * The billable created in the billing-address step (stored as ID + class for
+     * Livewire serialisation).
+     *
+     * Locked: `submit()` writes the billing address, the VIES audit row and the
+     * pending first payment onto whatever this pair resolves to. Unlocked, a
+     * crafted `updates` payload would repoint both at another tenant and rewrite
+     * its billing data — and `billableClass` additionally feeds a container
+     * lookup, so it must never be client-supplied.
+     */
+    #[Locked]
     public ?string $billableId = null;
+    #[Locked]
     public ?string $billableClass = null;
+
+    /**
+     * True when this component instance created the billable itself (anonymous
+     * signup). Those billables have no owner to authorize against yet, so the
+     * authorization gate in `submit()` is skipped for them — and only for them.
+     */
+    #[Locked]
+    public bool $billableCreatedHere = false;
 
     /**
      * True when the checkout was entered with a pre-existing billable that already
      * carries persisted billing data (e.g. after a previously cancelled subscription
      * or an access-grant-activated local subscription). The billing-address step is
      * skipped and the data is shown read-only on the confirm step.
+     *
+     * Locked: flipping it to false is what would re-enable the billing-address
+     * write in `submit()` for a billable the user only entered checkout with.
      */
+    #[Locked]
     public bool $billing_locked = false;
 
     // -------------------------------------------------------------------------
@@ -81,19 +119,62 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // billing-address fields and lock the billing step. The controller
         // already redirects away when an active subscription exists, so this
         // branch only runs for billables without an accessible subscription.
+        //
         $existing = MollieBilling::resolveBillable(request());
-        if ($existing !== null && $this->hasPersistedBillingData($existing)) {
+
+        // Reads need the same authorization the writes have always had. On a package
+        // route `resolveBillable()` falls back to matching any unreserved query
+        // parameter against a billable's route key, so `?org=<victim-key>` resolved a
+        // stranger — and this branch then rendered their company name, street, city
+        // and VAT number read-only on the confirm step. That was the one half of this
+        // component which never asked `authorizes()`.
+        //
+        // Identity and data are separated deliberately. The ($billableId, $billableClass)
+        // pair says who this checkout is *for*, and `submit()` authorizes against it —
+        // so a team member who is not the billing manager still gets a 403 there rather
+        // than silently having a second billable created. What must not happen is
+        // copying the fields, because that is the disclosure. A query-parameter guess
+        // is dropped entirely: it was never a statement about this visitor.
+        $refused = $existing !== null && ! MollieBilling::authorizes(request(), $existing);
+
+        if ($refused && MollieBilling::resolveBillableFromCallback(request()) === null) {
+            $existing = null;
+            $refused = false;
+        }
+
+        if ($refused) {
+            /** @var Model&Billable $existing */
             $this->billableId = (string) $existing->getKey();
             $this->billableClass = $existing->getMorphClass();
+            $existing = null;
+        }
+
+        // Identity first, and unconditionally — see the note above. Adopting it only
+        // together with the prefill made one predicate answer two questions, and an
+        // authorized billable without a complete address (a fresh signup, an org whose
+        // access grant just lapsed) fell through to `createBillable()` in submit(): the
+        // customer paid, a *second* organisation was created to hold the subscription, and
+        // their own one stayed unsubscribed — bounced back to checkout by
+        // RequireActiveSubscription and eligible for orphan cleanup.
+        if ($existing !== null) {
+            /** @var Model&Billable $existing */
+            $this->billableId = (string) $existing->getKey();
+            $this->billableClass = $existing->getMorphClass();
+        }
+
+        // The prefill, the lock and the step skip are the address question, and they stay
+        // gated on actually having an address to show.
+        if ($existing !== null && $this->hasPersistedBillingData($existing)) {
             $this->company_name = $existing->getBillingName();
             $this->billing_street = (string) $existing->getBillingStreet();
             $this->billing_postal_code = (string) $existing->getBillingPostalCode();
             $this->billing_city = (string) $existing->getBillingCity();
             $this->billing_country = (string) $existing->getBillingCountry();
             $this->vat_number = $existing->vat_number;
-            // VAT number is treated as confirmed when it was previously persisted
-            // — the audit trail captured the VIES result at the time it was set.
-            if (filled($this->vat_number)) {
+            // A persisted VAT number only counts as confirmed when the audit trail
+            // actually says so. Treating "vat_number is set" as valid would grant
+            // reverse charge to a number VIES rejected.
+            if (filled($this->vat_number) && $this->billableUsesReverseCharge($existing)) {
                 $this->vatNumberValid = true;
             }
             $this->billing_locked = true;
@@ -121,6 +202,118 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 $this->plan_code = (string) array_key_first($plans);
             }
         }
+
+        // Last, because it depends on the plan being settled: a plan may be sold in
+        // only one interval, and an interval it does not sell carries no price —
+        // which the pricing paths read as free. That applies to `?interval=` as much
+        // as to the property default, so normalise instead of trusting either.
+        $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+
+        $this->adoptAutoApplyCoupon();
+    }
+
+    /**
+     * Pre-fill the coupon a promotion link put in the session.
+     *
+     * Without this the code reached `StartSubscriptionCheckout` through the session
+     * while the form submitted a gross that knew nothing about it — the customer paid
+     * full price and the coupon was redeemed anyway. (The docs claimed this pre-fill
+     * existed; it did not.) The service now refuses a session coupon the amount does
+     * not reflect, so leaving this out would mean promotion links silently stopped
+     * working; doing it here is what makes them work *and* be priced.
+     *
+     * Validated like a typed code, so an expired or exhausted promotion is simply not
+     * applied rather than surfacing an error on a page the customer never asked about.
+     */
+    private function adoptAutoApplyCoupon(): void
+    {
+        $code = session('billing.auto_apply_coupon');
+
+        if (! is_string($code) || $code === '' || $this->applied_coupon !== null) {
+            return;
+        }
+
+        try {
+            $coupon = MollieBilling::coupons()->validateWithoutBillable($code, [
+                'planCode' => $this->plan_code,
+                'interval' => $this->interval,
+                'addonCodes' => $this->addon_codes,
+                'extraSeats' => $this->extra_seats,
+                'orderAmountNet' => $this->subtotalNet(),
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+                    \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+                    \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension,
+                    \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
+                ],
+            ]);
+        } catch (\Throwable) {
+            return;
+        }
+
+        if ($this->couponTrialDays($coupon) > 0 && ! $this->trialApplies($this->plan_code, $this->interval)) {
+            return;
+        }
+
+        $this->applied_coupon = [
+            'code' => (string) $coupon->code,
+            'name' => (string) $coupon->name,
+            'discount_net' => $this->calculateCouponDiscount($coupon),
+            'trial_days' => $this->couponTrialDays($coupon),
+        ];
+    }
+
+    /**
+     * The intervals the customer may actually pick, in display order.
+     *
+     * With a plan chosen, that plan's own intervals. Before then, every interval
+     * at least one selectable plan is sold in — so a catalog of monthly-only plans
+     * shows no toggle at all instead of a yearly option that prices to 0.
+     *
+     * @return array<int, string>
+     */
+    public function offeredIntervals(string $planCode = ''): array
+    {
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $codes = $planCode !== '' ? [$planCode] : array_keys($this->plans());
+
+        $offered = [];
+        foreach (['monthly', 'yearly'] as $candidate) {
+            foreach ($codes as $code) {
+                if ($catalog->planOffersInterval((string) $code, $candidate)) {
+                    $offered[] = $candidate;
+                    continue 2;
+                }
+            }
+        }
+
+        return $offered;
+    }
+
+    /**
+     * The preferred interval if the plan sells it, otherwise the plan's own
+     * remaining interval. Falls back to the preference when nothing is known
+     * (no plan chosen yet, or a catalog that offers neither).
+     */
+    private function firstOfferedInterval(string $planCode, string $preferred): string
+    {
+        if ($planCode === '') {
+            return $preferred;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+
+        if ($catalog->planOffersInterval($planCode, $preferred)) {
+            return $preferred;
+        }
+
+        foreach (['monthly', 'yearly'] as $candidate) {
+            if ($catalog->planOffersInterval($planCode, $candidate)) {
+                return $candidate;
+            }
+        }
+
+        return $preferred;
     }
 
     private function hasPersistedBillingData(Billable $billable): bool
@@ -172,9 +365,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'name' => $catalog->planName($code) ?? $code,
                 'description' => $catalog->planDescription($code),
                 'included_seats' => $catalog->includedSeats($code),
+                // Filtered by the *selected* interval as well as by the plan: an addon that
+                // does not sell this interval prices at 0, so it rendered as "€0.00 / per
+                // year" and looked like a free perk of the annual plan — and then
+                // StartSubscriptionCheckout refused the order, which submit() could only
+                // report as the generic "payment could not be created". The plan step's own
+                // addon list is fed from here too.
                 'allowed_addons' => array_values(array_filter(
                     $allAddons,
-                    fn (string $addonCode): bool => $catalog->planAllowsAddon($code, $addonCode),
+                    fn (string $addonCode): bool => $catalog->planAllowsAddon($code, $addonCode)
+                        && $catalog->addonOffersInterval($addonCode, $this->interval),
                 )),
                 'intervals' => [
                     'monthly' => [
@@ -262,7 +462,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return false;
         }
 
-        $billable = $this->resolveBillable() ?? MollieBilling::resolveBillable(request());
+        // The component's own persisted pair first; the request resolver only as a
+        // fallback for a not-yet-created billable, and only when authorized — the
+        // badge is derived from hasMollieMandate(), which is a fact about that
+        // account, not about this visitor.
+        $billable = $this->resolveBillable();
+
+        if ($billable === null) {
+            $resolved = MollieBilling::resolveBillable(request());
+            $billable = $resolved !== null && MollieBilling::authorizes(request(), $resolved)
+                ? $resolved
+                : null;
+        }
 
         return $billable === null || ! $billable->hasMollieMandate();
     }
@@ -332,7 +543,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     // Custom checkout steps (resolved fresh each call — closures can't be serialised by Livewire)
     // -------------------------------------------------------------------------
 
-    /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:\Closure}> */
+    /** @return array<int, array{key:string, label:string, headline:string, description:string, view:string, validate?:\Closure, enter?:\Closure}> */
     private function customSteps(): array
     {
         return MollieBilling::resolveCheckoutSteps();
@@ -493,15 +704,109 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return max(0, $net - $discount);
     }
 
+    /**
+     * Net amount per invoice line, in the order the first payment will be booked.
+     *
+     * Mirrors `SubscriptionAmount::lineItems()` plus the negative coupon line
+     * `FirstPaymentArtifacts::couponLineItems()` appends, because that is what the
+     * webhook writes onto the invoice for this very payment. VAT is rounded per line
+     * there, so the total has to be assembled the same way — see
+     * {@see BillingMoney::grossWithLineVat()}.
+     *
+     * @return list<int>
+     */
+    public function lineNets(): array
+    {
+        $plan = $this->selectedPlan();
+        if ($plan === null) {
+            return [];
+        }
+
+        $lines = [(int) ($plan['intervals'][$this->interval]['base_price_net'] ?? 0)];
+
+        $seatPrice = (int) ($plan['intervals'][$this->interval]['seat_price_net'] ?? 0);
+        if ($this->extra_seats > 0 && $seatPrice > 0) {
+            $lines[] = $seatPrice * $this->extra_seats;
+        }
+
+        $addons = $this->addons();
+        foreach ($this->addon_codes as $code) {
+            if (! isset($addons[$code])) {
+                continue;
+            }
+            $lines[] = (int) ($addons[$code]['intervals'][$this->interval]['price_net'] ?? 0);
+        }
+
+        // Capped at the subtotal: a discount larger than the order would otherwise
+        // push the assembled gross below zero, while totalNet() clamps at 0.
+        $discount = min($this->subtotalNet(), (int) ($this->applied_coupon['discount_net'] ?? 0));
+        if ($discount > 0) {
+            $lines[] = -$discount;
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Tax country the payment is priced from.
+     *
+     * With `billing_locked` the address belongs to a pre-existing billable: it is
+     * rendered read-only and `submit()` deliberately never writes it back. The
+     * property stays `wire:model`-bound for the unlocked case though, and
+     * `totals()` feeds `amount_gross` straight into the Mollie payment — so a
+     * locked checkout that priced from the form value could be re-pointed at a
+     * 0%-VAT country and pay net while the invoice books the persisted country's
+     * gross.
+     */
+    private function taxCountry(): string
+    {
+        if (! $this->billing_locked) {
+            return $this->billing_country;
+        }
+
+        $persisted = (string) ($this->resolveBillable()?->getBillingCountry() ?? '');
+
+        return $persisted !== '' ? $persisted : $this->billing_country;
+    }
+
+    /** The VAT number reverse charge is decided by — the persisted one while locked. See {@see taxCountry()}. */
+    private function taxVatNumber(): ?string
+    {
+        if (! $this->billing_locked) {
+            return $this->vat_number;
+        }
+
+        $billable = $this->resolveBillable();
+
+        return $billable instanceof Model ? ($billable->vat_number ?? null) : $this->vat_number;
+    }
+
+    /**
+     * Reverse charge — net prices, no VAT — requires BOTH a VAT number in the form
+     * and a server-side VIES confirmation for it. The `filled()` half is not
+     * cosmetic: without it a blank VAT number combined with a stale `true` flag
+     * would zero out the VAT while the VIES block in `validateStep1()` is skipped.
+     */
     public function showsNetPrices(): bool
     {
-        return $this->vatNumberValid === true;
+        if ($this->vatNumberValid !== true || ! filled($this->taxVatNumber())) {
+            return false;
+        }
+
+        // Cannot delegate wholesale to reverseChargeApplies(): it reads the *persisted*
+        // validation, and during checkout the number being entered is not saved until
+        // submit() — so a legitimate B2B customer would be shown and charged gross. The
+        // country half is asked of the service, which owns the seller-country policy and the
+        // domestic-supply rule; a local copy of it read a malformed `vat.seller_country`
+        // (`AUT`, `Austria`) as "no seller country" and granted reverse charge on an invoice
+        // that owes VAT.
+        return app(VatCalculationService::class)->reverseChargeCountriesQualify($this->taxCountry());
     }
 
     public function vatRate(VatCalculationService $vat): float
     {
         try {
-            return $vat->vatRateFor($this->billing_country);
+            return $vat->vatRateFor($this->taxCountry());
         } catch (\Throwable) {
             return 0.0;
         }
@@ -524,9 +829,11 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $net = $this->totalNet();
         $reverseCharge = $this->showsNetPrices();
 
-        // Trust the live VIES result captured in vatNumberValid — never re-hit VIES on render.
+        // Reuse the VIES result captured in vatNumberValid — never re-hit VIES on render.
         // Otherwise a flaky VIES call could disagree with what the UI just rendered, producing
-        // a "Reverse-Charge" label next to a gross-with-VAT total.
+        // a "Reverse-Charge" label next to a gross-with-VAT total. The flag is #[Locked] and
+        // only ever written by validateVatNumberLive(), so this is server state, not input;
+        // `submit()` re-runs validateStep1() before pricing, which refreshes it.
         if ($reverseCharge) {
             return [
                 'net' => $net,
@@ -538,18 +845,28 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         }
 
         try {
-            $calc = $vat->calculate($this->billing_country, $net, null);
+            $rate = (float) $vat->calculate($this->taxCountry(), $net, null)['rate'];
         } catch (\Throwable) {
-            $calc = ['net' => $net, 'vat' => 0, 'gross' => $net, 'rate' => 0.0];
+            $rate = 0.0;
         }
 
+        // VAT per invoice line, not over the summed net: the webhook books this
+        // payment line by line and the invoice header sums the per-line VAT
+        // (InvoiceService::createForPayment), so `round(Σnet × rate)` shows — and
+        // collects, via `amount_gross` in submit() — a different cent than the
+        // document the customer receives. See BillingMoney::grossWithLineVat().
+        $gross = BillingMoney::grossWithLineVat($this->lineNets(), $rate);
+
         return [
-            ...$calc,
+            'net' => $net,
+            'vat' => $gross - $net,
+            'gross' => $gross,
+            'rate' => $rate,
             'reverseCharge' => false,
         ];
     }
 
-    /** @return array{vatRate:float,showsNet:bool,priceFormatter:\Closure,totals:array,customStepCount:int,customStepViews:array} */
+    /** @return array{vatRate:float,showsNet:bool,priceFormatter:\Closure,money:\Closure,currencySymbol:string,totals:array,customStepCount:int,customStepViews:array} */
     public function with(VatCalculationService $vat): array
     {
         $rate = $this->vatRate($vat);
@@ -566,6 +883,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
                 return $netCents + (int) round($netCents * $rate / 100);
             },
+            // Handed down to the @include'd step partials, which are compiled as
+            // separate views and therefore cannot see this file's imports. Single
+            // money-rendering strategy for the whole checkout; `currencySymbol` is
+            // only for the lang strings that place the symbol themselves.
+            'money' => fn (?int $cents): string => BillingMoney::format($cents),
+            'moneyNumber' => fn (?int $cents): string => BillingMoney::numberFromMinor($cents),
+            'currencySymbol' => BillingMoney::symbol(),
             'totals' => $this->totals($vat),
             'customStepCount' => count($customSteps),
             'customStepViews' => array_map(fn (array $s): string => $s['view'], $customSteps),
@@ -585,6 +909,80 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         if (filled($this->vat_number)) {
             $this->validateVatNumberLive($vat);
+        }
+    }
+
+    /**
+     * Both directions of the (plan, interval) pair have to stay on a pair the
+     * catalog actually prices. `interval` is a live-bound radio group and
+     * `plan_code` is set through `$set()`, so either can move independently — and
+     * an unpriced pair costs 0, which the zero-amount branch of
+     * StartSubscriptionCheckout used to activate as a free plan.
+     */
+    public function updatedInterval(): void
+    {
+        $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+        $this->dropAddonsNotSoldInSelection();
+        $this->refreshCouponAfterSelectionChange();
+    }
+
+    public function updatedPlanCode(): void
+    {
+        $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
+        $this->dropAddonsNotSoldInSelection();
+        $this->refreshCouponAfterSelectionChange();
+    }
+
+    /**
+     * Drop already-ticked addons the new selection does not sell.
+     *
+     * Otherwise switching to yearly kept a monthly-only addon ticked and priced at 0 — a
+     * free extra on the confirm step, refused only when the order reached
+     * StartSubscriptionCheckout, where submit() could report nothing more useful than
+     * "payment could not be created".
+     */
+    private function dropAddonsNotSoldInSelection(): void
+    {
+        $plan = $this->selectedPlan();
+
+        // Seats the new selection does not sell, for the same reason as the addons below:
+        // picking a seat count on one plan and then switching to a plan without a
+        // `seat_price_net` left the count in place, priced at 0 — free capacity on the
+        // confirm step, and `validateStep3()` would refuse the order the customer had
+        // already been shown.
+        if ($this->extra_seats > 0
+            && ($plan['intervals'][$this->interval]['seat_price_net'] ?? null) === null
+        ) {
+            $this->extra_seats = 0;
+        }
+
+        if ($this->addon_codes === []) {
+            return;
+        }
+
+        $allowed = (array) ($plan['allowed_addons'] ?? []);
+
+        $this->addon_codes = array_values(array_filter(
+            $this->addon_codes,
+            fn ($code): bool => in_array((string) $code, $allowed, true),
+        ));
+    }
+
+    /**
+     * A coupon validated against the previous selection may no longer fit it.
+     * `refreshAppliedCoupon()` clears it and names the reason; surface that as a
+     * banner rather than silently dropping the discount the customer can see.
+     */
+    private function refreshCouponAfterSelectionChange(): void
+    {
+        if ($this->applied_coupon === null) {
+            return;
+        }
+
+        $reason = $this->refreshAppliedCoupon();
+
+        if ($reason !== null) {
+            $this->couponError = $this->couponErrorMessage($reason);
         }
     }
 
@@ -633,10 +1031,21 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
+        // The service can only ask whether the PLAN offers a trial; whether one will
+        // actually start also depends on this customer — a returning subscriber with
+        // a mandate on file checks out at full price, gets no trial, and a trial
+        // extension applied to that has nothing to extend.
+        if ($this->couponTrialDays($coupon) > 0 && ! $this->trialApplies($this->plan_code, $this->interval)) {
+            $this->couponError = __('billing::checkout.coupon_requires_trial');
+
+            return;
+        }
+
         $this->applied_coupon = [
             'code' => (string) $coupon->code,
             'name' => (string) $coupon->name,
             'discount_net' => $this->calculateCouponDiscount($coupon),
+            'trial_days' => $this->couponTrialDays($coupon),
         ];
         $this->coupon_input = '';
     }
@@ -645,6 +1054,52 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         $this->applied_coupon = null;
         $this->couponError = null;
+    }
+
+    /**
+     * The hosted checkout URL of a first payment that is still awaiting the customer,
+     * or null when there is nothing to return to.
+     *
+     * A payment Mollie still reports as `open` (or `pending`, for a method that has
+     * left the browser) is this checkout, not a new one. Minting a second
+     * `sequenceType: first` payment for the same intent means two payments that can
+     * both be paid — the second one is caught by the activation gate, but only as a
+     * duplicate, after the money moved.
+     *
+     * Every failure mode falls through to null: a Mollie hiccup must not block a
+     * customer from checking out, and the activation gate is still behind us.
+     */
+    private function reusablePendingCheckoutUrl(mixed $billable): ?string
+    {
+        $paymentId = $billable->getPendingFirstPaymentId();
+
+        if ($paymentId === null || $paymentId === '') {
+            return null;
+        }
+
+        try {
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
+        } catch (\Throwable $e) {
+            Log::warning('Checkout could not probe the pending first payment', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        if (! in_array((string) ($payment->status ?? ''), ['open', 'pending'], true)) {
+            return null;
+        }
+
+        $url = method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null;
+
+        // A `pending` payment has already left the hosted page (SEPA, vouchers), so it
+        // carries no checkout link — there is nothing to send the customer back to, but
+        // there is also nothing to charge them for twice. Send them to the return page,
+        // which is what polls this payment to completion.
+        return $url ?: BillingRoute::url('return', $billable);
     }
 
     /**
@@ -685,15 +1140,50 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return 'failed';
         }
 
+        // Same customer-level check as applyCoupon(): switching to a plan whose trial
+        // this billable can no longer get must drop the extension, not carry it to a
+        // submit where it would be applied to a paid period.
+        if ($this->couponTrialDays($coupon) > 0 && ! $this->trialApplies($this->plan_code, $this->interval)) {
+            $this->applied_coupon = null;
+
+            return 'requires_trial';
+        }
+
         $this->applied_coupon['discount_net'] = $this->calculateCouponDiscount($coupon);
+        $this->applied_coupon['trial_days'] = $this->couponTrialDays($coupon);
 
         return null;
+    }
+
+    /**
+     * What a TrialExtension coupon buys. It carries no money discount, so without
+     * this the summary would advertise it as "−0.00" — a coupon that reads as worth
+     * nothing while it is in fact worth days.
+     */
+    private function couponTrialDays(Coupon $coupon): int
+    {
+        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension
+            ? max(0, (int) ($coupon->trial_extension_days ?? 0))
+            : 0;
     }
 
     private function calculateCouponDiscount(Coupon $coupon): int
     {
         if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant) {
             return $this->calculateAccessGrantDiscount($coupon);
+        }
+
+        // Only the two types that actually move money. A TrialExtension or PeriodExtension
+        // coupon can still carry a `discount_value` — the admin form keeps the property
+        // when the operator switches the type selector after typing one — and
+        // `computeRecurringDiscount()` reads it regardless. The checkout then showed a
+        // discount no webhook path honours: the customer was quoted a reduced total and
+        // charged the full one.
+        if (! in_array($coupon->type, [
+            \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+            \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+        ], true)) {
+            return 0;
         }
 
         return MollieBilling::coupons()->computeRecurringDiscount($coupon, $this->subtotalNet());
@@ -742,8 +1232,10 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
+            'requires_trial' => __('billing::checkout.coupon_requires_trial'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
             'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
             'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
@@ -768,6 +1260,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $offset = $this->customStepCount();
         $pkg = $this->packageStep();
 
+        // Nothing from the previous attempt survives the move.
+        //
+        // `validate()` only clears the keys it is about to check, and a custom step that
+        // reports its own problem with `addError()` uses a key no later `validate()` touches —
+        // so the message stayed on screen after the user had fixed the thing it complained
+        // about. An email-confirmation step is the plain case: "please confirm your address"
+        // sat under a field that already said "confirmed".
+        $this->resetErrorBag();
+        $this->resetValidation();
+
         // Validate the current step
         if ($this->step <= $offset) {
             $this->validateCustomStep($this->step);
@@ -789,6 +1291,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         }
 
         $this->step++;
+        $this->enterCustomStep($this->step);
 
         // After advancing into the confirm step, re-validate any applied coupon
         // against the form state the user is about to submit. If it no longer
@@ -813,6 +1316,11 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $offset = $this->customStepCount();
         $pkg = $this->packageStep();
 
+        // Same reset as next(): a message about the step being left must not greet the user on
+        // the step they are returning to.
+        $this->resetErrorBag();
+        $this->resetValidation();
+
         // Skip addons step backwards
         if ($pkg === 4 && ! $this->hasAddonsOrSeatsStep()) {
             $this->step = $offset + 2;
@@ -825,11 +1333,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // on the plan step (there is nothing earlier to navigate to).
         if ($this->billing_locked && $pkg === 2) {
             $this->step = $offset > 0 ? $offset : $this->step;
+            $this->enterCustomStep($this->step);
 
             return;
         }
 
         $this->step = max(1, $this->step - 1);
+        $this->enterCustomStep($this->step);
     }
 
     private function validateCustomStep(int $step): void
@@ -838,6 +1348,32 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
         if ($customStep !== null && isset($customStep['validate'])) {
             ($customStep['validate'])($this);
+        }
+    }
+
+    /**
+     * Tell a custom step it is being entered — forwards or backwards.
+     *
+     * The step contract had `validate` and nothing else, so a step whose state can go stale
+     * while the user is elsewhere had no way to notice. The case that surfaced it: an
+     * email-confirmation step whose confirmation no longer holds once the user navigates back,
+     * with no way to request a new code because nothing told the step it was live again. A
+     * page reload was the only way forward.
+     *
+     * Called on every arrival, including a re-entry into the step just left, so an `enter`
+     * callback has to be safe to run repeatedly. It runs after `$this->step` has moved, so the
+     * callback sees the step it is being asked about as the current one.
+     */
+    private function enterCustomStep(int $step): void
+    {
+        if ($step > $this->customStepCount()) {
+            return;
+        }
+
+        $customStep = $this->customSteps()[$step - 1] ?? null;
+
+        if ($customStep !== null && isset($customStep['enter'])) {
+            ($customStep['enter'])($this);
         }
     }
 
@@ -882,11 +1418,25 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'plan_code' => ['required', 'string', 'in:' . implode(',', array_keys($plans))],
             'interval' => ['required', 'in:monthly,yearly'],
         ]);
+
+        // `in:monthly,yearly` says the value is a known interval, not that this
+        // plan is sold in it. A plan may offer only one — and an interval it does
+        // not offer has no price, which every pricing path below reads as free.
+        // Unchecked, picking "Yearly" on a monthly-only paid plan activated that
+        // paid plan for 0 €.
+        if (! app(SubscriptionCatalogInterface::class)->planOffersInterval($this->plan_code, $this->interval)) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'interval' => __('billing::checkout.interval_not_offered'),
+            ]);
+        }
     }
 
     private function validateStep3(): void
     {
         $plan = $this->selectedPlan();
+        // Already interval-filtered by plans(), so the `in:` rule refuses an addon the
+        // selected interval does not sell — with a field-level message instead of the
+        // generic payment error the service's exception used to surface as.
         $allowed = (array) ($plan['allowed_addons'] ?? []);
 
         $this->validate([
@@ -894,6 +1444,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'addon_codes.*' => ['string', 'in:' . ($allowed === [] ? 'none' : implode(',', $allowed))],
             'extra_seats' => ['integer', 'min:0', 'max:100'],
         ]);
+
+        // A plan whose interval sells no extra seats must not be given any. The catalog
+        // prices them at 0 there, so an unchecked value was capacity handed out for free —
+        // and the seat step is not even rendered for such a plan, so the only way to hold a
+        // non-zero value is a crafted payload or a selection changed after the fact.
+        if ($this->extra_seats > 0
+            && ($plan['intervals'][$this->interval]['seat_price_net'] ?? null) === null
+        ) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'extra_seats' => __('billing::checkout.seats_not_available'),
+            ]);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -918,6 +1480,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
         $this->billableId = (string) $billable->getKey();
         $this->billableClass = $billable->getMorphClass();
+        $this->billableCreatedHere = true;
 
         event(new CheckoutStarted($billable));
     }
@@ -943,9 +1506,28 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return null;
         }
 
-        $model = app($this->billableClass);
+        // `billableClass` holds a morph class, which is the morph-map alias when the
+        // app registered one — resolve that back to the model class first. The
+        // is_a() gate keeps the lookup inside Billable models even if the property
+        // is ever reached by something other than createBillable()/mount().
+        $class = Relation::getMorphedModel($this->billableClass) ?? $this->billableClass;
 
-        return $model->find($this->billableId);
+        if (! is_string($class) || ! is_a($class, Model::class, true) || ! is_a($class, Billable::class, true)) {
+            return null;
+        }
+
+        /** @var \Illuminate\Database\Eloquent\Model $model */
+        $model = app($class);
+
+        $found = $model->newQuery()->find($this->billableId);
+
+        return $found instanceof Billable ? $found : null;
+    }
+
+    /** Whether a persisted, VIES-confirmed validation exists for the billable's current VAT number. */
+    private function billableUsesReverseCharge(Billable $billable): bool
+    {
+        return method_exists($billable, 'usesReverseCharge') && $billable->usesReverseCharge();
     }
 
     // -------------------------------------------------------------------------
@@ -956,14 +1538,50 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         $this->errorMessage = null;
 
+        // Authorize FIRST — before validation, before anything mutates, and outside
+        // the try below so the 403 is not swallowed by its catchall. Livewire actions
+        // bypass the checkout route's middleware, and from here on we overwrite the
+        // billable's billing address, write a VIES audit row for it and open a Mollie
+        // payment on its customer. Anonymous signup is the one exemption: a billable
+        // this very component instance created has no owner to authorize against yet.
+        //
+        // Ahead of validation on purpose. With the field pre-fill now gated on
+        // authorization, an unauthorized requester's form is empty, so validation
+        // would refuse first and answer with field errors — telling someone who may
+        // not be here which fields a stranger's checkout wants. The answer must be
+        // 403 regardless of form state.
+        if (! $this->billableCreatedHere) {
+            $existing = $this->resolveBillable();
+
+            if ($existing !== null) {
+                abort_unless(MollieBilling::authorizes(request(), $existing), 403);
+            }
+        }
+
         // Validation runs BEFORE setting processing=true. ValidationException is
         // re-thrown so Livewire can render field errors; processing stays false
         // so the submit button doesn't lock up on a recoverable input error.
+        // Every custom step, not just the ones the customer walked through.
+        //
+        // `$step` is a plain public property: a crafted Livewire payload can set it past
+        // the custom steps and submit, and `next()` — which is where their validators
+        // normally run — is never called. An app's step is exactly where the README tells
+        // it to enforce things `createBillableUsing()` then trusts (a confirmed email, an
+        // accepted agreement), so skipping them is not a UI nicety.
+        foreach (array_keys($this->customSteps()) as $index) {
+            $this->validateCustomStep($index + 1);
+        }
+
         $this->validateStep1();
         $this->validateStep2();
-        if ($this->hasAddonsOrSeatsStep()) {
-            $this->validateStep3();
-        }
+        // Unconditional. Gating this on `hasAddonsOrSeatsStep()` meant that for a plan
+        // with no allowed addons and no seat price — where the step is not rendered at
+        // all — `addon_codes` and `extra_seats` reached the order completely unchecked.
+        // A crafted Livewire payload could therefore buy 500 free seats and switch on an
+        // addon reserved for another tier, whose features `FeatureAccess` then granted.
+        // With an empty allow-list the `in:none` rule refuses every code, so this is also
+        // the right check for exactly that plan.
+        $this->validateStep3();
 
         $this->processing = true;
 
@@ -1047,7 +1665,38 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 return null;
             }
 
+            // Serialised per billable. `$processing` is component state, so two
+            // `/livewire/update` POSTs each replaying their own snapshot never see the
+            // other's flag: both reached this call and both created a
+            // `sequenceType: first` payment. `recordPendingFirstPayment()` keeps only
+            // the last id, so the return page then polled the payment the customer did
+            // *not* pay, and the second one settling later was only caught by the
+            // activation gate — as a duplicate, after the money moved.
+            //
+            // Non-blocking on purpose: the loser must not sit on a worker until the
+            // winner has finished talking to Mollie. It re-enters through the
+            // still-open-payment branch below on the next attempt.
+            $submitLock = Cache::lock('billing:checkout-submit:'.$billable->getKey(), 60);
+
+            if (! $submitLock->get()) {
+                $this->errorMessage = __('billing::checkout.error_already_in_progress');
+
+                return null;
+            }
+
             try {
+                // A first payment still open at Mollie is the same checkout, not a new
+                // one. Sending the customer back to it keeps one payment per intent
+                // even when the two submits are seconds apart and the lock has already
+                // been released — a second `sequenceType: first` payment on the same
+                // mandate-to-be is exactly what the activation gate has to clean up
+                // afterwards, and it charges the customer twice if both are paid.
+                $reusable = $this->reusablePendingCheckoutUrl($billable);
+
+                if ($reusable !== null) {
+                    return $this->redirect($reusable, navigate: false);
+                }
+
                 $result = $checkout->handle($billable, [
                     'plan_code' => $this->plan_code,
                     'interval' => $this->interval,
@@ -1056,6 +1705,24 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     'coupon_code' => $this->applied_coupon['code'] ?? null,
                     'amount_gross' => $this->totals($vat)['gross'],
                 ]);
+
+                // Inside the lock: the marker is what the reuse branch above reads, so
+                // it has to be visible before another submit can win.
+                if (! empty($result['payment_id'])) {
+                    $billable->recordPendingFirstPayment((string) $result['payment_id']);
+                }
+
+                // Stamp the subject into this browser's session so the return page can
+                // recognise it. An anonymous signup has no owner yet, so `authorizes()`
+                // — which fails closed — answers false for the very customer who just
+                // paid, and the return page polled itself into a 90-second timeout with a
+                // Logout button. The session is bound to this browser, which is exactly
+                // the claim the return page needs and the one thing a `?org=` query
+                // parameter cannot forge.
+                session([StartSubscriptionCheckout::CHECKOUT_SUBJECT_SESSION_KEY => [
+                    'class' => $billable->getMorphClass(),
+                    'id' => (string) $billable->getKey(),
+                ]]);
             } catch (\Throwable $e) {
                 report($e);
                 try {
@@ -1066,10 +1733,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 $this->errorMessage = __('billing::checkout.error_payment_creation');
 
                 return null;
-            }
-
-            if (! empty($result['payment_id'])) {
-                $billable->recordPendingFirstPayment((string) $result['payment_id']);
+            } finally {
+                $submitLock->release();
             }
 
             if (! empty($result['checkout_url'])) {

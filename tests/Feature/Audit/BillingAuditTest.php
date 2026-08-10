@@ -15,6 +15,14 @@ use GraystackIT\MollieBilling\Support\BillingAuditEntry;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\Schema;
 
+class AuditTestOperator extends \Illuminate\Foundation\Auth\User implements \GraystackIT\MollieBilling\Contracts\AuthorizesBillingAdmin
+{
+    public function canAccessBillingAdmin(): bool
+    {
+        return true;
+    }
+}
+
 function auditBillable(): TestBillable
 {
     /** @var TestBillable $b */
@@ -270,4 +278,55 @@ it('renders invoice events with the serial number', function (): void {
     expect($entry->title())->toContain('INV-2026-0007')
         ->and($entry->meta()['amount_cents'])->toBe(1200)
         ->and($entry->category())->toBe(AuditCategory::Invoice);
+});
+
+it('records an operator action from the admin panel as an admin action', function (): void {
+    // The actor used to be decided from the current route name alone, and an admin panel
+    // built on Livewire only ever loads its route once: every button after that is a POST
+    // to `/livewire/update`, which is not an admin route. So every mutation an operator
+    // made — cancelling a subscription, granting access, changing a plan — was filed
+    // against them as if the *customer* had done it. An audit trail that misattributes who
+    // acted is worse than none, because it is believed.
+    //
+    // AuthorizeBillingAdmin is in Livewire's persistent middleware list (see
+    // MollieBillingServiceProvider), so it runs on those requests too and is the one place
+    // that reliably knows. Driven here the way Livewire drives it: the middleware first,
+    // then work happening while the route is the Livewire update route.
+    $billable = auditBillable();
+
+    $operator = new AuditTestOperator;
+    $operator->id = 1;
+    $this->actingAs($operator);
+
+    $request = \Illuminate\Http\Request::create('/billing/admin');
+    $request->setUserResolver(fn () => $operator);
+    app()->instance('request', $request);
+
+    (new \GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin)
+        ->handle($request, fn () => new \Illuminate\Http\Response);
+
+    // From here on the request is the Livewire update route — no admin route name in sight.
+    $request->setRouteResolver(fn () => (new \Illuminate\Routing\Route('POST', 'livewire/update', []))->name('livewire.update'));
+
+    event(new PlanChanged($billable, 'starter', 'pro', 'monthly'));
+
+    expect(auditRows()->last()->properties['actor'])->toBe('admin');
+});
+
+it('leaves an ordinary customer action attributed to the customer', function (): void {
+    // The other half of the pair: the marker is only ever set by the admin middleware, so
+    // a portal request must still read as a customer action.
+    $billable = auditBillable();
+
+    $operator = new AuditTestOperator;
+    $operator->id = 2;
+    $this->actingAs($operator);
+
+    $request = \Illuminate\Http\Request::create('/billing/plan');
+    $request->setRouteResolver(fn () => (new \Illuminate\Routing\Route('POST', 'livewire/update', []))->name('livewire.update'));
+    app()->instance('request', $request);
+
+    event(new PlanChanged($billable, 'starter', 'pro', 'monthly'));
+
+    expect(auditRows()->last()->properties['actor'])->toBe('customer');
 });

@@ -45,28 +45,30 @@ it('SubscriptionUpdateRequest::from accepts coupon_codes (array) and falls back 
     expect($empty->couponCodes)->toBe([]);
 });
 
-it('redeems multiple stackable coupons in one update and writes one redemption per code', function (): void {
-    // Recurring coupons (single_payment is no longer accepted on plan change /
-    // seat sync / addon enable). Stacking semantics are coupon-type-agnostic.
+it('refuses a second recurring coupon in one update, because there is one marker to hold it', function (): void {
+    // This used to pass, counting one redemption row per code — and that was the bug.
+    // `active_recurring_coupon` is a single slot, so the second redeem overwrote the
+    // first: the preview and the prorata charge honoured both discounts, then every
+    // renewal honoured only the last one while BOTH per-billable slots had been
+    // consumed. The stacking rules cannot catch it (they run before any redeem, so the
+    // marker the recurring_conflict check reads does not exist yet), and a marker list
+    // would mean threading remaining-net through the patcher and every renewal.
+    //
+    // Stacking itself is unchanged and still exercised where it works: one-time orders
+    // (ZeroTotalOrderRoundingTest) thread the remaining net across several
+    // single-payment codes correctly.
     $service = app(CouponService::class);
-    $a = $service->create([
-        'code' => 'STACK10',
-        'name' => 'Stackable 10%',
-        'type' => CouponType::Recurring,
-        'discount_type' => DiscountType::Percentage,
-        'discount_value' => 10,
-        'stackable' => true,
-        'max_redemptions_per_billable' => 3,
-    ]);
-    $b = $service->create([
-        'code' => 'STACK5',
-        'name' => 'Stackable 5%',
-        'type' => CouponType::Recurring,
-        'discount_type' => DiscountType::Percentage,
-        'discount_value' => 5,
-        'stackable' => true,
-        'max_redemptions_per_billable' => 3,
-    ]);
+    foreach (['STACK10' => 10, 'STACK5' => 5] as $code => $value) {
+        $service->create([
+            'code' => $code,
+            'name' => $code,
+            'type' => CouponType::Recurring,
+            'discount_type' => DiscountType::Percentage,
+            'discount_value' => $value,
+            'stackable' => true,
+            'max_redemptions_per_billable' => 3,
+        ]);
+    }
 
     /** @var TestBillable $billable */
     $billable = TestBillable::create(['name' => 'Stack', 'email' => 'stack@x.test']);
@@ -78,14 +80,46 @@ it('redeems multiple stackable coupons in one update and writes one redemption p
         'subscription_period_starts_at' => BillingTime::nowUtc(),
     ])->save();
 
-    app(UpdateSubscription::class)->update($billable->fresh(), [
+    expect(fn () => app(UpdateSubscription::class)->update($billable->fresh(), [
         'plan_code' => 'pro',
         'interval' => 'monthly',
         'coupon_codes' => ['STACK10', 'STACK5'],
+    ]))->toThrow(\GraystackIT\MollieBilling\Exceptions\InvalidCouponException::class);
+
+    // Nothing half-applied: refused before any redeem.
+    expect(CouponRedemption::query()->count())->toBe(0)
+        ->and($billable->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
+});
+
+it('redeems a single recurring coupon in an update and writes its redemption', function (): void {
+    $service = app(CouponService::class);
+    $a = $service->create([
+        'code' => 'STACK10',
+        'name' => 'Stackable 10%',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 10,
+        'stackable' => true,
+        'max_redemptions_per_billable' => 3,
+    ]);
+
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Stack', 'email' => 'stack2@x.test']);
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Local,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc(),
+    ])->save();
+
+    app(UpdateSubscription::class)->update($billable->fresh(), [
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'coupon_codes' => ['STACK10'],
     ]);
 
     expect(CouponRedemption::query()->where('coupon_id', $a->id)->count())->toBe(1);
-    expect(CouponRedemption::query()->where('coupon_id', $b->id)->count())->toBe(1);
 });
 
 it('rejects a non-stackable coupon when another coupon is already in the apply set', function (): void {

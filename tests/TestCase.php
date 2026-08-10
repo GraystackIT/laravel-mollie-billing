@@ -8,9 +8,9 @@ use Bavix\Wallet\WalletServiceProvider;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\MollieBillingServiceProvider;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\MollieCall;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Route;
 use Mpociot\VatCalculator\VatCalculatorServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 
@@ -48,6 +48,19 @@ abstract class TestCase extends Orchestra
         $this->loadMigrationsFrom(__DIR__.'/database/migrations');
     }
 
+    /**
+     * `RefreshDatabase` wraps every case in a transaction of its own, so "nothing held"
+     * is that depth, not 0. Pinning it here is what lets {@see MollieCall} enforce the
+     * no-Mollie-inside-a-transaction rule during the whole suite instead of only where a
+     * test happens to assert `DB::transactionLevel()`.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        MollieCall::useCurrentTransactionLevelAsBaseline();
+    }
+
     protected function defineRoutes($router): void
     {
         MollieBilling::dashboardRoutes();
@@ -58,8 +71,11 @@ abstract class TestCase extends Orchestra
 
     protected function tearDown(): void
     {
+        MollieCall::resetBaselineTransactionLevel();
         BillingRoute::flush();
         MollieBilling::flushNotificationMap();
+        MollieBilling::flushCallbacks();
+        MollieBilling::resetFake();
         parent::tearDown();
     }
 }

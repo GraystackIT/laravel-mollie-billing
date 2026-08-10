@@ -14,7 +14,6 @@ use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\MandateUpdated;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\SubscriptionActivationFailed;
-use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Events\TrialStarted;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
@@ -25,10 +24,56 @@ use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class MandateOnlyPaymentHandler
 {
+    /**
+     * Subscription states a mandate-only activation may run from. `New` is the
+     * regular first checkout; PastDue, Expired and a Cancelled subscription
+     * whose grace period has run out are recovery checkouts — StartSubscriptionCheckout
+     * admits all of them (it gates only on `! hasAccessibleBillingSubscription()`)
+     * and routes 100%-coupon and trial checkouts through this handler, and
+     * FirstPaymentHandler allows the same set. Anything still accessible was
+     * already caught by openGate()'s duplicate branch and never reaches the activation.
+     */
+    protected const ACTIVATABLE_STATES = [
+        SubscriptionStatus::New,
+        SubscriptionStatus::PastDue,
+        SubscriptionStatus::Expired,
+        SubscriptionStatus::Cancelled,
+    ];
+
+    /**
+     * Whether this billable may be activated by the payment we are holding.
+     *
+     * The enum list above is not the whole answer, and the docblock's claim that
+     * "anything still accessible was already caught by openGate()" is what hid the gap:
+     * `Active` with a past `subscription_ends_at` is *not* accessible — that is precisely
+     * the state an AccessGrant coupon and `ActivateLocalSubscription($durationDays)`
+     * leave behind once the grant lapses. The gate let it through, this list did not, and
+     * both activation bodies logged and returned.
+     *
+     * What that cost: the customer was routed into a trial checkout (StartSubscription-
+     * Checkout admits them, they have no mandate yet), the €0 mandate payment settled,
+     * the mandate was saved — and nothing else happened. No subscription, no invoice, no
+     * runAfterCheckout, and the return page span to a timeout. Worse, their second
+     * attempt now *had* a mandate, so the trial branch was skipped and they were charged
+     * full price for the trial they were offered.
+     *
+     * So the predicate is the gate's own question, with the enum list kept as the
+     * explicit statement of intent for the states that carry no `ends_at`.
+     */
+    protected function mayActivate(Billable $billable): bool
+    {
+        if (in_array($billable->getBillingSubscriptionStatus(), self::ACTIVATABLE_STATES, true)) {
+            return true;
+        }
+
+        return ! $billable->hasAccessibleBillingSubscription();
+    }
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly SubscriptionCatalogInterface $catalog,
@@ -99,29 +144,95 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        if ((string) ($metadata['pending_subscription_plan_code'] ?? '') === '') {
+            return;
+        }
+
+        $paymentId = (string) ($payment->id ?? '');
+
+        // Same two-phase split as FirstPaymentHandler, for the same reason: the gate
+        // is short and transactional (row lock, guards, durable claim), the activation
+        // runs outside it. With the Mollie CreateSubscription call inside the
+        // transaction, anything throwing after it — an app listener, the
+        // after-checkout hook — rolled back the trial state and
+        // `mollie_subscription_id` while the subscription existed at Mollie, and the
+        // re-delivery created a second one.
+        $gate = $this->openGate($payment, $billable, $paymentId);
+
+        if ($gate === ActivationGate::AlreadyBooked) {
+            // See FirstPaymentHandler: an invoice without a finished activation is a
+            // crash between the two, not a completed run — and silence there left a
+            // paying customer with no subscription and nobody informed.
+            if (! $this->support->activationCompleted($billable)) {
+                $this->support->reportIncompleteActivation($billable, $payment, 'mandate_only');
+            } else {
+                Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
+                    'payment_id' => $paymentId,
+                    'billable_id' => $billable->getKey(),
+                ]);
+            }
+
+            return;
+        }
+
+        if ($gate === ActivationGate::Duplicate) {
+            Log::warning('Mandate-only subscription activation skipped — billable already has an active subscription', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'current_status' => $billable->getBillingSubscriptionStatus()->value,
+            ]);
+            DuplicatePaymentReceived::dispatch($billable, $paymentId);
+
+            return;
+        }
+
+        try {
+            $this->activateAfterMandate($payment, $billable, $metadata);
+        } finally {
+            $this->support->releaseActivationClaim($billable, $paymentId);
+        }
+    }
+
+    /**
+     * Decide under the row lock whether this delivery may activate, and claim it.
+     *
+     * The invoice guard is kept even though the trial branch writes no invoice: a
+     * 100%-coupon activation does write one (the local zero-amount audit document),
+     * and for the trial branch it simply never matches — the accessible Trial
+     * subscription is what stops a re-run there, reported as the duplicate outcome.
+     */
+    protected function openGate(object $payment, Billable $billable, string $paymentId): ActivationGate
+    {
+        /** @var Model&Billable $billable */
+        return DB::transaction(function () use ($payment, $billable, $paymentId): ActivationGate {
+            $this->support->lockBillableRow($billable);
+
+            if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
+                return ActivationGate::AlreadyBooked;
+            }
+
+            if ($billable->hasAccessibleBillingSubscription()) {
+                return ActivationGate::Duplicate;
+            }
+
+            $this->support->claimActivation($billable, $paymentId);
+
+            return ActivationGate::Proceed;
+        });
+    }
+
+    /**
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function activateAfterMandate(object $payment, Billable $billable, array $metadata): void
+    {
+        /** @var Model&Billable $billable */
         $planCode = (string) ($metadata['pending_subscription_plan_code'] ?? '');
         $interval = (string) ($metadata['pending_subscription_interval'] ?? 'monthly');
         $addonCodes = (array) ($metadata['pending_subscription_addon_codes'] ?? []);
         $extraSeats = (int) ($metadata['pending_subscription_extra_seats'] ?? 0);
         $couponCode = (string) ($metadata['pending_subscription_coupon_code'] ?? '');
         $trialDays = (int) ($metadata['pending_subscription_trial_days'] ?? 0);
-
-        if ($planCode === '') {
-            return;
-        }
-
-        $billable->refresh();
-
-        if ($billable->hasAccessibleBillingSubscription()) {
-            Log::warning('Mandate-only subscription activation skipped — billable already has an active subscription', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-                'current_status' => $billable->getBillingSubscriptionStatus()->value,
-            ]);
-            DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? ''));
-
-            return;
-        }
 
         $billable->forceFill([
             'tax_country_payment' => strtoupper((string) ($payment->countryCode ?? $billable->tax_country_payment ?? '')),
@@ -162,12 +273,11 @@ class MandateOnlyPaymentHandler
     ): void {
         /** @var Model&Billable $billable */
 
-        if ($billable->getBillingSubscriptionStatus() !== SubscriptionStatus::New) {
-            Log::info('Mandate-only coupon activation skipped — billable already past initial state', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-                'current_status' => $billable->getBillingSubscriptionStatus()->value,
-            ]);
+        if (! $this->mayActivate($billable)) {
+            // A mandate has already been captured at this point, so a skip here is not a
+            // no-op — it is a customer who paid (or accepted a €0 authorisation) and got
+            // nothing. Reported, not just logged.
+            $this->support->reportSkippedActivation($billable, $payment, 'coupon');
 
             return;
         }
@@ -192,6 +302,23 @@ class MandateOnlyPaymentHandler
                 'discount_net' => $pricedCoupon['discount_net'] ?? null,
                 'order_amount_net' => $pricedCoupon['order_amount_net'] ?? null,
             ]);
+
+            // Reported, for the same reason the status skip above is: the mandate has been
+            // captured, so this is a customer who completed a €0 checkout and got nothing.
+            // The coupon can lose its cover between checkout and webhook — its redemption
+            // cap fills up, an operator deactivates it, `valid_until` passes — and a log
+            // line is not something anybody is watching when that happens.
+            $this->support->reportSkippedActivation(
+                $billable,
+                $payment,
+                'coupon',
+                sprintf(
+                    'Mandate captured but the subscription was not activated: coupon [%s] no longer covers the full price (%d of %d net)',
+                    $couponCode,
+                    (int) ($pricedCoupon['discount_net'] ?? 0),
+                    (int) ($pricedCoupon['order_amount_net'] ?? 0),
+                ),
+            );
 
             return;
         }
@@ -225,13 +352,36 @@ class MandateOnlyPaymentHandler
         try {
             $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
         } catch (\Throwable $e) {
-            Log::error('Mandate-only audit invoice creation failed', [
+            Log::error('Mandate-only audit invoice creation failed — re-delivery will retry', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $payment->id ?? null,
                 'error' => $e->getMessage(),
             ]);
 
-            return;
+            // Rethrown, not swallowed. Returning here let __invoke() record the outcome
+            // as processed and answer 200, so Mollie never re-delivered: a transient
+            // failure (deadlock, serial collision after its three retries) permanently
+            // ended a signup that had already captured a mandate — with no event, no
+            // admin notification and, unlike the prorata path, no cleanup job to catch
+            // it. The invoice guard plus the activation claim make the retry safe, which
+            // is exactly how FirstPaymentHandler handles the same failure.
+            throw $e;
+        }
+
+        // A Recurring coupon keeps discounting the renewals, so its discount must
+        // reach CreateSubscription — and the marker has to exist *before* that
+        // call: at 100% coverage Mollie cannot accept amount 0, so CreateSubscription
+        // sends the full price and instead defers startDate past the marker's
+        // valid_until. Without the marker it falls back to "one period from now"
+        // and charges the full price from the second period on. redeem() below
+        // re-writes the same marker; that is idempotent.
+        $recurringDiscountNet = (int) ($pricedCoupon['recurring_discount_net'] ?? 0);
+        if ($recurringDiscountNet > 0) {
+            $this->couponService->applyRecurringMarker(
+                $pricedCoupon['coupon'],
+                $billable,
+                (int) $pricedCoupon['order_amount_net'],
+            );
         }
 
         try {
@@ -240,7 +390,7 @@ class MandateOnlyPaymentHandler
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'recurring_discount_net' => 0,
+                'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
             ]);
         } catch (\Throwable $e) {
@@ -272,18 +422,14 @@ class MandateOnlyPaymentHandler
             'subscription_status' => SubscriptionStatus::Active,
         ])->save();
 
-        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $quantity) {
-            if ((int) $quantity > 0) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'subscription_activation');
-            }
-        }
-
-        event(new SubscriptionCreated($billable, $planCode, $interval));
-        event(new PaymentSucceeded($billable, $invoice));
-
-        $this->support->notifyInvoiceAvailable($billable, $invoice);
-
-        MollieBilling::runAfterCheckout($billable, true);
+        // Each step isolated — see WebhookSupport::completeActivation(). Once the invoice
+        // exists a throw here is terminal: the re-delivery answers AlreadyBooked and takes
+        // the quiet branch, so whatever was skipped would never run.
+        $this->support->completeActivation(
+            $billable,
+            $invoice,
+            $this->catalog->includedUsages($planCode, $interval),
+        );
     }
 
     /**
@@ -301,12 +447,8 @@ class MandateOnlyPaymentHandler
     ): void {
         /** @var Model&Billable $billable */
 
-        if ($billable->getBillingSubscriptionStatus() !== SubscriptionStatus::New) {
-            Log::info('Mandate-only trial activation skipped — billable already past initial state', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $payment->id ?? null,
-                'current_status' => $billable->getBillingSubscriptionStatus()->value,
-            ]);
+        if (! $this->mayActivate($billable)) {
+            $this->support->reportSkippedActivation($billable, $payment, 'trial');
 
             return;
         }
@@ -315,7 +457,8 @@ class MandateOnlyPaymentHandler
         if ($couponCode !== '') {
             try {
                 $pricedCoupon = $this->firstPaymentCouponPricing->price(
-                    $billable, $couponCode, $planCode, $interval, $addonCodes, $extraSeats
+                    $billable, $couponCode, $planCode, $interval, $addonCodes, $extraSeats,
+                    trialStarting: true,
                 );
             } catch (\Throwable $e) {
                 Log::warning('Trial activation: coupon pricing failed, proceeding without coupon', [
@@ -332,13 +475,33 @@ class MandateOnlyPaymentHandler
             'subscription_period_starts_at' => BillingTime::nowUtc(),
         ])->save();
 
+        // The marker BEFORE the Mollie call, and the discount passed into it: Mollie
+        // collects every charge after the trial on its own, so a subscription created
+        // at full price charges full price forever — while our marker keeps promising
+        // the discount and the renewal invoice reconciles down to what actually
+        // cleared. The customer would pay full price for a coupon the checkout
+        // accepted. The non-trial mandate-only path already orders it this way.
+        $recurringDiscountNet = 0;
+        if ($pricedCoupon !== null && $pricedCoupon['coupon']->type === CouponType::Recurring) {
+            $recurringDiscountNet = (int) ($pricedCoupon['recurring_discount_net'] ?? 0);
+
+            if ($recurringDiscountNet > 0) {
+                $this->couponService->applyRecurringMarker(
+                    $pricedCoupon['coupon'],
+                    $billable,
+                    (int) $pricedCoupon['order_amount_net'],
+                    $interval,
+                );
+            }
+        }
+
         try {
             $this->createSubscription->handle($billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
                 'extra_seats' => $extraSeats,
-                'recurring_discount_net' => 0,
+                'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
                 'trial_days' => $trialDays,
             ]);
@@ -360,6 +523,12 @@ class MandateOnlyPaymentHandler
                 $e->getMessage(),
             ));
 
+            // Admins too. CreateSubscription can throw AFTER the Mollie call but before
+            // its local save, which leaves a live Mollie subscription with no local
+            // record of it — the costliest state in the package, and the only signal was
+            // a log line and an event most apps do not listen to.
+            $this->support->reportIncompleteActivation($billable, $payment, 'trial_activation');
+
             return;
         }
 
@@ -370,27 +539,94 @@ class MandateOnlyPaymentHandler
 
         if ($pricedCoupon !== null) {
             $this->stashTrialCoupon($billable, $pricedCoupon, $planCode, $interval, $addonCodes, $extraSeats);
+            $this->countRecurringGrant($billable, $pricedCoupon, $planCode, $interval);
         }
 
+        // Prorated to the trial length, then handed to completeActivation() so one failing
+        // wallet cannot cost the customer the rest of their quota, the TrialStarted event
+        // the app provisions on, or the after-checkout hook.
         $intervalDays = $interval === 'yearly' ? 365 : 30;
+        $trialQuota = [];
+
         foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $included) {
             $included = (int) $included;
+
             if ($included <= 0) {
                 continue;
             }
-            $credit = (int) ceil($included * $trialDays / $intervalDays);
-            if ($credit > 0) {
-                $this->walletService->credit($billable, (string) $type, $credit, 'subscription_trial_start');
-            }
+
+            $trialQuota[(string) $type] = (int) ceil($included * $trialDays / $intervalDays);
         }
 
-        event(new SubscriptionCreated($billable, $planCode, $interval));
-        event(new TrialStarted($billable, $planCode, $trialDays));
-
-        MollieBilling::runAfterCheckout($billable, true);
+        $this->support->completeActivation(
+            $billable,
+            null,
+            $trialQuota,
+            fn () => event(new TrialStarted($billable, $planCode, $trialDays)),
+            'subscription_trial_start',
+        );
     }
 
     /**
+     * Count a Recurring coupon's grant on a trial signup.
+     *
+     * The trial path writes only the marker, and every charge afterwards goes through
+     * `redeemRecurringCouponForRenewal()` → `redeem(renewal: true)`, which by design
+     * skips the cap checks AND the counter. So no code path ever performed the
+     * grant-counting redeem for a trial signup: `redemptions_count` stayed 0 forever,
+     * `globally_exhausted` never tripped, and a 50-redemption campaign could be
+     * claimed by any number of trial signups. Per-billable limits still worked, since
+     * those count rows.
+     *
+     * Redeemed with a zero discount: the discount belongs to the charges, which book
+     * their own renewal redemptions. This row exists to occupy the campaign slot the
+     * customer has been promised, which is why it runs only after the Mollie
+     * subscription exists — a failed activation must not consume it.
+     *
+     * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
+     */
+    protected function countRecurringGrant(
+        Billable $billable,
+        array $pricedCoupon,
+        string $planCode,
+        string $interval,
+    ): void {
+        if ($pricedCoupon['coupon']->type !== CouponType::Recurring) {
+            return;
+        }
+
+        try {
+            $this->couponService->redeem($pricedCoupon['coupon'], $billable, [
+                'planCode' => $planCode,
+                'interval' => $interval,
+                'orderAmountNet' => (int) $pricedCoupon['order_amount_net'],
+                'discount_amount_net' => 0,
+                // The marker is already set — and set BEFORE CreateSubscription on
+                // purpose, so Mollie was created at the discounted amount. Re-writing it
+                // here would restart its lifetime from now, which is the same instant,
+                // but skipping is clearer about which write owns the marker.
+                'skip_marker' => true,
+            ]);
+        } catch (\Throwable $e) {
+            // The campaign filling up between price() and here is a legitimate race.
+            // The customer keeps the discount (Mollie is already created with it) and
+            // the marker keeps honouring it; only the audit row is missing.
+            Log::warning('Trial activation: recurring coupon grant could not be counted', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'coupon_code' => (string) $pricedCoupon['coupon']->code,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Apply whatever a trial signup's coupon does at activation time.
+     *
+     * `$addonCodes` / `$extraSeats` are no longer read here — the Recurring branch
+     * that needed them moved ahead of CreateSubscription. They stay in the signature
+     * because this method is a protected override seam; dropping them would break an
+     * app that overrides it.
+     *
      * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
      * @param  array<int, string>  $addonCodes
      */
@@ -405,13 +641,10 @@ class MandateOnlyPaymentHandler
         /** @var Model&Billable $billable */
         $coupon = $pricedCoupon['coupon'];
 
+        // Recurring is already handled before CreateSubscription — its marker has to
+        // exist before Mollie is told the amount. Re-applying it here would be
+        // harmless but redundant.
         if ($coupon->type === CouponType::Recurring) {
-            $totalSeats = $this->catalog->includedSeats($planCode) + max(0, $extraSeats);
-            $baseRecurringNet = SubscriptionAmount::net(
-                $this->catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes
-            );
-            $this->couponService->applyRecurringMarker($coupon, $billable, $baseRecurringNet);
-
             return;
         }
 
@@ -421,6 +654,33 @@ class MandateOnlyPaymentHandler
                 'code' => (string) $coupon->code,
             ];
             $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            return;
+        }
+
+        // A TrialExtension buys days, not money, so there is nothing to stash for a
+        // later charge — it takes effect now, on the trial this activation just
+        // started. Redeemed here rather than at signup's start because
+        // extendBillingTrialUntil() also PATCHes the Mollie subscription's next
+        // charge date, which requires that subscription to exist.
+        //
+        // Falling through both branches above was the whole bug: the checkout
+        // accepted the code, the customer saw it applied, and the trial ended on the
+        // plan's own day with no redemption recorded anywhere.
+        if ($coupon->type === CouponType::TrialExtension) {
+            try {
+                $this->couponService->redeem($coupon, $billable, [
+                    'planCode' => $planCode,
+                    'interval' => $interval,
+                    'orderAmountNet' => (int) $pricedCoupon['order_amount_net'],
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('Trial activation: TrialExtension coupon redemption failed', [
+                    'billable_id' => $billable->getKey(),
+                    'coupon_code' => (string) $coupon->code,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 }

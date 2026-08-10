@@ -8,23 +8,40 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
+use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Session;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class StartSubscriptionCheckout
 {
+    /**
+     * Session key naming the billable this browser checked out for.
+     *
+     * Written by the checkout component, read by the return page. An anonymous signup's
+     * billable has no owner yet, so `MollieBilling::authorizes()` — which fails closed —
+     * answers false for the customer who just paid; the return page needs some claim
+     * about who it is showing, and a session entry is bound to this browser in a way a
+     * `?organization=` query parameter is not. Mirrors ORDER_TOKEN_PARAM, which does the
+     * same job for one-time orders through the URL.
+     */
+    public const CHECKOUT_SUBJECT_SESSION_KEY = 'billing.checkout_subject';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly MollieCustomerResolver $customerResolver,
         private readonly StartMandateCheckout $mandateCheckout,
         private readonly ActivateLocalSubscription $activateLocal,
         private readonly CouponService $couponService,
+        private readonly \GraystackIT\MollieBilling\Services\Vat\VatCalculationService $vatService,
     ) {
     }
 
@@ -34,6 +51,7 @@ class StartSubscriptionCheckout
      *
      * @throws \RuntimeException if the billable already has an accessible subscription
      * @throws HiddenPlanNotSelectableException if the requested plan is hidden
+     * @throws IntervalNotOfferedException if the plan or an addon is not sold in the requested interval
      */
     public function handle(Billable $billable, array $request): array
     {
@@ -50,15 +68,51 @@ class StartSubscriptionCheckout
             throw new HiddenPlanNotSelectableException($billable, (string) $request['plan_code']);
         }
 
-        $couponCode = $request['coupon_code'] ?? null;
-        if ($couponCode === null || $couponCode === '') {
-            $auto = Session::get('billing.auto_apply_coupon');
-            if ($auto) {
-                $couponCode = (string) $auto;
+        // An interval the plan does not sell has no price, and "no price" reads as
+        // 0 all the way down — which the zero-amount branch below then treats as a
+        // free plan and activates locally. That handed out a paid plan, with every
+        // feature, for nothing. Checked here as well as in the UI because this is
+        // the seam an app calling the service directly also passes through.
+        if (! $this->catalog->planOffersInterval((string) $request['plan_code'], (string) $request['interval'])) {
+            throw new IntervalNotOfferedException(
+                (string) $request['plan_code'],
+                (string) $request['interval'],
+            );
+        }
+
+        foreach ((array) ($request['addon_codes'] ?? []) as $addonCode) {
+            if (! $this->catalog->addonOffersInterval((string) $addonCode, (string) $request['interval'])) {
+                throw new IntervalNotOfferedException((string) $addonCode, (string) $request['interval'], 'addon');
             }
         }
 
+        // Stated, not inferred. `handle()` is a documented entry point and its signature
+        // says this key is required — but reading it straight out of the array turned a
+        // caller's omission into `(int) null`, which is 0, and 0 on a *paid* plan falls
+        // through to the €0 mandate-only branch below: a mandate is captured, the
+        // subscription is activated, and the first period is never charged. A price that
+        // was never supplied is not a price of zero.
+        if (! array_key_exists('amount_gross', $request) || ! is_numeric($request['amount_gross'])) {
+            throw new \InvalidArgumentException(
+                'StartSubscriptionCheckout::handle() requires an `amount_gross` (in minor units) — '
+                .'it is what Mollie collects. Compute it from the catalog, including seats, addons, '
+                .'the coupon and VAT, the way the checkout component does.'
+            );
+        }
+
         $amountGross = (int) $request['amount_gross'];
+
+        $couponCode = $request['coupon_code'] ?? null;
+        $couponFromSession = false;
+
+        if ($couponCode === null || $couponCode === '') {
+            $auto = Session::get('billing.auto_apply_coupon');
+
+            if ($auto) {
+                $couponCode = (string) $auto;
+                $couponFromSession = true;
+            }
+        }
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
         // AccessGrant coupons activate a Local subscription directly via the
@@ -82,7 +136,10 @@ class StartSubscriptionCheckout
                     'interval' => $request['interval'],
                     'addonCodes' => $request['addon_codes'] ?? [],
                     'extraSeats' => (int) ($request['extra_seats'] ?? 0),
-                    'orderAmountNet' => $amountGross,
+                    // Net, not the gross the caller handed us: validate() compares this
+                    // against `minimum_order_amount_net`, so a VAT-inflated gross would
+                    // admit every order within the VAT rate below the configured floor.
+                    'orderAmountNet' => $this->orderAmountNet($billable, $request),
                     'allowed_types' => [CouponType::AccessGrant],
                 ]);
 
@@ -152,13 +209,38 @@ class StartSubscriptionCheckout
             );
         }
 
+        // Everything above either charges nothing now (trial, mandate-only) or is a
+        // grant. From here real money is collected, and this is where a session coupon
+        // has to prove itself: a promotion link puts the code in the session, and it was
+        // spliced into the payment metadata regardless — while `amount_gross` came from a
+        // form that knew nothing about it. So the customer paid FULL price, the webhook
+        // then priced the coupon, booked a discount line that reconcileWithPaidAmount
+        // immediately cancelled out (firing PaymentAmountMismatch on a perfectly good
+        // payment), and redeem() burned their one per-billable slot plus the campaign
+        // counter for a discount they never received. Paying full price and losing the
+        // coupon is strictly worse than not having applied it, so on a mismatch the code
+        // is dropped and the customer can still enter it by hand.
+        if ($couponFromSession
+            && $couponCode !== null
+            && ! $this->amountReflectsCoupon($billable, $request, $couponCode, $amountGross)
+        ) {
+            Log::info('Auto-apply coupon dropped — the submitted amount was not priced with it', [
+                'billable_id' => $billable->getKey(),
+                'coupon_code' => $couponCode,
+                'amount_gross' => $amountGross,
+            ]);
+
+            $couponCode = null;
+        }
+
         $customerId = $this->customerResolver->resolve($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
-        $payment = Mollie::send(new CreatePaymentRequest(
+        $payment = MollieCall::send(new CreatePaymentRequest(
             description: "Subscription {$request['plan_code']}",
-            amount: new Money($currency, number_format($amountGross / 100, 2, '.', '')),
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            locale: MollieBilling::mollieLocale(),
             cancelUrl: route(BillingRoute::checkout(), $urlParams),
             webhookUrl: route(BillingRoute::webhook()),
             metadata: [
@@ -179,5 +261,74 @@ class StartSubscriptionCheckout
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
             'payment_id' => $payment->id,
         ];
+    }
+
+    /**
+     * The requested subscription's recurring net (plan + seats + addons), which is the
+     * basis every `orderAmountNet` consumer in CouponService expects.
+     *
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int}  $request
+     */
+    private function orderAmountNet(Billable $billable, array $request): int
+    {
+        $planCode = (string) $request['plan_code'];
+        $interval = (string) $request['interval'];
+        $totalSeats = $this->catalog->includedSeats($planCode) + max(0, (int) ($request['extra_seats'] ?? 0));
+
+        return SubscriptionAmount::net(
+            $this->catalog,
+            $billable,
+            $planCode,
+            $interval,
+            $totalSeats,
+            $request['addon_codes'] ?? [],
+        );
+    }
+
+    /**
+     * Whether `amount_gross` looks like it was priced WITH this coupon.
+     *
+     * Compared in net space, against a 1-cent tolerance: the caller may round its VAT
+     * per line while this compares totals, and the question is only "discounted or
+     * not", where the two candidates are a whole discount apart.
+     *
+     * Coupon types that carry no monetary discount (TrialExtension, AccessGrant,
+     * Credits, PeriodExtension) are admitted unconditionally — there is nothing for
+     * the amount to reflect, and AccessGrant is handled before this point anyway.
+     *
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int}  $request
+     */
+    private function amountReflectsCoupon(Billable $billable, array $request, string $couponCode, int $amountGross): bool
+    {
+        $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()
+            ->whereRaw('UPPER(code) = ?', [strtoupper($couponCode)])
+            ->first();
+
+        if ($coupon === null) {
+            return false;
+        }
+
+        if (! in_array($coupon->type, [CouponType::SinglePayment, CouponType::Recurring], true)) {
+            return true;
+        }
+
+        $net = $this->orderAmountNet($billable, $request);
+        $discount = $this->couponService->computeRecurringDiscount($coupon, $net);
+
+        if ($discount <= 0) {
+            return true;
+        }
+
+        $country = (string) ($billable->getBillingCountry() ?? config('mollie-billing.checkout_country_fallback', 'DE'));
+
+        try {
+            $vat = $this->vatService->calculate($country, max(0, $net - $discount), $billable);
+        } catch (\Throwable) {
+            // VAT unavailable: fall back to a net-space comparison rather than
+            // guessing, and let the amount decide.
+            return $amountGross <= max(0, $net - $discount) + 1;
+        }
+
+        return abs($amountGross - (int) $vat['gross']) <= 1;
     }
 }

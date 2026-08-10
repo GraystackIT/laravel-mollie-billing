@@ -15,11 +15,22 @@ This document explains how the package calculates VAT, validates VAT numbers (UI
 
 ## VAT calculation
 
-`VatCalculationService::calculate(string $country, int $netAmount, ?string $vatNumber = null)` is the single entry point used by all pricing code (subscription, addons, overage, one-time charges).
+`VatCalculationService::calculate(string $country, int $netAmount, ?Billable $billable = null)` is the single entry point used by all pricing code (subscription, addons, overage, one-time charges).
 
 Resolution order:
 
-1. **Reverse-charge** — when a non-empty `$vatNumber` is passed and the destination is an EU country, the service runs the VIES live check. If valid → VAT = 0, gross = net, rate = 0. Returns immediately.
+1. **Reverse-charge** — when a `$billable` is passed, the destination is an EU country and `reverseChargeApplies()` says so → VAT = 0, gross = net, rate = 0. Returns immediately.
+
+   `calculate()` never talks to VIES. It reads the billable's *persisted* validation
+   (`billing_vat_validations`, `valid = true`), which is written when the VAT number is
+   checked — during checkout or in the billing-data form. Pricing must not depend on a
+   third-party service being reachable at the moment a price is quoted.
+
+   Reverse-charge is also refused for a **domestic supply**: if either the validated
+   customer country or the invoice country equals `mollie-billing.vat.seller_country`,
+   VAT is charged as normal. Without a configured seller country the domestic check
+   cannot run: reverse-charge is then granted unless `mollie-billing.vat.require_seller_country`
+   is `true` (and always refused when the configured value is not a usable ISO alpha-2 code).
 2. **VAT rate lookup** — `vatRateFor($country)` resolves in this order:
     - `config('mollie-billing.vat_rate_overrides.{COUNTRY}')`
     - `config('mollie-billing.additional_countries.{COUNTRY}.vat_rate')`
@@ -58,6 +69,22 @@ Reverse-charge applies when **all three** are true:
 - the seller's tax country (i.e. the country running this app) is also in the EU.
 
 When all three conditions hold, `VatCalculationService::calculate()` returns gross = net, rate = 0, and the invoice line shows the customer's VAT number with a reverse-charge note. The invoice currency and the VAT-rate-source mechanics still flow through the same code path.
+
+### The seller country and what happens without a valid one
+
+`VatCalculationService::sellerCountry()` reads `mollie-billing.vat.seller_country`, falling back to `mollie-billing.invoices.seller.address.country` (both default to `BILLING_SELLER_COUNTRY`). A candidate is only accepted as an **ISO-3166-1 alpha-2** code — two letters, case and surrounding whitespace irrelevant, `EL` normalised to `GR`. Anything else (`AUT`, `Austria`, `A`, `AT1`, `de-AT`) is rejected and logged, and the next candidate is tried. The check is structural, not a lookup against the EU-27 list, so a seller in GB, CH or NO stays configurable.
+
+This matters because an unmatched seller country reads as "cross-border" for *every* customer: before the validation, a mistyped code silently reverse-charged every domestic B2B supply at 0% and the seller owed that VAT out of pocket.
+
+When no candidate survives, `reverseChargePolicyWithoutSellerCountry()` decides — and it distinguishes two causes:
+
+| State | Reverse charge | Rationale |
+|---|---|---|
+| Nothing configured, `require_seller_country = false` (default) | Granted on VIES validity alone, warning logged | Backwards compatible with pre-0.4 installs. |
+| Nothing configured, `require_seller_country = true` | Refused (VAT charged) | Opt-in strictness. |
+| Configured but not an alpha-2 code | Refused (VAT charged), regardless of `require_seller_country` | The operator opted into the setting and mistyped it, so the backwards-compatibility allowance does not apply. Charging VAT is recoverable through the credit-note + correction machinery; reverse-charging a domestic supply is not. |
+
+The package deliberately does **not** throw on a malformed value: `sellerCountry()` is on the checkout render path and inside the webhook handler, so a throw would turn a config typo into a checkout outage and a Mollie webhook retry loop. `php artisan billing:check-config` is the place that should fail loudly.
 
 ## Country reconciliation (three-way check)
 
@@ -106,11 +133,22 @@ The self-service modal asks the user for the correct invoice address and a count
 
 The address-edit page (`billing-data.blade.php`) disables the country dropdown while a Pending mismatch exists and surfaces a hint banner pointing back to the dashboard. The `save()` action is a defence-in-depth gate: even direct wire calls cannot change the country while the mismatch is open.
 
+**When `check()` runs matters.** It is not a read — a mismatch flags, and flagging cancels the
+subscription at period end and writes `Cancelled` straight away. Every caller therefore runs it
+**after** the payment it accompanies has been fully booked (`FirstPaymentArtifacts`,
+`MandateOnlyPaymentHandler`, and `SubscriptionPaymentHandler` since 0.4). Calling it earlier
+made the renewal's own booking see a dead subscription: no wallet recharge, no period advance,
+an admin alert about money collected for a subscription that no longer runs, and a customer
+locked out of the period they had just paid for.
+
 ### Resolve flow (`CountryMatchService::resolve()`)
 
 Triggered from the user modal or the admin override. Steps, in order:
 
-1. **Refund every linked invoice** (filter: `mismatch_id = $mismatch->id` AND `invoice_kind != Refund` AND `amount_net > 0` AND not already fully refunded). Each refund goes through `RefundInvoiceService::refundFully()` with `RefundReasonCode::BillingError`, which creates a local credit note and calls Mollie's refund API. The credit-note serial is captured per original invoice for the reissue PDF.
+0. **Refuse a country the package cannot invoice.** Before a single refund goes out, the chosen country is probed through `VatCalculationService::calculate()` — the one owner of "is this country billable" — and a `NonEuCountryException` aborts the resolve with nothing changed. This is not a theoretical case: the mismatch's own signals are exactly where a UK-issued card or a Swiss IP lands, and both selectors offered them. Because step 3's failure is swallowed (see *Idempotency* below), choosing such a country used to refund the customer in full, never re-charge, and leave a `billing_country` that makes every later checkout, resubscribe and renewal throw. Both the portal modal and the admin modal filter their options on `VatCalculationService::isInvoiceable()`, so an unbillable signal is never presented; configure the country under `mollie-billing.additional_countries` if you do invoice there.
+1. **Refund every linked invoice** (filter: `mismatch_id = $mismatch->id` AND `invoice_kind != Refund` AND `amount_net > 0` AND `remainingRefundableNet() > 0`). Each refund goes through `RefundInvoiceService::refundFully()` with `RefundReasonCode::BillingError`, which creates a local credit note and calls Mollie's refund API. The credit-note serial is captured per original invoice for the reissue PDF.
+
+   The "anything left to refund" gate reads `BillingInvoice::remainingRefundableNet()`, i.e. the *effective* refunded net (`max(refunded_net, sum of credit-note lines pointing at this invoice)`) — never the `refunded_net` column alone. A credit note written by a path that did not update that cache column (legacy pro-rata refunds) leaves it at 0, the gate would wave the invoice through to `refundFully()`, and the resulting `Refund amount must be positive.` is rethrown and aborts the entire resolve — leaving the mismatch Pending with no way out for the customer.
 2. **Update the billable** in a DB transaction: `tax_country_user = billing_country = $newCountry`, plus the mismatch row gets `chosen_country`, `status=Resolved`, `resolved_at`, and `resolved_by_user_id`.
 3. **Issue a Mollie correction charge** per refunded invoice via `InvoiceService::issueCorrectionCharge()` with metadata `type=country_correction`. The customer-facing reissue invoice is created when the `country_correction` payment confirms (in `MollieWebhookController::handleCountryCorrectionPaid()`, which preserves the original invoice's `period_start` / `period_end` for OSS-correct accounting).
 4. Dispatch `CountryMismatchResolved`.
@@ -122,7 +160,7 @@ Triggered from the user modal or the admin override. Steps, in order:
 3. **re-cancels the subscription at period end** (the original cancel from the initial flag was undone when `resolve()` ran — without the re-cancel the billable would keep renewing while the unresolved mismatch sits in the audit log);
 4. notifies the billable's admins via `CountryMismatchReissueFailedNotification`.
 
-The user can retry the resolve modal. The retry path through `retryPendingReissues()` skips refunds that already have a credit note (`refunded_net >= amount_net`) and skips re-charges with a still-pending entry in `subscription_meta.country_corrections` — only the missing pieces are retried, no double refund.
+The user can retry the resolve modal. The retry path through `retryPendingReissues()` skips refunds that already have a credit note (`remainingRefundableNet() <= 0`) and skips re-charges with a still-pending entry in `subscription_meta.country_corrections` — only the missing pieces are retried, no double refund.
 
 **Hung-webhook safety net.** If the `country_correction` webhook never arrives (Mollie outage, webhook-URL misconfig, app downtime that exhausted Mollie's retry window), `CleanupStalePendingCountryCorrectionJob` runs hourly and reconciles the hang by polling Mollie's payment status directly:
 
@@ -137,7 +175,9 @@ The user can retry the resolve modal. The retry path through `retryPendingReissu
 
 ### Admin override
 
-The admin portal's mismatch list still has Pending and Resolved tabs. The Pending resolve modal lets an admin pick the user-, payment-, or IP-derived country, **or** enter any ISO-2 code freely (admins know the context). The chosen country goes through the same `CountryMatchService::resolve()` path as the user modal. `resolved_by_user_id` records the operator.
+The admin portal's mismatch list still has Pending and Resolved tabs. The Pending resolve modal lets an admin pick the user-, payment-, or IP-derived country, **or** enter any ISO-2 code freely (admins know the context) — as long as the package can invoice it; anything else is refused with a translated message rather than the service's exception. The chosen country goes through the same `CountryMatchService::resolve()` path as the user modal. `resolved_by_user_id` records the operator.
+
+The admin modal additionally **requires** a free-text justification (max 500 characters). It is stored at `subscription_meta.tax_country_verified.justification` and lands in the `country_mismatch_resolved` audit entry alongside `chosen_country`, so the trail records not just that a resolution happened but which country won and on what grounds. That justification is what allows an ISO-2 code matching none of the three signals to be accepted at all — the user-facing modal has no such freedom.
 
 ### Edge cases
 
@@ -149,13 +189,28 @@ The admin portal's mismatch list still has Pending and Resolved tabs. The Pendin
 
 ## OSS quarterly export
 
-`OssProtocolService::export(int $year)` generates a CSV file aggregating all invoices in the given calendar year by `(quarter, country, vat_rate)`:
+`OssProtocolService::export(int $year)` generates a CSV file aggregating all invoices in the given calendar year by `(quarter, currency, country, vat_rate, scope)`:
 
 ```
-quarter, country, sales_count, net_amount_eur, vat_amount_eur, vat_rate
+quarter, currency, country, sales_count, net_amount_eur, vat_amount_eur, vat_rate, scope
 ```
 
-Quarter boundaries are computed in **UTC** so the export is deterministic regardless of `app.timezone`. Multi-VAT invoices contribute one bucket entry per distinct VAT rate.
+Quarter boundaries are computed in **UTC** so the export is deterministic regardless of `app.timezone`. Multi-VAT invoices contribute one bucket entry per distinct VAT rate. Amounts are scaled by the row's own currency, so a JPY install exports `3000`, not `30.00`.
+
+### What `scope` means — read this before filing
+
+OSS covers cross-border **B2C** supplies inside the EU. The export contains every invoice, because turnover that silently disappears from a report is harder to notice than turnover in a column that says what it is — so each row declares which filing it belongs to:
+
+| `scope` | What it is | Where it belongs |
+|---|---|---|
+| `oss` | Cross-border EU consumer supply | **The OSS return.** These rows, and only these. |
+| `domestic` | Customer is in the seller's own country (`vat.seller_country`) | The ordinary national VAT return. |
+| `reverse_charge` | Validated EU business customer (`vat_validation_id`, VIES-accepted) | The EC Sales List. Zero-rated here; declared by the customer. |
+| `non_eu` | Customer outside the EU | Outside the scope of OSS. |
+
+`scope` is part of the bucket key, so a domestic and a cross-border supply at the same rate (Austria and Bulgaria are both 20 %) never merge into one row.
+
+When `vat.seller_country` resolves to nothing, `domestic` cannot be decided and those rows stay `oss` — configure it (see [Configuration](configuration.md#vat--oss)) if you sell in your own country.
 
 Run via:
 
@@ -200,6 +255,7 @@ See [configuration.md](configuration.md) for details.
 
 ## Operational notes
 
+- **Verified is not the same as reverse-charged.** A VIES-valid number from your own country is a domestic business customer: they owe domestic VAT, and `reverseChargeApplies()` refuses reverse charge for them. The form's verification message follows the same rule via `reverseChargeCountriesQualify()` and says *"VAT number verified. This is a domestic supply, so VAT is charged."* rather than promising a treatment the invoice will not use.
 - **VIES outage handling.** `validateVatNumber()` throws `ViesUnavailableException` when VIES is unreachable. `ValidatesVatNumber::validateVatNumberLive()` treats this as "unknown" and shows a status message; the form does not block. The actual `VatCalculationService::calculate()` re-runs the VIES check at invoice time — if it still fails, reverse-charge is *not* applied (gross VAT is collected) and the customer can dispute via the resolution flow.
 - **Webhook idempotency.** `MollieWebhookController` is deduped via `BillingProcessedWebhook`. A single Mollie payment cannot trigger two reconciliation rows even if Mollie retries the webhook.
 - **Signed webhooks.** Mollie does not sign legacy webhooks. The `BillingProcessedWebhook` dedup table plus the round-trip `GetPaymentRequest` against the Mollie API (which fails for spoofed IDs) are the integrity guarantees. See [CLAUDE.md](../CLAUDE.md).

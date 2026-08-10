@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Jobs\RetryUsageOverageChargeJob;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -13,11 +14,18 @@ new class extends Component {
     public string $sortBy = 'updated_at';
     public string $sortDirection = 'desc';
     public ?string $flash = null;
+    public ?string $error = null;
+
+    private const ALLOWED_SORTS = ['name', 'email', 'updated_at'];
 
     public function updatingSearch(): void { $this->resetPage(); }
 
     public function sort(string $column): void
     {
+        if (! in_array($column, self::ALLOWED_SORTS, true)) {
+            return;
+        }
+
         if ($this->sortBy === $column) {
             $this->sortDirection = $this->sortDirection === 'asc' ? 'desc' : 'asc';
         } else {
@@ -28,28 +36,42 @@ new class extends Component {
 
     public function retry(mixed $id): void
     {
+        $this->flash = $this->error = null;
+
         $class = config('mollie-billing.billable_model');
         $b = $class ? $class::find($id) : null;
-        if ($b) {
-            RetryUsageOverageChargeJob::dispatch($class, $b->getKey());
-            $this->flash = __('billing::admin.past_due.retry_dispatched', ['name' => $b->getBillingName()]);
+        if (! $b) {
+            $this->error = __('billing::admin.common.billable_not_found');
+            return;
         }
+
+        // Only what this list offers is actionable. The job evaluates the dunning
+        // budget and can flip a billable to past_due itself, so a target the list
+        // never showed must not reach it just because the id was in the payload.
+        if (! $b->isBillingPastDue()) {
+            $this->error = __('billing::admin.past_due.not_past_due', ['name' => $b->getBillingName()]);
+            return;
+        }
+
+        RetryUsageOverageChargeJob::dispatch($class, $b->getKey());
+        $this->flash = __('billing::admin.past_due.retry_dispatched', ['name' => $b->getBillingName()]);
     }
 
     public function with(): array
     {
         $class = config('mollie-billing.billable_model');
-        $q = $class ? $class::query()->where('subscription_status', 'past_due') : null;
+        $q = $class ? $class::query()->where('subscription_status', SubscriptionStatus::PastDue->value) : null;
 
         if ($q && $this->search !== '') {
             $q->billableSearch($this->search);
         }
 
         if ($q) {
-            match ($this->sortBy) {
+            $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'updated_at';
+            match ($sortBy) {
                 'name' => $q->billableOrderByName($this->sortDirection),
                 'email' => $q->billableOrderByEmail($this->sortDirection),
-                default => $q->orderBy($this->sortBy, $this->sortDirection),
+                default => $q->orderBy($sortBy, $this->sortDirection),
             };
         }
 
@@ -65,7 +87,7 @@ new class extends Component {
         :subtitle="__('billing::admin.past_due.subtitle')"
     />
 
-    <x-mollie-billing::admin.flash :success="$flash" />
+    <x-mollie-billing::admin.flash :success="$flash" :error="$error" />
 
     @if (! $billables)
         <flux:card>

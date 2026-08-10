@@ -51,10 +51,10 @@ runtime spies, not faked — the simulated side-effects still happen.
 | `trial-ending-soon` | Schedules a trial to end tomorrow. | `trial_ends_at = tomorrow + 6h` | `ProcessTrialLifecycleJob` |
 | `trial-expired` | Forces a trial past its expiry date. | `trial_ends_at = yesterday` | `ProcessTrialLifecycleJob` |
 | `renewal` | Creates a real recurring payment in the Mollie sandbox, polls until paid, then invokes our webhook controller with the resulting payment id. Requires the billable to already have `mollie_customer_id` + `mollie_mandate_id` from a completed checkout. | — | — |
-| `apply-scheduled-change` | Puts a scheduled plan change into the past so `ApplyScheduledChangesJob` picks it up. Pass `--plan=<code>` to schedule one inline, or leave empty to reuse an existing `scheduled_change`. | `scheduled_change_at = now - 1m` | `PrepareUsageOverageJob` (Pass 4) |
-| `overage-charge` | Withdraws units from a wallet to force a negative balance, then triggers the overage payment pass. Pass `--usage-type=tokens --withdraw=100`. | wallet balance negative + `subscription_period_starts_at` ≈ 1 month ago | `PrepareUsageOverageJob` (Pass 1) |
-| `past-due-auto-cancel` | Puts a billable in `PastDue` with `past_due_since` older than `past_due_max_days`, then runs the auto-cancel pass. | `status=PastDue`, `meta.past_due_since = now - (max_days + 1)` | `PrepareUsageOverageJob` (Pass 3a) |
-| `cancelled-to-expired` | Sets `subscription_ends_at` into the past so the expiry pass flips the billable to `Expired`. | `status=Cancelled`, `subscription_ends_at = now - 1m` | `PrepareUsageOverageJob` (Pass 3b) |
+| `apply-scheduled-change` | Puts a scheduled plan change into the past so `ApplyScheduledChangesJob` picks it up. Pass `--plan=<code>` to schedule one inline, or leave empty to reuse an existing `scheduled_change`. | `scheduled_change_at = now - 1m` | `PrepareUsageOverageJob` (Pass 5) |
+| `overage-charge` | Withdraws units from a wallet to force a negative balance, then triggers the overage payment pass. Pass `--usage-type=tokens --withdraw=100`. | wallet balance negative + `subscription_period_starts_at` ≈ 1 month ago | `PrepareUsageOverageJob` (Pass 2) |
+| `past-due-auto-cancel` | Puts a billable in `PastDue` with `past_due_since` older than `past_due_max_days`, then runs the auto-cancel pass. | `status=PastDue`, `meta.past_due_since = now - (max_days + 1)` | `PrepareUsageOverageJob` (Pass 4) |
+| `cancelled-to-expired` | Sets `subscription_ends_at` into the past so the expiry pass flips the billable to `Expired`. | `status=Cancelled`, `subscription_ends_at = now - 1m` | `PrepareUsageOverageJob` (Pass 1) |
 
 ### Options
 
@@ -131,3 +131,21 @@ $sim->replayWebhook('tr_xxxxx', forceReset: true);
 - **Payment-failure webhooks** — currently only the happy path of `renewal` is wired up.
   To exercise the failure handler, mock `Mollie::send` in a test or push a failing
   sandbox payment id into `billing:webhook-replay`.
+
+## The PostgreSQL migration test
+
+`tests/Feature/Migrations/WalletMorphPostgresTest.php` runs the wallet morph migration
+against a **real PostgreSQL server**, because the defect it guards is invisible on the
+suite's SQLite: dropping a unique index and dropping a unique constraint are the same
+statement there and two different things on Postgres. It skips when no server answers, so
+CI and contributors without one are unaffected.
+
+To have it actually run, create an empty scratch database once:
+
+```bash
+createdb mollie_billing_pgcheck     # or: psql -U postgres -c 'CREATE DATABASE mollie_billing_pgcheck'
+```
+
+The test creates and drops its own `wallets` / `transactions` tables inside it and touches
+nothing else. Point it elsewhere with `BILLING_PG_HOST`, `BILLING_PG_PORT`,
+`BILLING_PG_USER`, `BILLING_PG_PASSWORD`, `BILLING_PG_DATABASE`.

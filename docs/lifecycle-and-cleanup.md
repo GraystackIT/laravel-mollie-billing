@@ -10,11 +10,13 @@ The goal of this page is to give integrators a precise picture of which states t
 |---|---|---|
 | 1. Checkout started, never completed | `CleanupOrphanedBillablesJob` (every 15 min) | Register `MollieBilling::cleanupOrphanedBillableUsing()` if the billable record should be hard-deleted with side effects |
 | 2. Trial / mandate-only started, mandate never arrives | Same as 1 (orphan cleanup) plus `ProcessTrialLifecycleJob` once the mandate is captured | – |
-| 3. Subscription cancelled | `CancelSubscription` (immediately or end-of-period) + `PrepareUsageOverageJob` Pass 3b (`cancelled → expired`) | Decide whether to revoke the Mollie mandate (the package leaves it alive on purpose) |
+| 3. Subscription cancelled | `CancelSubscription` (immediately or end-of-period) + `PrepareUsageOverageJob` Pass 1 (`cancelled → expired`) | Decide whether to revoke the Mollie mandate (the package leaves it alive on purpose) |
 | 4. Billable record deleted by the host app | – | Cascade delete of `wallets`, `billing_vat_validations`, `billing_country_mismatches`, `coupon_redemptions` (invoices are usually retained for legal reasons) |
-| 5. Stuck in `past_due` indefinitely | `PrepareUsageOverageJob` Pass 3a auto-cancels after `past_due_max_days` (default 30) | Adjust `BILLING_PAST_DUE_MAX_DAYS` to taste, or set `0` to keep the legacy behavior |
+| 5. Stuck in `past_due` indefinitely | `PrepareUsageOverageJob` Pass 4 auto-cancels after `past_due_max_days` (default 30) | Adjust `BILLING_PAST_DUE_MAX_DAYS` to taste, or set `0` to keep the legacy behavior |
 | 6. Paid webhook for an unresolvable billable | Logs a warning + sends `AdminPaidWithoutBillableNotification` | Reconcile manually — the money cleared at Mollie but no local record was touched |
-| 7. Billable table mixes customers with non-customers (staff/admins) | `HasBilling` applies `BillingScope` globally and delegates to `applyBillingScope()` on the model | Override `applyBillingScope(Builder $query)` to filter out non-billable rows |
+| 7. Prorata plan change charged, webhook never arrived | `CleanupStalePendingProrataChangeJob` (daily) asks Mollie, unblocks the customer, and alerts on a payment that was collected | Reconcile a `paid` orphan by hand — apply the plan change or refund |
+| 8. Overage charged, webhook never arrived | `CleanupStalePendingOverageChargeJob` (daily) asks Mollie after 72 h: replays a lost `paid` delivery, writes off a terminal failure, and after 14 days writes off one still sitting at `open` | Reconcile the wallet debt of a written-off charge — it is still outstanding |
+| 9. Billable table mixes customers with non-customers (staff/admins) | `HasBilling` applies `BillingScope` globally and delegates to `applyBillingScope()` on the model | Override `applyBillingScope(Builder $query)` to filter out non-billable rows |
 
 ## 1. Checkout started, never completed
 
@@ -27,6 +29,8 @@ Detection is hybrid:
 - **If** the billable has a `pending_first_payment_id` in `subscription_meta`, Mollie is polled. The record is cleaned **only** when the payment is in a terminal failure state (`failed`, `canceled`, `expired`).
 - **Otherwise**, the billable is cleaned purely on age — older than `mollie-billing.cleanup.threshold_minutes` (default 60).
 
+Either way, the job asks Mollie whether it collected anything before it deletes, and refuses to delete a billable that has an invoice or a paid Mollie payment. That check is unconditional on purpose: `pending_first_payment_id` only tracks the latest attempt, so a first payment that settled while its invoice write failed would otherwise look exactly like an abandoned checkout — and deleting it revokes a paying customer's mandate.
+
 The job calls `MollieBilling::runCleanupOrphanedBillable()` first, then dispatches `RevokeMollieMandateJob` to release the mandate on Mollie's side (relevant when the user captured a mandate but never paid the first invoice). The mandate-revoke call uses a snapshot of the customer/mandate IDs taken before the cleanup closure runs, so it still works after the closure has deleted the underlying row. If you have not registered `MollieBilling::cleanupOrphanedBillableUsing()`, the fallback is `$billable->delete()` — fine for soft-deleting models, **not** sufficient if the billable represents a tenant whose user records, auth tokens, or other tables need to go too.
 
 The Mollie Customer object itself is **not** deleted from Mollie. Mollie allows orphaned customers; this is a deliberate non-decision rather than a bug.
@@ -34,6 +38,8 @@ The Mollie Customer object itself is **not** deleted from Mollie. Mollie allows 
 A `CheckoutAbandoned` event fires for every cleaned billable so apps can hook into the deletion (analytics, audit trail).
 
 **Vetoing cleanup from the closure.** The query is intentionally permissive — any row with `subscription_source ∈ {null, None}` and `subscription_status ∈ {null, New}` older than the threshold matches, including users that legitimately exist without a subscription (admins, employees, internal accounts). The cleanup closure may return `false` to declare such a row "not actually orphan"; the job then suppresses **all** side-effects: no `CheckoutAbandoned` event, no mandate revocation, no log entry. Returning `true` or `void` keeps the legacy behaviour.
+
+A veto is **remembered**: the job stamps `subscription_meta.cleanup_vetoed_at` and the candidate query excludes rows that carry it. Without that, an internal account matched the query and re-ran your closure every 15 minutes forever. Delete the key to re-admit a row.
 
 ```php
 MollieBilling::cleanupOrphanedBillableUsing(function ($billable): bool {
@@ -97,7 +103,7 @@ Once the mandate arrives and the billable transitions to `subscription_status = 
 
 When `$immediately === true`, a final overage charge runs immediately via `ChargeUsageOverageDirectly` — so any open wallet debt is settled before the subscription dies.
 
-`PrepareUsageOverageJob` Pass 3b ([src/Jobs/PrepareUsageOverageJob.php](../src/Jobs/PrepareUsageOverageJob.php)) then completes the transition once `subscription_ends_at` is in the past: `cancelled → expired` with `subscription_source = None`.
+`PrepareUsageOverageJob` Pass 1 ([src/Jobs/PrepareUsageOverageJob.php](../src/Jobs/PrepareUsageOverageJob.php)) then completes the transition once `subscription_ends_at` is in the past: `cancelled → expired` with `subscription_source = None`.
 
 ### Mandate policy: the mandate stays alive after cancel/expire
 
@@ -113,7 +119,7 @@ If your business model needs to revoke mandates eagerly (e.g. for GDPR data-mini
 
 ### Wallets and invoices after cancel
 
-Wallets are **not** wiped on cancel. Negative balances (open overages) persist. Pass 3b's `cancelled → expired` flip does not touch wallets either. The cancel-immediately overage charge is the only place a final balance settlement runs; for end-of-period cancellations, Pass 1 Case B charges one last time the day before the period ends.
+Wallets are **not** wiped on cancel. Negative balances (open overages) persist. Pass 1's `cancelled → expired` flip does not touch wallets either. The cancel-immediately overage charge is the only place a final balance settlement runs; for end-of-period cancellations, Pass 2 Case B charges one last time the day before the period ends.
 
 `BillingInvoice` rows are retained indefinitely. EU fiscal rules typically require seven to ten years of invoice retention — the package does not enforce this, but it does ensure that invoices outlive subscriptions and customers.
 
@@ -162,9 +168,9 @@ Organization::deleting(function (Organization $org) {
 
 Mollie retries the recurring charge on its own schedule (≈14 days). A successful retry triggers `handleSubscriptionPaymentPaid` and — via the prorata charge path or a successful recovery payment — clears `payment_failure` + `past_due_since` and moves the status back to `active`.
 
-If Mollie gives up entirely the billable would, **without** Pass 3a, sit in `past_due` forever. `RequireActiveSubscription` middleware locks the app out, but the database state never finalizes — making KPI counts, churn analysis, and seat-license freeing impossible.
+If Mollie gives up entirely the billable would, **without** Pass 4, sit in `past_due` forever. `RequireActiveSubscription` middleware locks the app out, but the database state never finalizes — making KPI counts, churn analysis, and seat-license freeing impossible.
 
-**`PrepareUsageOverageJob` Pass 3a** closes this. After `mollie-billing.past_due_max_days` (default 30) of unbroken `past_due`, the billable is transitioned to `cancelled` with `subscription_ends_at = now()`. The next run's Pass 3b then flips it to `expired`.
+**`PrepareUsageOverageJob` Pass 4** closes this. After `mollie-billing.past_due_max_days` (default 30) of unbroken `past_due`, the billable is transitioned to `cancelled` with `subscription_ends_at = now()`. The next run's Pass 1 then flips it to `expired`.
 
 Recovery still works up to the cutoff — Mollie retries are usually exhausted within 14 days, so a default of 30 days gives a comfortable buffer plus a deliberate "we tried" grace period.
 
@@ -177,7 +183,7 @@ Recovery still works up to the cutoff — Mollie retries are usually exhausted w
 
 Set `BILLING_PAST_DUE_MAX_DAYS=0` to disable auto-cancel entirely and keep the pre-1.x behavior (manual finalisation only).
 
-**Edge case — legacy billables without `past_due_since`** — billables that were already `past_due` before this feature shipped do **not** have a `past_due_since` marker. Pass 3a skips them on purpose; only `past_due` periods that started **after** the upgrade are eligible for auto-cancel. If you need to backfill, set `subscription_meta.past_due_since` to a timestamp of your choice (e.g. the upgrade date) via a one-time script.
+**Edge case — legacy billables without `past_due_since`** — billables that were already `past_due` before this feature shipped do **not** have a `past_due_since` marker. Pass 4 skips them on purpose; only `past_due` periods that started **after** the upgrade are eligible for auto-cancel. If you need to backfill, set `subscription_meta.past_due_since` to a timestamp of your choice (e.g. the upgrade date) via a one-time script.
 
 ## 6. Paid webhook for an unresolvable billable
 
@@ -200,7 +206,24 @@ MollieBilling::notifyAdminUsing(fn () => [
 ]);
 ```
 
-## 7. Excluding non-customer rows from billing queries
+## 7. A prorata plan change whose webhook never arrives
+
+A paid plan change runs in two phases: charge the prorata difference, then apply the new plan when the charge webhook lands. Between the two, `subscription_meta.pending_prorata_change` holds the intent — and `ValidateSubscriptionChange` refuses every further plan change while it is set. If the webhook never arrives (a Mollie outage, a webhook URL that stopped resolving), the customer is locked out of their own plan screen indefinitely.
+
+**`CleanupStalePendingProrataChangeJob`** ([src/Jobs/CleanupStalePendingProrataChangeJob.php](../src/Jobs/CleanupStalePendingProrataChangeJob.php)), scheduled daily, resolves those. It always asks Mollie what happened **before** it looks at the entry's age:
+
+| Mollie says | The job does |
+| --- | --- |
+| `paid` | Clears the pending state so the customer is unblocked, records the payment under `subscription_meta.orphaned_prorata_payment`, and alerts the admins with the intended change and its charge lines. |
+| `failed` / `canceled` / `expired` | Clears the pending state and records the reason. |
+| still unsettled | Keeps waiting — SEPA direct debit legitimately takes several business days. Past 7 days this is logged as stuck rather than slow. |
+| unreachable, past 7 days | Clears the pending state and alerts, since the outcome cannot be established. |
+
+The `paid` row is the one that matters: Mollie collected money and the new plan was never applied. Phase 2 is deliberately **not** replayed from here — the only replay path is a testing helper that refuses to run in production — so an operator reconciles it by hand, applying the plan change or refunding. `orphaned_prorata_payment` is cleared once the alert has been sent, so the same payment is reported once.
+
+The same shape exists for country corrections (`CleanupStalePendingCountryCorrectionJob`).
+
+## 8. Excluding non-customer rows from billing queries
 
 When the configured billable model also stores rows that are not customers — typically a single `users` table containing both staff and paying users — every lifecycle job and admin query would otherwise sweep through them. Override `applyBillingScope()` on the billable model and return a filtered builder; `HasBilling` registers `BillingScope` as a global Eloquent scope and runs the override on every package-side query:
 

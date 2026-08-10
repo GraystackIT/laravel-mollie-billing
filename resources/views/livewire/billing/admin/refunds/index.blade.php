@@ -1,8 +1,11 @@
 <?php
 
+use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -13,8 +16,11 @@ new class extends Component {
     public string $sortBy = 'created_at';
     public string $sortDirection = 'desc';
 
+    /** Locked: which credit note the detail modal shows is decided by openDetail(), not by the browser. */
+    #[Locked]
     public ?int $detailInvoiceId = null;
     public bool $showDetail = false;
+    public ?string $error = null;
 
     private const ALLOWED_SORTS = ['created_at', 'amount_gross', 'serial_number'];
 
@@ -34,8 +40,26 @@ new class extends Component {
         }
     }
 
+    /**
+     * Credit notes only. The modal presents its subject as a refund of a parent
+     * invoice, so a regular invoice opened here would read as money returned that
+     * never left. There is no separate credit-note kind — a credit note *is* an
+     * InvoiceKind::Refund row.
+     */
     public function openDetail(int $id): void
     {
+        $this->error = null;
+
+        $isCreditNote = BillingInvoice::query()
+            ->whereKey($id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->exists();
+
+        if (! $isCreditNote) {
+            $this->error = __('billing::admin.refunds.not_a_credit_note');
+            return;
+        }
+
         $this->detailInvoiceId = $id;
         $this->showDetail = true;
     }
@@ -43,7 +67,7 @@ new class extends Component {
     public function with(): array
     {
         $q = BillingInvoice::query()
-            ->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)
+            ->where('invoice_kind', InvoiceKind::Refund)
             ->with('billable');
 
         if ($this->search !== '') {
@@ -61,7 +85,10 @@ new class extends Component {
         $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
 
         $detail = $this->showDetail && $this->detailInvoiceId
-            ? BillingInvoice::with('billable')->find($this->detailInvoiceId)
+            ? BillingInvoice::with('billable')
+                ->where('invoice_kind', InvoiceKind::Refund)
+                ->whereKey($this->detailInvoiceId)
+                ->first()
             : null;
 
         $parent = null;
@@ -87,6 +114,8 @@ new class extends Component {
         :title="__('billing::admin.refunds.title')"
         :subtitle="__('billing::admin.refunds.subtitle')"
     />
+
+    <x-mollie-billing::admin.flash :error="$error" />
 
     <flux:input
         type="search"
@@ -142,7 +171,7 @@ new class extends Component {
                                 @endif
                             </flux:table.cell>
                             <flux:table.cell align="end">
-                                <x-mollie-billing::admin.money :cents="$n->amount_gross" />
+                                <x-mollie-billing::admin.money :cents="$n->amount_gross" :currency="$n->currency" />
                             </flux:table.cell>
                             <flux:table.cell align="end">
                                 <flux:button
@@ -231,7 +260,7 @@ new class extends Component {
                             </div>
                             <div class="flex items-baseline gap-2">
                                 <span class="text-4xl font-semibold tabular-nums tracking-tight text-amber-900 dark:text-amber-200">
-                                    −<x-mollie-billing::admin.money :cents="$grossAbs" />
+                                    −<x-mollie-billing::admin.money :cents="$grossAbs" :currency="$detail->currency" />
                                 </span>
                             </div>
                             <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-amber-800/70 dark:text-amber-300/70">
@@ -242,8 +271,8 @@ new class extends Component {
                                          <x-…money> component can't be nested inside a
                                          translation placeholder. --}}
                                     <span class="tabular-nums">{{ __('billing::admin.refunds.detail.net_vat', [
-                                        'net' => \GraystackIT\MollieBilling\Support\BillingMoney::format($netAbs),
-                                        'vat' => \GraystackIT\MollieBilling\Support\BillingMoney::format($vatAbs),
+                                        'net' => BillingMoney::format($netAbs, $detail->currency),
+                                        'vat' => BillingMoney::format($vatAbs, $detail->currency),
                                     ]) }}</span>
                                 @endif
                             </div>
@@ -290,7 +319,7 @@ new class extends Component {
                                         <div class="flex items-baseline gap-3">
                                             <span class="font-mono text-2xl font-semibold tracking-tight text-zinc-900 dark:text-white">#{{ $parent->id }}</span>
                                             <span class="text-base tabular-nums text-zinc-600 dark:text-zinc-400">
-                                                <x-mollie-billing::admin.money :cents="$parentGross" />
+                                                <x-mollie-billing::admin.money :cents="$parentGross" :currency="$parent->currency" />
                                             </span>
                                         </div>
                                         <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">
@@ -365,7 +394,7 @@ new class extends Component {
                                         @endif
                                     </div>
                                     <div class="shrink-0 text-right text-sm font-medium tabular-nums text-amber-700 dark:text-amber-400">
-                                        −<x-mollie-billing::admin.money :cents="$liGrossAbs" />
+                                        −<x-mollie-billing::admin.money :cents="$liGrossAbs" :currency="$detail->currency" />
                                     </div>
                                 </li>
                             @endforeach

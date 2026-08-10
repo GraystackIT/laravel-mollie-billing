@@ -172,12 +172,25 @@ new class extends Component {
                     min="1"
                 />
             </div>
-            {{-- The two hints carry inline <span> markup for emphasis, hence {!! !!}.
-                 Both strings are package-controlled translations, never user input. --}}
+            @php
+                // The emphasis markup lives here, not in the translation: lang files are
+                // publishable, so an app-side edit must not be able to inject HTML. The
+                // translation is escaped first, then our own tokens are swapped for markup.
+                $emphasize = fn (string $text) => '<span class="font-medium">'.e($text).'</span>';
+                $validityHint = strtr(
+                    e(__($type === 'recurring'
+                        ? 'billing::admin.coupons.create.validity_hint_recurring'
+                        : 'billing::admin.coupons.create.validity_hint_default')),
+                    [
+                        ':max_total' => $emphasize(__('billing::admin.coupons.create.max_redemptions')),
+                        ':max_per_billable' => $emphasize(__('billing::admin.coupons.create.max_per_billable')),
+                        ':valid_until' => $emphasize(__('billing::admin.coupons.create.valid_until')),
+                        ':default_one' => '<span class="tabular-nums">1</span>',
+                    ],
+                );
+            @endphp
             <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                {!! $type === 'recurring'
-                    ? __('billing::admin.coupons.create.validity_hint_recurring')
-                    : __('billing::admin.coupons.create.validity_hint_default') !!}
+                {!! $validityHint !!}
             </flux:text>
 
             <flux:separator variant="subtle" />
@@ -194,7 +207,9 @@ new class extends Component {
                     ? ($type === 'recurring'
                         ? __('billing::admin.coupons.create.discount_hint_percentage_recurring')
                         : __('billing::admin.coupons.create.discount_hint_percentage_single'))
-                    : __('billing::admin.coupons.create.discount_hint_fixed');
+                    : __('billing::admin.coupons.create.discount_hint_fixed', [
+                        'example' => \GraystackIT\MollieBilling\Support\BillingMoney::format(500),
+                    ]);
             @endphp
             <x-mollie-billing::admin.section
                 :title="__('billing::admin.coupons.create.discount_title')"
@@ -238,9 +253,15 @@ new class extends Component {
                 :description="__('billing::admin.coupons.create.credits_description')"
             >
                 @if (empty($usageTypeOptions))
+                    @php
+                        // Same reasoning as the validity hint: escape the translation, then
+                        // substitute our own token with the <code> markup.
+                        $noUsageTypesHint = strtr(e(__('billing::admin.coupons.create.credits_no_usage_types')), [
+                            ':config_keys' => '<code>included_usages</code> / <code>usage_overage_prices</code>',
+                        ]);
+                    @endphp
                     <flux:callout variant="warning" icon="exclamation-triangle" inline>
-                        {{-- Contains <code> markup; package-controlled string, not user input. --}}
-                        {!! __('billing::admin.coupons.create.credits_no_usage_types') !!}
+                        {!! $noUsageTypesHint !!}
                     </flux:callout>
                 @else
                     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

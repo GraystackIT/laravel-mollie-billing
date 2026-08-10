@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
@@ -8,9 +9,11 @@ use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PreviewService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     public bool $polling = false;
     public ?string $pendingAddon = null;
     public ?string $pendingAction = null;
@@ -29,6 +32,27 @@ new class extends Component {
     private function resolveBillable(): ?Billable
     {
         return MollieBilling::resolveBillable(request());
+    }
+
+    /**
+     * Read gate for everything this page renders and prices.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's active addons or
+     * probe coupon validity against it. Withholding the billable falls through to the
+     * same empty state as "none resolved"; `enableAddon()`/`disableAddon()` keep
+     * resolving it unguarded so they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
     }
 
     public function applyCoupon(string $addonCode, CouponService $couponService, PreviewService $previewService): void
@@ -52,7 +76,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -156,7 +180,7 @@ new class extends Component {
             return;
         }
 
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) {
             return;
         }
@@ -183,6 +207,7 @@ new class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
@@ -202,6 +227,32 @@ new class extends Component {
         if (! $billable) return;
 
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+
+        // The view only offers addons the plan allows, but the code arrives from the
+        // client and nothing downstream re-checks it: ValidateSubscriptionChange skips
+        // its addon validation unless the *plan* changed, so an addon reserved for a
+        // higher tier was written into active_addon_codes — and FeatureAccess then
+        // granted its features. An unknown code was accepted too and stayed forever as
+        // a junk entry priced at 0.
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $planCode = $billable->getBillingSubscriptionPlanCode();
+
+        if ($planCode === null || ! $catalog->planAllowsAddon($planCode, $addonCode)) {
+            $this->toast(__('billing::portal.flash.error'), 'danger');
+
+            return;
+        }
+
+        // An addon may be sold in only one interval, and `addonPriceNet()` answers 0
+        // for an interval it does not define — so on the other interval the addon
+        // would be enabled, feature-granting, at no charge.
+        $interval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
+
+        if (! $catalog->addonOffersInterval($addonCode, $interval)) {
+            $this->toast(__('billing::portal.flash.error'), 'danger');
+
+            return;
+        }
 
         $codes = $this->appliedCouponCodes[$addonCode] ?? [];
 
@@ -223,7 +274,7 @@ new class extends Component {
             );
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
@@ -241,40 +292,61 @@ new class extends Component {
             $this->polling = true;
         } catch (\Throwable $e) {
             report($e);
-            \Flux::toast(__('billing::portal.flash.error'), variant: 'danger');
+            $this->toast(__('billing::portal.flash.error'), 'danger');
         }
     }
 
     public function pollForChange(): void
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         if (! $billable) return;
 
         $meta = $billable->getBillingSubscriptionMeta();
 
-        if (empty($meta['pending_plan_change'])) {
-            $this->polling = false;
-            $name = $this->pendingAddon
-                ? (app(SubscriptionCatalogInterface::class)->addonName($this->pendingAddon) ?? $this->pendingAddon)
-                : null;
+        // Both markers, and the failure one.
+        //
+        // An addon change books its deferred charge under `pending_prorata_change`;
+        // `pending_plan_change` is written only for a real plan or interval switch. Polling
+        // on the latter alone meant the very first tick found it empty and announced
+        // success while the payment was still open — and it announced success again when
+        // the charge was later declined, because `failed()` clears the markers too. The
+        // customer read "add-on enabled" for a charge that never went through.
+        if (! empty($meta['pending_prorata_change']) || ! empty($meta['pending_plan_change'])) {
+            return;
+        }
+
+        $this->polling = false;
+
+        $failedAt = $meta['plan_change_failed_at'] ?? null;
+        $failedRecently = $failedAt !== null
+            && \GraystackIT\MollieBilling\Support\BillingTime::toUtc($failedAt)
+                ->greaterThan(\GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->subMinutes(30));
+
+        $name = $this->pendingAddon
+            ? (app(SubscriptionCatalogInterface::class)->addonName($this->pendingAddon) ?? $this->pendingAddon)
+            : null;
+
+        if ($failedRecently) {
+            $this->toast(__('billing::portal.flash.plan_change_failed'), 'danger');
+        } else {
             $message = $name
                 ? __("billing::portal.addons_flash.{$this->pendingAction}", ['addon' => $name])
                 : __('billing::portal.flash.plan_changed');
-            \Flux::toast($message, variant: 'success');
-            $this->pendingAddon = null;
-            $this->pendingAction = null;
+            $this->toast($message, 'success');
         }
+
+        $this->pendingAddon = null;
+        $this->pendingAction = null;
     }
 
     public function with(): array
     {
-        $billable = $this->resolveBillable();
+        $billable = $this->readableBillable();
         $catalog = app(SubscriptionCatalogInterface::class);
         $interval = $billable?->getBillingSubscriptionInterval() ?? 'monthly';
         $planCode = $billable?->getBillingSubscriptionPlanCode();
         $activeAddons = $billable?->getActiveBillingAddonCodes() ?? [];
-        $currency = config('mollie-billing.currency', 'EUR');
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        $currencySymbol = BillingMoney::symbol();
 
         $reverseCharge = $billable !== null
             && method_exists($billable, 'usesReverseCharge')
@@ -395,7 +467,7 @@ new class extends Component {
                             @endif
                             <div class="text-right">
                                 <div class="flex items-baseline gap-1">
-                                    <span class="text-2xl font-bold tabular-nums tracking-tight">{{ $currencySymbol }}{{ number_format($addon['price'] / 100, 2) }}</span>
+                                    <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($addon['price']) }}</span>
                                     <span class="text-sm text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }}</span>
                                 </div>
                                 <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
@@ -443,7 +515,7 @@ new class extends Component {
                         <div class="space-y-6">
                             <div class="space-y-2">
                                 <flux:heading size="lg">{{ __('billing::portal.addons_enable_confirm.title') }}</flux:heading>
-                                <flux:text>{{ __('billing::portal.addons_enable_confirm.body', ['addon' => $addon['name'], 'price' => $currencySymbol . number_format($addon['price'] / 100, 2), 'interval' => $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year')]) }}</flux:text>
+                                <flux:text>{{ __('billing::portal.addons_enable_confirm.body', ['addon' => $addon['name'], 'price' => BillingMoney::format($addon['price']), 'interval' => $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year')]) }}</flux:text>
                             </div>
 
                             <div class="space-y-2">
@@ -481,7 +553,7 @@ new class extends Component {
 
                                 @if (($couponDiscounts[$addon['code']] ?? 0) > 0)
                                     <flux:text class="text-xs text-emerald-600 dark:text-emerald-400">
-                                        −{{ $currencySymbol }}{{ number_format(($couponDiscounts[$addon['code']] ?? 0) / 100, 2) }} {{ __('billing::portal.coupon_discount_applied') }}
+                                        −{{ BillingMoney::format($couponDiscounts[$addon['code']] ?? 0) }} {{ __('billing::portal.coupon_discount_applied') }}
                                     </flux:text>
                                 @endif
 

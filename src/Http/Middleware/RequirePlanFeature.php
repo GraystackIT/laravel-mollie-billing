@@ -20,11 +20,14 @@ class RequirePlanFeature
         }
 
         if ($request->expectsJson()) {
-            return response()->json(['message' => 'Upgrade required.'], 403);
+            return response()->json(['message' => __('billing::portal.upgrade_required')], 403);
         }
 
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
-        return redirect()->route(BillingRoute::name('index'), $urlParams)->with('billing.status', 'upgrade_required');
+        // One key, and a sentence rather than a slug: `billing.status` was read by nothing,
+        // so the customer was bounced to the dashboard without being told why.
+        return redirect()->route(BillingRoute::name('index'), $urlParams)
+            ->with('billing_status', __('billing::portal.upgrade_required'));
     }
 }

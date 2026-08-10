@@ -2,15 +2,12 @@
 
 declare(strict_types=1);
 
-use GraystackIT\MollieBilling\Enums\InvoiceKind;
-use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Jobs\CleanupStalePendingProrataChangeJob;
 use GraystackIT\MollieBilling\Jobs\RetryRefundLineJob;
 use GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob;
-use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\Notification;

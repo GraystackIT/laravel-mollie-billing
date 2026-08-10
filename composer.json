@@ -30,23 +30,27 @@
     },
     "require": {
         "php": "^8.3",
+        "brick/money": "^0.11",
         "bavix/laravel-wallet": "^11.5|^12.0",
         "elegantly/laravel-invoices": "^4.8",
-        "illuminate/contracts": "^12.0|^13.0",
-        "illuminate/database": "^12.0|^13.0",
-        "illuminate/support": "^12.0|^13.0",
+        "dragonmantank/cron-expression": "^3.4",
+        "laravel/framework": "^12.0|^13.0",
+        "laravel/prompts": "^0.3|^1.0",
         "livewire/flux": "^2.0",
         "livewire/livewire": "^4.0",
         "mollie/laravel-mollie": "^4.1",
         "mpociot/vat-calculator": "^3.26",
-        "spatie/laravel-activitylog": "^4.12|^5.0"
+        "spatie/laravel-activitylog": "^4.12|^5.0",
+        "symfony/http-foundation": "^7.0|^8.0"
     },
     "suggest": {
         "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license."
     },
     "require-dev": {
+        "livewire/flux-pro": "^2.0",
         "mockery/mockery": "^1.6",
         "orchestra/testbench": "^10.0|^11.0",
+        "orchestra/testbench-dusk": "^10.0|^11.0",
         "pestphp/pest": "^3.0|^4.0",
         "pestphp/pest-plugin-laravel": "^3.0|^4.0"
     },
@@ -57,11 +61,17 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "GraystackIT\\MollieBilling\\Tests\\": "tests/"
+            "GraystackIT\\MollieBilling\\Tests\\": "tests/",
+            "Workbench\\App\\": "workbench/app/"
         }
     },
     "scripts": {
-        "test": "./vendor/bin/pest --compact"
+        "test": "pest --compact",
+        "test:browser": "@php vendor/bin/pest --compact --configuration=phpunit.dusk.xml",
+        "test:sandbox": "@php vendor/bin/pest --configuration=phpunit.sandbox.xml",
+        "browser:assets": "npm run build",
+        "browser:driver": "@php vendor/bin/dusk-updater detect --auto-update",
+        "browser:gallery": "@php tests/Browser/gallery.php"
     },
     "extra": {
         "laravel": {
@@ -80,5 +90,12 @@
         }
     },
     "minimum-stability": "dev",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "repositories": [
+        {
+            "name": "flux-pro",
+            "type": "composer",
+            "url": "https://composer.fluxui.dev"
+        }
+    ]
 }

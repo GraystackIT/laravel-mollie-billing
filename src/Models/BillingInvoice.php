@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Models;
 
-use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
@@ -21,6 +20,9 @@ class BillingInvoice extends Model
     protected $table = 'billing_invoices';
 
     protected $guarded = [];
+
+    /** @var \Illuminate\Support\Collection<int, self>|null */
+    protected ?\Illuminate\Support\Collection $refundChildren = null;
 
     protected function casts(): array
     {
@@ -55,6 +57,68 @@ class BillingInvoice extends Model
         return $this->belongsTo(BillingVatValidation::class, 'vat_validation_id');
     }
 
+    /**
+     * Share one credit-note lookup across a page of invoices of the same billable.
+     *
+     * `effectiveRefundedNet()` is called once per row by the admin invoice tab, and each call
+     * loaded every credit note of the billable again — 100 invoices meant 100 identical
+     * queries. They all want the same answer, so hand it to them once.
+     *
+     * @param  iterable<self>  $invoices
+     */
+    public static function shareRefundChildren(iterable $invoices): void
+    {
+        $first = null;
+
+        foreach ($invoices as $invoice) {
+            $first ??= $invoice;
+        }
+
+        if ($first === null) {
+            return;
+        }
+
+        $children = self::query()
+            ->where('billable_type', $first->billable_type)
+            ->where('billable_id', $first->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+
+        foreach ($invoices as $invoice) {
+            // Only for rows of the billable the set was loaded for — a mixed collection
+            // would otherwise be told about somebody else's credit notes.
+            if ((string) $invoice->billable_id === (string) $first->billable_id
+                && $invoice->billable_type === $first->billable_type
+            ) {
+                $invoice->refundChildren = $children;
+            }
+        }
+    }
+
+    /**
+     * Every credit note of this invoice's billable, loaded once per instance.
+     *
+     * The three readers below each ran the same query, and `creditNetForGross()` calls into
+     * them up to eighteen times for a single refund — all inside the transaction that holds
+     * the invoice row lock and the serial range, which is what made a lock-wait timeout
+     * against a concurrent admin refund realistic. The reference lives inside `line_items`
+     * JSON so it cannot be narrowed in SQL; loading it once is the whole win.
+     *
+     * Memoised per instance, deliberately not per process: the refund paths snapshot
+     * `effectiveRefundedNet()` before writing a credit note and read it again afterwards, on
+     * a fresh instance.
+     *
+     * @return \Illuminate\Support\Collection<int, self>
+     */
+    protected function refundChildren(): \Illuminate\Support\Collection
+    {
+        return $this->refundChildren ??= self::query()
+            ->where('billable_type', $this->billable_type)
+            ->where('billable_id', $this->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items']);
+    }
+
     public function isFullyRefunded(): bool
     {
         return $this->effectiveRefundedNet() >= $this->amount_net && $this->amount_net > 0;
@@ -62,7 +126,133 @@ class BillingInvoice extends Model
 
     public function remainingRefundableNet(): int
     {
-        return max(0, $this->amount_net - $this->effectiveRefundedNet());
+        return max(0, $this->refundableBaseNet() - $this->effectiveRefundedNet());
+    }
+
+    /**
+     * The value this invoice itself holds, before anything was credited back out of it.
+     *
+     * Its own charges only — lines carrying a `parent_invoice_id` are credits *against
+     * another* invoice, not value this one collected. For an ordinary invoice that is
+     * every line, so this equals `amount_net` (a coupon line is negative and has no
+     * parent, so it still reduces the base exactly as it reduces the header).
+     *
+     * The difference is the saldo-zero plan-switch invoice
+     * ({@see InvoiceService::createPlanSwitchInvoice()}), which persists a charge for the
+     * new plan next to the credit that paid for it. Its header nets to zero because no new
+     * money moved — but the charge line is real, unused service the customer has paid for
+     * out of the previous invoice, and a later change in the same period has to be able to
+     * credit it. Read off the header, the pool was `max(0, 0 − 0)` and every candidate line
+     * from such an invoice was silently dropped, so a third change in one period credited
+     * the components the switch had consumed at 0.
+     *
+     * The books stay balanced across the two documents: the switch only exists when its
+     * charge is fully covered by credits booked against the source invoice, so the source's
+     * remaining base drops by exactly what the switch's base gains — together they never
+     * exceed what the payment collected.
+     */
+    /**
+     * The invoice whose payment settled this one's charges, if any.
+     *
+     * Set only by {@see InvoiceService::createPlanSwitchInvoice()}: an equal-price change
+     * mid-period charges the new plan and credits the old for the same amount, so the new
+     * plan's remaining days are paid for out of the invoice that collected the period. That
+     * relationship cannot be expressed by sharing `mollie_payment_id` — it is unique, and
+     * that uniqueness is the webhook's idempotency guard.
+     */
+    public function settledBy(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'settled_by_invoice_id');
+    }
+
+    /**
+     * The Mollie payment a refund of this invoice has to be posted against.
+     *
+     * Its own, or — for a settled document — the one that actually holds the money.
+     *
+     * Follows the chain rather than a single hop. `createPlanSwitchInvoice()` now points a
+     * settlement at the invoice that really collected the payment, but rows written before
+     * that fix can carry a switch→switch link: the guard there tested this accessor, which
+     * resolved one hop and therefore accepted a switch invoice as a target. The resulting
+     * document answered null here and was unrefundable — a third change in one period could
+     * never be paid out. Walking the chain repairs those rows too. The `seen` set is not
+     * paranoia: a corrupted cycle would otherwise loop forever inside a webhook.
+     */
+    public function refundablePaymentId(): ?string
+    {
+        $invoice = $this;
+        $seen = [];
+
+        while ($invoice !== null) {
+            if ($invoice->mollie_payment_id !== null) {
+                return (string) $invoice->mollie_payment_id;
+            }
+
+            $key = (int) $invoice->getKey();
+
+            if ($invoice->settled_by_invoice_id === null || isset($seen[$key])) {
+                return null;
+            }
+
+            $seen[$key] = true;
+            $invoice = $invoice->settledBy;
+        }
+
+        return null;
+    }
+
+    public function refundableBaseNet(): int
+    {
+        // An invoice that collected its own payment is measured by its header, full stop:
+        // that is the money Mollie took, and the lines can legitimately state something
+        // else — a mismatch booked to the paid amount, VAT recomputed after the fact. Only
+        // a settled document has to be read line by line, and it is settled precisely
+        // because its header cannot describe it.
+        if ($this->settled_by_invoice_id === null) {
+            return (int) $this->amount_net;
+        }
+
+        return $this->ownChargeTotal('amount_net', (int) $this->amount_net);
+    }
+
+    /**
+     * `refundableBaseNet()`'s gross counterpart — the ceiling a refund of this invoice may
+     * not exceed at Mollie. Same rule, same reason: a settled plan-switch invoice's header
+     * gross is zero while the service its charge line paid for is real.
+     */
+    public function refundableBaseGross(): int
+    {
+        if ($this->settled_by_invoice_id === null) {
+            return (int) $this->amount_gross;
+        }
+
+        return $this->ownChargeTotal('amount_gross', (int) $this->amount_gross);
+    }
+
+    /**
+     * Sum one amount field over this invoice's own charge lines — the ones that do not carry
+     * a `parent_invoice_id`, i.e. are not credits against another invoice.
+     *
+     * @param  int  $fallback  used when the invoice has no line items at all
+     */
+    private function ownChargeTotal(string $field, int $fallback): int
+    {
+        $lines = (array) ($this->line_items ?? []);
+
+        if ($lines === []) {
+            return $fallback;
+        }
+
+        $total = 0;
+        foreach ($lines as $line) {
+            if (($line['parent_invoice_id'] ?? null) !== null) {
+                continue;
+            }
+
+            $total += (int) ($line[$field] ?? 0);
+        }
+
+        return $total;
     }
 
     /**
@@ -87,13 +277,8 @@ class BillingInvoice extends Model
     public function derivedRefundedNet(): int
     {
         $sum = 0;
-        $children = self::query()
-            ->where('billable_type', $this->billable_type)
-            ->where('billable_id', $this->billable_id)
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get(['line_items']);
 
-        foreach ($children as $child) {
+        foreach ($this->refundChildren() as $child) {
             foreach ((array) ($child->line_items ?? []) as $line) {
                 if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
                     continue;
@@ -105,6 +290,72 @@ class BillingInvoice extends Model
         return $sum;
     }
 
+    /**
+     * Net and VAT already credited back per original line item, keyed by the
+     * line's index in this invoice's `line_items`.
+     *
+     * Read from every refund-invoice line that points at this invoice via
+     * `parent_invoice_id` **and** carries a `parent_line_item_index`. Credit
+     * lines without that index (custom `line_items` handed to the refund
+     * service) cannot be attributed to a single line and are therefore absent
+     * here — invoice-level accounting still sees them through
+     * {@see derivedRefundedNet()}.
+     *
+     * Credit-note amounts are stored negative; the sums are absolute so callers
+     * can subtract them from what the original charged.
+     *
+     * @return array<int, array{net: int, vat: int}>
+     */
+    public function creditedPerOriginalLine(): array
+    {
+        $credited = [];
+
+        foreach ($this->refundChildren() as $child) {
+            foreach ((array) ($child->line_items ?? []) as $line) {
+                if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
+                    continue;
+                }
+                if (! isset($line['parent_line_item_index'])) {
+                    continue;
+                }
+
+                $index = (int) $line['parent_line_item_index'];
+                $credited[$index] ??= ['net' => 0, 'vat' => 0];
+                $credited[$index]['net'] += abs((int) ($line['amount_net'] ?? 0));
+                $credited[$index]['vat'] += abs((int) ($line['vat_amount'] ?? 0));
+            }
+        }
+
+        return $credited;
+    }
+
+    /**
+     * VAT already credited back against this invoice, counting **every** credit line
+     * that points at it — with or without a `parent_line_item_index`.
+     *
+     * {@see creditedPerOriginalLine()} deliberately skips unindexed lines, because
+     * they cannot be attributed to one original line. Summing that map to answer the
+     * invoice-wide question "how much VAT is left to credit" therefore under-counts:
+     * a credit note created with custom `line_items` was invisible, and the next
+     * automatic refund credited VAT that had already been given back.
+     */
+    public function creditedVatTotal(): int
+    {
+        $credited = 0;
+
+        foreach ($this->refundChildren() as $child) {
+            foreach ((array) ($child->line_items ?? []) as $line) {
+                if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
+                    continue;
+                }
+
+                $credited += abs((int) ($line['vat_amount'] ?? 0));
+            }
+        }
+
+        return $credited;
+    }
+
     public function hasPdf(): bool
     {
         return $this->pdf_path !== null;
@@ -112,10 +363,12 @@ class BillingInvoice extends Model
 
     public function getDownloadUrl(): ?string
     {
-        if (! $this->hasPdf()) {
-            return null;
-        }
-
+        // Deliberately NOT gated on `hasPdf()`. A render that failed — a transient disk
+        // outage, a DOMPDF font error, a currency the renderer refused — leaves the row
+        // with no `pdf_path`, and the invoice then had no link at all: the customer could
+        // see the charge and never obtain the document, permanently, with no way to ask for
+        // it. `InvoiceDownloadController` regenerates on demand and 404s only when that
+        // fails too, which is the honest outcome to show.
         $billable = $this->billable()->first();
         if (! $billable) {
             return null;
@@ -128,7 +381,7 @@ class BillingInvoice extends Model
     }
 
     /**
-     * Liefert ein einzelnes line_item per Index oder null.
+     * A single line item by index, or null.
      *
      * @return array<string, mixed>|null
      */
@@ -137,27 +390,6 @@ class BillingInvoice extends Model
         $items = $this->line_items ?? [];
 
         return $items[$index] ?? null;
-    }
-
-    /**
-     * Tage von line_item.period_start bis line_item.period_end.
-     */
-    /**
-     * Resolve the period for a single line item with fallback chain:
-     * line.period_* → invoice.period_* → null.
-     *
-     * @param  array<string, mixed>  $line
-     * @return array{0: ?CarbonInterface, 1: ?CarbonInterface}
-     */
-    private function lineItemPeriod(array $line): array
-    {
-        $rawStart = $line['period_start'] ?? $this->period_start;
-        $rawEnd = $line['period_end'] ?? $this->period_end;
-
-        return [
-            $rawStart !== null ? \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawStart) : null,
-            $rawEnd !== null ? \GraystackIT\MollieBilling\Support\BillingTime::toUtc($rawEnd) : null,
-        ];
     }
 
     /**
@@ -194,41 +426,6 @@ class BillingInvoice extends Model
             ->includedSeats((string) $planCode);
 
         return $includedSeats + $extraSeats;
-    }
-
-    public function lineItemDaysActive(int $index): int
-    {
-        $line = $this->lineItem($index);
-        if ($line === null) {
-            return 0;
-        }
-
-        [$start, $end] = $this->lineItemPeriod($line);
-        if ($start === null || $end === null) {
-            return 0;
-        }
-
-        return \GraystackIT\MollieBilling\Support\BillingPolicy::prorataPeriodDays($start, $end)['total'];
-    }
-
-    /**
-     * Days from $reference to line_item.period_end (always relative to now — the
-     * $reference parameter is legacy and is ignored; the single source of truth
-     * is BillingPolicy::prorataPeriodDays).
-     */
-    public function lineItemDaysRemaining(int $index, ?CarbonInterface $reference = null): int
-    {
-        $line = $this->lineItem($index);
-        if ($line === null) {
-            return 0;
-        }
-
-        [$start, $end] = $this->lineItemPeriod($line);
-        if ($start === null || $end === null) {
-            return 0;
-        }
-
-        return \GraystackIT\MollieBilling\Support\BillingPolicy::prorataPeriodDays($start, $end)['remaining'];
     }
 
     /**
@@ -269,10 +466,28 @@ class BillingInvoice extends Model
 
         // 1. All charge invoices (Subscription/OneTimeOrder/Overage) for the billable with paid status,
         //    that have at least one line with (kind, optionally code) whose line.period contains now.
+        // A refund candidate has to be an invoice a refund can actually be paid out of, and
+        // `createRefund()` needs a `mollie_payment_id` to post one. The only document here
+        // without one is the saldo-zero plan-switch invoice
+        // ({@see InvoiceService::createPlanSwitchInvoice()}), which is a Subscription and is
+        // Paid, so it was offered — and since candidates are sorted newest-invoice-first, it
+        // won over the invoice that actually holds the money. Its header net is 0, so
+        // `applyRemainingRefundablePool()` read a budget of `max(0, 0 − 0)` and dropped every
+        // line it had just selected; on the seat and addon paths the loop had already
+        // decremented its remaining quantity for the discarded candidate, so the real
+        // invoice's line was never reached at all. A downgrade after an equally-priced
+        // sidegrade therefore credited nothing.
         $invoices = self::query()
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
             ->where('status', InvoiceStatus::Paid)
+            ->where(function ($q): void {
+                // A candidate has to be an invoice a refund can actually be posted against.
+                // Either it collected a payment itself, or its charges were settled out of one
+                // that did — the saldo-zero plan-switch invoice is the second kind, and
+                // excluding it left a third change in one period crediting nothing.
+                $q->whereNotNull('mollie_payment_id')->orWhereNotNull('settled_by_invoice_id');
+            })
             ->whereIn('invoice_kind', [InvoiceKind::Subscription, InvoiceKind::OneTimeOrder, InvoiceKind::Overage])
             ->get();
 
@@ -335,6 +550,16 @@ class BillingInvoice extends Model
                     continue;
                 }
                 if (abs($end->diffInDays($billablePeriodEnd, false)) > 1) {
+                    continue;
+                }
+
+                // Negative lines are credits, not charges. The plan-switch invoice persists
+                // its refund lines alongside its charge lines under the same `plan`/`seats`/
+                // `addon` kinds, so without this a credit already granted was offered up as
+                // something further to credit. Zero stays a candidate: a fully coupon-covered
+                // line has no cash to give back but still holds quantity, and dropping it
+                // would let the same unit be credited twice from an older invoice.
+                if ((int) ($line['amount_net'] ?? 0) < 0) {
                     continue;
                 }
 

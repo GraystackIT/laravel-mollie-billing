@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Enums\CountryMismatchStatus;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Support\AdminKpiService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use Livewire\Component;
 
@@ -20,11 +21,15 @@ new class extends Component {
         $this->kpis = [
             'mrr' => $kpiService->mrr(),
             'arr' => $kpiService->arr(),
-            'active' => $kpiService->activeSubscriptionsByStatus(),
             'churn' => $kpiService->churnRate(30),
             'trial_conversion' => $kpiService->trialConversionRate(90),
-            'open_overage' => $kpiService->openOverageCharges(),
         ];
+
+        // `activeSubscriptionsByStatus()` and `openOverageCharges()` used to be resolved
+        // here and never rendered. The second one walks the whole billable table in
+        // `chunkById(200)`, hydrating a JSON column per row, and threw the result away —
+        // paid for on every dashboard load whose 5-minute KPI cache had expired. Both
+        // remain on `AdminKpiService` for anyone who wants to render them.
 
         $this->openMismatches = BillingCountryMismatch::query()
             ->where('status', CountryMismatchStatus::Pending)
@@ -59,13 +64,13 @@ new class extends Component {
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <x-mollie-billing::admin.stat
                 :label="__('billing::admin.dashboard.mrr')"
-                :value="'€'.number_format($kpis['mrr'] / 100, 2)"
+                :value="BillingMoney::format((int) $kpis['mrr'])"
                 icon="arrow-trending-up"
                 :hint="__('billing::admin.dashboard.mrr_hint')"
             />
             <x-mollie-billing::admin.stat
                 :label="__('billing::admin.dashboard.arr')"
-                :value="'€'.number_format($kpis['arr'] / 100, 2)"
+                :value="BillingMoney::format((int) $kpis['arr'])"
                 icon="chart-bar"
                 :hint="__('billing::admin.dashboard.arr_hint')"
             />

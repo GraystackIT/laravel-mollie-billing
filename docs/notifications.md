@@ -64,9 +64,38 @@ php artisan vendor:publish --tag=billing-lang
 
 Subjects, body lines, button labels and signatures live in `resources/lang/vendor/billing/{locale}/notifications.php`. Laravel resolves vendor translations first, so app overrides take precedence over package defaults. See [translations.md](translations.md) for the full file list and placeholder reference.
 
+### Queueing
+
+Every shipped notification implements `ShouldQueue` and is routed onto the connection and queue from the [`queue`](configuration.md#queue) config block, so a mail-transport outage can no longer fail the webhook that triggered it — previously an SMTP error propagated out of `Notification::send()`, the webhook returned 500, Mollie re-delivered and the state event fired twice.
+
+Two consequences for replacement classes registered via `resolveNotificationUsing()`:
+
+- They must be serializable. `Illuminate\Notifications\Notification` already uses `SerializesModels`, so model properties are reloaded from the database when the job runs — capture any point-in-time value (an amount, an end date) in the constructor rather than reading it in `toMail()`. That is also why the package's own notifications no longer hold a `Throwable`: exception traces routinely carry closures, which makes the job permanently unqueueable.
+- Money is rendered through `Support\BillingMoney`, using the invoice's own currency where one is stored.
+
+#### Point-in-time values are captured in the constructor
+
+Anything a notification *asserts about a past moment* is frozen when the notification is constructed and exposed as a public readonly property — scalars, or a `CarbonInterface` for dates. Reading it in `toMail()` instead would describe the state at delivery time, which for a queued mail can be the opposite of the truth: a mandate that arrived after the reminder was queued turned "please add a payment method" into "we will charge your saved card", and a plan downgrade inverted the overage hint on a usage warning.
+
+| Class | Frozen at construction |
+|-------|------------------------|
+| `TrialEndingSoonNotification` | `$hasMandate`, `$trialEndsAt`, `$days` |
+| `TrialExpiredNotification` | `$trialEndsAt` |
+| `TrialConvertedNotification` | `$planName`, `$planCode`, `$amountGross`, `$currency` |
+| `SubscriptionCancelledNotification` | `$endsAt` |
+| `SubscriptionPaymentFailedNotification` | `$amountGross`, `$currency`, `$failedAt` |
+| `UsageThresholdNotification` | `$overageAllowed` |
+| `OverageBillingFailedNotification` | `$amountGross`, `$currency` (from `subscription_meta['usage_overage']`) |
+| `AdminOverageBillingFailedNotification` | `$amountGross`, `$currency`, `$reason` |
+| `AdminRefundFailedNotification` | `$invoiceId` (the refund target), `$reason` |
+
+Invoice amounts are the exception: `InvoiceAvailableNotification` and `RefundProcessedNotification` read `amount_gross` / `currency` off the invoice model itself, and those columns are only ever written when the row is created — corrections issue a new document rather than rewriting an old one, so there is nothing to drift.
+
+A replacement class registered via `useNotification()` is subject to the same rule: it is handed the live `Billable` and must capture what it needs, because by the time its `toMail()` runs the billable has been reloaded from the database.
+
 ### Choosing the locale per recipient
 
-The package does not introduce its own "notification language" setting. Notifications render in whatever locale is active when `Notification::send()` runs — which is usually `config('app.locale')` for queued jobs and webhook handlers (no HTTP request → no auto-detected request locale).
+The package does not introduce its own "notification language" setting. Notifications render in whatever locale is active when `Notification::send()` runs — which for queued notifications is `config('app.locale')` at the moment the job executes, not the locale of the request that queued it.
 
 To send each customer their preferred language, implement Laravel's `Illuminate\Contracts\Translation\HasLocalePreference` on the **notifiable** that `notifyBillingAdminsUsing()` / `notifyAdminUsing()` returns (typically your `User` model). Laravel calls `preferredLocale()` automatically before rendering the mail and switches the translator for the duration of that notification — no changes needed inside the package.
 
@@ -123,12 +152,12 @@ From that point on, every `Notification::send(..., new TrialEndingSoonNotificati
 | Class | Trigger | Constructor signature |
 |-------|---------|----------------------|
 | `TrialEndingSoonNotification` | Trial ends in `trial_ending_soon_notice_days` days. Wording branches on `hasMollieMandate()`: with mandate → heads-up that the first charge will be made automatically; without mandate → CTA to add a payment method. | `(Billable $billable)` |
-| `TrialConvertedNotification` | Mollie's first recurring charge has actually landed (fired from `SubscriptionPaymentHandler::paid()`, not from the lifecycle job). The first invoice is already attached when this is sent. | `(Billable $billable)` |
+| `TrialConvertedNotification` | Mollie's first recurring charge has actually landed (fired from `SubscriptionPaymentHandler::paid()`, not from the lifecycle job). The converting charge's invoice is handed in so the mail names the amount that was really collected; without it the newest subscription invoice is used. | `(Billable $billable, ?BillingInvoice $invoice = null)` |
 | `TrialExpiredNotification` | Trial passed without a successful first charge — billable was flipped to `PastDue`. | `(Billable $billable)` |
 | `InvoiceAvailableNotification` | A new invoice (subscription renewal, one-time order, plan-change proration) has been generated. | `(Billable $billable, BillingInvoice $invoice)` |
 | `SubscriptionCancelledNotification` | Subscription cancelled (immediate or end-of-period). | `(Billable $billable)` |
-| `SubscriptionPaymentFailedNotification` | Recurring subscription payment failed. | `(Billable $billable, string $paymentId)` |
-| `OverageBillingFailedNotification` | Wallet-overage charge failed after retries. | `(Billable $billable)` |
+| `SubscriptionPaymentFailedNotification` | Recurring subscription payment failed. The amount, currency and failure date come from the Mollie payment at the call site — a failed payment produces no invoice, so looking one up returned an unrelated document (last month's renewal, or a credit note's negative gross). | `(Billable $billable, string $paymentId, ?int $amountGross = null, ?string $currency = null, ?CarbonInterface $failedAt = null)` |
+| `OverageBillingFailedNotification` | Wallet-overage charge failed after retries. The amount is read from `subscription_meta['usage_overage']` — the failed charge never produced an invoice, so the previous version quoted an unrelated one. | `(Billable $billable)` |
 | `UsageThresholdNotification` | Wallet for a usage type hit the configured warning threshold (`usage_threshold_percent`). | `(Billable $billable, string $type, int $percent)` |
 | `PlanChangeFailedNotification` | Immediate-prorata or scheduled plan change failed at the Mollie payment step. | `(Billable $billable, string $paymentId)` |
 | `RefundProcessedNotification` | Refund / credit note issued. | `(Billable $billable, BillingCreditNote $creditNote)` |
@@ -141,7 +170,7 @@ From that point on, every `Notification::send(..., new TrialEndingSoonNotificati
 | `AdminPaidWithoutBillableNotification` | Mollie webhook arrived for a payment whose billable cannot be resolved. | `(string $paymentId, ?string $billableType, ?string $billableId, ?int $amountCents, ?string $currency)` |
 | `AdminOverageBillingFailedNotification` | Overage charge gave up after final retry. | `(Billable $billable, Throwable $exception)` |
 | `AdminPlanChangeFailedNotification` | Plan change failed terminally — patch retries exhausted or stale pending state cleaned up. | `(string $reason, array $context = [])` |
-| `AdminRefundFailedNotification` | Mollie refund API call failed. | `(Billable $billable, Throwable $exception)` |
+| `AdminRefundFailedNotification` | Mollie refund API call failed. `$invoice` is the refund target — the invoice the refund was posted against, which is what an operator needs: the credit note was never written (the call failed before it) and the billable's newest invoice is an unrelated renewal or an earlier credit note. Omitting it falls back to a best-effort guess narrowed to paid, non-credit-note invoices. | `(Billable $billable, Throwable $exception, ?BillingInvoice $invoice = null)` |
 | `CountryMismatchReissueFailedNotification` | Auto-reissue of a credit note + corrected invoice after a country correction failed. | `(Billable $billable, BillingCountryMismatch $mismatch, string $reason)` |
 
 ## Choosing the right layer

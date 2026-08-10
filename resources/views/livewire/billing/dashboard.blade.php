@@ -1,5 +1,6 @@
 <?php
 
+use GraystackIT\MollieBilling\Concerns\InteractsWithFluxUi;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
@@ -10,13 +11,16 @@ use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Livewire\Component;
 
 new class extends Component {
+    use InteractsWithFluxUi;
     public ?string $flash = null;
     public bool $flashError = false;
     public string $couponCode = '';
@@ -36,10 +40,44 @@ new class extends Component {
         return MollieBilling::resolveBillable(request());
     }
 
+    /**
+     * Livewire actions bypass the portal route middleware, so every action below
+     * that touches the billable authorizes here. Without it a member the host app
+     * denies billing management to could still cancel the tenant's subscription,
+     * end its trial or rewrite its billing address straight from the dashboard.
+     */
+    private function authorizeBillingAction(Billable $billable): void
+    {
+        abort_unless(MollieBilling::authorizes(request(), $billable), 403);
+    }
+
+    /**
+     * The same gate for the read path, which the hardening above skipped.
+     *
+     * The portal routes do carry `billing.portal`, and AuthorizeBillingPortal is
+     * registered as Livewire persistent middleware so it re-runs on
+     * `/livewire/update` too. This gate is defence-in-depth behind both, because a
+     * component that answers questions about a tenant must not depend on its
+     * mounting being right — it decides for itself who gets to read the tenant's plan, address,
+     * invoices and wallet balances. Withholding the billable renders the same
+     * "no billable" state as an unresolvable tenant, while the actions keep resolving it
+     * unguarded so they can still answer 403.
+     */
+    private function readableBillable(): ?Billable
+    {
+        $billable = $this->resolveBillable();
+
+        return $billable !== null && MollieBilling::authorizes(request(), $billable)
+            ? $billable
+            : null;
+    }
+
     public function openCountryFix(): void
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
 
         $this->fixCountry = (string) ($billable->getBillingCountry() ?? '');
         $this->fixStreet = (string) ($billable->getBillingStreet() ?? '');
@@ -59,9 +97,11 @@ new class extends Component {
             return;
         }
 
+        $this->authorizeBillingAction($billable);
+
         $mismatch = $billable->latestOpenCountryMismatch();
         if ($mismatch === null) {
-            \Flux::modal('fix-country')->close();
+            $this->closeModal('fix-country');
             return;
         }
 
@@ -100,7 +140,7 @@ new class extends Component {
                 $billable,
                 $mismatch,
                 $newCountry,
-                MollieBilling::resolveBillable(request()) ? request()->user()?->getKey() : null,
+                request()->user()?->getKey(),
             );
         } catch (\Throwable $e) {
             report($e);
@@ -108,7 +148,7 @@ new class extends Component {
             return;
         }
 
-        \Flux::modal('fix-country')->close();
+        $this->closeModal('fix-country');
         $this->flash = __('billing::portal.country_mismatch.resolved_flash');
         $this->flashError = false;
     }
@@ -117,6 +157,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             $service->handle($billable);
             $this->flash = __('billing::portal.flash.resubscribed');
@@ -132,6 +174,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             $billable->cancelBillingSubscription();
             $this->flash = __('billing::portal.flash.cancelled');
@@ -146,7 +190,16 @@ new class extends Component {
     public function endTrial(): void
     {
         $billable = $this->resolveBillable();
-        if (! $billable || ! $billable->isOnBillingTrial()) {
+        if (! $billable) {
+            return;
+        }
+
+        // Authorize FIRST, like every other action here: a 403 for "on trial" and a silent
+        // 200 for "not on trial" told an unauthorized team member the tenant's trial state,
+        // which the read gate otherwise withholds entirely.
+        $this->authorizeBillingAction($billable);
+
+        if (! $billable->isOnBillingTrial()) {
             return;
         }
         try {
@@ -170,6 +223,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             $billable->resubscribeBillingPlan();
             $this->flash = __('billing::portal.flash.resubscribed');
@@ -186,6 +241,21 @@ new class extends Component {
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
+        $this->authorizeBillingAction($billable);
+
+        // Re-checked here, not just in the render that drew the button: the dashboard has
+        // no wire:poll, so the banner can be arbitrarily stale. Between the render and the
+        // click Mollie can charge and the webhook activate the subscription — and
+        // forceImmediateCharge() looks at neither status nor start date, so the click
+        // PATCHed startDate to today on an Active subscription and collected a second full
+        // period for one already paid. Same shape as the admin past-due list's retry().
+        if (! $billable->isBillingPastDue()) {
+            $this->flash = __('billing::portal.flash.force_charge_no_longer_needed');
+            $this->flashError = true;
+
+            return;
+        }
+
         if ($gate->forceImmediateCharge($billable)) {
             $this->flash = __('billing::portal.flash.force_charge_scheduled');
             $this->flashError = false;
@@ -199,6 +269,8 @@ new class extends Component {
     {
         $billable = $this->resolveBillable();
         if (! $billable) return;
+
+        $this->authorizeBillingAction($billable);
         try {
             app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
                 ->cancelScheduledChange($billable);
@@ -227,6 +299,8 @@ new class extends Component {
             $this->couponMessageError = true;
             return;
         }
+
+        $this->authorizeBillingAction($billable);
 
         $catalog = app(SubscriptionCatalogInterface::class);
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
@@ -302,6 +376,7 @@ new class extends Component {
             'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
             'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
             'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
+            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
@@ -323,12 +398,12 @@ new class extends Component {
         $status = $b->getBillingSubscriptionStatus();
         $planCode = $b->getBillingSubscriptionPlanCode();
         $interval = $b->getBillingSubscriptionInterval();
-        $currency = config('mollie-billing.currency', 'EUR');
         $addonCodes = $b->getActiveBillingAddonCodes();
+
+        $catalog = app(SubscriptionCatalogInterface::class);
 
         $usageTypes = [];
         if ($planCode) {
-            $catalog = app(SubscriptionCatalogInterface::class);
             foreach ($catalog->includedUsages($planCode, $interval) as $type => $included) {
                 $wallet = $b->getWallet((string) $type);
                 $usageTypes[] = [
@@ -343,21 +418,26 @@ new class extends Component {
             }
         }
 
-        $currencySymbol = $currency === 'EUR' ? '€' : $currency;
+        // Each row renders in its own invoice currency — the billable may have
+        // been charged in more than one over time.
         $invoices = $b->billingInvoices()->latest()->limit(5)->get()->map(fn ($inv) => [
             'date' => BillingTime::display($inv->created_at, $b)->translatedFormat('d. M Y'),
             'kind' => $inv->invoice_kind?->label() ?? '—',
             'kindColor' => $inv->invoice_kind?->color() ?? 'zinc',
-            'net' => $currencySymbol . number_format($inv->amount_net / 100, 2),
-            'vat' => $currencySymbol . number_format($inv->amount_vat / 100, 2),
-            'gross' => $currencySymbol . number_format($inv->amount_gross / 100, 2),
+            'net' => BillingMoney::format($inv->amount_net, $inv->currency),
+            'vat' => BillingMoney::format($inv->amount_vat, $inv->currency),
+            'gross' => BillingMoney::format($inv->amount_gross, $inv->currency),
             'status' => $inv->status->label(),
             'statusColor' => $inv->status->color(),
             'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
         ])->all();
 
+        // Through the catalog, never the config file: apps may rebind
+        // SubscriptionCatalogInterface to a DB-backed catalog (where this config is empty),
+        // and addonName() also prefers the `billing::addons.{code}.name` translation. This
+        // was the one screen that rendered raw codes and untranslated names.
         $addonLabels = array_map(
-            fn (string $code) => config("mollie-billing-plans.addons.{$code}.name", $code),
+            fn (string $code) => $catalog->addonName($code) ?? $code,
             $addonCodes,
         );
 
@@ -379,11 +459,16 @@ new class extends Component {
         }
 
         $openMismatch = $b->latestOpenCountryMismatch();
+        // Only signals the package can actually invoice. A UK-issued card or a Swiss IP
+        // is an ordinary signal, and offering it let the customer resolve to a country
+        // `VatCalculationService` refuses — which refunded every invoice and then failed
+        // to re-charge, silently. `resolve()` rejects such a country too; filtering here
+        // is what keeps it from being presented as a choice in the first place.
         $allowedFixCountries = $openMismatch !== null
-            ? array_values(array_unique(array_filter([
+            ? array_values(array_filter(array_unique(array_filter([
                 $openMismatch->tax_country_payment ? strtoupper((string) $openMismatch->tax_country_payment) : null,
                 $openMismatch->tax_country_ip ? strtoupper((string) $openMismatch->tax_country_ip) : null,
-            ])))
+            ])), fn (string $country): bool => app(VatCalculationService::class)->isInvoiceable($country)))
             : [];
         $resolvedMismatch = $b->latestResolvedCountryMismatch();
         $endsAt = $b->getBillingSubscriptionEndsAt();
@@ -402,7 +487,22 @@ new class extends Component {
                 ->get()
             : collect();
         $mismatchInvoiceCount = $invoicesUnderMismatch->count();
-        $mismatchInvoiceTotalGross = (int) $invoicesUnderMismatch->sum('amount_gross');
+
+        // Every one of these invoices is about to be refunded and reissued, so the
+        // figure has to name the same money the refunds will move. Grouping by the
+        // invoice's own currency is what keeps that true: a single sum rendered with one
+        // symbol turned 20.00 GBP plus 10.00 EUR into "€30.00", an amount nobody is
+        // owed. The `:count` above stays a count over all of them.
+        $mismatchInvoiceTotal = $invoicesUnderMismatch
+            ->groupBy(fn ($invoice): string => BillingMoney::normalizeCurrency($invoice->currency))
+            // The query is unordered, so without this the two amounts swap places between
+            // renders of the same data.
+            ->sortKeys()
+            ->map(fn ($group, string $currency): string => BillingMoney::format(
+                (int) $group->sum('amount_gross'),
+                $currency,
+            ))
+            ->join(' + ');
 
         return [
             'status' => $status,
@@ -415,7 +515,9 @@ new class extends Component {
                 'ip' => (string) ($openMismatch->tax_country_ip ?? '-'),
                 'allowed_countries' => $allowedFixCountries,
                 'invoice_count' => $mismatchInvoiceCount,
-                'invoice_total_gross' => $currencySymbol . number_format($mismatchInvoiceTotalGross / 100, 2),
+                'invoice_total_gross' => $mismatchInvoiceTotal !== ''
+                    ? $mismatchInvoiceTotal
+                    : BillingMoney::format(0),
             ] : null,
             'needsReactivate' => $needsReactivate,
             'reactivateInGrace' => $reactivateInGrace,
@@ -481,7 +583,7 @@ new class extends Component {
 ?>
 
 @php
-    $billable = $this->resolveBillable();
+    $billable = $this->readableBillable();
     $d = $this->dashboardData($billable);
 @endphp
 
@@ -731,7 +833,13 @@ new class extends Component {
         @if (count($d['usageTypes']) > 0)
             <div class="space-y-4">
                 <flux:heading size="lg">{{ __('billing::portal.usage') }}</flux:heading>
-                <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-{{ min(count($d['usageTypes']), 4) }}">
+                {{-- An inline grid-template, not an interpolated utility class: Tailwind only
+                     emits classes it can see as complete strings, so `lg:grid-cols-{{ n }}`
+                     was never compiled and three meters silently fell back to two per row.
+                     `auto-fit` also drops the breakpoints — the meters wrap on width rather
+                     than on a guessed column count. plan-change.blade.php uses the same
+                     inline-template approach. --}}
+                <div class="grid gap-4" style="grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))">
                     @foreach ($d['usageTypes'] as $usage)
                         <livewire:mollie-billing::components.usage-meter
                             :type="$usage['type']"
@@ -739,7 +847,13 @@ new class extends Component {
                             :included="$usage['included']"
                             :balance="$usage['balance']"
                             :purchased-balance="$usage['purchased_balance']"
-                            :key="'usage-'.$loop->index"
+                            {{-- The balances belong in the key. A child component keeps its own
+                                 state across a parent re-render, so with a fixed key the meter
+                                 kept showing the numbers it first mounted with: redeeming a
+                                 credits coupon reported success while the meter still displayed
+                                 the old balance, and only a full page load revealed the credits
+                                 the customer had just been told they received. --}}
+                            :key="'usage-'.$usage['type'].'-'.$usage['balance'].'-'.$usage['purchased_balance']"
                         />
                     @endforeach
                 </div>

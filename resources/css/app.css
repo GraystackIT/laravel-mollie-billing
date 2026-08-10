@@ -1,0 +1,17 @@
+/*
+ * Reference stylesheet for the Blade views this package ships — and the exact
+ * file the browser-test workbench builds. Consuming apps need an equivalent:
+ * import Tailwind + Flux, then let Tailwind scan this package's views (see the
+ * last @source line, adjusted to the vendor path). docs/browser-testing.md
+ * explains the build.
+ */
+@import 'tailwindcss';
+@import '../../vendor/livewire/flux/dist/flux.css';
+@plugin '@tailwindcss/typography';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@source '../../vendor/livewire/flux/stubs/resources/views/**/*.blade.php';
+@source '../../vendor/livewire/flux-pro/stubs/resources/views/**/*.blade.php';
+@source '../views/**/*.blade.php';
+@source '../../workbench/resources/views/**/*.blade.php';

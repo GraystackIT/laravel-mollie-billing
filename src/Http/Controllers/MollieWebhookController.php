@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPaidWithoutBillableNotification;
+use GraystackIT\MollieBilling\Services\Webhook\ActivationClaimHeldException;
 use GraystackIT\MollieBilling\Services\Webhook\CountryCorrectionHandler;
 use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentArtifacts;
 use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentCouponPricing;
@@ -17,6 +18,7 @@ use GraystackIT\MollieBilling\Services\Webhook\FirstPaymentHandler;
 use GraystackIT\MollieBilling\Services\Webhook\LocalToMollieUpgradeHandler;
 use GraystackIT\MollieBilling\Services\Webhook\MandateOnlyPaymentHandler;
 use GraystackIT\MollieBilling\Services\Webhook\OneTimeOrderHandler;
+use GraystackIT\MollieBilling\Services\Webhook\ChargebackHandler;
 use GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler;
 use GraystackIT\MollieBilling\Services\Webhook\RefundHandler;
 use GraystackIT\MollieBilling\Services\Webhook\SingleChargeHandler;
@@ -28,16 +30,27 @@ use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
-use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\MollieCall;
 
 class MollieWebhookController extends Controller
 {
+    /**
+     * How long a still-pending reservation is believed to be in flight.
+     *
+     * Past this, {@see reserve()} treats it as abandoned and takes it over — see the
+     * reasoning there. Longer than any legitimate delivery (invoice PDF plus several
+     * Mollie round-trips) and far shorter than the 180-day retention that used to be
+     * the only thing clearing a leaked row.
+     */
+    public const RESERVATION_TTL_MINUTES = 15;
+
     public function __construct(
         protected readonly WebhookSupport $support,
         protected readonly FirstPaymentArtifacts $firstPaymentArtifacts,
         protected readonly FirstPaymentCouponPricing $firstPaymentCouponPricing,
         protected readonly OneTimeOrderHandler $oneTimeOrderHandler,
         protected readonly RefundHandler $refundHandler,
+        protected readonly ChargebackHandler $chargebackHandler,
         protected readonly CountryCorrectionHandler $countryCorrectionHandler,
         protected readonly ProrataChargeHandler $prorataChargeHandler,
         protected readonly SingleChargeHandler $singleChargeHandler,
@@ -60,8 +73,19 @@ class MollieWebhookController extends Controller
 
         $reservation = $this->reserve($paymentId);
         if ($reservation === null) {
-            Log::info('Webhook skipped — already processed or in progress', ['payment_id' => $paymentId]);
-            return response('', 200);
+            // 503, not 200: this delivery may carry information the in-flight one
+            // cannot see. Mollie re-calls the same payment when a refund is created,
+            // and the country-mismatch flow refunds the very payment being processed —
+            // so the holder fetched it before that refund existed, records `…:paid`,
+            // and answering 200 here told Mollie the refund delivery was handled.
+            // `refunded_net` then stayed 0 and the books over-stated revenue.
+            //
+            // Safe to retry because reserve() now takes over an abandoned reservation
+            // after RESERVATION_TTL_MINUTES, so this cannot loop forever. The
+            // claim-held branch below already answers 503 for exactly this reason.
+            Log::info('Webhook deferred — another delivery for this payment is in progress', ['payment_id' => $paymentId]);
+
+            return response('', 503);
         }
 
         try {
@@ -75,17 +99,58 @@ class MollieWebhookController extends Controller
             return response('', 503);
         }
 
+        $outcome = $this->outcomeSignatureFor($payment, $paymentId);
+
+        // Non-terminal status (open/pending/authorized): route() matches no
+        // branch, so nothing happened and nothing may be recorded as processed —
+        // otherwise the genuine terminal delivery would look like a duplicate
+        // and the payment would never be booked.
+        if ($outcome === null) {
+            Log::info('Webhook ignored — payment not in a terminal state yet', [
+                'payment_id' => $paymentId,
+                'status' => $payment->status ?? null,
+            ]);
+            $reservation->delete();
+            return response('', 200);
+        }
+
+        if ($this->outcomeAlreadyProcessed($paymentId, $outcome)) {
+            Log::info('Webhook skipped — this outcome was already processed', [
+                'payment_id' => $paymentId,
+                'outcome' => $outcome,
+            ]);
+            $reservation->delete();
+            return response('', 200);
+        }
+
         $billable = $this->resolveBillableFromMetadata($payment);
 
         try {
             $this->route($payment, $billable);
 
+            // Only now is a paid first payment truly done. Clearing the marker
+            // earlier made a billable whose activation threw look abandoned to
+            // CleanupOrphanedBillablesJob.
+            $this->clearPendingFirstPaymentAfterSuccess($payment, $billable);
+
             $reservation->update([
-                'event_signature' => BillingProcessedWebhook::finalSignature($paymentId, (string) ($payment->status ?? 'unknown')),
+                'event_signature' => $outcome,
                 'processed_at' => BillingTime::nowUtc(),
             ]);
 
             return response('', 200);
+        } catch (ActivationClaimHeldException $e) {
+            // Benign back-off, not a failure: a competing payment's activation
+            // is in flight for this billable. Nothing is recorded as processed
+            // and 503 makes Mollie re-deliver once the holder has finished (the
+            // duplicate/invoice guards then apply) or its claim went stale.
+            Log::info('Webhook deferred — a competing activation holds the claim for this billable', [
+                'payment_id' => $paymentId,
+                'reason' => $e->getMessage(),
+            ]);
+
+            $reservation->delete();
+            return response('', 503);
         } catch (\Throwable $e) {
             Log::error('Billing webhook handler failed', [
                 'payment_id' => $paymentId,
@@ -98,36 +163,157 @@ class MollieWebhookController extends Controller
         }
     }
 
-    protected function reserve(string $paymentId): ?BillingProcessedWebhook
+    /**
+     * Drop the "waiting for payment" marker the return page polls, once the paid
+     * handlers have actually run. Non-terminal states never reach here and the
+     * failed states are cleared in route(); this covers `paid`, where clearing
+     * too early is what let CleanupOrphanedBillablesJob delete a paying customer
+     * whose activation had thrown.
+     */
+    protected function clearPendingFirstPaymentAfterSuccess(object $payment, ?Billable $billable): void
     {
-        $signature = BillingProcessedWebhook::pendingSignature($paymentId);
-
-        $existingFinal = BillingProcessedWebhook::query()
-            ->where('mollie_payment_id', $paymentId)
-            ->where('event_signature', '!=', $signature)
-            ->whereNotNull('processed_at')
-            ->exists();
-
-        if ($existingFinal) {
-            return null;
+        if ($billable === null || ($payment->status ?? null) !== 'paid') {
+            return;
         }
 
+        $pendingId = $billable->getPendingFirstPaymentId();
+
+        if ($pendingId !== null && $pendingId === (string) ($payment->id ?? '')) {
+            $billable->clearPendingFirstPayment();
+        }
+    }
+
+    /**
+     * Claim the right to process this payment id right now. The row is written
+     * with the pending signature and rewritten to the delivery's outcome
+     * signature once processing succeeded, so only one delivery of a given
+     * payment can be in flight at a time while later deliveries that carry NEW
+     * information (a terminal status after a non-terminal one, or a refund that
+     * appeared after the paid run) can still claim their turn.
+     */
+    protected function reserve(string $paymentId): ?BillingProcessedWebhook
+    {
         $reservation = BillingProcessedWebhook::firstOrCreate(
-            ['mollie_payment_id' => $paymentId, 'event_signature' => $signature],
+            [
+                'mollie_payment_id' => $paymentId,
+                'event_signature' => BillingProcessedWebhook::pendingSignature($paymentId),
+            ],
             ['received_at' => BillingTime::nowUtc()],
         );
 
-        if (! $reservation->wasRecentlyCreated) {
+        if ($reservation->wasRecentlyCreated) {
+            return $reservation;
+        }
+
+        // A pending row this old is not "in flight", it is abandoned. Nothing unwinds
+        // the reservation when the process dies outright — an OOM or max_execution_time
+        // fatal during PDF generation or the Mollie/VIES calls, a SIGKILL on deploy, or
+        // the delete() in __invoke()'s own catch failing (a lost DB connection is
+        // exactly what got us into that catch). The row then survived forever with the
+        // pending signature, and because a non-created row means "skip", every later
+        // delivery of that payment was answered 200: Mollie marked the webhook
+        // delivered and stopped. A first payment was never activated — money collected,
+        // no subscription, no invoice — and a renewal never booked, never advanced the
+        // period and never recharged the wallets, for the 180 days until
+        // PruneProcessedWebhooksJob removed the row.
+        //
+        // Same reasoning as the activation claim's TTL takeover, which was given one
+        // for this failure mode; the reservation was not.
+        if ($this->reservationIsAbandoned($reservation)) {
+            // Conditional on the value we read, so exactly one delivery wins. `firstOrCreate`
+            // is race-safe (the loser gets `wasRecentlyCreated === false` and a 503), but the
+            // takeover was not: two deliveries could both see the same stale row, both call
+            // it abandoned and both proceed. The activation claim and the
+            // `billing_invoices.mollie_payment_id` unique index absorb that for the
+            // activation and invoicing paths — but a credit note carries
+            // `mollie_payment_id = null`, so nothing stopped the refund handler from writing
+            // two for one refund, after which `effectiveRefundedNet()` read the invoice as
+            // fully refunded and refused every later legitimate refund.
+            $previous = $reservation->received_at;
+
+            $won = $reservation->newQuery()
+                ->whereKey($reservation->getKey())
+                ->where('received_at', $previous)
+                ->update(['received_at' => BillingTime::nowUtc()]);
+
+            if ($won === 0) {
+                return null;
+            }
+
+            Log::warning('Reclaiming an abandoned webhook reservation — a previous delivery died without unwinding it', [
+                'payment_id' => $paymentId,
+                'received_at' => (string) ($previous ?? ''),
+            ]);
+
+            return $reservation->refresh();
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether a still-pending reservation is old enough to be treated as dead.
+     *
+     * Generous on purpose: a legitimate delivery holds the row for as long as its
+     * handler runs, which includes PDF generation and several Mollie calls. Reclaiming
+     * one that is merely slow would reintroduce the double-activation race the
+     * reservation prevents — so the window has to be longer than any real delivery,
+     * and the activation claim guards that race independently anyway.
+     */
+    protected function reservationIsAbandoned(BillingProcessedWebhook $reservation): bool
+    {
+        $receivedAt = $reservation->received_at;
+
+        if ($receivedAt === null) {
+            return true;
+        }
+
+        return BillingTime::toUtc($receivedAt)
+            ->addMinutes(self::RESERVATION_TTL_MINUTES)
+            ->isPast();
+    }
+
+    /**
+     * Signature describing what this delivery would do: the terminal status plus
+     * the refunded total. Returns null while Mollie reports a non-terminal
+     * status, because such a delivery has no outcome to deduplicate on.
+     */
+    protected function outcomeSignatureFor(object $payment, string $paymentId): ?string
+    {
+        $status = (string) ($payment->status ?? '');
+
+        if (! in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
             return null;
         }
 
-        return $reservation;
+        return BillingProcessedWebhook::outcomeSignature(
+            $paymentId,
+            $status,
+            $this->refundedAmount($payment),
+            // A chargeback leaves the status at `paid` and shows up nowhere else, so
+            // without this component its delivery was byte-identical to the paid one
+            // already on record and was deduped away.
+            $this->support->chargedBackAmount($payment),
+        );
+    }
+
+    /**
+     * True when an earlier delivery already finished processing exactly this
+     * outcome — a genuine duplicate that must not run its side-effects twice.
+     */
+    protected function outcomeAlreadyProcessed(string $paymentId, string $outcome): bool
+    {
+        return BillingProcessedWebhook::query()
+            ->where('mollie_payment_id', $paymentId)
+            ->where('event_signature', $outcome)
+            ->whereNotNull('processed_at')
+            ->exists();
     }
 
     protected function fetchPayment(string $paymentId): object
     {
         try {
-            return Mollie::send(new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId));
+            return MollieCall::send(new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId));
         } catch (\Mollie\Api\Exceptions\ApiException $e) {
             if (method_exists($e, 'getCode') && $e->getCode() === 404) {
                 throw new PaymentNotFoundException($paymentId);
@@ -150,6 +336,24 @@ class MollieWebhookController extends Controller
         return $this->support->invoiceAlreadyExistsForPayment($payment);
     }
 
+    /**
+     * Re-run a delivery Mollie made and we lost, from a recovery job.
+     *
+     * `CleanupStalePendingOverageChargeJob` finds a payment Mollie reports as paid whose
+     * webhook never landed, and the only correct way to book it is the very code path the
+     * webhook would have taken — invoice, wallet settlement, events. It used to reach
+     * `route()` through `ReflectionMethod::setAccessible()`, which a rename would have
+     * broken silently at runtime, with nothing to catch it: the replay path had no test.
+     *
+     * Idempotent by the same guards the HTTP entry point relies on, which is what makes it
+     * safe to expose: `invoiceAlreadyExistsForPayment()` short-circuits every handler that
+     * writes an invoice, and the caller has already checked that no invoice exists.
+     */
+    public function replayDelivery(object $payment, ?Billable $billable): void
+    {
+        $this->route($payment, $billable);
+    }
+
     protected function route(object $payment, ?Billable $billable): void
     {
         $status = (string) ($payment->status ?? 'unknown');
@@ -169,17 +373,20 @@ class MollieWebhookController extends Controller
             'billable_id' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
         ]);
 
-        // Clear the pending-first-payment marker as soon as Mollie reports a
-        // terminal state for that exact payment, regardless of branch. The
-        // "waiting for payment" return page reads this to decide whether to
-        // keep polling — leaving it set after a final state would extend the
-        // poll loop unnecessarily.
-        if ($billable !== null && in_array($status, ['paid', 'failed', 'canceled', 'expired'], true)) {
-            $pendingId = $billable->getPendingFirstPaymentId();
-            if ($pendingId !== null && $pendingId === (string) ($payment->id ?? '')) {
-                $billable->clearPendingFirstPayment();
-            }
-        }
+        // The pending-first-payment marker survives EVERY webhook outcome here.
+        // On `paid` deliberately: the paid handlers still have to activate the
+        // subscription, and if that throws we return 200 anyway — a billable left
+        // at New/None with a paid invoice and a live mandate then looks abandoned
+        // to CleanupOrphanedBillablesJob, which used to delete it and revoke the
+        // mandate; the handler clears it once activation succeeded. And on
+        // `failed`/`canceled`/`expired` too: the webhook nearly always beats the
+        // customer's redirect, and the return page's failure probe finds the
+        // payment through exactly this marker — clearing it here left the customer
+        // staring at the "activating…" spinner until the poll timeout instead of
+        // seeing "payment failed, try again". The return page clears the marker
+        // itself once it has shown the failure, and CleanupOrphanedBillablesJob
+        // treats a billable WITH the marker more carefully, not less: it polls
+        // Mollie and only cleans on a terminal failure status.
 
         if ($status === 'paid') {
             if ($billable === null) {
@@ -194,23 +401,20 @@ class MollieWebhookController extends Controller
 
             if ($type === 'one_time_order') {
                 $this->handleOneTimeOrderPaid($payment, $billable, $metadata);
+                $this->syncMollieCredits($payment, $billable);
                 return;
             }
 
             // Neuer Plan-Change-Pfad (Multi-VAT-Sammel-Charge).
             if ($type === 'prorata_charge') {
                 $this->handleProrataChargePaid($payment, $billable, $metadata);
-                if ($this->hasRefunds($payment)) {
-                    $this->handleRefundWebhook($payment, $billable);
-                }
+                $this->syncMollieCredits($payment, $billable);
                 return;
             }
 
             if ($type === 'country_correction') {
                 $this->handleCountryCorrectionPaid($payment, $billable, $metadata);
-                if ($this->hasRefunds($payment)) {
-                    $this->handleRefundWebhook($payment, $billable);
-                }
+                $this->syncMollieCredits($payment, $billable);
                 return;
             }
 
@@ -228,9 +432,7 @@ class MollieWebhookController extends Controller
             // Sync any refunds that were issued via the Mollie dashboard.
             // This runs *after* the normal paid-flow so that a payment that
             // is both paid and partially refunded is fully processed.
-            if ($this->hasRefunds($payment)) {
-                $this->handleRefundWebhook($payment, $billable);
-            }
+            $this->syncMollieCredits($payment, $billable);
 
             return;
         }
@@ -267,9 +469,28 @@ class MollieWebhookController extends Controller
                 return;
             }
 
-            // First checkout payment that never resulted in a subscription.
-            if ($subscriptionId === '' && ! $billable->hasAccessibleBillingSubscription()) {
-                MollieBilling::runAfterCheckout($billable, false);
+            // Aborted checkout payment: a first checkout, a Local→Mollie upgrade
+            // or a stale earlier attempt. None of them carries a Mollie
+            // subscriptionId and none of them can be a recurring-payment
+            // failure — no charge was ever attempted against an existing
+            // subscription. Marking the billable PastDue here would lock the
+            // customer out of the free Local plan they still hold (aborted
+            // upgrade) or out of the subscription a later attempt already
+            // activated (stale first attempt).
+            if ($subscriptionId === '') {
+                if (($metadata['upgrade_from_local'] ?? false) === true
+                    || ! $billable->hasAccessibleBillingSubscription()
+                ) {
+                    MollieBilling::runAfterCheckout($billable, false);
+                    return;
+                }
+
+                Log::info('Aborted checkout payment for a billable that already has an accessible subscription — not treated as a payment failure', [
+                    'payment_id' => $payment->id ?? null,
+                    'status' => $status,
+                    'type' => $type,
+                ]);
+
                 return;
             }
 
@@ -376,6 +597,29 @@ class MollieWebhookController extends Controller
         $this->refundHandler->handle($payment, $billable);
     }
 
+    protected function handleChargebackWebhook(object $payment, Billable $billable): void
+    {
+        $this->chargebackHandler->handle($payment, $billable);
+    }
+
+    /**
+     * Book whatever money has left this payment since it settled.
+     *
+     * Both kinds arrive as a re-delivery of the *same* payment, and both can be present
+     * at once (a partial refund and then a chargeback of the rest), so they are checked
+     * independently rather than as an either/or.
+     */
+    protected function syncMollieCredits(object $payment, Billable $billable): void
+    {
+        if ($this->hasRefunds($payment)) {
+            $this->handleRefundWebhook($payment, $billable);
+        }
+
+        if ($this->support->hasChargebacks($payment)) {
+            $this->handleChargebackWebhook($payment, $billable);
+        }
+    }
+
     protected function resolveBillableFromMetadata(object $payment): ?Billable
     {
         $metadata = (array) ($payment->metadata ?? []);
@@ -385,6 +629,13 @@ class MollieWebhookController extends Controller
 
         $type = (string) ($metadata['billable_type'] ?? '');
         $id = $metadata['billable_id'] ?? null;
+
+        // Every checkout writes `getMorphClass()` into the metadata, which is a
+        // morph-map alias in apps that register one — resolve it back to the FQCN
+        // before touching the class.
+        if ($type !== '' && ! class_exists($type)) {
+            $type = (string) (\Illuminate\Database\Eloquent\Relations\Relation::getMorphedModel($type) ?? '');
+        }
 
         if ($type === '' || $id === null || ! class_exists($type)) {
             return null;
@@ -511,6 +762,11 @@ class MollieWebhookController extends Controller
     protected function hasRefunds(object $payment): bool
     {
         return $this->support->hasRefunds($payment);
+    }
+
+    protected function refundedAmount(object $payment): int
+    {
+        return $this->support->refundedAmount($payment);
     }
 
     protected function handleOneTimeOrderPaid(object $payment, Billable $billable, array $metadata): void
