@@ -131,3 +131,21 @@ $sim->replayWebhook('tr_xxxxx', forceReset: true);
 - **Payment-failure webhooks** — currently only the happy path of `renewal` is wired up.
   To exercise the failure handler, mock `Mollie::send` in a test or push a failing
   sandbox payment id into `billing:webhook-replay`.
+
+## The PostgreSQL migration test
+
+`tests/Feature/Migrations/WalletMorphPostgresTest.php` runs the wallet morph migration
+against a **real PostgreSQL server**, because the defect it guards is invisible on the
+suite's SQLite: dropping a unique index and dropping a unique constraint are the same
+statement there and two different things on Postgres. It skips when no server answers, so
+CI and contributors without one are unaffected.
+
+To have it actually run, create an empty scratch database once:
+
+```bash
+createdb mollie_billing_pgcheck     # or: psql -U postgres -c 'CREATE DATABASE mollie_billing_pgcheck'
+```
+
+The test creates and drops its own `wallets` / `transactions` tables inside it and touches
+nothing else. Point it elsewhere with `BILLING_PG_HOST`, `BILLING_PG_PORT`,
+`BILLING_PG_USER`, `BILLING_PG_PASSWORD`, `BILLING_PG_DATABASE`.
