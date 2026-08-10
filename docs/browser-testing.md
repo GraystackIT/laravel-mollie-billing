@@ -26,9 +26,23 @@ open tests/Browser/screenshots/index.html
 > ```
 >
 > Without it, `composer install` fails on that package. `composer install --no-dev`
-> works but leaves you unable to run any test suite. CI that only needs the feature
-> suite still has to supply the credential, or install with `--no-dev` plus the
-> handful of test packages it actually uses.
+> works but leaves you unable to run any test suite.
+>
+> **Without a licence at all — CI, or a contributor who only wants the feature suite —
+> remove both halves and install normally:**
+>
+> ```bash
+> composer remove --dev livewire/flux-pro --no-update
+> composer config --unset repositories.flux-pro
+> composer update
+> ```
+>
+> Both, not just the dependency: Composer loads every configured repository's package
+> list *before* it resolves anything, so leaving `composer.fluxui.dev` behind fails the
+> install with a 401 before a single package is considered. That is what `.github/workflows/tests.yml`
+> does, and the feature suite then passes in full (1780 cases at the time of writing) with
+> Flux absent — measured, not assumed. Only `tests/Browser` needs it, and that suite has
+> its own `phpunit.dusk.xml`.
 
 ## Why this exists alongside the feature suite
 
