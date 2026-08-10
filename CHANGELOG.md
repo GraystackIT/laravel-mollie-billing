@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-11
+
 ### Added
 
 - **Sandbox test suite** (`composer test:sandbox`, `tests/Sandbox/`). Sends every request type the package builds to the real Mollie API with a test key, through the package's own services, and checks that the responses carry the fields the code then reads. It is what the other two suites structurally cannot be: the feature tests fake the facade and the browser tests fake the SDK's HTTP adapter, so both answer with whatever they were told. Opt-in and excluded from `phpunit.xml.dist` — it needs a key and a network. Refuses any key that is not `test_`, and cancels every subscription it creates by sweeping the customers it created, not by remembering ids a failing test never reached.
