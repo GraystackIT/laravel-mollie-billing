@@ -23,7 +23,14 @@ composer install
 composer test:browser                                   # Chrome end-to-end suite
 composer browser:assets                                 # rebuild Vite assets first
 composer browser:gallery                                # screenshots → index.html
+
+composer test:sandbox                                   # real Mollie API, needs MOLLIE_KEY=test_…
 ```
+
+`composer test:browser` runs past Composer's 300-second process timeout; it dies mid-suite and
+leaves its server on port 8001, which makes every later run fail with `UnableToStartServer`.
+Run it as `./vendor/bin/pest --compact --configuration=phpunit.dusk.xml` (or set
+`COMPOSER_PROCESS_TIMEOUT=0`), and if a run was interrupted, free the port before the next one.
 
 The browser suite (`tests/Browser/`) is separate on purpose: it needs Chrome and a
 Flux Pro licence, and `phpunit.xml.dist` deliberately does not list it. It is the only
@@ -74,6 +81,8 @@ Idempotency has two layers: (1) `reserve()` serializes deliveries that are still
 **No Mollie call inside a DB transaction — anywhere.** The activation path is the documented case, but the rule is general: a transaction can be rolled back, an HTTP call to a payment provider cannot. `UpdateSubscription::update()` and `RefundInvoiceService::refund()` therefore follow the same three-phase shape — decide (row lock, short transaction) → call Mollie (nothing held) → write (row lock, short transaction) — with a **cache lock** (`billing:subscription-change:{id}`, `billing:invoice-refund:{id}`) providing the serialisation a long transaction used to. The loser of that lock is refused (`SubscriptionChangeInProgressException` / `RefundInProgressException`) rather than queued: it would otherwise sit on a worker through a payment plus a PATCH, and everything it validated is stale by the time it gets its turn. `InvoiceService::createCreditNote($…, deferDocument: true)` exists so the DOMPDF render and the disk write happen after the booking commits, instead of holding the invoice row lock and the serial range across them. `WalletPlanChangeAdjuster::adjust($…, deferOverageCharge: true)` exists for the same reason: the rebalance is local and belongs in the transaction, the charge for what it cannot resolve is a Mollie call and is handed back out to `chargeDeferredOverage()`.
 
 **Every Mollie request goes through `Support\MollieCall::send()`, never `Mollie::send()` directly.** That is the single door where the rule above is *enforced*: it refuses when a transaction is open — throwing in testing/local, logging a warning in production, because dropping a payment the customer is waiting for is worse than the risk being warned about. Reviewing every call site against every caller that might open a transaction is exactly the check that rots, and it did — the addon services and the plan-change phase-3 body both drifted back after the rule was written down. The test harness pins the ambient `RefreshDatabase` depth as the baseline in `tests/TestCase.php::setUp()`, so the guard is live for the whole suite rather than only where a test asserts it. `tests/Feature/Billing/NoMollieCallInsideTransactionTest.php` additionally pins `DB::transactionLevel()` at the moment of the call for the money paths, and self-tests the guard.
+
+`MollieCall::send()` also owns the **idempotency key** for the calls that have a meaningful one: `send($request, $key)` sets it on the shared client and clears it in a `finally`, because the SDK clears the key from a *response* middleware that a throw never reaches — and a leaked key means the next mutating request gets this operation's cached response or a 400. Mollie caches a key for **one hour** and rejects a reused key whose parameters differ, so a key must be stable across *retries of one operation* and must move when the amount does: see `RefundInvoiceService` (`invoice-refund:…`) and `ChargeUsageOverageDirectly` (`usage-overage:…`, keyed on the dunning cycle). Note the SDK puts a *random* key on every POST by default, which protects nothing across retries.
 
 `MollieCall::send()` enforces a second invariant at the same door: **every amount is written with its currency's own number of decimals.** Mollie reads the number as written, so a hand-assembled `"10.5"` is a wrong charge rather than a rejected one, and `"500.00"` for a zero-decimal currency like JPY is off by a factor of a hundred in a request the API accepts. Build amounts with `BillingMoney::mollieAmount()` / `InvoiceService::molliePrice()`, never `number_format($cents / 100, 2)` or a `(string)` cast. Pinned by `tests/Feature/Billing/MollieAmountScaleGuardTest.php`.
 

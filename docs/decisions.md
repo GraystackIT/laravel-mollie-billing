@@ -221,6 +221,7 @@ alternative; they are listed so the alternative is argued rather than rediscover
 | The one-pending-change rule keys on an explicit re-entry flag | It used to infer "internal re-validation" from both prorata amounts being 0 — which is also true of a switch between two equally priced plans, so exactly that switch walked past the guard while another change's payment was in flight. `SubscriptionChangeContext::$isPendingReapply` says it outright. |
 | A stuck country correction escalates after 14 days, not 24 hours | `pending` is where a SEPA Direct Debit lives for several business days. Escalating cancels the customer's subscription and mails the admins that the reissue failed — for a payment that is simply still travelling. The figure now matches the overage sweeper's for the structurally identical case. |
 | A PDF line uses the booked VAT, falling back to the rate | The renderer recomputes `net × rate` when given only a percentage, and the stored figure is not always that number — a partial credit note allocates its VAT across the lines it reverses. `unit_tax` is multiplied by the quantity, so it is used only where the stored amount divides evenly; everything else renders exactly as before. |
+| `RetryRefundLineJob` keeps `releaseAfter(30)` | Reported as a hazard: every release counts against `tries`, so a blocked sibling could dead-letter a refund line without ever calling Mollie. The numbers do not support it — `expireAfter(600)` caps one holder at 20 releases against a `tries` budget of 50, and the sibling that *did* choose `dontRelease()` (`RetryUsageOverageChargeJob`) has 3 tries, not 50. Lengthening the interval would also delay every legitimate retry behind a fast sibling, and no test can distinguish the two without real queue timing. Revisit if a dead-lettered line is ever observed with no Mollie attempt recorded. |
 | Trials are exempt from the lapsed-period guard | The guard's premise is that a renewal webhook keeps `nextBillingDate()` in the future. A trial's anchor is the mandate-capture time and Mollie charges at the trial end instead, so a trial longer than one interval walks past it with nothing wrong. Nothing is given away: nothing was paid for the period, so a prorata of 0 is the right answer. |
 
 ---
@@ -264,6 +265,32 @@ definitive. Any code that treats only one of them as final leaves a stale id or 
 `CleanupOrphanedBillablesJob` did. `tests/Feature/Billing/MollieGoneResourceTest.php` pins
 both, and pins the other half too: a 503 must *not* be read as "gone", or one bad night
 orphans a live subscription.
+
+### A lost create-payment answer is marked, never guessed
+
+`ChargeUsageOverageDirectly::charge()` writes the snapshot, posts the payment and only then
+stores the id, so a throw in between leaves `payment_id: null` for two very different reasons:
+the request never arrived, or it arrived and the answer was lost. Locally they are
+indistinguishable and both readings cost money — reading it as *charged* silences the debt
+forever, reading it as *not charged* charges the customer twice, because the payment settles
+into its own invoice under the webhook's per-payment idempotency and a plan-change line is
+never credited back (`settles_wallet: false`).
+
+So the third state is explicit: `usage_overage.payment_unknown_at`. Every path that would
+otherwise re-derive the debt asks `paymentMayExist()` first, and only
+`CleanupStalePendingOverageChargeJob` may resolve it — against Mollie's payment list for the
+customer, never on a guess. An idempotency key is *not* sufficient here: Mollie caches one for
+one hour, which covers the retry ladder (`[60, 300, 900]`) and not the nightly sweep. See
+`docs/usage-billing.md` for the four outcomes and
+`tests/Feature/Wallet/LostOveragePaymentReconciliationTest.php` for the pins.
+
+Two figures in that flow are deliberate. The reconciliation waits **one hour**
+(`RECONCILE_UNKNOWN_AFTER_HOURS`), not the job's 72, because the 72 buy patience for a delivery
+that is still coming and here nothing is — while the marker stands, this billable's overage
+cannot be charged at all, so a three-day wait freezes money for nothing. And the key format was
+measured rather than reasoned about: `tests/Sandbox/MollieRequestContractTest.php` sends a key of
+the exact production shape (class-name backslashes, ISO-timestamp colons) to the real API and
+asserts the replay, plus the 400 for a reused key with a different amount.
 
 ## Refuted findings
 
@@ -331,6 +358,41 @@ the derivation itself was corrupted by an overwritten period start.
 Reported as a signature violation — four arguments passed to a three-parameter method. It
 has four: `?string $interval = null`. An artifact of reviewing `src/Services/Webhook` without
 `src/Services/Billing` in scope.
+
+### `sellerCountry()` cannot return an untrimmed country
+
+Reported as a domestic B2B supply invoiced at 0 %: `isIsoAlpha2()` trims before validating, so
+`' AT '` passes, and the untrimmed candidate is then handed to
+`CountryResolver::isoFromVatPrefix()`. The premise is that the whitespace survives — it does
+not. `isoFromVatPrefix()` opens with `strtoupper(trim(...))`, so what `sellerCountry()`
+returns is already normalised and `reverseChargeApplies()`'s `===` comparison holds.
+
+### `PlanChangeIntent` stores a class name, and resolves it scope-free
+
+Two findings, same file, both already closed in this PR. `toArray()` writes
+`$this->billable::class`, not `getMorphClass()` — with a comment saying why, since an alias
+fails `class_exists()` in the retry job. And `fromArray()` resolves with
+`withoutGlobalScope(BillingScope::class)`, so an app-defined `applyBillingScope()` cannot hide
+the row from a queue worker. The `??=` guard in `SweepPendingRetriesJob` therefore keeps an
+FQCN, never an alias.
+
+### `CancelSubscription::handle()` accepts a reason
+
+Reported as a `Error: Unknown named parameter $reason` swallowed by a local catch, so no
+past-due billable would ever be auto-cancelled. The signature is
+`handle(Billable $billable, bool $immediately = false, ?string $reason = null)` — the reason
+argument was added in this PR together with the audit requirement.
+
+### The trial-ending day count is already aligned to UTC
+
+Reported as an off-by-one from `$trialEndsAt->copy()->startOfDay()` using the instance's own
+timezone. `trial_ends_at` is cast to `UtcDatetime`, so `getBillingTrialEndsAt()` cannot return
+a non-UTC instance and both day boundaries are taken in the same zone.
+
+### `amount_unknown` is defined in both shipped locales
+
+Reported as a raw translation key reaching customer emails. It is `resources/lang/en/notifications.php`
+line 6 and its German sibling.
 
 ### The stale `@phpstan-ignore-next-line` markers are not stale
 
