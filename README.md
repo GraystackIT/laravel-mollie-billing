@@ -896,7 +896,7 @@ Every state change dispatches a Laravel event so apps can react via listeners. N
 - `SubscriptionCreated`, `SubscriptionCancelled`, `SubscriptionExpired`, `SubscriptionResumed`
 - `PlanChanged`, `SubscriptionUpdated`, `SubscriptionChangeScheduled`
 - `TrialStarted`, `TrialConverted`, `TrialExpired`, `TrialExtended`
-- `MandateUpdated`
+- `MandateUpdated`, `MollieSubscriptionReferenceCleared`
 - `PaymentSucceeded`, `PaymentFailed`, `PaymentAmountMismatch`, `DuplicatePaymentReceived`, `RenewalCollectedForEndedSubscription`
 - `InvoiceCreated`, `InvoiceRefunded`, `CreditNoteIssued`, `InvoicePdfRegenerated`
 - `OverageCharged`, `OverageChargeFailed`

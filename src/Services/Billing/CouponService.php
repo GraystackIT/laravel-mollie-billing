@@ -602,7 +602,15 @@ class CouponService
         return DB::transaction(function () use ($coupon, $billable, $context): CouponRedemption {
             $coupon = Coupon::query()->lockForUpdate()->findOrFail($coupon->id);
 
-            $isRenewal = ($context['renewal'] ?? false) === true;
+            // Only a Recurring coupon can be renewed. The exemption below is justified by
+            // what `max_redemptions_per_billable` means for that type (billing periods,
+            // not grants) and nothing else, and `redeem()` is public API taking a
+            // caller-supplied array — so a `renewal` flag on a SinglePayment or Credits
+            // coupon bought a second redemption past an exhausted campaign. The internal
+            // caller resolves its coupon from `active_recurring_coupon`, so this is a
+            // no-op for it.
+            $isRenewal = ($context['renewal'] ?? false) === true
+                && $coupon->type === CouponType::Recurring;
 
             if (! $isRenewal) {
                 if (

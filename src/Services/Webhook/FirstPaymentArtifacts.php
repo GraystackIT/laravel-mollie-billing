@@ -93,7 +93,7 @@ class FirstPaymentArtifacts
      * shape MandateOnlyPaymentHandler writes so every invoice kind carries the
      * same coupon line keys.
      *
-     * @param  array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount_net: int, recurring_discount_net: int, order_amount_net: int}  $pricedCoupon
+     * @param  array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount_net: int, recurring_discount_net: int, order_amount_net: int}|null  $pricedCoupon
      * @return array<int, array<string, mixed>>
      */
     public function couponLineItems(?array $pricedCoupon): array

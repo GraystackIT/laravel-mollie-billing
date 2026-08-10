@@ -264,6 +264,12 @@ final class BillingAuditMap
                     'new_mandate_id' => $e->newMandateId,
                 ]),
 
+            Events\MollieSubscriptionReferenceCleared::class => self::make('mollie_subscription_reference_cleared', AuditCategory::PaymentMethod,
+                fn (Events\MollieSubscriptionReferenceCleared $e): array => [
+                    'mollie_subscription_id' => $e->mollieSubscriptionId,
+                    'reason' => $e->reason,
+                ]),
+
             // ---------------------------------------------------------------
             // Coupons / grants
             // ---------------------------------------------------------------

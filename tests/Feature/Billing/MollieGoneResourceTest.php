@@ -5,8 +5,10 @@ declare(strict_types=1);
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Events\MollieSubscriptionReferenceCleared;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Testing\TestBillable;
+use Illuminate\Support\Facades\Event;
 use Mollie\Api\Exceptions\ApiException;
 use Mollie\Laravel\Facades\Mollie;
 
@@ -60,6 +62,40 @@ it('forgets a subscription id whose customer was deleted at Mollie', function ()
 
     expect(app(MollieSubscriptionGate::class)->hasLiveMollieSubscription($billable))->toBeFalse()
         ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('mollie_subscription_id');
+});
+
+it('announces the cleared reference so an app can react', function (): void {
+    // Clearing the id is a state change like any other, and the package's seam for those is
+    // an event — a log line reaches nobody. Afterwards `hasLiveMollieSubscription()` answers
+    // false, which is indistinguishable from a billable that never had a subscription, so
+    // without this an app could not tell "gone at Mollie" from "never started".
+    Event::fake([MollieSubscriptionReferenceCleared::class]);
+
+    $billable = goneBillable();
+
+    Mollie::shouldReceive('send')->andThrow(goneException(410));
+
+    app(MollieSubscriptionGate::class)->hasLiveMollieSubscription($billable);
+
+    Event::assertDispatched(MollieSubscriptionReferenceCleared::class, fn (MollieSubscriptionReferenceCleared $e): bool => $e->billable->getKey() === $billable->getKey()
+        && $e->mollieSubscriptionId === 'sub_orphan'
+        && $e->reason === 'gone');
+});
+
+it('reports a 404 as not_found rather than gone', function (): void {
+    // The two codes answer different questions and the audit row says which one it was:
+    // 404 is "never existed" (a bad id we wrote), 410 is "existed and was removed" (a
+    // deletion at Mollie). Collapsing them would lose the only signal that separates our
+    // own bug from an operator's action.
+    Event::fake([MollieSubscriptionReferenceCleared::class]);
+
+    $billable = goneBillable();
+
+    Mollie::shouldReceive('send')->andThrow(goneException(404));
+
+    app(MollieSubscriptionGate::class)->hasLiveMollieSubscription($billable);
+
+    Event::assertDispatched(MollieSubscriptionReferenceCleared::class, fn (MollieSubscriptionReferenceCleared $e): bool => $e->reason === 'not_found');
 });
 
 it('keeps the id when Mollie is merely unreachable', function (): void {

@@ -8,6 +8,7 @@ use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\MollieSubscriptionStatus;
+use GraystackIT\MollieBilling\Events\MollieSubscriptionReferenceCleared;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -203,6 +204,12 @@ class MollieSubscriptionGate
             'mollie_subscription_id' => $subscriptionId,
             'reason' => $reason,
         ]);
+
+        // A log line is not the extension seam. The billable just lost the reference every
+        // later cancel, patch and renewal needs, and only an event lets an app notice —
+        // `hasLiveMollieSubscription()` answering false afterwards looks exactly like a
+        // billable that never had one.
+        event(new MollieSubscriptionReferenceCleared($billable, (string) $subscriptionId, $reason));
     }
 
     private static function cacheKey(string $subscriptionId): string

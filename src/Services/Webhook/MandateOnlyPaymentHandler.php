@@ -568,17 +568,6 @@ class MandateOnlyPaymentHandler
     }
 
     /**
-     * Apply whatever a trial signup's coupon does at activation time.
-     *
-     * `$addonCodes` / `$extraSeats` are no longer read here — the Recurring branch
-     * that needed them moved ahead of CreateSubscription. They stay in the signature
-     * because this method is a protected override seam; dropping them would break an
-     * app that overrides it.
-     *
-     * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
-     * @param  array<int, string>  $addonCodes
-     */
-    /**
      * Count a Recurring coupon's grant on a trial signup.
      *
      * The trial path writes only the marker, and every charge afterwards goes through
@@ -630,6 +619,17 @@ class MandateOnlyPaymentHandler
         }
     }
 
+    /**
+     * Apply whatever a trial signup's coupon does at activation time.
+     *
+     * `$addonCodes` / `$extraSeats` are no longer read here — the Recurring branch
+     * that needed them moved ahead of CreateSubscription. They stay in the signature
+     * because this method is a protected override seam; dropping them would break an
+     * app that overrides it.
+     *
+     * @param  array{coupon:\GraystackIT\MollieBilling\Models\Coupon, discount_net:int, recurring_discount_net?:int, order_amount_net:int}  $pricedCoupon
+     * @param  array<int, string>  $addonCodes
+     */
     protected function stashTrialCoupon(
         Billable $billable,
         array $pricedCoupon,

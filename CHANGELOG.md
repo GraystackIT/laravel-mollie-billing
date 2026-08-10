@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `mollie-billing.vat.seller_country` (`BILLING_SELLER_COUNTRY`) and `vat.require_seller_country`: your own country, which is what separates a domestic business customer (owes domestic VAT) from a cross-border one (reverse charge). Falls back to `invoices.seller.address.country`.
 - `mollie-billing.checkout_country_fallback` (`BILLING_CHECKOUT_COUNTRY_FALLBACK`, default `DE`): the VAT country used when a billable has none persisted. Replaces five scattered `?? 'DE'` literals that checkout and webhook could drift apart on.
 - `mollie-billing.invoices.locale` (`BILLING_INVOICE_LOCALE`) plus a nullable `billing_invoices.locale` column: pins the language a PDF renders in, so a regenerated document matches the archived one.
+- `MollieSubscriptionReferenceCleared` event, dispatched when the gate drops a `mollie_subscription_id` Mollie no longer knows. Audited like every other event.
 - `MollieBilling::routes()` — the mounting call README documented all along but that did not exist.
 - `MollieBilling::flushCallbacks()` for use in `tearDown()`.
 - `brick/money` is a declared dependency. It was already installed transitively and used directly by the invoice and money code, which would have broken on any install that resolved it away.
@@ -78,6 +79,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A chargeback that puts a subscription past due now dispatches `PaymentFailed`, like the failed renewal producing the same transition. An app hanging its dunning off that event missed every chargeback-driven episode.
+- `CouponService::redeem()` grants the `renewal` context exemption only to Recurring coupons. `redeem()` is public API taking a caller-supplied array, so the flag bought any coupon type a second redemption past an exhausted campaign.
+- `MollieSubscriptionGate` announces a cleared `mollie_subscription_id` via the new `MollieSubscriptionReferenceCleared` event (reason `gone` for 410, `not_found` for 404). Afterwards `hasLiveMollieSubscription()` answers false, which is indistinguishable from a billable that never had one, so a log line was the only trace.
+- `WalletPlanChangeAdjuster::restoreUnchargedExcess()` logs every line it cannot put back. The existing warning fires only when at least one line *was* restored, so a wholly unrestorable set left no trace at all — and those units are gone, the wallet having already been clamped to 0.
+- Two docblocks that had drifted onto the wrong method (`SingleChargeHandler::pinVatRate()` carried `settleOverageWallets()`'s, `MandateOnlyPaymentHandler::countRecurringGrant()` carried `stashTrialCoupon()`'s).
 - The "overage price without a quota" warning names what the shape actually does. Pay-per-use — no allowance, every unit billed — is supported end to end, and the message read as if it were a defect.
 - A subscription whose Mollie customer was deleted is forgotten. Mollie answers **410 Gone** for a resource that existed and was removed, not 404, so the gate — which cleared the stored id on 404 only — left it in place forever: unreachable, un-cancellable, and blocking a replacement. Measured against the sandbox.
 - An orphaned billable whose Mollie customer no longer exists can be cleaned up. The sweep answered "might have paid" to anything it could not ask, which is right for a timeout and wrong for a 404/410 — those say there is no customer, so there are no payments to protect. The orphan could never be removed and every nightly sweep logged the same warning.

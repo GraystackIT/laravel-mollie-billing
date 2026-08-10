@@ -73,6 +73,7 @@ return [
 
     // Zahlungsmethode
     'mandate_updated' => 'Zahlungsmethode geändert',
+    'mollie_subscription_reference_cleared' => 'Abonnement bei Mollie nicht mehr vorhanden — Referenz entfernt',
 
     // Gutscheincodes / Freischaltungen
     'coupon_redeemed' => 'Gutscheincode :code eingelöst',

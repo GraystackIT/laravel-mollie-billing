@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
+use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
@@ -188,6 +189,17 @@ class ChargebackHandler
                 'subscription_status' => SubscriptionStatus::PastDue,
                 'subscription_meta' => $meta,
             ])->save();
+
+            // The same transition a failed renewal produces, announced the same way.
+            // `SubscriptionPaymentHandler::failed()` dispatches PaymentFailed for it, so an
+            // app that hangs its dunning off that event saw renewal failures and silently
+            // missed every chargeback-driven episode — while the past-due ladder here runs
+            // to auto-cancel regardless.
+            //
+            // Dispatched on a repeat chargeback too, even though the status does not move:
+            // a second reversal is a second failed payment, and `past_due_since` staying
+            // put is about the grace clock, not about the event.
+            event(new PaymentFailed($billable, (string) $invoice->mollie_payment_id, 'chargeback'));
         }
 
         Log::warning('Chargeback booked — billable is past due', [

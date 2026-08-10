@@ -288,6 +288,57 @@ Blocking a *new* booking while a mismatch is open is the stated intent — booki
 unreviewed VAT data only creates more invoices the correction flow has to refund and
 reissue.
 
+### `SingleChargeHandler` cannot write a zero-rated invoice for a VAT-bearing charge
+
+Reported as a money defect: `chargedVatRate()` returns `0.0` from its `catch`, and
+`pinVatRate()` stamps that onto every line through `??=` (0.0 is not null), so the comment's
+promise to "leave the lines unpinned" is not what the code does. True as written — and
+unreachable. `VatCalculationService::calculate()` has exactly one throw,
+`NonEuCountryException`, and it is decided by the country alone; the reverse-charge branch
+reads persisted state and never VIES, so there is no transient failure to catch. A country
+that makes the probe throw makes `InvoiceService::createForPayment()` throw at the same
+`calculate()` call, which has no `catch` — so no invoice is written at 0 %, the webhook 500s
+instead, and Mollie re-delivers. And that country cannot be reached either: the only two
+package paths that persist `billing_country` are `WebhookSupport::ensureBillingCountry()`
+(writes `checkout_country_fallback`) and `CountryMatchService::resolve()`, which is guarded by
+`assertCountryIsInvoiceable()`. The same reasoning refutes the companion finding against
+`OneTimeOrderHandler::ensureBillingCountry()` for "a non-EU country with no
+`additional_countries` entry".
+
+### The reservation takeover's null branch is unreachable, not broken
+
+Reported as a permanent 503 loop: `reservationIsAbandoned()` treats a null `received_at` as
+abandoned, and the takeover then builds `where('received_at', null)`, which SQL compiles to
+`received_at = null` and never matches — so `$won` stays 0 and every delivery is refused. The
+SQL reasoning is right; the state is impossible. `received_at` is `$table->timestamp(...)`,
+i.e. NOT NULL, `firstOrCreate()` always writes it, and nothing else ever sets it to null. The
+null branch is a defensive read of a column that cannot hold null, and a `whereNull()` fix
+could not be given a test that fails without it.
+
+### `prorationIsUsable()` does not need an ordering check on explicit boundaries
+
+Reported as billing the whole balance as excess when a caller passes an old period whose end
+is not after its start. `BillingPolicy::prorataFactor()` returns 0.0 for that pair
+(`prorataPeriodDays()` answers `total => 0`) and clamps `remaining` at 0, so the factor stays
+inside [0, 1] and the degenerate pair reads as "period fully elapsed" — entitlement is the
+*full* old quota, which bills less excess, never more. The one case where everything becomes
+excess is `oldIncluded === 0`, and for a plan with no included quota that is the right answer.
+The derived path's guard exists for a different reason: there, a zero elapsed fraction means
+the derivation itself was corrupted by an overwritten period start.
+
+### `applyRecurringMarker()` takes the interval argument its callers pass
+
+Reported as a signature violation — four arguments passed to a three-parameter method. It
+has four: `?string $interval = null`. An artifact of reviewing `src/Services/Webhook` without
+`src/Services/Billing` in scope.
+
+### The stale `@phpstan-ignore-next-line` markers are not stale
+
+Reported as failing the analysis under `reportUnmatchedIgnoredErrors`. There is no analysis:
+PHPStan is neither a dependency nor configured in this repository. The markers are inert, and
+`$payment->refunds()` on an SDK object is exactly the kind of call that would need one again
+if PHPStan were added.
+
 ### `RefundHandler` does not over-credit across refunds in one delivery
 
 `refundChildren()` is memoised, and `creditNetForGross()` does read it, so the reasoning

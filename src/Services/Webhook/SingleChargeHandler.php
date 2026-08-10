@@ -206,18 +206,6 @@ class SingleChargeHandler
     }
 
     /**
-     * The overage charge settled, so the units the customer just paid for are no
-     * longer owed: credit them back so the negative balance disappears. Without
-     * this the customer pays cash for the units and still loses them from the
-     * next period's quota (rollover types add the new quota on top of the
-     * negative balance), a plan change in the same window feeds the already-paid
-     * negative balance into WalletPlanChangeAdjuster and charges it a second
-     * time, and for non-rollover types the renewal reset makes a failed charge
-     * indistinguishable from a paid one.
-     *
-     * @param  array<int, array<string, mixed>>  $lineItems
-     */
-    /**
      * Stamp a rate onto every line that does not carry one of its own.
      *
      * `createForPayment()` honours a per-line `vat_rate` (that is how mixed-rate
@@ -296,6 +284,18 @@ class SingleChargeHandler
         }
     }
 
+    /**
+     * The overage charge settled, so the units the customer just paid for are no
+     * longer owed: credit them back so the negative balance disappears. Without
+     * this the customer pays cash for the units and still loses them from the
+     * next period's quota (rollover types add the new quota on top of the
+     * negative balance), a plan change in the same window feeds the already-paid
+     * negative balance into WalletPlanChangeAdjuster and charges it a second
+     * time, and for non-rollover types the renewal reset makes a failed charge
+     * indistinguishable from a paid one.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     */
     protected function settleOverageWallets(Billable $billable, array $lineItems): void
     {
         foreach ($lineItems as $line) {

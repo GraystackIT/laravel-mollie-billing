@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\BillingProcessedWebhook;
@@ -15,6 +16,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Testing\TestBillable;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 
@@ -302,6 +304,29 @@ it('keeps refunds and chargebacks on one payment apart', function (): void {
         ->toBe('tr_cb:paid:refunded:1000');
 
     expect(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(1);
+});
+
+it('announces the chargeback-driven past due as a failed payment', function (): void {
+    Notification::fake();
+    Event::fake([PaymentFailed::class]);
+
+    $billable = chargebackBillable();
+    chargebackInvoice($billable);
+
+    ChargebackFakeWebhookController::$payments['tr_cb'] = chargebackPayment($billable, [
+        ['id' => 'chb_1', 'value' => '23.80'],
+    ]);
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_cb'])->assertStatus(200);
+
+    expect($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::PastDue);
+
+    // The same transition a failed renewal produces has to be announced the same way:
+    // `SubscriptionPaymentHandler::failed()` dispatches PaymentFailed, so an app that
+    // reacts to dunning on that event silently missed every chargeback-driven episode.
+    Event::assertDispatched(PaymentFailed::class, fn (PaymentFailed $e): bool => $e->billable->getKey() === $billable->getKey()
+        && $e->paymentId === 'tr_cb'
+        && $e->reason === 'chargeback');
 });
 
 it('leaves a cancelled subscription alone', function (): void {

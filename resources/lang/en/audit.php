@@ -76,6 +76,7 @@ return [
 
     // Payment method
     'mandate_updated' => 'Payment method updated',
+    'mollie_subscription_reference_cleared' => 'Subscription no longer exists at Mollie — reference cleared',
 
     // Promo codes / grants
     'coupon_redeemed' => 'Promo code :code redeemed',

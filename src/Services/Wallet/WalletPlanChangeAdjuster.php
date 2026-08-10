@@ -268,17 +268,23 @@ class WalletPlanChangeAdjuster
 
         $restored = [];
 
+        $skipped = [];
+
         foreach ($overageLineItems as $line) {
             $type = (string) ($line['type'] ?? $line['code'] ?? '');
             $quantity = (int) ($line['quantity'] ?? 0);
 
             if ($type === '' || $quantity <= 0) {
+                $skipped[] = ['type' => $type, 'quantity' => $quantity, 'why' => 'malformed_line'];
+
                 continue;
             }
 
             $wallet = $billable->getWallet($type);
 
             if ($wallet === null) {
+                $skipped[] = ['type' => $type, 'quantity' => $quantity, 'why' => 'wallet_missing'];
+
                 continue;
             }
 
@@ -295,6 +301,18 @@ class WalletPlanChangeAdjuster
                 'billable_id' => $billable->getKey(),
                 'reason' => $reason,
                 'units' => $restored,
+            ]);
+        }
+
+        // A line this method cannot put back is revenue that is simply gone — the wallet was
+        // already clamped to 0 by `adjust()`, and nothing else holds these units. The
+        // warning above fires only when at least one line *was* restored, so a wholly
+        // unrestorable set used to pass in total silence: no balance, no snapshot, no log.
+        if ($skipped !== []) {
+            Log::error('Plan-change overage could not be restored — these units are lost', [
+                'billable_id' => $billable->getKey(),
+                'reason' => $reason,
+                'skipped' => $skipped,
             ]);
         }
     }

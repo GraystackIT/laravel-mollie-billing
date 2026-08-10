@@ -89,6 +89,37 @@ it('frees the per-billable slot again once a grant is revoked', function (): voi
     expect(fn () => $service->redeem($coupon->refresh(), $billable, []))->not->toThrow(InvalidCouponException::class);
 });
 
+it('refuses the renewal bypass for a coupon that is not recurring', function (): void {
+    $service = app(CouponService::class);
+    $billable = capsBillable();
+
+    $coupon = $service->create([
+        'code' => 'ONESHOT',
+        'name' => 'One shot',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Fixed,
+        'discount_value' => 500,
+        'max_redemptions' => 1,
+        'max_redemptions_per_billable' => 1,
+        'active' => true,
+    ]);
+
+    $service->redeem($coupon, $billable, ['discount_amount_net' => 500]);
+    expect($coupon->refresh()->redemptions_count)->toBe(1);
+
+    // The renewal exemption exists because for a Recurring coupon
+    // `max_redemptions_per_billable` counts billing periods, not grants. A
+    // SinglePayment coupon has no such reading, so the flag must not buy it a second
+    // redemption past an exhausted campaign — `redeem()` is public API, and the flag
+    // arrives in a caller-supplied array.
+    expect(fn () => $service->redeem($coupon->refresh(), $billable, [
+        'renewal' => true,
+        'discount_amount_net' => 500,
+    ]))->toThrow(InvalidCouponException::class);
+
+    expect(CouponRedemption::where('coupon_id', $coupon->id)->count())->toBe(1);
+});
+
 it('does not let recurring renewals consume the global new-customer cap', function (): void {
     $service = app(CouponService::class);
     $billable = capsBillable();
