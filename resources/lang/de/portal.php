@@ -82,6 +82,9 @@ return [
     'remaining' => 'verbleibend',
     'purchased_credits' => 'gekauft',
     'usage_plan_remaining' => 'Plan: :remaining von :total übrig',
+    // A trial is credited its prorated share of the plan quota, so the total shown
+    // during one is that share — labelled, so it is not mistaken for the plan's.
+    'usage_trial_remaining' => 'Testphase: :remaining von :total übrig',
     'usage_purchased_remaining' => 'Gekauft: :remaining von :total übrig',
     'view_all_invoices' => 'Alle ansehen',
     'recent_invoices' => 'Letzte Rechnungen',
@@ -449,6 +452,12 @@ return [
         'period_reset' => 'Periodenreset',
         'plan_change_upgrade' => 'Plan-Upgrade',
         'plan_change_downgrade' => 'Plan-Downgrade',
+        'subscription_trial_start' => 'Testphasen-Kontingent',
+        // The wallet is credited back what an overage charge settled, so the units
+        // are not billed a second time next period.
+        'overage_settlement' => 'Mehrverbrauch bezahlt',
+        // Dynamic reason: `one_time_order:{productCode}`, rendered with the product's name.
+        'one_time_order' => 'Kauf: :product',
     ],
     'invoices_subtitle' => 'Alle Rechnungen einsehen und herunterladen.',
     'invoice' => [

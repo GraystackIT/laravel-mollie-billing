@@ -62,6 +62,13 @@ interface Billable
     public function recordBillingUsage(string $type, int $quantity = 1, ?string $reason = null): void;
     public function creditBillingUsage(string $type, int $quantity = 1, ?string $reason = null): void;
     public function includedBillingQuota(string $type): int;
+
+    /**
+     * The quota actually credited for the current period. Equals
+     * `includedBillingQuota()` on a paying subscription and the prorated trial share
+     * on a trial — the number to measure meters, percentages and thresholds against.
+     */
+    public function grantedBillingQuota(string $type): int;
     public function usedBillingQuota(string $type): int;
     public function remainingBillingQuota(string $type): int;
     public function purchasedBillingCredits(string $type): int;

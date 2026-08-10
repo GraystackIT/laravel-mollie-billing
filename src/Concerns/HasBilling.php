@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
+use GraystackIT\MollieBilling\Support\TrialQuota;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
@@ -478,11 +479,55 @@ trait HasBilling
         );
     }
 
+    /**
+     * The quota this billable was actually credited for the current period.
+     *
+     * Identical to `includedBillingQuota()` on a paying subscription. On a trial it is
+     * the prorated share the trial was granted (see `TrialQuota`), read from the
+     * `trial_quota` marker `MandateOnlyPaymentHandler` writes at grant time. This is the
+     * number every meter, percentage and threshold has to measure against: measuring a
+     * trial wallet against the full period quota reports the part that was never
+     * credited as consumption, so a brand-new 14-day trial showed half its quota used.
+     */
+    public function grantedBillingQuota(string $type): int
+    {
+        $included = $this->includedBillingQuota($type);
+
+        if ($this->getBillingSubscriptionStatus() !== SubscriptionStatus::Trial || $included <= 0) {
+            return $included;
+        }
+
+        $granted = $this->getBillingSubscriptionMeta()['trial_quota'] ?? null;
+        $planCode = $this->getBillingSubscriptionPlanCode();
+        $interval = $this->getBillingSubscriptionInterval();
+
+        // Only while it still describes the plan the billable is on: a trial that
+        // changed plan or interval was re-credited by the plan-change adjuster against
+        // the new plan's full quota, and the stale marker would under-report it.
+        if (is_array($granted)
+            && ($granted['plan_code'] ?? null) === $planCode
+            && ($granted['interval'] ?? null) === $interval
+            && is_array($granted['usages'] ?? null)
+        ) {
+            return array_key_exists($type, $granted['usages'])
+                ? (int) $granted['usages'][$type]
+                : 0;
+        }
+
+        // Trials granted before the marker existed, and any billable whose marker was
+        // lost: re-derive from the catalog's configured trial length.
+        return TrialQuota::prorate(
+            $included,
+            app(SubscriptionCatalogInterface::class)->trialDays($planCode ?? '', $interval ?? ''),
+            $interval,
+        );
+    }
+
     public function usedBillingQuota(string $type): int
     {
         $wallet = $this->getWallet($type);
         $balance = (int) ($wallet?->balanceInt ?? 0);
-        $included = $this->includedBillingQuota($type);
+        $included = $this->grantedBillingQuota($type);
         $purchased = $wallet !== null
             ? WalletUsageService::getPurchasedBalance($wallet)
             : 0;

@@ -121,6 +121,29 @@ a negative balance without a price, and pay-per-use is handled end to end becaus
 charge path, the dunning ladder and the plan-change rebalance all iterate *wallets* rather
 than quotas. `tests/Feature/Config/UsageConfigMatrixTest.php` walks the matrix.
 
+### A trial's quota is prorated, and is the yardstick for the whole trial
+
+A trial collects no money, so it is credited only the share of the plan's period quota
+that its own length represents: `ceil(included × trialDays ÷ intervalDays)`, 30 nominal
+days to a month and 365 to a year. A 14-day trial on a monthly plan with 100 included
+units gets 47. That is deliberate, and `Support\TrialQuota` owns the arithmetic.
+
+What was *not* deliberate is that only the crediting knew about it. Every reader — the
+usage meters, `usedBillingQuota()`, the threshold warning — measured the wallet against
+the plan's full period quota, so the part that was never granted read as consumption: a
+subscription minutes old reported "10 of 20 remaining" on a wallet nothing had touched.
+The threshold warning failed in the customer's disfavour for the same reason, firing at
+80 % of a quota the trial wallet only reaches once it is well into overage.
+
+`Billable::grantedBillingQuota()` is the single answer to "how much was this billable
+actually given this period", and everything that measures a wallet goes through it. It
+reads the `subscription_meta.trial_quota` marker written at grant time rather than
+re-deriving from `trial_days` — the configured trial length can change under an existing
+trial, and `extendBillingTrialUntil()` moves the end date while crediting nothing, so the
+recorded grant is the only thing that stays true. A trial from before the marker existed,
+or one whose marker no longer describes the plan the billable is on, falls back to
+re-deriving. `tests/Feature/Wallet/TrialGrantedQuotaTest.php` pins both.
+
 ### Rollover carries differently at a renewal than at a plan change
 
 At a **renewal** the new quota is added on top of whatever is in the wallet: 100 unused

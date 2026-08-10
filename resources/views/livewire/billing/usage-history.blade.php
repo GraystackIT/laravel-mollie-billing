@@ -3,9 +3,11 @@
 use Bavix\Wallet\Models\Transaction;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\UsageReason;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -102,6 +104,7 @@ new class extends Component {
         $catalog = app(SubscriptionCatalogInterface::class);
         $planCode = $billable->getBillingSubscriptionPlanCode();
         $interval = $billable->getBillingSubscriptionInterval();
+        $isTrial = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial;
 
         // Collect available usage types from plan config + meter data.
         $availableTypes = [];
@@ -116,7 +119,10 @@ new class extends Component {
                 $usageMeters[$slug] = [
                     'type' => $slug,
                     'label' => $label,
-                    'included' => (int) $included,
+                    // The granted quota — see the dashboard's meters for why the plan's
+                    // period quota is the wrong yardstick during a trial.
+                    'included' => $billable->grantedBillingQuota($slug),
+                    'trial' => $isTrial,
                     'balance' => (int) ($wallet?->balanceInt ?? 0),
                     'purchased_balance' => $wallet !== null
                         ? WalletUsageService::getPurchasedBalance($wallet)
@@ -137,6 +143,7 @@ new class extends Component {
                 'type' => $slug,
                 'label' => $label,
                 'included' => 0,
+                'trial' => false,
                 'balance' => (int) ($wallet->balanceInt ?? 0),
                 'purchased_balance' => WalletUsageService::getPurchasedBalance($wallet),
             ];
@@ -322,6 +329,7 @@ new class extends Component {
                     :included="$meter['included']"
                     :balance="$meter['balance']"
                     :purchased-balance="$meter['purchased_balance']"
+                    :trial="$meter['trial']"
                     {{-- Balances in the key — see the dashboard's meters for why. --}}
                     :key="'history-meter-'.$meter['type'].'-'.$meter['balance'].'-'.$meter['purchased_balance']"
                 />
@@ -503,9 +511,10 @@ new class extends Component {
                             $meta = $tx->meta ?? [];
                             $txType = $tx->type instanceof \BackedEnum ? $tx->type->value : $tx->type;
                             $isDebit = $txType === 'withdraw';
-                            $reasonKey = $meta['reason'] ?? null;
-                            $langKey = $reasonKey ? "billing::portal.usage_reasons.{$reasonKey}" : null;
-                            $translatedReason = $langKey && __($langKey) !== $langKey ? __($langKey) : ($reasonKey ?? '—');
+                            // Resolved centrally: an unknown reason used to render as its
+                            // raw identifier (`subscription_trial_start`), which is what a
+                            // customer saw for every reason added after the language files.
+                            $translatedReason = UsageReason::label($meta['reason'] ?? null);
                         @endphp
                         <flux:table.row>
                             <flux:table.cell class="tabular-nums">{{ BillingTime::display($tx->created_at, $billable)->translatedFormat('d. M Y H:i') }}</flux:table.cell>

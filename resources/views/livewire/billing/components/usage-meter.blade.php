@@ -1,6 +1,7 @@
 <?php
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use Livewire\Component;
@@ -12,6 +13,7 @@ new class extends Component {
     public ?int $propIncluded = null;
     public ?int $propBalance = null;
     public ?int $propPurchasedBalance = null;
+    public ?bool $propTrial = null;
 
     public function mount(
         string $type,
@@ -19,12 +21,14 @@ new class extends Component {
         ?int $included = null,
         ?int $balance = null,
         ?int $purchasedBalance = null,
+        ?bool $trial = null,
     ): void {
         $this->type = $type;
         $this->label = $label ?? ucfirst($type);
         $this->propIncluded = $included;
         $this->propBalance = $balance;
         $this->propPurchasedBalance = $purchasedBalance;
+        $this->propTrial = $trial;
     }
 
     public function data(): array
@@ -33,6 +37,7 @@ new class extends Component {
             $included = $this->propIncluded;
             $balance = $this->propBalance ?? 0;
             $purchasedBalance = $this->propPurchasedBalance ?? 0;
+            $isTrial = (bool) $this->propTrial;
         } else {
             // Authorized: without props this renders real wallet balances, and
             // `resolveBillable()` will match a query parameter against any billable's
@@ -41,7 +46,10 @@ new class extends Component {
             if ($billable !== null && ! MollieBilling::authorizes(request(), $billable)) {
                 $billable = null;
             }
-            $included = $billable ? $billable->includedBillingQuota($this->type) : 0;
+            // The granted quota, never the plan's period quota: a trial is credited only
+            // its prorated share (see `TrialQuota`), and the difference is not usage.
+            $included = $billable ? $billable->grantedBillingQuota($this->type) : 0;
+            $isTrial = $billable?->getBillingSubscriptionStatus() === SubscriptionStatus::Trial;
             $wallet = ($billable instanceof \Illuminate\Database\Eloquent\Model)
                 ? $billable->getWallet($this->type)
                 : null;
@@ -86,7 +94,7 @@ new class extends Component {
         $planUsedColor = $isDanger ? 'bg-red-500' : ($isWarning ? 'bg-amber-500' : 'bg-emerald-500');
 
         return compact(
-            'included', 'overage', 'purchasedBalance',
+            'included', 'overage', 'purchasedBalance', 'isTrial',
             'planUsed', 'purchasedUsed', 'remainingIncluded', 'remainingPurchased',
             'planUsedWidth', 'remainingIncludedWidth', 'purchasedUsedWidth', 'remainingPurchasedWidth',
             'usedPercent', 'isWarning', 'isDanger', 'planUsedColor',
@@ -133,7 +141,9 @@ new class extends Component {
 
     {{-- Footer --}}
     <div class="mt-2 flex items-center justify-between text-xs tabular-nums">
-        <span class="text-zinc-400">{{ __('billing::portal.usage_plan_remaining', ['remaining' => number_format($m['remainingIncluded']), 'total' => number_format($m['included'])]) }}</span>
+        {{-- Labelled "Trial" while the quota shown is the prorated trial grant, so the
+             number is not read as the plan's full monthly allowance gone missing. --}}
+        <span class="text-zinc-400">{{ __($m['isTrial'] ? 'billing::portal.usage_trial_remaining' : 'billing::portal.usage_plan_remaining', ['remaining' => number_format($m['remainingIncluded']), 'total' => number_format($m['included'])]) }}</span>
         @if ($m['purchasedBalance'] > 0)
             <span class="text-sky-500">{{ __('billing::portal.usage_purchased_remaining', ['remaining' => number_format($m['remainingPurchased']), 'total' => number_format($m['purchasedBalance'])]) }}</span>
         @endif

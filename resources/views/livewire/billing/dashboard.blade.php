@@ -409,7 +409,11 @@ new class extends Component {
                 $usageTypes[] = [
                     'type' => (string) $type,
                     'label' => $catalog->usageTypeName((string) $type),
-                    'included' => $included,
+                    // What was credited, not what the plan lists: a trial gets the
+                    // prorated share, and measuring against the full quota rendered
+                    // the difference as consumption on a subscription minutes old.
+                    'included' => $b->grantedBillingQuota((string) $type),
+                    'trial' => $status === SubscriptionStatus::Trial,
                     'balance' => (int) ($wallet?->balanceInt ?? 0),
                     'purchased_balance' => $wallet !== null
                         ? WalletUsageService::getPurchasedBalance($wallet)
@@ -847,6 +851,7 @@ new class extends Component {
                             :included="$usage['included']"
                             :balance="$usage['balance']"
                             :purchased-balance="$usage['purchased_balance']"
+                            :trial="$usage['trial']"
                             {{-- The balances belong in the key. A child component keeps its own
                                  state across a parent re-render, so with a fixed key the meter
                                  kept showing the numbers it first mounted with: redeeming a

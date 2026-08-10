@@ -417,11 +417,11 @@ class WalletUsageService
             return null;
         }
 
-        $included = $this->catalog->includedUsage(
-            $billable->getBillingSubscriptionPlanCode() ?? '',
-            $billable->getBillingSubscriptionInterval(),
-            $type,
-        );
+        // The granted quota, not the plan's period quota: a trial is credited only its
+        // prorated share, so measuring against the full quota put the 80 % warning at a
+        // point the trial wallet reaches only well inside overage — the customer was
+        // never told their trial quota was running out.
+        $included = $billable->grantedBillingQuota($type);
 
         if ($included <= 0) {
             return null;

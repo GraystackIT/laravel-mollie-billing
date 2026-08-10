@@ -126,6 +126,24 @@ On each billing period renewal (Mollie webhook payment or local subscription res
 
 In both cases, purchased credits that were not consumed survive the renewal.
 
+### A trial is credited a prorated quota
+
+A trial collects no money, so `MandateOnlyPaymentHandler` credits only the share of the
+period quota the trial's own length represents:
+
+```
+grant = ceil(included × trialDays ÷ intervalDays)      // 30 days per month, 365 per year
+```
+
+A 14-day trial on a monthly plan with 100 included units is credited 47, not 100. What was
+granted is recorded under `subscription_meta.trial_quota` and read back by
+`grantedBillingQuota($type)` — which is what every meter, percentage and threshold
+measures against for the duration of the trial. Do not compare a trial wallet against
+`includedBillingQuota()`: the part that was never credited would read as consumption.
+
+The first paid renewal credits the full period quota and the status leaves `Trial`, so the
+meters return to the plan's own numbers with no further bookkeeping.
+
 ### An unpaid overage debt survives the renewal
 
 A negative balance is unpaid debt, and the reset does **not** forgive it while the charge for exactly those units is still settling. It used to: the reset zeroed the debt, then the overage payment's webhook credited the charged quantity on top, so every overage cycle handed the customer that quantity as free units. With SEPA the renewal usually settles first, because Mollie creates the renewal about two days ahead while the overage charge is created the day before it.
@@ -287,6 +305,7 @@ The `HasBilling` trait provides display-ready methods:
 | Method | Description |
 |--------|-------------|
 | `includedBillingQuota($type)` | Plan's included quota from catalog |
+| `grantedBillingQuota($type)` | What was actually credited for the current period — the same number on a paying subscription, the prorated share on a trial. Measure meters and percentages against this, not against the line above |
 | `usedBillingQuota($type)` | Plan units consumed this period (excludes purchased credits) |
 | `remainingBillingQuota($type)` | Total units still available (plan + purchased) |
 | `purchasedBillingCredits($type)` | Remaining purchased credits (one-time orders + coupons) |
@@ -313,8 +332,14 @@ Embedded in the dashboard (pre-computed props):
     :included="1000"
     :balance="490"
     :purchased-balance="500"
+    :trial="false"
 />
 ```
+
+Pass `grantedBillingQuota($type)` as `:included`, not the plan's period quota — see
+[A trial is credited a prorated quota](#a-trial-is-credited-a-prorated-quota). `:trial`
+only labels the footer ("Trial: 7 of 10 remaining" instead of "Plan: …"); the standalone
+form below resolves both from the billable itself.
 
 Standalone (resolves billable automatically):
 
@@ -343,6 +368,23 @@ WalletUsageService::scopeRealUsage(
 ```
 
 Non-usage reasons are listed in `WalletUsageService::NON_USAGE_REASONS`; dynamic ones are matched by prefix via `NON_USAGE_REASON_PREFIXES` (e.g. `one_time_order:`). Any reason not on those lists — including custom reasons passed to `recordBillingUsage($type, $qty, $reason)` — counts as consumption.
+
+### Reason labels
+
+A reason is an internal identifier, and the transaction table must not print it as one.
+`Support\UsageReason::label()` is the single resolver:
+
+```php
+UsageReason::label('subscription_trial_start');   // "Trial quota"       — billing::portal.usage_reasons.*
+UsageReason::label('one_time_order:pack-500');    // "Purchase: 500 Pack" — dynamic, rendered with the product name
+UsageReason::label('some_new_reason');            // "Some New Reason"    — title-cased fallback
+UsageReason::label('Brave Image Search');         // unchanged            — free text an app or admin wrote
+UsageReason::label(null);                         // "Usage"
+```
+
+Add a key under `usage_reasons` in `resources/lang/{locale}/portal.php` for any reason your
+app writes often enough to deserve wording of its own; anything without one still renders
+readably rather than as `snake_case`.
 
 ## Events
 

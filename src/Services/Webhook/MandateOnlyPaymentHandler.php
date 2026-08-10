@@ -23,6 +23,7 @@ use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
+use GraystackIT\MollieBilling\Support\TrialQuota;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -532,30 +533,39 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        // Prorated to the trial length, then handed to completeActivation() so one failing
+        // wallet cannot cost the customer the rest of their quota, the TrialStarted event
+        // the app provisions on, or the after-checkout hook.
+        $trialQuota = TrialQuota::forPlan(
+            $this->catalog->includedUsages($planCode, $interval),
+            $trialDays,
+            $interval,
+        );
+
+        // Recorded, not left to be re-derived: what the trial was actually granted is
+        // what every usage meter has to measure against, and re-deriving it from
+        // `trial_days` goes wrong the moment the plan's configured trial length changes
+        // or the trial is extended (`extendBillingTrialUntil()` moves the end date and
+        // credits nothing). Without it the portal measured a trial wallet against the
+        // full period quota and reported the un-granted remainder as consumption.
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['trial_quota'] = [
+            'granted_at' => BillingTime::nowUtc()->toIso8601String(),
+            'plan_code' => $planCode,
+            'interval' => $interval,
+            'trial_days' => $trialDays,
+            'usages' => $trialQuota,
+        ];
+
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::Trial,
             'trial_ends_at' => BillingTime::nowUtc()->addDays($trialDays),
+            'subscription_meta' => $meta,
         ])->save();
 
         if ($pricedCoupon !== null) {
             $this->stashTrialCoupon($billable, $pricedCoupon, $planCode, $interval, $addonCodes, $extraSeats);
             $this->countRecurringGrant($billable, $pricedCoupon, $planCode, $interval);
-        }
-
-        // Prorated to the trial length, then handed to completeActivation() so one failing
-        // wallet cannot cost the customer the rest of their quota, the TrialStarted event
-        // the app provisions on, or the after-checkout hook.
-        $intervalDays = $interval === 'yearly' ? 365 : 30;
-        $trialQuota = [];
-
-        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $included) {
-            $included = (int) $included;
-
-            if ($included <= 0) {
-                continue;
-            }
-
-            $trialQuota[(string) $type] = (int) ceil($included * $trialDays / $intervalDays);
         }
 
         $this->support->completeActivation(

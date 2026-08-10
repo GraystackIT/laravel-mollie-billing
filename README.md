@@ -535,7 +535,9 @@ return [
                     'base_price_net' => 2900,
                     'seat_price_net' => 990,
                     'trial_days' => 14, // optional, per-interval trial length
-                    // Included quota per billing period (here: per month)
+                    // Included quota per billing period (here: per month). A trial is
+                    // credited its prorated share of this — 14 of 30 days = 47 of 100 —
+                    // and `grantedBillingQuota()` is what the meters measure against.
                     'included_usages' => ['tokens' => 100, 'sms' => 50],
                     // Cents per unit over quota; use `false` for a deliberate "no overage"
                     'usage_overage_prices' => ['tokens' => 10, 'sms' => 15],
