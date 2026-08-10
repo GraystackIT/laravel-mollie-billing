@@ -18,6 +18,7 @@ use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -38,6 +39,8 @@ use Illuminate\Support\Facades\Notification;
  */
 class CountryMatchService
 {
+    use MutatesBillingMeta;
+
     public function __construct(
         private readonly CancelSubscription $cancelSubscription,
         private readonly RefundInvoiceService $refunds,
@@ -453,33 +456,27 @@ class CountryMatchService
             return;
         }
 
-        // Re-read the meta: issueCorrectionCharge() has just written its own
-        // `country_corrections` entry to the same column.
-        $meta = $billable->getBillingSubscriptionMeta();
-        $issued = (array) ($meta[self::ISSUED_KEY] ?? []);
-        $issued[(string) $originalInvoiceId] = [
-            'payment_id' => $paymentId,
-            'mismatch_id' => $mismatchId,
-            'country' => $newCountry,
-            'issued_at' => BillingTime::nowUtc()->toIso8601String(),
-        ];
-        $meta[self::ISSUED_KEY] = $issued;
+        // Locked read-modify-write, not a plain re-read: `issueCorrectionCharge()` has just
+        // written its own `country_corrections` entry to this same column, and the customer
+        // can pay that charge immediately — so the webhook handler, in another process, is
+        // clearing that key while we are between our read and our save. Whoever saved second
+        // used to discard the other's key. Losing `country_corrections` makes
+        // `needsCorrection()` re-issue a charge that is already in flight, and the customer
+        // pays twice for one supply period.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($originalInvoiceId, $mismatchId, $newCountry, $paymentId): array {
+            $issued = (array) ($meta[self::ISSUED_KEY] ?? []);
+            $issued[(string) $originalInvoiceId] = [
+                'payment_id' => $paymentId,
+                'mismatch_id' => $mismatchId,
+                'country' => $newCountry,
+                'issued_at' => BillingTime::nowUtc()->toIso8601String(),
+            ];
+            $meta[self::ISSUED_KEY] = $issued;
 
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+            return $meta;
+        });
     }
 
-    /**
-     * A resolution may only pick a country the mismatch actually saw, unless the
-     * operator states why. Anything else silently re-opens on the next payment
-     * because `check()` keeps comparing against the unchanged signals.
-     *
-     * The user-declared country counts as a signal. It has to: a mismatch exists
-     * precisely because the signals disagree, so `tax_country_user` never equals
-     * payment or IP — and it is one of the two options both the portal modal and the
-     * admin screen offer. Omitting it made every choice the UI presents throw, leaving
-     * the mismatch Pending with no path to resolve it and the subscription cancelling
-     * at period end.
-     */
     /**
      * Refuse a country the package cannot price, before a single refund goes out.
      *
@@ -502,6 +499,18 @@ class CountryMatchService
         $this->vat->calculate($newCountry, 1, $billable);
     }
 
+    /**
+     * A resolution may only pick a country the mismatch actually saw, unless the
+     * operator states why. Anything else silently re-opens on the next payment
+     * because `check()` keeps comparing against the unchanged signals.
+     *
+     * The user-declared country counts as a signal. It has to: a mismatch exists
+     * precisely because the signals disagree, so `tax_country_user` never equals
+     * payment or IP — and it is one of the two options both the portal modal and the
+     * admin screen offer. Omitting it made every choice the UI presents throw, leaving
+     * the mismatch Pending with no path to resolve it and the subscription cancelling
+     * at period end.
+     */
     private function assertCountryIsResolvable(
         BillingCountryMismatch $mismatch,
         string $newCountry,
@@ -546,17 +555,21 @@ class CountryMatchService
             return;
         }
 
-        $meta = $billable->getBillingSubscriptionMeta();
-        $meta[self::VERIFIED_KEY] = [
-            'country' => $newCountry,
-            'tax_country_payment' => $this->normalize($mismatch->tax_country_payment),
-            'tax_country_ip' => $this->normalize($mismatch->tax_country_ip),
-            'mismatch_id' => (int) $mismatch->id,
-            'justification' => $justification === '' ? null : $justification,
-            'verified_at' => BillingTime::nowUtc()->toIso8601String(),
-        ];
+        // Under the row lock for the same reason as `recordIssuedCorrection()`: this runs
+        // inside `resolve()`'s transaction, which makes the write atomic but does not stop a
+        // concurrent writer from having read the column before it and saving after it.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($mismatch, $newCountry, $justification): array {
+            $meta[self::VERIFIED_KEY] = [
+                'country' => $newCountry,
+                'tax_country_payment' => $this->normalize($mismatch->tax_country_payment),
+                'tax_country_ip' => $this->normalize($mismatch->tax_country_ip),
+                'mismatch_id' => (int) $mismatch->id,
+                'justification' => $justification === '' ? null : $justification,
+                'verified_at' => BillingTime::nowUtc()->toIso8601String(),
+            ];
 
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+            return $meta;
+        });
     }
 
     /**

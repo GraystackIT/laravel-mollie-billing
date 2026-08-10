@@ -225,6 +225,59 @@ it('does not re-issue while a correction payment is still in flight', function (
     expect($this->invoiceSpy->charges)->toHaveCount(1);
 });
 
+it('keeps a concurrent writer’s meta key while recording the issued correction', function (): void {
+    $billable = correctionBillable();
+    correctionInvoice($billable, 1000);
+
+    // The other writer is another *process*: `issueCorrectionCharge()` posts a payment and
+    // the customer can pay it at once, so the webhook handler is writing this same JSON
+    // column while `resolve()` sits between its own read and its save. Modelled with a raw
+    // update, which is the one thing the in-memory instance cannot see — the stub in
+    // `beforeEach` writes through the same model, which is why the existing tests never
+    // caught it.
+    $this->app->singleton(InvoiceService::class, function ($app) {
+        return new class (
+            $app->make(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class),
+            $app->make(\GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator::class),
+        ) extends InvoiceService
+        {
+            public function issueCorrectionCharge(BillingInvoice $original, $billable, string $newCountry, int $mismatchId, ?string $creditNoteSerial = null): object
+            {
+                $paymentId = 'tr_corr_1';
+
+                $meta = (array) $billable->fresh()->subscription_meta;
+                $meta['country_corrections'] = [$paymentId => [
+                    'mismatch_id' => $mismatchId,
+                    'original_invoice_id' => (int) $original->id,
+                    'new_country' => strtoupper($newCountry),
+                ]];
+
+                \Illuminate\Support\Facades\DB::table('test_billables')
+                    ->where('id', $billable->getKey())
+                    ->update(['subscription_meta' => json_encode($meta)]);
+
+                return (object) ['id' => $paymentId, 'status' => 'open'];
+            }
+        };
+    });
+
+    app(CountryMatchService::class)->resolve(
+        $billable,
+        app(CountryMatchService::class)->check($billable),
+        'DE',
+    );
+
+    $meta = (array) $billable->fresh()->subscription_meta;
+
+    // Both keys, or the next pass is wrong in one of two directions: losing
+    // `country_corrections` makes `needsCorrection()` re-issue a charge that is already in
+    // flight — the customer pays twice for one supply period — and losing
+    // `country_corrections_issued` loses the record that it was issued at all.
+    expect($meta)->toHaveKey('country_corrections')
+        ->and($meta['country_corrections'])->toHaveKey('tr_corr_1')
+        ->and($meta['country_corrections_issued'] ?? [])->not->toBeEmpty();
+});
+
 it('rejects a country matching neither signal without a justification', function (): void {
     $billable = correctionBillable(['tax_country_payment' => 'DE', 'tax_country_ip' => 'CH']);
     $mismatch = app(CountryMatchService::class)->check($billable);

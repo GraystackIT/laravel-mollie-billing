@@ -14,6 +14,10 @@ use Illuminate\Support\Facades\Storage;
 
 class OssProtocolService
 {
+    private ?string $sellerCountry = null;
+
+    private bool $sellerCountryResolved = false;
+
     /**
      * Generate an OSS quarterly export CSV for the given calendar year and
      * write it to the configured filesystem disk (S3-compatible or local).
@@ -210,25 +214,47 @@ class OssProtocolService
      * `oss`, which is the pre-existing behaviour, and `sellerCountry()`'s own warning
      * covers the misconfiguration.
      */
-    private function scopeFor(BillingInvoice $invoice, string $country): string
+    /**
+     * The seller country, resolved once per export rather than once per invoice.
+     *
+     * `scopeFor()` runs for every row, and each call resolved the container and re-read
+     * config. Memoised on the instance, which the export creates fresh — so a config change
+     * between two exports is still picked up.
+     */
+    private function sellerCountry(): ?string
     {
-        if ($country !== '' && ! in_array($country, CountryResolver::euCountryCodes(), true)) {
-            return 'non_eu';
+        if (! $this->sellerCountryResolved) {
+            $this->sellerCountry = app(VatCalculationService::class)->sellerCountry();
+            $this->sellerCountryResolved = true;
         }
 
-        $seller = app(VatCalculationService::class)->sellerCountry();
+        return $this->sellerCountry;
+    }
+
+    private function scopeFor(BillingInvoice $invoice, string $country): string
+    {
+        $seller = $this->sellerCountry();
         $isDomestic = $seller !== null && $country !== '' && strtoupper($seller) === $country;
 
-        // Domestic is decided first. A validated VAT number alone does not make a supply
-        // reverse-charged: `VatCalculationService::reverseChargeApplies()` — the rule the
-        // charge itself used — also requires the customer country to differ from the
-        // seller's, so a domestic business customer pays full domestic VAT. Asking about
-        // the validation first labelled those rows `reverse_charge`, which sent real
-        // domestic turnover and its collected VAT into the EC Sales List and out of the
-        // national return entirely — with a non-zero VAT amount on a line the list says
-        // is zero-rated.
+        // Domestic is decided first — before the EU-27 test as well as before the validation
+        // one. `sellerCountry()` accepts a seller outside the EU on purpose ("a seller in GB,
+        // CH or NO is a legitimate" case), and for such a seller the non-EU test claimed its
+        // own home turnover and labelled it `non_eu`. Neither scope enters the OSS return, so
+        // the total stayed right while the national-return rows lost their label.
+        //
+        // Before the validation test for a different reason: a validated VAT number alone
+        // does not make a supply reverse-charged. `VatCalculationService::reverseChargeApplies()`
+        // — the rule the charge itself used — also requires the customer country to differ
+        // from the seller's, so a domestic business customer pays full domestic VAT. Asking
+        // about the validation first sent real domestic turnover and its collected VAT into
+        // the EC Sales List and out of the national return entirely, with a non-zero VAT
+        // amount on a line the list says is zero-rated.
         if ($isDomestic) {
             return 'domestic';
+        }
+
+        if ($country !== '' && ! in_array($country, CountryResolver::euCountryCodes(), true)) {
+            return 'non_eu';
         }
 
         $validation = $invoice->vatValidation;

@@ -217,6 +217,31 @@ it('marks which filing each row belongs to', function (): void {
     ]);
 });
 
+it('calls a non-EU seller’s own supplies domestic, not non_eu', function (): void {
+    // `sellerCountry()` deliberately accepts a seller outside the EU-27 — "a seller in GB,
+    // CH or NO is a legitimate" case, in its own words. For such a seller its own home
+    // turnover was labelled `non_eu`, because that test ran before the domestic one even
+    // though the comment beside it says domestic is decided first. Neither scope enters the
+    // OSS return, so the total was right and only the label on the national-return rows was
+    // wrong — which is exactly the column an accountant sorts by.
+    config()->set('mollie-billing.vat.seller_country', 'GB');
+
+    ossInvoice($this->billable, 'GB', 'EUR', 1000, 20.0);
+    ossInvoice($this->billable, 'US', 'EUR', 1000, 0.0);
+
+    $rows = readOssCsv((new OssProtocolService())->export(2026)->path);
+
+    $byCountry = [];
+    foreach (array_slice($rows, 1) as $row) {
+        $byCountry[$row[2]] = $row[7];
+    }
+
+    expect($byCountry)->toBe([
+        'GB' => 'domestic',
+        'US' => 'non_eu',
+    ]);
+});
+
 it('calls a domestic business customer domestic, not reverse charge', function (): void {
     config()->set('mollie-billing.vat.seller_country', 'AT');
 
