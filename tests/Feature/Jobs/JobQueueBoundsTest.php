@@ -31,6 +31,57 @@ function ladderSeconds(array $backoff, int $tries): int
     return $total;
 }
 
+/**
+ * Every job class the package ships that is `ShouldBeUnique`.
+ *
+ * Enumerated from the directory rather than listed, so a new job cannot join the package
+ * without the bounds below applying to it.
+ *
+ * @return array<int, class-string>
+ */
+function uniqueJobClasses(): array
+{
+    $classes = [];
+
+    foreach (glob(__DIR__.'/../../../src/Jobs/*.php') ?: [] as $file) {
+        $class = 'GraystackIT\\MollieBilling\\Jobs\\'.basename($file, '.php');
+
+        if (is_a($class, \Illuminate\Contracts\Queue\ShouldBeUnique::class, true)) {
+            $classes[] = $class;
+        }
+    }
+
+    return $classes;
+}
+
+it('holds every unique lock past the runtime the job caps for itself', function (): void {
+    // Laravel takes the unique lock at *dispatch* time, not when the worker picks the job
+    // up. So `uniqueFor` has to cover the queue wait plus the whole run: a lock equal to
+    // `timeout` is already expired by the time a job that ran to its own limit finishes,
+    // and the next dispatching pass — which finds its row for as long as the marker it
+    // clears on success is set — queues a second copy of work that spends money.
+    //
+    // Read off the class defaults so no constructor arguments are needed, and so the rule
+    // covers every job in `src/Jobs` rather than a list that ages.
+    foreach (uniqueJobClasses() as $class) {
+        $defaults = (new ReflectionClass($class))->getDefaultProperties();
+
+        $uniqueFor = $defaults['uniqueFor'] ?? null;
+        $timeout = $defaults['timeout'] ?? null;
+
+        if (! is_int($uniqueFor) || ! is_int($timeout)) {
+            // A job that caps neither, or caps only one of the two, is covered by the
+            // ladder assertions further down instead.
+            continue;
+        }
+
+        expect($uniqueFor)->toBeGreaterThan(
+            $timeout,
+            $class.' unique lock expires before its own timeout, so a second copy can be queued mid-run',
+        );
+    }
+});
+
 it('bounds every job that walks the whole billable table', function (): void {
     // A table scan with a synchronous Mollie call per row and no timeout runs until the
     // worker's default cuts it off mid-pass. Combined with `tries = 1` that silently

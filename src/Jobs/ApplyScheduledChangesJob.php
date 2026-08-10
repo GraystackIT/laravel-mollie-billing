@@ -50,12 +50,18 @@ class ApplyScheduledChangesJob implements ShouldQueue, ShouldBeUnique
     public int $timeout = 900;
 
     /**
-     * Long enough to cover the Mollie round-trips of one apply(). The dispatching pass
-     * finds the row for as long as `scheduled_change_at` is set, so without uniqueness a
-     * retried or manually re-run pass would queue a second apply() for a billable whose
-     * first one had not committed yet.
+     * Long enough to cover the queue wait *plus* the Mollie round-trips of one apply().
+     * The dispatching pass finds the row for as long as `scheduled_change_at` is set, so
+     * without uniqueness a retried or manually re-run pass would queue a second apply()
+     * for a billable whose first one had not committed yet.
+     *
+     * Four times `timeout`, the same ratio `ProcessTrialLifecycleJob` uses for the same
+     * ceiling. Equal to `timeout` was not enough: Laravel takes the lock when the job is
+     * *dispatched*, not when a worker picks it up, so a busy queue spent the lock before
+     * `apply()` even started — and `apply()` charges and refunds money, which is why
+     * `tries = 1` and why a second copy is the one outcome this job must not allow.
      */
-    public int $uniqueFor = 900;
+    public int $uniqueFor = 3600;
 
     public function __construct(
         public readonly string $billableClass,

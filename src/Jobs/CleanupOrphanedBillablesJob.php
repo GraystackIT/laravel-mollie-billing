@@ -309,13 +309,6 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
     }
 
     /**
-     * Whether Mollie holds a paid payment for this billable's customer.
-     *
-     * Only consulted when there is no pending-payment marker to poll. Returns true
-     * when Mollie is unreachable as well: "unknown" must never authorise a delete,
-     * and the next run (every 15 minutes) retries.
-     */
-    /**
      * Refuse the cleanup because Mollie could not answer — as opposed to answering "gone".
      *
      * Split out so the two catch arms above share one wording and one decision: an
@@ -333,6 +326,15 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
         return true;
     }
 
+    /**
+     * Whether Mollie holds a paid payment for this billable's customer.
+     *
+     * Consulted for every candidate that has a Mollie customer, not only when there is no
+     * pending-payment marker: the marker tracks the latest attempt only, so a terminal
+     * failure on it does not prove nothing was collected earlier. Returns true when Mollie
+     * is unreachable as well — "unknown" must never authorise a delete, and the next run
+     * (every 15 minutes) retries.
+     */
     private function mollieMayHavePaid(Model $billable): bool
     {
         $customerId = (string) ($billable->mollie_customer_id ?? '');
