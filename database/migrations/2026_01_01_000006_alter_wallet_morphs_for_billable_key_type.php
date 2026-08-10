@@ -120,6 +120,30 @@ return new class extends Migration
                 continue;
             }
 
+            // A unique index has to be dropped as a *constraint*, not as an index.
+            // PostgreSQL backs `unique()` with a constraint (Laravel's grammar emits
+            // `alter table … add constraint … unique`), and it refuses to drop the index
+            // out from under it: "cannot drop index … because constraint … on table
+            // wallets requires it" (SQLSTATE 2BP01) — which aborted `php artisan migrate`
+            // in every consuming app on Postgres. `dropUnique()` compiles to
+            // `alter table … drop constraint …` there, while on MySQL and SQLite it
+            // compiles to exactly the same statement as `dropIndex()`, so this costs
+            // nothing on the other drivers.
+            if (($index['unique'] ?? false) === true) {
+                try {
+                    Schema::table($table, function (Blueprint $t) use ($name): void {
+                        $t->dropUnique($name);
+                    });
+
+                    continue;
+                } catch (\Throwable) {
+                    // A unique index created directly (`CREATE UNIQUE INDEX`, as a host app
+                    // may well have done) reports `unique` but has no constraint behind it,
+                    // and then dropping the constraint is what fails. Fall through to the
+                    // index form rather than leaving the column undroppable.
+                }
+            }
+
             Schema::table($table, function (Blueprint $t) use ($name): void {
                 $t->dropIndex($name);
             });
