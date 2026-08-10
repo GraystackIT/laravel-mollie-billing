@@ -74,4 +74,67 @@ final class TrialQuota
 
         return $quota;
     }
+
+    /**
+     * The `subscription_meta.trial_quota` entry recording what a trial was granted.
+     *
+     * Recorded rather than re-derived: the configured trial length can change under a
+     * running trial, `extendBillingTrialUntil()` moves the end date while crediting
+     * nothing, and a plan change mid-trial re-grants against a different plan. The plan
+     * and interval travel with it so a reader can tell whether it still applies.
+     *
+     * @param  array<string, int>  $usages
+     * @return array<string, mixed>
+     */
+    public static function marker(string $planCode, ?string $interval, int $trialDays, array $usages): array
+    {
+        return [
+            'granted_at' => BillingTime::nowUtc()->toIso8601String(),
+            'plan_code' => $planCode,
+            'interval' => $interval,
+            'trial_days' => $trialDays,
+            'usages' => $usages,
+        ];
+    }
+
+    /**
+     * The recorded grant, but only while it still describes the given plan and interval.
+     *
+     * Null for a marker that is absent or stale — the caller then falls back to
+     * re-deriving from the catalog's configured trial length, which is all a trial
+     * granted before the marker existed can offer.
+     *
+     * @param  array<string, mixed>  $meta  the billable's `subscription_meta`
+     * @return array<string, int>|null
+     */
+    public static function grantedFromMeta(array $meta, ?string $planCode, ?string $interval): ?array
+    {
+        $marker = $meta['trial_quota'] ?? null;
+
+        if (! is_array($marker)
+            || ($marker['plan_code'] ?? null) !== $planCode
+            || ($marker['interval'] ?? null) !== $interval
+            || ! is_array($marker['usages'] ?? null)
+        ) {
+            return null;
+        }
+
+        return array_map(static fn ($units): int => (int) $units, $marker['usages']);
+    }
+
+    /**
+     * The trial length the recorded grant was made for, or null when there is none.
+     *
+     * The catalog's current `trial_days` is the fallback, and it is not the same
+     * question: a plan whose configured trial was shortened after this trial started
+     * would re-grant against the shorter one.
+     *
+     * @param  array<string, mixed>  $meta  the billable's `subscription_meta`
+     */
+    public static function grantedTrialDays(array $meta): ?int
+    {
+        $days = ($meta['trial_quota'] ?? null)['trial_days'] ?? null;
+
+        return is_int($days) || (is_string($days) && $days !== '') ? (int) $days : null;
+    }
 }

@@ -50,31 +50,11 @@ class SubscriptionPaymentHandler
     /**
      * Whether an overage charge covering this usage type is created but not settled.
      *
-     * Read off the snapshot `ChargeUsageOverageDirectly` persists, which lists exactly
-     * the line items it charged for — so a type the charge did not cover still gets its
-     * ordinary reset. A snapshot whose cycle already gave up (`STATUS_FAILED`) is not
-     * "in flight": that debt was written off with a past-due transition, and preserving
-     * it forever would keep the customer at a negative balance no settlement will clear.
+     * Lives on `WebhookSupport` since the paid trial conversion needs the same answer.
      */
     protected function hasUnsettledOverageFor(Billable $billable, string $usageType): bool
     {
-        $meta = $billable->getBillingSubscriptionMeta();
-
-        if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
-            return false;
-        }
-
-        $lines = (array) ($meta[ChargeUsageOverageDirectly::META_KEY]['line_items'] ?? []);
-
-        foreach ($lines as $line) {
-            $type = (string) ($line['type'] ?? $line['code'] ?? '');
-
-            if (strcasecmp($type, $usageType) === 0 && (int) ($line['quantity'] ?? 0) > 0) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->support->hasUnsettledOverageFor($billable, $usageType);
     }
 
     /**
@@ -328,30 +308,10 @@ class SubscriptionPaymentHandler
             }
         }
 
-        foreach ($this->catalog->includedUsages($planCode, $interval) as $type => $units) {
-            try {
-                if ($this->catalog->usageRollover((string) $type)) {
-                    // Clamps the purchased balance before crediting — see creditRollover().
-                    $this->walletService->creditRollover($billable, (string) $type, (int) $units);
-                } else {
-                    // A charge for these units may still be settling — with SEPA it
-                    // usually is, since Mollie creates the renewal about two days ahead
-                    // while the overage charge is created the day before it. Forgiving
-                    // the debt here and then crediting the charged quantity when the
-                    // overage settles handed the customer that quantity for free, every
-                    // cycle. Rollover types are unaffected: they never zero the balance.
-                    $this->walletService->resetAndCredit(
-                        $billable,
-                        (string) $type,
-                        (int) $units,
-                        'subscription_renewal',
-                        preserveDebt: $this->hasUnsettledOverageFor($billable, (string) $type),
-                    );
-                }
-            } catch (\Throwable $e) {
-                Log::warning('Wallet credit failed during webhook', ['type' => $type, 'error' => $e->getMessage()]);
-            }
-        }
+        // Shared with the paid trial conversion in ProrataChargeHandler, so a trial that
+        // ends by changing plan lands in the same wallet state as one that ends by simply
+        // being charged.
+        $this->support->creditPeriodQuota($billable, $planCode, $interval, 'subscription_renewal');
 
         // Already resolved above, where the invoice's period was computed from it.
         $periodStartsAt = $newPeriodStart;
@@ -394,6 +354,10 @@ class SubscriptionPaymentHandler
                 // trial-conversion tile read 0 % for a business converting everyone.
                 if ($wasTrial) {
                     $meta['trial_converted_at'] = $periodStartsAt->toIso8601String();
+
+                    // The grant record describes a trial that no longer runs — see
+                    // ProrataChargeHandler, which converts a trial the other way.
+                    unset($meta['trial_quota']);
                 }
 
                 // A successful recurring charge recovers a PastDue billable — drop the

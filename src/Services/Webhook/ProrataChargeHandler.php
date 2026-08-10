@@ -231,7 +231,17 @@ class ProrataChargeHandler
         $oldPeriodStart = $billable->getBillingPeriodStartsAt();
         $oldPeriodEnd = $billable->nextBillingDate();
 
-        if ($planOrIntervalChanged) {
+        if ($wasTrial) {
+            // The trial ends here and a full period has just been paid for, so the wallets
+            // get that period's quota — the same refill the first ordinary renewal does.
+            //
+            // Not the plan-change adjuster: its premise is a period that was paid for and
+            // partly consumed, and a trial's wallet holds only the prorated share it was
+            // granted. It also only ran when plan or interval moved, so a seat change
+            // mid-trial converted the trial, started a new period, charged for it — and
+            // left the wallet on the trial's fraction for the whole month that followed.
+            $this->support->creditPeriodQuota($billable, $newPlanCode, $newIntervalCode, 'subscription_trial_conversion');
+        } elseif ($planOrIntervalChanged) {
             try {
                 $this->walletAdjuster->adjust(
                     $billable,
@@ -283,6 +293,11 @@ class ProrataChargeHandler
             // cohort to count.
             if ($wasTrial) {
                 $meta['trial_converted_at'] = $newPeriodStart->toIso8601String();
+
+                // The grant record describes a trial that no longer runs. Status alone
+                // already keeps `grantedBillingQuota()` off it, but leaving it behind
+                // invites the next reader to trust it.
+                unset($meta['trial_quota']);
             }
 
             if ($wasPastDue) {

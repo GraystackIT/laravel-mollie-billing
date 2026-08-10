@@ -453,6 +453,7 @@ return [
         'plan_change_upgrade' => 'Plan-Upgrade',
         'plan_change_downgrade' => 'Plan-Downgrade',
         'subscription_trial_start' => 'Testphasen-Kontingent',
+        'subscription_trial_conversion' => 'Erste bezahlte Periode',
         // The wallet is credited back what an overage charge settled, so the units
         // are not billed a second time next period.
         'overage_settlement' => 'Mehrverbrauch bezahlt',

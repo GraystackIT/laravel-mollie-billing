@@ -549,13 +549,7 @@ class MandateOnlyPaymentHandler
         // credits nothing). Without it the portal measured a trial wallet against the
         // full period quota and reported the un-granted remainder as consumption.
         $meta = $billable->getBillingSubscriptionMeta();
-        $meta['trial_quota'] = [
-            'granted_at' => BillingTime::nowUtc()->toIso8601String(),
-            'plan_code' => $planCode,
-            'interval' => $interval,
-            'trial_days' => $trialDays,
-            'usages' => $trialQuota,
-        ];
+        $meta['trial_quota'] = TrialQuota::marker($planCode, $interval, $trialDays, $trialQuota);
 
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::Trial,

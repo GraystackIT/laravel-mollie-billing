@@ -8,8 +8,10 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\TrialQuota;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
@@ -85,11 +87,38 @@ class WalletPlanChangeAdjuster
 
         $overageLineItems = [];
 
+        // A trial was credited only its prorated share, and both sides of the rebalance
+        // have to say so. Read from the catalog, the old baseline was the plan's full
+        // period quota — a quota the trial never received — so the untouched remainder
+        // counted as consumption: `excess` came out at the whole un-granted difference,
+        // which is deducted from the new plan's quota and, past that, billed as overage
+        // the customer never used. The new side is prorated for the same reason, so long
+        // as the trial continues; the paths where the trial *ends* here (the paid
+        // conversion) credit a full period instead and do not call this at all.
+        $oldGranted = TrialQuota::grantedFromMeta($billable->getBillingSubscriptionMeta(), $oldPlan, $oldInterval);
+        $staysOnTrial = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial;
+        $trialDays = $staysOnTrial
+            ? (TrialQuota::grantedTrialDays($billable->getBillingSubscriptionMeta())
+                ?? $this->catalog->trialDays($newPlan, $newInterval))
+            : 0;
+        $regrantedTrialQuota = [];
+
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
             $rollover = $this->catalog->usageRollover($slug);
-            $oldIncluded = $this->catalog->includedUsage($oldPlan, $oldInterval, $slug);
+            $oldIncluded = $oldGranted !== null
+                ? (int) ($oldGranted[$slug] ?? 0)
+                : $this->catalog->includedUsage($oldPlan, $oldInterval, $slug);
             $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
+
+            if ($staysOnTrial) {
+                $newIncluded = TrialQuota::prorate($newIncluded, $trialDays, $newInterval);
+
+                if ($newIncluded > 0) {
+                    $regrantedTrialQuota[$slug] = $newIncluded;
+                }
+            }
+
             $balance = (int) $wallet->balanceInt;
 
             // Separate purchased credits from plan credits. Purchased credits
@@ -183,9 +212,28 @@ class WalletPlanChangeAdjuster
         // Create wallets for usage types that are new in the target plan.
         $newUsages = $this->catalog->includedUsages($newPlan, $newInterval);
         foreach ($newUsages as $type => $quantity) {
-            if ((int) $quantity > 0 && $billable->getWallet($type) === null) {
-                $this->walletService->credit($billable, (string) $type, (int) $quantity, 'plan_change_credit');
+            $quantity = (int) $quantity;
+
+            if ($staysOnTrial) {
+                $quantity = TrialQuota::prorate($quantity, $trialDays, $newInterval);
+
+                if ($quantity > 0) {
+                    $regrantedTrialQuota[(string) $type] = $quantity;
+                }
             }
+
+            if ($quantity > 0 && $billable->getWallet($type) === null) {
+                $this->walletService->credit($billable, (string) $type, $quantity, 'plan_change_credit');
+            }
+        }
+
+        // The grant moved with the plan, so the record of it has to move too — it is what
+        // `grantedBillingQuota()` answers with for the rest of the trial, and a marker
+        // still naming the old plan would send every meter back to re-deriving.
+        if ($staysOnTrial) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta['trial_quota'] = TrialQuota::marker($newPlan, $newInterval, $trialDays, $regrantedTrialQuota);
+            $billable->forceFill(['subscription_meta' => $meta])->save();
         }
 
         if ($overageLineItems === []) {

@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
+use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -37,6 +38,84 @@ class WebhookSupport
      * Mollie call is still in flight must never be raced.
      */
     public const ACTIVATION_CLAIM_TTL_MINUTES = 10;
+    /**
+     * Credit a newly paid period's included quota into the wallets.
+     *
+     * The renewal's own refill, shared so a paid trial conversion lands the customer in
+     * exactly the state the first ordinary renewal would have. The conversion used to go
+     * through the plan-change adjuster or, when neither plan nor interval moved, through
+     * nothing at all — so a customer who changed seats mid-trial paid for a full period
+     * and kept the trial's prorated wallet for it.
+     *
+     * Rollover types add on top; the rest are reset and re-credited, preserving a debt an
+     * overage charge is still collecting (see `resetAndCredit`). One failing wallet must
+     * not cost the others, so each is isolated.
+     */
+    public function creditPeriodQuota(
+        Billable $billable,
+        string $planCode,
+        ?string $interval,
+        string $reason,
+    ): void {
+        $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
+        $walletService = app(WalletUsageService::class);
+
+        foreach ($catalog->includedUsages($planCode, $interval) as $type => $units) {
+            try {
+                if ($catalog->usageRollover((string) $type)) {
+                    // Clamps the purchased balance before crediting — see creditRollover().
+                    $walletService->creditRollover($billable, (string) $type, (int) $units);
+                } else {
+                    $walletService->resetAndCredit(
+                        $billable,
+                        (string) $type,
+                        (int) $units,
+                        $reason,
+                        preserveDebt: $this->hasUnsettledOverageFor($billable, (string) $type),
+                    );
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Wallet credit failed during webhook', ['type' => $type, 'error' => $e->getMessage()]);
+            }
+        }
+    }
+
+    /**
+     * Whether an overage charge covering this usage type is created but not settled.
+     *
+     * Read off the snapshot `ChargeUsageOverageDirectly` persists, which lists exactly
+     * the line items it charged for — so a type the charge did not cover still gets its
+     * ordinary reset. A snapshot whose cycle already gave up (`STATUS_FAILED`) is not
+     * "in flight": that debt was written off with a past-due transition, and preserving
+     * it forever would keep the customer at a negative balance no settlement will clear.
+     *
+     * A charge for the units being re-credited may still be settling — with SEPA it
+     * usually is, since Mollie creates the renewal about two days ahead while the overage
+     * charge is created the day before it. Forgiving the debt and then crediting the
+     * charged quantity when the overage settles handed the customer that quantity for
+     * free, every cycle. Rollover types are unaffected: they never zero the balance.
+     */
+    public function hasUnsettledOverageFor(Billable $billable, string $usageType): bool
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (($meta['usage_overage_status'] ?? null) !== ChargeUsageOverageDirectly::STATUS_PENDING) {
+            return false;
+        }
+
+        $lines = (array) ($meta[ChargeUsageOverageDirectly::META_KEY]['line_items'] ?? []);
+
+        foreach ($lines as $line) {
+            $type = (string) ($line['type'] ?? $line['code'] ?? '');
+
+            if (strcasecmp($type, $usageType) === 0 && (int) ($line['quantity'] ?? 0) > 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function invoiceAlreadyExistsForPayment(object $payment): bool
     {
         $paymentId = (string) ($payment->id ?? '');

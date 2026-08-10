@@ -453,6 +453,7 @@ return [
         'plan_change_upgrade' => 'Plan upgrade',
         'plan_change_downgrade' => 'Plan downgrade',
         'subscription_trial_start' => 'Trial quota',
+        'subscription_trial_conversion' => 'First paid period',
         // The wallet is credited back what an overage charge settled, so the units
         // are not billed a second time next period.
         'overage_settlement' => 'Overage paid',

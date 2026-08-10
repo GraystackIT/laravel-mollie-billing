@@ -7,7 +7,6 @@ namespace GraystackIT\MollieBilling\Services\Wallet;
 use Bavix\Wallet\Models\Wallet as WalletModel;
 use Carbon\Carbon;
 use GraystackIT\MollieBilling\Contracts\Billable;
-use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Events\UsageLimitReached;
 use GraystackIT\MollieBilling\Events\WalletCredited;
 use GraystackIT\MollieBilling\Events\WalletReset;
@@ -22,9 +21,13 @@ use Illuminate\Support\Facades\Notification;
 
 class WalletUsageService
 {
-    public function __construct(
-        private readonly SubscriptionCatalogInterface $catalog,
-    ) {
+    /**
+     * The catalog used to sit here for the threshold's quota lookup. That question is
+     * now `Billable::grantedBillingQuota()`'s — it has to account for a trial's prorated
+     * grant, which the catalog alone cannot see.
+     */
+    public function __construct()
+    {
     }
 
     /**
@@ -275,6 +278,7 @@ class WalletUsageService
         'subscription_renewal',
         'subscription_renewal_rollover',
         'subscription_trial_start',
+        'subscription_trial_conversion',
         'coupon_credit',
         // Overage that has been paid for is credited back to the wallet. The
         // consumption was already counted when it was debited — counting the

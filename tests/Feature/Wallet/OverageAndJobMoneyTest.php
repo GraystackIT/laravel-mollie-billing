@@ -150,15 +150,9 @@ it('still forgives the balance on an ordinary renewal with no charge in flight',
 });
 
 it('reads the pending-charge marker to decide, per usage type', function (): void {
-    $handler = new class extends GraystackIT\MollieBilling\Services\Webhook\SubscriptionPaymentHandler
-    {
-        public function __construct() {}
-
-        public function probe(GraystackIT\MollieBilling\Contracts\Billable $b, string $type): bool
-        {
-            return $this->hasUnsettledOverageFor($b, $type);
-        }
-    };
+    // On WebhookSupport since the paid trial conversion needs the same answer as the
+    // renewal; SubscriptionPaymentHandler delegates to it.
+    $handler = app(GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class);
 
     $pending = jobMoneyBillable([], [
         'usage_overage_status' => ChargeUsageOverageDirectly::STATUS_PENDING,
@@ -167,9 +161,9 @@ it('reads the pending-charge marker to decide, per usage type', function (): voi
         ],
     ]);
 
-    expect($handler->probe($pending, 'Tokens'))->toBeTrue()
+    expect($handler->hasUnsettledOverageFor($pending, 'Tokens'))->toBeTrue()
         // A type the charge did not cover keeps its ordinary reset.
-        ->and($handler->probe($pending, 'Sms'))->toBeFalse();
+        ->and($handler->hasUnsettledOverageFor($pending, 'Sms'))->toBeFalse();
 
     // A cycle that gave up is not "in flight": that debt was written off with the
     // past-due transition, and preserving it would strand the wallet negative forever.
@@ -180,7 +174,7 @@ it('reads the pending-charge marker to decide, per usage type', function (): voi
         ],
     ]);
 
-    expect($handler->probe($failed, 'Tokens'))->toBeFalse();
+    expect($handler->hasUnsettledOverageFor($failed, 'Tokens'))->toBeFalse();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

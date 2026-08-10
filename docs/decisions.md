@@ -144,6 +144,24 @@ recorded grant is the only thing that stays true. A trial from before the marker
 or one whose marker no longer describes the plan the billable is on, falls back to
 re-deriving. `tests/Feature/Wallet/TrialGrantedQuotaTest.php` pins both.
 
+The same premise decides what happens to the wallet when the trial ends or moves:
+
+| | | |
+|---|---|---|
+| **Trial ends, paid** — first recurring charge, or any change charged mid-trial | Full period quota, `WebhookSupport::creditPeriodQuota()` | A full period has been paid for. Both routes share one refill, so a trial that ends by changing plan lands where one that ends by being charged lands. |
+| **Trial continues, plan changes** | Rebalance against the *grant*, re-granted prorated to the same trial length | Nothing has been paid; the trial's entitlement simply moves plan. |
+| **Paying subscription, plan changes** | Unchanged — prorated settlement of the period being left | The period was paid for and partly consumed. |
+
+The plan-change adjuster is deliberately *not* the mechanism for the first row. Its
+baseline is a period that was paid for and partly consumed, which a trial's is neither —
+and it only ran when plan or interval moved, so a seat change mid-trial converted the
+trial, started a new period, charged for it, and left the wallet holding the trial's
+fraction for the whole month that followed. Read against the old plan's full quota, the
+un-granted remainder also counted as consumption: an untouched 10-of-20 trial wallet came
+out of a downgrade holding 1 unit instead of 5, and past the new quota the difference is
+billed as overage the customer never used. `tests/Feature/Webhook/TrialConversionWalletTest.php`
+and `tests/Feature/Wallet/TrialPlanChangeRebalanceTest.php` pin the three rows.
+
 ### Rollover carries differently at a renewal than at a plan change
 
 At a **renewal** the new quota is added on top of whatever is in the wallet: 100 unused

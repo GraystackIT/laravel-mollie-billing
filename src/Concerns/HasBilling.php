@@ -497,21 +497,15 @@ trait HasBilling
             return $included;
         }
 
-        $granted = $this->getBillingSubscriptionMeta()['trial_quota'] ?? null;
         $planCode = $this->getBillingSubscriptionPlanCode();
         $interval = $this->getBillingSubscriptionInterval();
 
-        // Only while it still describes the plan the billable is on: a trial that
-        // changed plan or interval was re-credited by the plan-change adjuster against
-        // the new plan's full quota, and the stale marker would under-report it.
-        if (is_array($granted)
-            && ($granted['plan_code'] ?? null) === $planCode
-            && ($granted['interval'] ?? null) === $interval
-            && is_array($granted['usages'] ?? null)
-        ) {
-            return array_key_exists($type, $granted['usages'])
-                ? (int) $granted['usages'][$type]
-                : 0;
+        // Only while it still describes the plan the billable is on — a mid-trial plan
+        // change re-grants against the new plan and rewrites the marker with it.
+        $granted = TrialQuota::grantedFromMeta($this->getBillingSubscriptionMeta(), $planCode, $interval);
+
+        if ($granted !== null) {
+            return (int) ($granted[$type] ?? 0);
         }
 
         // Trials granted before the marker existed, and any billable whose marker was

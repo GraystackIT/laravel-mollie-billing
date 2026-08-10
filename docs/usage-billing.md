@@ -141,8 +141,19 @@ granted is recorded under `subscription_meta.trial_quota` and read back by
 measures against for the duration of the trial. Do not compare a trial wallet against
 `includedBillingQuota()`: the part that was never credited would read as consumption.
 
-The first paid renewal credits the full period quota and the status leaves `Trial`, so the
-meters return to the plan's own numbers with no further bookkeeping.
+**When the trial ends**, a full period has been paid for and the wallets get that
+period's quota — the ordinary renewal refill (`WebhookSupport::creditPeriodQuota()`),
+reason `subscription_trial_conversion`, and the grant record is dropped. Both routes out
+of a trial go through it: the first recurring charge (`SubscriptionPaymentHandler`) and a
+change that is charged mid-trial (`ProrataChargeHandler` — a plan switch, an addon, or
+just a seat). The plan-change adjuster deliberately does **not** run for the second: its
+baseline is a period that was paid for and partly consumed, which a trial's is neither.
+
+**A plan change that leaves the trial running** rebalances against the grant instead:
+`WalletPlanChangeAdjuster` reads the old side from the recorded grant and prorates the new
+plan's quota to the same trial length, then rewrites the record. Without that, the units
+the trial was never credited counted as consumption — deducted from the new plan's quota
+and, past that, billed as overage nobody used.
 
 ### An unpaid overage debt survives the renewal
 
