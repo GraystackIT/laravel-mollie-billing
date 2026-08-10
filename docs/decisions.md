@@ -144,11 +144,26 @@ recorded grant is the only thing that stays true. A trial from before the marker
 or one whose marker no longer describes the plan the billable is on, falls back to
 re-deriving. `tests/Feature/Wallet/TrialGrantedQuotaTest.php` pins both.
 
+### A trial is free, including what is added during it
+
+Seats, addons and quantities added while the trial runs are not charged, and removing
+them again credits nothing. Nothing was paid for the window they are added to and nothing
+will be until the trial ends, so there is no fraction of anything to prorate — the
+customer is charged the full new amount at conversion, because Mollie is PATCHed to it
+either way. A **plan or interval change is the exception**: it ends the trial and is
+charged. That is a product decision, not an arithmetic one.
+
+`BillingPolicy::isFreeTrialAdjustment()` is the predicate, next to `isPastDueReset()` and
+for the same reason: the composer, the context builder and the preview all have to give
+one answer. They did not — the preview quoted €0 for extra seats during a trial while the
+change collected the prorated amount and converted the trial with it.
+`tests/Feature/Subscription/TrialAdjustmentIsFreeTest.php` pins both directions.
+
 The same premise decides what happens to the wallet when the trial ends or moves:
 
 | | | |
 |---|---|---|
-| **Trial ends, paid** — first recurring charge, or any change charged mid-trial | Full period quota, `WebhookSupport::creditPeriodQuota()` | A full period has been paid for. Both routes share one refill, so a trial that ends by changing plan lands where one that ends by being charged lands. |
+| **Trial ends, paid** — first recurring charge, or a plan change mid-trial | Full period quota, `WebhookSupport::creditPeriodQuota()` | A full period has been paid for. Both routes share one refill, so a trial that ends by changing plan lands where one that ends by being charged lands. |
 | **Trial continues, plan changes** | Rebalance against the *grant*, re-granted prorated to the same trial length | Nothing has been paid; the trial's entitlement simply moves plan. |
 | **Paying subscription, plan changes** | Unchanged — prorated settlement of the period being left | The period was paid for and partly consumed. |
 

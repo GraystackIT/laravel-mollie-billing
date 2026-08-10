@@ -1333,7 +1333,13 @@ class UpdateSubscription
 
         $isPastDueReset = BillingPolicy::isPastDueReset($billable, $planChanged, $intervalChanged);
 
-        if ($isPastDueReset) {
+        if (BillingPolicy::isFreeTrialAdjustment($billable, $planChanged, $intervalChanged)) {
+            // Free while the trial runs — see BillingPolicy::isFreeTrialAdjustment().
+            // Both amounts stay at 0, which is what keeps `$hasProrata` false and lets
+            // the change apply straight through with only the Mollie PATCH.
+            $prorataChargeNet = 0;
+            $prorataCreditNet = 0;
+        } elseif ($isPastDueReset) {
             // Past-Due: the current period was never paid (last charge failed).
             // Charge the full first period of the new plan and start fresh.
             // Mirrors PreviewService and ProrataComposer::composePastDueReset().

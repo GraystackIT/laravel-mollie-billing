@@ -13,6 +13,7 @@ Plan changes are handled by `UpdateSubscription::update()` and come in three fla
 | **Downgrade** (lower price) | User selects a cheaper plan | Immediate or scheduled to end of period |
 | **Mollie → Free downgrade** | Paid user selects a free plan | Cancels Mollie subscription, switches source to Local |
 | **Past-Due reset** | User on `past_due` selects any paid plan (same or different) | Charges the full first period of the new plan, resets the cycle |
+| **Change during a trial** | Seats, addons or quantities while `subscription_status = trial` | Immediate and **free** — no charge, no credit. The trial keeps running; Mollie is PATCHed so the first real charge collects the new amount. A plan or interval change is *not* this case: it ends the trial and is charged. |
 | **Zero-cost change** | Same price, different plan/interval | Immediate, booked as a saldo-zero switch invoice settled against the paying one |
 | **Free → Free change** | Both source and target are free plans | Immediate, source stays Local |
 
@@ -144,6 +145,14 @@ These guards make the legacy bug where a free plan could be silently flipped to 
 ## Prorata Calculation
 
 All prorata calculations are centralized in `BillingPolicy::computeProrata()`. Both `UpdateSubscription` and `PreviewService` delegate to this single method.
+
+### Nothing is prorated during a trial
+
+A trial is free, and everything the current plan allows is part of what is being tried. Seats and addons added during one are **not charged**, and taking them away again credits nothing: no money was paid for the window they are added to, so there is no fraction of anything to prorate. Mollie is still PATCHed to the new amount, so the first real charge — at the trial end — collects it in full.
+
+A **plan or interval change is the exception**: it ends the trial and is charged. That is a product decision, not an arithmetic one — testing one plan does not entitle anyone to test a different one for the rest of the same trial.
+
+`BillingPolicy::isFreeTrialAdjustment()` is the single predicate, for the same reason `isPastDueReset()` is: `ProrataComposer`, `UpdateSubscription::buildContext()` and `PreviewService` all have to give the same answer. Before it existed the composer and the context disagreed with the preview — the preview quoted €0 for extra seats during a trial and the change then collected the prorated amount anyway, converting the trial with it.
 
 ### Day Granularity
 

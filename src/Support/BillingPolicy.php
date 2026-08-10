@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Support;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 
 class BillingPolicy
 {
@@ -31,6 +32,32 @@ class BillingPolicy
     public static function isPastDueReset(Billable $billable, bool $planChanged, bool $intervalChanged): bool
     {
         return $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+    }
+
+    /**
+     * Whether this change is free because a trial is running.
+     *
+     * A trial is free, and everything the current plan allows is part of what is being
+     * tried: seats, addons, quantities. Nothing has been paid for the window they are
+     * added to and nothing will be until the trial ends, so there is no fraction of
+     * anything to charge — and nothing to refund when they are taken away again. The
+     * customer is charged the full new amount when the trial converts, because the
+     * Mollie subscription is PATCHed to it either way.
+     *
+     * A plan or interval change is the exception: it ends the trial and is charged. That
+     * is a product decision, not an arithmetic one — testing a plan does not entitle
+     * anyone to test a different one for the rest of the same trial.
+     *
+     * Lives here for the same reason `isPastDueReset()` does: `ProrataComposer`,
+     * `UpdateSubscription::buildContext()` and `PreviewService` all have to give the
+     * same answer, and a preview that quotes an amount the change then does not collect
+     * is the exact failure that rule was written after.
+     */
+    public static function isFreeTrialAdjustment(Billable $billable, bool $planChanged, bool $intervalChanged): bool
+    {
+        return $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Trial
+            && ! $planChanged
+            && ! $intervalChanged;
     }
 
     /**

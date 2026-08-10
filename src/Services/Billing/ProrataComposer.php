@@ -65,6 +65,17 @@ class ProrataComposer
             return $this->composePastDueReset($intent);
         }
 
+        // Plan switch
+        $planChanged = $intent->currentPlan !== $intent->newPlan;
+        $intervalChanged = $intent->currentInterval !== $intent->newInterval;
+
+        // Free while the trial runs: no charge for what it adds, no credit for what it
+        // takes away. See BillingPolicy::isFreeTrialAdjustment() — a plan or interval
+        // change is charged, because it ends the trial.
+        if (BillingPolicy::isFreeTrialAdjustment($billable, $planChanged, $intervalChanged)) {
+            return [];
+        }
+
         $periodStart = $billable->getBillingPeriodStartsAt();
         $periodEnd = $billable->nextBillingDate();
         if ($periodStart === null || $periodEnd === null) {
@@ -73,10 +84,6 @@ class ProrataComposer
 
         $charges = [];
         $refunds = [];
-
-        // Plan switch
-        $planChanged = $intent->currentPlan !== $intent->newPlan;
-        $intervalChanged = $intent->currentInterval !== $intent->newInterval;
 
         if ($planChanged || $intervalChanged) {
             // Plan or interval change → close out the entire current period
