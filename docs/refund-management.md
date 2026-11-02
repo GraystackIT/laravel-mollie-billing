@@ -63,6 +63,8 @@ $refundService->refundOverageUnits($invoice, 'Tokens', 1000, RefundReasonCode::G
 
 Refund overage units across multiple usage types in a single call.
 
+Both unit helpers require every count to be a positive integer and no larger than the units the invoice billed for that type, minus what earlier refunds already credited back; anything else throws `InvalidArgumentException` before Mollie is called. The money cap alone could not catch this: a negative entry for one type used to offset the price of a positive one on another, while the wallet credited only the positive side.
+
 ```php
 $refundService->refundOverageUnitsBulk($invoice, [
     'Tokens' => 500,

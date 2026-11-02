@@ -231,7 +231,7 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 5. Runs `WalletPlanChangeAdjuster` to reduce plan credits to the free-plan quota; `purchased_balance` is preserved.
 6. Refunds any prorata credit through `ProrataExecutor` → `InvoiceService::createRefund()` if `apply_at = immediate` and a mandate is still available.
 
-`config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` with `internal=true` to bypass the user-input mode check).
+`config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` as an internal re-entry to bypass the user-input mode check). The marker is set only through the typed `SubscriptionUpdateRequest::asInternalReentry()`; `SubscriptionUpdateRequest::from()` ignores an `internal` key in array data, like `allow_hidden_plan`, because it also waives the lapsed-period guard.
 
 ### When "end of period" falls
 

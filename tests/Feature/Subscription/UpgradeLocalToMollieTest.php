@@ -112,6 +112,36 @@ it('creates a Mollie payment with upgrade_from_local metadata', function (): voi
     expect($metadata['upgrade_from_local'])->toBeTrue();
 });
 
+// The seat guard clamps a negative count to 0, but the metadata used to carry the raw
+// value — and the webhook hands that straight to CreateSubscription, which then priced
+// the recurring amount with fewer seats than the plan includes.
+it('never writes a negative seat count into the payment metadata', function (): void {
+    $billable = makeUpgradeLocalBillable();
+    $captured = null;
+
+    Mollie::shouldReceive('send')
+        ->once()
+        ->withArgs(function ($request) use (&$captured) {
+            $captured = $request;
+
+            return $request instanceof CreatePaymentRequest;
+        })
+        ->andReturn(fakeUpgradePaymentResponse('tr_upgrade_neg', 'https://checkout.mollie.com/upgrade'));
+
+    app(UpgradeLocalToMollie::class)->handle($billable, [
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'addon_codes' => [],
+        'extra_seats' => -2,
+        'amount_gross' => 3500,
+    ]);
+
+    $metadataProp = (new ReflectionObject($captured))->getProperty('metadata');
+    $metadataProp->setAccessible(true);
+
+    expect($metadataProp->getValue($captured)['extra_seats'])->toBe(0);
+});
+
 it('reuses an existing Mollie customer ID', function (): void {
     $billable = makeUpgradeLocalBillable();
 

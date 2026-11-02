@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `CancelSubscription` no longer writes back the meta snapshot it read before the Mollie cancel call; a concurrent overage charge's in-flight marker survived and could be charged twice otherwise.
+- `CouponService::redeem()` grants the renewal exemption only to a billable holding that coupon's marker, and a renewal never rewrites the marker.
+- `BlockRestrictedCountries` is Livewire persistent middleware, so the IP gate also applies to component actions of an already-open tab.
+- Addon-only changes check newly added addons against the plan's `allowed_addons` and interval (`AddonNotAllowedException`, `IntervalNotOfferedException`); `StartSubscriptionCheckout` checks the allowlist too.
+- `max_seats` is enforced for every explicit seat count, not only through `SyncSeats`.
+- `RequireResolvedCountryMismatch` ignores an unauthorized query-parameter guess instead of redirecting on a stranger's mismatch state.
+- `SubscriptionUpdateRequest::from()` ignores `internal`; the scheduler uses the new typed `asInternalReentry()`.
+- A retried coupon-expiry reset is priced from the live subscription and leaves a newer recurring coupon alone.
+- Refund reasons are escaped before they reach the PDF template, which prints the description unescaped.
+- Paid checkouts validate SinglePayment/Recurring coupons against the billable (per-billable limit), in the service and the component.
+- The package-route check behind the query-parameter billable fallback also requires a package controller; an app route named `*.billing.*` no longer qualifies.
+- Prorata payment webhooks only act on the pending change whose `charge_payment_id` they carry.
+- `CleanupOrphanedBillablesJob` keeps `applyBillingScope()`, so excluded rows are never deleted.
+- Overage unit refunds reject non-positive counts and more units than the invoice billed.
+- The refund webhook defers while a programmatic refund of the same invoice is in flight, so one Mollie refund cannot be booked twice.
+- `ResubscribeSubscription` refuses while a country mismatch is open.
+- Editing billing details on the plan-change screen records `tax_country_user`, like the other two forms.
+- The Local→Mollie upgrade refuses extra seats the target plan does not sell, writes the clamped seat count into the payment metadata, and `confirmAndPay()` honours blocking preview errors.
+- A locked checkout grants reverse charge only when the VIES-confirmed number is the persisted one.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added

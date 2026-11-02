@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionResumed;
@@ -39,6 +40,16 @@ class ResubscribeSubscription
         $endsAt = $billable->getBillingSubscriptionEndsAt();
         if ($endsAt === null || ! $endsAt->isFuture()) {
             throw new \RuntimeException('Cannot resubscribe: grace period has already ended.');
+        }
+
+        // An open country mismatch is what cancelled this subscription in the first place,
+        // and resuming before it is resolved books the next period on the VAT data under
+        // review. Nothing else would stop it: the dashboard only hides the button, and
+        // CountryMatchService returns the existing mismatch without cancelling again.
+        if ($billable->hasOpenCountryMismatch()) {
+            throw new InvalidSubscriptionStateException(
+                'Cannot resubscribe: a country mismatch is still open and has to be resolved first.'
+            );
         }
 
         $meta = $billable->getBillingSubscriptionMeta();

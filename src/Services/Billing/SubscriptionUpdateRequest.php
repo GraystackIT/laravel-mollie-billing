@@ -90,8 +90,34 @@ class SubscriptionUpdateRequest
             addons: $request['addons'] ?? null,
             couponCode: $request['coupon_code'] ?? $request['couponCode'] ?? null,
             applyAt: $request['apply_at'] ?? $request['applyAt'] ?? null,
-            internal: (bool) ($request['internal'] ?? false),
+            // `internal` is not read either, for the same reason as `allow_hidden_plan`:
+            // it waives the plan-change mode and the lapsed-period guard, so an array an
+            // app forwards from request data could otherwise buy a seat increase prorated
+            // to zero on a stalled renewal. See asInternalReentry().
             couponCodes: $couponCodes,
+        );
+    }
+
+    /**
+     * Trusted copy marked as an internal re-entry.
+     *
+     * Only `ScheduleSubscriptionChange::apply()` uses it: the change it replays was
+     * validated when it was scheduled and is applied exactly at the period roll-over,
+     * which is what the exemptions keyed on `internal` exist for.
+     */
+    public function asInternalReentry(): self
+    {
+        return new self(
+            planCode: $this->planCode,
+            interval: $this->interval,
+            seats: $this->seats,
+            addons: $this->addons,
+            couponCode: $this->couponCode,
+            applyAt: $this->applyAt,
+            internal: true,
+            allowHiddenPlan: $this->allowHiddenPlan,
+            couponCodes: $this->couponCodes,
+            applyAtExplicit: $this->applyAtExplicit,
         );
     }
 

@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -24,6 +25,8 @@ use GraystackIT\MollieBilling\Support\MollieCall;
 
 class CancelSubscription
 {
+    use MutatesBillingMeta;
+
     public function __construct(
         private readonly ChargeUsageOverageDirectly $overageService,
     ) {
@@ -44,6 +47,8 @@ class CancelSubscription
 
         $previousEndsAt = $billable->getBillingSubscriptionEndsAt();
         $meta = $billable->getBillingSubscriptionMeta();
+        // What this method's edits are measured against — see persistCancellation().
+        $base = $meta;
         $scheduledChange = $meta['scheduled_change'] ?? null;
 
         // Both graceful branches below always leave a non-null `subscription_ends_at`,
@@ -74,7 +79,8 @@ class CancelSubscription
 
                 // It writes its own meta, so re-read before this method's own write.
                 $billable->refresh();
-                $meta = array_replace($billable->getBillingSubscriptionMeta(), [
+                $base = $billable->getBillingSubscriptionMeta();
+                $meta = array_replace($base, [
                     'cancelled_from' => $meta['cancelled_from'],
                 ]);
                 unset($meta['scheduled_change']);
@@ -92,12 +98,11 @@ class CancelSubscription
                 ? BillingTime::nowUtc()
                 : $this->graceBoundary($billable, $previousEndsAt ?? BillingTime::nowUtc()->addDays(30));
 
-            $billable->forceFill([
+            $this->persistCancellation($billable, $base, $meta, [
                 'subscription_status' => SubscriptionStatus::Cancelled,
                 'subscription_ends_at' => $endsAt,
-                'subscription_meta' => $meta,
                 'scheduled_change_at' => null,
-            ])->save();
+            ]);
 
             $this->announce($billable, $immediately, $reason, $scheduledChange);
 
@@ -112,14 +117,13 @@ class CancelSubscription
             $meta = $this->cancelAtMollie($billable, $meta, $customerId, (string) $subscriptionId);
         }
 
-        $billable->forceFill([
+        $this->persistCancellation($billable, $base, $meta, [
             'subscription_status' => SubscriptionStatus::Cancelled,
             'subscription_ends_at' => $immediately
                 ? BillingTime::nowUtc()
                 : $this->graceBoundary($billable, $billable->nextBillingDate() ?? BillingTime::nowUtc()->addDays(30)),
-            'subscription_meta' => $meta,
             'scheduled_change_at' => null,
-        ])->save();
+        ]);
 
         if ($immediately) {
             try {
@@ -130,6 +134,43 @@ class CancelSubscription
         }
 
         $this->announce($billable, $immediately, $reason, $scheduledChange);
+    }
+
+    /**
+     * Write the cancellation as a delta onto the row as it is *now*.
+     *
+     * `$meta` is this method's edit of `$base`, a snapshot read before the Mollie cancel
+     * call. Writing it back whole reverted whatever was committed during that call — most
+     * dangerously the nightly sweep's `usage_overage` slot, the very guard
+     * ChargeUsageOverageDirectly::handle() checks before an immediate cancel's overage
+     * pass, which then charged the same unsettled debt a second time. So only the keys
+     * this method set or removed are applied, to the row re-read under its lock.
+     *
+     * @param  array<string, mixed>  $base
+     * @param  array<string, mixed>  $meta
+     * @param  array<string, mixed>  $attributes
+     */
+    private function persistCancellation(Billable $billable, array $base, array $meta, array $attributes): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $fresh) use ($base, $meta): array {
+            foreach (array_keys($base) as $key) {
+                if (! array_key_exists($key, $meta)) {
+                    unset($fresh[$key]);
+                }
+            }
+
+            foreach ($meta as $key => $value) {
+                if (! array_key_exists($key, $base) || $base[$key] !== $value) {
+                    $fresh[$key] = $value;
+                }
+            }
+
+            return $fresh;
+        }, $attributes);
     }
 
     /**

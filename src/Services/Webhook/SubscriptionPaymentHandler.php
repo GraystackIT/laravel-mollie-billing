@@ -297,6 +297,8 @@ class SubscriptionPaymentHandler
                 $meta = $billable->getBillingSubscriptionMeta();
                 $meta['pending_subscription_patch'] = [
                     'reason' => 'recurring_coupon_expiry_reset',
+                    // Which discount this reset ends, so a retry cannot end a newer one.
+                    'coupon_id' => $meta['active_recurring_coupon']['coupon_id'] ?? null,
                     'plan_code' => $planCode,
                     'interval' => $interval,
                     'addons' => $addonCodes,

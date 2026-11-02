@@ -8,8 +8,10 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
+use GraystackIT\MollieBilling\Exceptions\RefundInProgressException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 class RefundHandler
@@ -61,6 +63,31 @@ class RefundHandler
             return;
         }
 
+        // The same lock RefundInvoiceService holds from deciding a refund to booking it.
+        // That service creates the refund at Mollie and stamps its id onto the credit note
+        // a moment later — and Mollie calls this webhook as soon as the refund exists. In
+        // that window the id is not on record yet, so this handler booked a "synced from
+        // dashboard" credit note and the service then booked a second one for the same
+        // money. Refusing here makes the delivery fail and Mollie re-deliver once the
+        // service has committed, when the dedup below recognises the refund.
+        $lock = Cache::lock('billing:invoice-refund:'.$original->id, 120);
+
+        if (! $lock->get()) {
+            throw new RefundInProgressException($original);
+        }
+
+        try {
+            $this->syncRefunds($refunds, $original, $billable);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * @param  iterable<int, object>  $refunds
+     */
+    private function syncRefunds(iterable $refunds, BillingInvoice $original, Billable $billable): void
+    {
         foreach ($refunds as $refund) {
             $refundId = (string) ($refund->id ?? '');
             if ($refundId === '') {

@@ -406,6 +406,8 @@ class RefundInvoiceService
             throw new InvalidRefundTargetException('refundOverageUnits only applies to overage invoices.');
         }
 
+        $this->assertRefundableUnits($invoice, [$usageType => $units]);
+
         $unitPrice = $this->unitPriceFor($invoice, $usageType);
 
         return $this->refund($invoice, [
@@ -431,6 +433,8 @@ class RefundInvoiceService
             throw new InvalidRefundTargetException('refundOverageUnitsBulk only applies to overage invoices.');
         }
 
+        $this->assertRefundableUnits($invoice, $unitsPerType);
+
         $amountNet = 0;
         foreach ($unitsPerType as $type => $units) {
             $amountNet += $this->unitPriceFor($invoice, (string) $type) * (int) $units;
@@ -442,6 +446,43 @@ class RefundInvoiceService
             'reason_code' => $reason,
             'reason_text' => $reasonText,
         ]);
+    }
+
+    /**
+     * Every requested unit count must be positive and within what the invoice billed for
+     * that type, less what earlier refunds already credited back.
+     *
+     * The same map prices the refund and credits the wallet, and the wallet ignores a
+     * non-positive quantity — so a negative entry for one type used to pay for a positive
+     * one on another, and the money cap (which only sees the sum) let it through. The
+     * per-type cap closes the other half: the invoice's total covers 2000 units of one
+     * type when two types were billed at 1000 each.
+     *
+     * @param  array<string, int>  $unitsPerType
+     */
+    private function assertRefundableUnits(BillingInvoice $invoice, array $unitsPerType): void
+    {
+        $billed = [];
+        foreach ((array) $invoice->line_items as $item) {
+            $type = $item['code'] ?? $item['type'] ?? null;
+            if ($type !== null) {
+                $billed[(string) $type] = ($billed[(string) $type] ?? 0) + (int) ($item['quantity'] ?? 0);
+            }
+        }
+
+        $credited = $this->alreadyCreditedUnits($invoice);
+
+        foreach ($unitsPerType as $type => $units) {
+            if (! is_int($units) || $units <= 0) {
+                throw new \InvalidArgumentException("Units to refund for {$type} must be a positive integer.");
+            }
+
+            $refundable = ($billed[(string) $type] ?? 0) - (int) ($credited[(string) $type] ?? 0);
+
+            if ($units > $refundable) {
+                throw new \InvalidArgumentException("Cannot refund {$units} units of {$type}: only {$refundable} remain refundable on this invoice.");
+            }
+        }
     }
 
     private function unitPriceFor(BillingInvoice $invoice, string $usageType): int

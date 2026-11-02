@@ -7,8 +7,10 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
+use GraystackIT\MollieBilling\Exceptions\AddonNotAllowedException;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
+use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -81,6 +83,13 @@ class StartSubscriptionCheckout
         }
 
         foreach ((array) ($request['addon_codes'] ?? []) as $addonCode) {
+            // The component only lists the plan's allowed addons; this is the seam an app
+            // calling the service directly passes through, and activation persists the
+            // codes verbatim into active_addon_codes, where FeatureAccess grants them.
+            if (! $this->catalog->planAllowsAddon((string) $request['plan_code'], (string) $addonCode)) {
+                throw new AddonNotAllowedException((string) $request['plan_code'], (string) $addonCode);
+            }
+
             if (! $this->catalog->addonOffersInterval((string) $addonCode, (string) $request['interval'])) {
                 throw new IntervalNotOfferedException((string) $addonCode, (string) $request['interval'], 'addon');
             }
@@ -233,6 +242,15 @@ class StartSubscriptionCheckout
             $couponCode = null;
         }
 
+        // Judged against this billable, not just the campaign. The component validated
+        // without one, which cannot see the per-billable limit — so a returning customer's
+        // spent coupon priced the payment, the webhook (which does check per billable)
+        // rejected it, booked the shortfall as an adjustment and activated the subscription
+        // at the discounted price regardless. Refused here, before any money moves.
+        if ($couponCode !== null && $couponCode !== '') {
+            $couponCode = $this->couponEligibleForPaidCheckout($billable, $request, $couponCode, $couponFromSession);
+        }
+
         $customerId = $this->customerResolver->resolve($billable);
         $currency = (string) config('mollie-billing.currency', 'EUR');
 
@@ -298,6 +316,53 @@ class StartSubscriptionCheckout
      *
      * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int}  $request
      */
+    /**
+     * The coupon code to embed in a paid first payment, after the billable-aware check
+     * FirstPaymentCouponPricing::price() will apply when the payment settles.
+     *
+     * Only the types that change the amount are judged — the others move no money here.
+     * A typed code that fails is an error the customer can act on; a code that arrived
+     * from a promotion link is dropped instead, for the reason the mismatch branch above
+     * gives.
+     *
+     * @param  array<string, mixed>  $request
+     */
+    private function couponEligibleForPaidCheckout(Billable $billable, array $request, string $couponCode, bool $fromSession): ?string
+    {
+        $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()
+            ->whereRaw('UPPER(code) = ?', [strtoupper($couponCode)])
+            ->first();
+
+        if ($coupon === null || ! in_array($coupon->type, [CouponType::SinglePayment, CouponType::Recurring], true)) {
+            return $couponCode;
+        }
+
+        try {
+            $this->couponService->validate($couponCode, $billable, [
+                'planCode' => $request['plan_code'],
+                'interval' => $request['interval'],
+                'addonCodes' => $request['addon_codes'] ?? [],
+                'orderAmountNet' => $this->orderAmountNet($billable, $request),
+                'trial_starting' => false,
+                'allowed_types' => [CouponType::SinglePayment, CouponType::Recurring],
+            ]);
+        } catch (InvalidCouponException $e) {
+            if (! $fromSession) {
+                throw $e;
+            }
+
+            Log::info('Auto-apply coupon dropped — not redeemable for this billable', [
+                'billable_id' => $billable->getKey(),
+                'coupon_code' => $couponCode,
+                'reason' => $e->reason(),
+            ]);
+
+            return null;
+        }
+
+        return $couponCode;
+    }
+
     private function amountReflectsCoupon(Billable $billable, array $request, string $couponCode, int $amountGross): bool
     {
         $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()

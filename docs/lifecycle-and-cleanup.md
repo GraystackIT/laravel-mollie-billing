@@ -245,7 +245,9 @@ class User extends Authenticatable implements Billable
 
 This is independent from `MollieBilling::cleanupOrphanedBillableUsing()` (which vetoes the cleanup *side-effects* on a per-row basis). The scope keeps the row out of the candidate set entirely, so admin listings, KPIs and lifecycle jobs never see it. Use the cleanup closure when the row *is* a billable but should not be touched right now; use the scope when the row is not a billable at all.
 
-`CleanupOrphanedBillablesJob`, `ProcessTrialLifecycleJob` and the admin billables index all honour the scope automatically. Lookups that must reach every row regardless — Mollie webhook resolution, retry jobs handling a payment for an old row, admin impersonation flows — bypass it explicitly:
+`CleanupOrphanedBillablesJob` and the admin billables index honour the scope automatically. The cleanup job is the one that deletes, so its candidate query keeps the scope even though it runs in a worker: a row the scope excludes is never offered to the cleanup closure, let alone to the default `delete()`. Keep the filter static (a column on the row) — a scope that reads request or tenant context answers nothing in a worker, which for the cleanup fails safe (nothing is cleaned) but is not what you want.
+
+The lifecycle sweeps (`ProcessTrialLifecycleJob`, `PrepareUsageOverageJob`) and the lookups that must reach every row regardless — Mollie webhook resolution, retry jobs handling a payment for an old row, admin impersonation flows — bypass it. They only ever act on rows that carry a subscription, which a non-customer row does not:
 
 ```php
 User::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($id);

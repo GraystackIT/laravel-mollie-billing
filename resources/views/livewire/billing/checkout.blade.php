@@ -793,6 +793,17 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return false;
         }
 
+        // While locked, the number that decides is the persisted one (taxVatNumber()), but
+        // the VIES flag describes whatever `vat_number` held when it was last checked — and
+        // that field stays live-bound. Confirming somebody else's valid number in the form
+        // then lent reverse charge to a persisted number nobody had verified. The flag only
+        // counts when it was earned by the number the invoice will carry.
+        if ($this->billing_locked
+            && CountryResolver::normalizeVatNumber((string) $this->vat_number)
+                !== CountryResolver::normalizeVatNumber((string) $this->taxVatNumber())) {
+            return false;
+        }
+
         // Cannot delegate wholesale to reverseChargeApplies(): it reads the *persisted*
         // validation, and during checkout the number being entered is not saved until
         // submit() — so a legitimate B2B customer would be shown and charged gross. The
@@ -1021,6 +1032,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
                 ],
             ]);
+            $this->assertCouponFitsBillable($coupon);
         } catch (InvalidCouponException $e) {
             $this->couponError = $this->couponErrorMessage($e->reason());
 
@@ -1103,6 +1115,41 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     }
 
     /**
+     * The half of coupon validation that needs the billable: its per-billable limit.
+     *
+     * `validateWithoutBillable()` is right for a signup and blind for a returning
+     * customer, whose already-spent coupon then priced the payment — the webhook, which
+     * does check per billable, rejected it afterwards and activated the subscription at
+     * the discounted price anyway. Only the types that move money here are judged, with
+     * the same context FirstPaymentCouponPricing::price() uses when the payment settles.
+     *
+     * @throws InvalidCouponException
+     */
+    private function assertCouponFitsBillable(\GraystackIT\MollieBilling\Models\Coupon $coupon): void
+    {
+        $billable = $this->resolveBillable();
+
+        if ($billable === null || ! in_array($coupon->type, [
+            \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+            \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+        ], true)) {
+            return;
+        }
+
+        MollieBilling::coupons()->validate((string) $coupon->code, $billable, [
+            'planCode' => $this->plan_code,
+            'interval' => $this->interval,
+            'addonCodes' => $this->addon_codes,
+            'orderAmountNet' => $this->subtotalNet(),
+            'trial_starting' => $this->trialApplies($this->plan_code, $this->interval),
+            'allowed_types' => [
+                \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+                \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+            ],
+        ]);
+    }
+
+    /**
      * Re-validate the currently applied coupon against the live form state
      * (plan, interval, addons, extra seats). Returns null on success, or a
      * reason string when the coupon no longer fits — in which case the
@@ -1130,6 +1177,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant,
                 ],
             ]);
+            $this->assertCouponFitsBillable($coupon);
         } catch (InvalidCouponException $e) {
             $this->applied_coupon = null;
 

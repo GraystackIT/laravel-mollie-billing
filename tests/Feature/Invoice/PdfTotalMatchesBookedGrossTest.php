@@ -85,3 +85,41 @@ it('keeps a multi-unit line rendered per unit', function (): void {
 
     expect(pdfTotalFor($invoice, $billable))->toBe((int) $invoice->amount_gross);
 });
+
+it('renders a refund reason as text, not as markup', function (): void {
+    // The vendor template prints the description with `{!! !!}` and ships DOMPDF with
+    // `isRemoteEnabled`, so an `<img src>` typed into the admin refund form was fetched by
+    // the server while rendering — an SSRF to whatever address it named — and any other
+    // markup landed on a legal document as such.
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Refund Co', 'email' => 'refund-pdf@example.test', 'billing_country' => 'AT']);
+
+    $invoice = BillingInvoice::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'mollie_payment_id' => null,
+        'invoice_kind' => InvoiceKind::Refund,
+        'status' => InvoiceStatus::Paid,
+        'country' => 'AT',
+        'currency' => 'EUR',
+        'amount_net' => -1000,
+        'amount_vat' => -200,
+        'amount_gross' => -1200,
+        'serial_number' => 'CN-pdf-'.uniqid(),
+        'refund_reason_text' => "Goodwill <img src=\"http://169.254.169.254/latest/meta-data/\">\nsecond line",
+        'line_items' => [[
+            'kind' => 'plan', 'label' => 'Pro', 'quantity' => 1,
+            'unit_price_net' => -1000, 'amount_net' => -1000,
+            'vat_rate' => 20.0, 'vat_amount' => -200, 'amount_gross' => -1200,
+        ]],
+    ]);
+
+    $method = new ReflectionMethod(InvoiceService::class, 'buildPdfInvoice');
+    $method->setAccessible(true);
+    $description = $method->invoke(app(InvoiceService::class), $invoice, $billable)->description;
+
+    expect($description)->not->toContain('<img')
+        ->and($description)->toContain('&lt;img')
+        // The template renders with `whitespace-pre-line`, so line breaks survive escaping.
+        ->and($description)->toContain("\nsecond line");
+});

@@ -173,12 +173,11 @@ it('patches Mollie for a plan change that prorates to nothing', function (): voi
     ));
     expect($lines)->toBe([]);
 
-    app(UpdateSubscription::class)->update($billable, [
+    app(UpdateSubscription::class)->update($billable, \GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest::from([
         'plan_code' => 'enterprise',
         'interval' => 'monthly',
         'apply_at' => 'immediate',
-        'internal' => true,
-    ]);
+    ])->asInternalReentry());
 
     $billable->refresh();
 

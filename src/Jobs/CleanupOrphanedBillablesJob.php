@@ -11,7 +11,6 @@ use GraystackIT\MollieBilling\Events\CheckoutAbandoned;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
-use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Bus\Queueable;
@@ -135,7 +134,14 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             return null;
         }
 
-        return $billableClass::withoutGlobalScope(BillingScope::class)
+        // Scoped — unlike the retry jobs, which resolve one row they already know is a
+        // billable. This query decides which rows get *deleted*, and `applyBillingScope()`
+        // is the documented way for an app to say "this row is not a billable at all"
+        // (staff in a shared `users` table). Those rows look exactly like orphans: no
+        // subscription, older than the threshold. Removing the scope sent them to the
+        // default `delete()`. A scope that depends on request context answers nothing in a
+        // worker, which here fails safe: nothing is cleaned rather than the wrong thing.
+        return $billableClass::query()
             ->where(function ($q): void {
                 $q->whereNull('subscription_source')
                     ->orWhere('subscription_source', SubscriptionSource::None->value);
@@ -176,7 +182,7 @@ class CleanupOrphanedBillablesJob implements ShouldQueue
             return 0;
         }
 
-        return (int) $billableClass::withoutGlobalScope(BillingScope::class)
+        return (int) $billableClass::query()
             ->whereJsonContainsKey('subscription_meta->'.self::VETOED_KEY)
             ->count();
     }

@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
+use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Support\BillingMoney;
@@ -60,6 +61,16 @@ class UpgradeLocalToMollie
             throw new HiddenPlanNotSelectableException($billable, $targetPlan);
         }
 
+        // Extra seats on a plan that does not sell them price at 0 — the payment would
+        // carry them in its metadata and CreateSubscription store them as paid capacity.
+        // The same rule ValidateSubscriptionChange applies to every other seat change.
+        $extraSeats = max(0, (int) ($request['extra_seats'] ?? 0));
+        if ($extraSeats > 0 && $this->catalog->seatPriceNet($targetPlan, (string) $request['interval']) === null) {
+            $included = $this->catalog->includedSeats($targetPlan);
+
+            throw new SeatDowngradeRequiredException($billable, $included + $extraSeats, $included);
+        }
+
         $customerId = $this->customerResolver->resolve($billable);
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
@@ -80,7 +91,7 @@ class UpgradeLocalToMollie
                 'plan_code' => $request['plan_code'],
                 'interval' => $request['interval'],
                 'addon_codes' => $request['addon_codes'] ?? [],
-                'extra_seats' => (int) ($request['extra_seats'] ?? 0),
+                'extra_seats' => $extraSeats,
                 'coupon_code' => $request['coupon_code'] ?? null,
                 'upgrade_from_local' => true,
             ],

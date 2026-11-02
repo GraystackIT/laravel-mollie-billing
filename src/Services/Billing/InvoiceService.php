@@ -925,8 +925,13 @@ class InvoiceService
         // refund_reason_text doubles as a general invoice description: credit
         // notes use it for the refund reason, country-correction reissues use
         // it to explain what happened. Render it for both kinds when set.
+        //
+        // Escaped here because the vendor template prints it with `{!! !!}` and ships DOMPDF
+        // with `isRemoteEnabled`: an `<img src>` typed into the admin refund form was fetched
+        // by the server while rendering. The template's `whitespace-pre-line` keeps the line
+        // breaks, which is all the formatting this field was ever meant to carry.
         $description = ! empty($invoice->refund_reason_text)
-            ? (string) $invoice->refund_reason_text
+            ? e((string) $invoice->refund_reason_text)
             : null;
 
         // Force the tax column on the PDF whenever at least one line has a

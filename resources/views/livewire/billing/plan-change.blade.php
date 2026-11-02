@@ -571,6 +571,14 @@ new class extends Component {
         // must come from PreviewService in this request, not from the snapshot.
         $this->refreshPreview($previewService);
 
+        // The view greys the button out on a blocking preview error; a direct call does not
+        // see the view. Seats the target plan cannot sell would otherwise ride along in the
+        // payment metadata, priced at nothing.
+        if (! empty($this->preview['errors'] ?? [])) {
+            $this->toast(__('billing::portal.flash.error'), 'danger');
+            return null;
+        }
+
         $grossAmount = (int) ($this->preview['grossTotal'] ?? 0);
         if ($grossAmount <= 0) {
             $this->toast(__('billing::portal.flash.error'), 'danger');
@@ -734,6 +742,10 @@ new class extends Component {
                     'billing_city' => $this->billing_city,
                     'billing_country' => $this->billing_country,
                     'vat_number' => $newVatNumber,
+                    // Declared together with the country VAT is priced from, as the
+                    // billing-data and checkout forms do — otherwise CountryMatchService
+                    // reconciles against the old declaration and misses the move.
+                    'tax_country_user' => $this->billing_country,
                 ])->save();
 
                 // `currentVatValidation()` filters by the billable's current

@@ -22,6 +22,17 @@ class RequireResolvedCountryMismatch
     {
         $billable = MollieBilling::resolveBillable($request);
 
+        // A query-parameter guess has to be authorized before its state decides the
+        // response. Checkout runs outside tenant context, so the guess is what usually
+        // answers there — and redirect-or-not told anyone who could name a route key
+        // whether that tenant had an open VAT mismatch. Same gate as
+        // BillingPortalController::checkout(), which this middleware runs in front of.
+        if ($billable !== null
+            && MollieBilling::resolveBillableFromCallback($request) === null
+            && ! MollieBilling::authorizes($request, $billable)) {
+            $billable = null;
+        }
+
         if ($billable === null) {
             return $next($request);
         }

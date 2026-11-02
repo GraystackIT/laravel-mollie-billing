@@ -609,8 +609,16 @@ class CouponService
             // coupon bought a second redemption past an exhausted campaign. The internal
             // caller resolves its coupon from `active_recurring_coupon`, so this is a
             // no-op for it.
+            //
+            // And only a grant that exists can be re-applied: the billable must already hold
+            // this coupon's marker. Without that, the same flag let a billable that never
+            // had a grant skip both caps and — with `skip_marker` omitted — write itself a
+            // fresh one past an exhausted campaign.
+            $liveMarker = $this->getActiveRecurringCouponMarker($billable);
             $isRenewal = ($context['renewal'] ?? false) === true
-                && $coupon->type === CouponType::Recurring;
+                && $coupon->type === CouponType::Recurring
+                && $liveMarker !== null
+                && (int) ($liveMarker['coupon_id'] ?? 0) === (int) $coupon->id;
 
             if (! $isRenewal) {
                 if (
@@ -673,7 +681,9 @@ class CouponService
                     if (isset($context['invoice_id'])) {
                         $redemption->invoice_id = (int) $context['invoice_id'];
                     }
-                    if (($context['skip_marker'] ?? false) !== true) {
+                    // A renewal re-applies the grant the marker describes; rewriting it
+                    // would reset the base amount and lifetime the grant was locked to.
+                    if (($context['skip_marker'] ?? false) !== true && ! $isRenewal) {
                         // The marker locks the discount to the recurring net the
                         // coupon was applied against — seats/addons added later
                         // are billed at full price.

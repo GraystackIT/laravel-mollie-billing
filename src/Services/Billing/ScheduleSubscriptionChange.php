@@ -228,8 +228,7 @@ class ScheduleSubscriptionChange
         $payload = (array) $scheduledChange;
         $allowHiddenPlan = ($payload['allow_hidden_plan'] ?? false) === true;
         $payload['apply_at'] = 'immediate';
-        $payload['internal'] = true;
-        unset($payload['scheduled_at'], $payload['allow_hidden_plan']);
+        unset($payload['scheduled_at'], $payload['allow_hidden_plan'], $payload['internal']);
 
         // Seats that were auto-derived at schedule time must be re-derived against live
         // state, not replayed as an explicit count — see schedule().
@@ -239,9 +238,10 @@ class ScheduleSubscriptionChange
         unset($payload['seats_auto_derived']);
 
         // Trusted re-entry: the override was approved when the change was scheduled,
-        // so it is re-applied through the typed API here. `from()` ignores the array
-        // key on purpose — see SubscriptionUpdateRequest::from().
-        $dto = SubscriptionUpdateRequest::from($payload);
+        // so it is re-applied through the typed API here, and so is the `internal`
+        // marker. `from()` ignores both array keys on purpose — see
+        // SubscriptionUpdateRequest::from().
+        $dto = SubscriptionUpdateRequest::from($payload)->asInternalReentry();
         if ($allowHiddenPlan) {
             $dto = $dto->withAllowHiddenPlan();
         }

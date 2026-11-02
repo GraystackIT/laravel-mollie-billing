@@ -270,3 +270,35 @@ it('is a no-op when cleanup is disabled', function (): void {
 
     expect(TestBillable::find($orphan->getKey()))->not->toBeNull();
 });
+
+/**
+ * A billable table that also holds staff, filtered out through the documented
+ * `applyBillingScope()` hook (docs/lifecycle-and-cleanup.md §8).
+ */
+class StaffScopedTestBillable extends TestBillable
+{
+    public function applyBillingScope(\Illuminate\Database\Eloquent\Builder $query): void
+    {
+        $query->where('name', '!=', 'Staff Member');
+    }
+}
+
+it('never deletes a row the app excludes through applyBillingScope', function (): void {
+    config(['mollie-billing.billable_model' => StaffScopedTestBillable::class]);
+
+    // Staff accounts look exactly like orphans — no subscription, older than the
+    // threshold — and the scope is the documented way to say "not a billable at all".
+    // The candidate query removed it, so with no cleanup closure registered the default
+    // `delete()` removed the staff account.
+    $staff = StaffScopedTestBillable::create(['name' => 'Staff Member', 'email' => 'staff@example.test']);
+    $orphan = StaffScopedTestBillable::create(['name' => 'Stale Co', 'email' => 'stale-scope@example.test']);
+
+    foreach ([$staff, $orphan] as $row) {
+        $row->forceFill(['created_at' => now()->subHours(2), 'updated_at' => now()->subHours(2)])->save();
+    }
+
+    CleanupOrphanedBillablesJob::dispatchSync();
+
+    expect(TestBillable::find($staff->getKey()))->not->toBeNull()
+        ->and(TestBillable::find($orphan->getKey()))->toBeNull();
+});

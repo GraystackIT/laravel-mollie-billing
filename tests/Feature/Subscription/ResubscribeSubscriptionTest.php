@@ -242,3 +242,41 @@ it('starts a fresh dunning clock when a free plan is resumed', function (): void
         ->and($meta)->not->toHaveKey('past_due_since')
         ->and($meta)->not->toHaveKey('payment_failure');
 });
+
+it('refuses to resume a subscription while its country mismatch is still open', function (): void {
+    // The mismatch flow cancels the subscription and parks the customer on the correction
+    // modal. The dashboard hides "reactivate" while the mismatch is open, but the action is
+    // a plain Livewire method, and the service resumed it — a fresh Mollie subscription on
+    // the unreviewed VAT data, with `subscription_ends_at` cleared, while the still-open
+    // mismatch kept CountryMatchService from ever cancelling it again.
+    Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    Mollie::shouldReceive('send')->never();
+
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Mismatch Co', 'email' => uniqid('mm-').'@x.test', 'billing_country' => 'AT']);
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Cancelled,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subDays(5),
+        'subscription_ends_at' => BillingTime::nowUtc()->addDays(20),
+        'mollie_customer_id' => 'cst_mm',
+        'mollie_mandate_id' => 'mdt_mm',
+        'subscription_meta' => ['seat_count' => 1],
+    ])->save();
+
+    \GraystackIT\MollieBilling\Models\BillingCountryMismatch::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'tax_country_user' => 'AT',
+        'tax_country_payment' => 'DE',
+        'tax_country_ip' => 'DE',
+        'status' => \GraystackIT\MollieBilling\Enums\CountryMismatchStatus::Pending,
+    ]);
+
+    expect(fn () => app(ResubscribeSubscription::class)->handle($billable->refresh()))
+        ->toThrow(\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException::class);
+
+    expect($billable->fresh()->subscription_status)->toBe(SubscriptionStatus::Cancelled);
+});

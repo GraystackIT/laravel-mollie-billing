@@ -183,3 +183,21 @@ it('still grants reverse charge when no seller country is configured at all', fu
     expect($component->instance()->showsNetPrices())->toBeTrue()
         ->and($component->instance()->totals(app(VatCalculationService::class))['gross'])->toBe(3000);
 });
+
+it('does not let a VIES-confirmed form number lend reverse charge to a different persisted one', function (): void {
+    // On file: a German VAT number VIES never confirmed (no audit row). The locked form
+    // keeps `vat_number` live-bound, so a customer could type someone else's valid number,
+    // have `updatedVatNumber()` confirm *that* one — and `showsNetPrices()` combined the
+    // flag with the persisted number, granting net pricing for a number nobody verified.
+    // The invoice is written from the persisted record, so the webhook then booked the
+    // missing VAT as an adjustment.
+    lockedCheckoutBillable('DE111111111', 'DE');
+
+    $component = Livewire::test('mollie-billing::checkout')->set('plan_code', 'pro');
+
+    $component->instance()->vat_number = 'DE123456789';
+    $component->instance()->vatNumberValid = true;
+
+    expect($component->instance()->showsNetPrices())->toBeFalse()
+        ->and($component->instance()->totals(app(VatCalculationService::class))['gross'])->toBe(3570);
+});

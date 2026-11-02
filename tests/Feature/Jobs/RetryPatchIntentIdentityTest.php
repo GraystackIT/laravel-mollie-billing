@@ -206,3 +206,81 @@ it('treats the flat coupon-expiry marker as one identity across sweeps', functio
 
     expect($first->uniqueId())->toBe($second->uniqueId());
 });
+
+/** Patcher double recording what a coupon-expiry reset priced from. */
+function bindRecordingAmountPatcher(): object
+{
+    return new class extends MollieSubscriptionPatcher
+    {
+        /** @var list<array<string, mixed>> */
+        public array $amounts = [];
+
+        public function __construct() {}
+
+        public function updateRecurringAmount(
+            \GraystackIT\MollieBilling\Contracts\Billable $billable,
+            string $planCode,
+            string $interval,
+            array $addons,
+            int $extraSeats,
+            bool $intervalChanged = false,
+            int $couponDiscountNet = 0,
+            bool $forceResetStartDate = false,
+        ): void {
+            $this->amounts[] = compact('planCode', 'interval', 'addons', 'extraSeats', 'couponDiscountNet');
+        }
+    };
+}
+
+it('prices a retried coupon-expiry reset from the live subscription, not the captured one', function (): void {
+    config()->set('mollie-billing-plans.plans.pro.included_seats', 1);
+
+    // Captured on `starter` with no extra seats; the customer has since upgraded to `pro`
+    // with three seats in total. Replaying the captured configuration PATCHed Mollie down
+    // to the starter price while the customer kept every pro entitlement.
+    $b = patchIntentBillable();
+    $b->forceFill(['subscription_meta' => ['seat_count' => 3, 'mollie_subscription_id' => 'sub_x']])->save();
+
+    $patcher = bindRecordingAmountPatcher();
+
+    (new RetrySubscriptionPatchJob([
+        'reason' => 'recurring_coupon_expiry_reset',
+        'plan_code' => 'starter',
+        'interval' => 'monthly',
+        'addons' => [],
+        'extra_seats' => 0,
+        'billable_type' => TestBillable::class,
+        'billable_id' => $b->getKey(),
+    ], BillingTime::nowUtc()->toIso8601String()))->handle($patcher);
+
+    expect($patcher->amounts)->toHaveCount(1)
+        ->and($patcher->amounts[0]['planCode'])->toBe('pro')
+        ->and($patcher->amounts[0]['extraSeats'])->toBe(2)
+        ->and($patcher->amounts[0]['couponDiscountNet'])->toBe(0);
+});
+
+it('leaves a newer recurring coupon alone when retrying an older one\'s reset', function (): void {
+    $b = patchIntentBillable();
+    $b->forceFill(['subscription_meta' => [
+        'mollie_subscription_id' => 'sub_x',
+        'active_recurring_coupon' => ['coupon_id' => 42, 'code' => 'NEWER'],
+    ]])->save();
+
+    $patcher = bindRecordingAmountPatcher();
+
+    (new RetrySubscriptionPatchJob([
+        'reason' => 'recurring_coupon_expiry_reset',
+        'coupon_id' => 7,
+        'plan_code' => 'pro',
+        'interval' => 'monthly',
+        'addons' => [],
+        'extra_seats' => 0,
+        'billable_type' => TestBillable::class,
+        'billable_id' => $b->getKey(),
+    ], BillingTime::nowUtc()->toIso8601String()))->handle($patcher);
+
+    // The reset was for coupon 7. Coupon 42 is a later discount the customer is owed —
+    // PATCHing to full price and clearing its marker would take it away.
+    expect($patcher->amounts)->toBe([])
+        ->and($b->fresh()->getBillingSubscriptionMeta()['active_recurring_coupon']['coupon_id'] ?? null)->toBe(42);
+});

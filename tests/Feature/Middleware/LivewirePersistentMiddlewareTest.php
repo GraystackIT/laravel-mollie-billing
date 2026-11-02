@@ -25,3 +25,13 @@ it('re-applies the route-default propagation on livewire update requests', funct
     // the first Livewire interaction threw UrlGenerationException — a 500 on first click.
     expect($middleware)->toContain(PropagateRouteDefaults::class);
 });
+
+it('re-applies the IP country gate on livewire update requests', function (): void {
+    $middleware = app(PersistentMiddleware::class)->getPersistentMiddleware();
+
+    // Every portal, checkout and admin page is mounted behind BlockRestrictedCountries,
+    // and a Livewire page never navigates again — so a gate that only ran on the initial
+    // GET stayed open for as long as the tab did, and every component action (checkout
+    // submit, seat change, OSS export) kept working from a country the policy denies.
+    expect($middleware)->toContain(\GraystackIT\MollieBilling\Http\Middleware\BlockRestrictedCountries::class);
+});

@@ -217,7 +217,11 @@ class MollieBillingServiceProvider extends ServiceProvider
             // an attack — and every invoice issued in that window carries a VAT treatment the
             // correction flow then has to refund and reissue. The feature gate was missing for
             // the same reason: a downgrade or a revoked grant left the paid screen driveable.
+            // The IP gate likewise: every portal, checkout and admin route carries it, so
+            // without it here a tab loaded from an allowed country kept submitting checkouts,
+            // seat changes and OSS exports after the visitor's country became a denied one.
             Livewire::addPersistentMiddleware([
+                BlockRestrictedCountries::class,
                 PropagateRouteDefaults::class,
                 RequireActiveSubscription::class,
                 RequireResolvedCountryMismatch::class,

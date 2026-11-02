@@ -255,17 +255,50 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
+        $coupons ??= app(CouponService::class);
+
+        // A later discount is not this reset's to end. The marker names the coupon whose
+        // expiry it was written for (older markers do not, and are judged as before); a
+        // live marker for a different coupon means a newer one was applied in the
+        // meantime, and PATCHing to full price would take it away.
+        $expiredCouponId = $this->intentData['coupon_id'] ?? null;
+        $liveMarker = $coupons->getActiveRecurringCouponMarker($billable);
+
+        if ($expiredCouponId !== null
+            && $liveMarker !== null
+            && (int) ($liveMarker['coupon_id'] ?? 0) !== (int) $expiredCouponId) {
+            Log::info('Skipping a superseded coupon-expiry reset — another recurring coupon is active', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'expired_coupon_id' => $expiredCouponId,
+                'live_coupon_id' => $liveMarker['coupon_id'] ?? null,
+            ]);
+
+            return;
+        }
+
+        // Priced from the live subscription, not from the configuration captured when the
+        // reset first failed. This chain backs off for up to a day, a plan change can land
+        // in that window, and the captured plan, seats and addons then PATCHed Mollie back
+        // to the old (cheaper) price while the customer kept the new entitlements — the
+        // same harm intentIsStillCurrent() guards against on the plan-change branch.
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
+
+        if ($planCode === '' || $interval === '') {
+            return;
+        }
+
         $patcher->updateRecurringAmount(
             billable: $billable,
-            planCode: (string) ($this->intentData['plan_code'] ?? ''),
-            interval: (string) ($this->intentData['interval'] ?? ''),
-            addons: (array) ($this->intentData['addons'] ?? []),
-            extraSeats: (int) ($this->intentData['extra_seats'] ?? 0),
+            planCode: $planCode,
+            interval: $interval,
+            addons: $billable->getActiveBillingAddonCodes(),
+            extraSeats: $billable->getExtraBillingSeats(),
             intervalChanged: false,
             couponDiscountNet: 0,
         );
 
-        ($coupons ?? app(CouponService::class))->clearActiveRecurringCouponMarker($billable);
+        $coupons->clearActiveRecurringCouponMarker($billable);
     }
 
     /**

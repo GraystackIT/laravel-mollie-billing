@@ -103,3 +103,31 @@ it('returns a fresh fake for each application instance', function (): void {
 
     expect(MollieBilling::fake())->not->toBe($first);
 });
+
+it('ignores query parameters on an application route whose name merely contains billing.', function (): void {
+    /** @var TestBillable $foreign */
+    $foreign = TestBillable::create(['name' => 'Foreign', 'email' => 'foreign@example.test']);
+
+    // The package-route test used to be `str_contains($name, 'billing.')`, so an app's own
+    // `settings.billing.history` — exactly the kind of page that carries `billing.feature`
+    // — counted as a package route and `?x=<foreign-key>` selected a stranger again.
+    Route::get('/settings/billing/history', fn () => 'ok')->name('settings.billing.history');
+    Route::getRoutes()->refreshNameLookups();
+    $route = Route::getRoutes()->getByName('settings.billing.history');
+
+    $request = Request::create('/settings/billing/history?x='.$foreign->getKey(), 'GET');
+    $request->setRouteResolver(fn () => $route);
+
+    expect(MollieBilling::resolveBillable($request))->toBeNull();
+});
+
+it('still resolves a billable from a query parameter on the bound checkout route', function (): void {
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Acme', 'email' => 'acme@example.test']);
+
+    $route = Route::getRoutes()->getByName('billing.checkout');
+    $request = Request::create('/billing/checkout?organization='.$billable->getKey(), 'GET');
+    $request->setRouteResolver(fn () => $route);
+
+    expect(MollieBilling::resolveBillable($request)?->getKey())->toBe($billable->getKey());
+});

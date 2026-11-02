@@ -79,3 +79,53 @@ it('allows access when no billable is resolved', function () {
 
     $response->assertOk();
 });
+
+it('does not reveal a query-selected stranger\'s open mismatch', function () {
+    $foreign = TestBillable::create(['name' => 'Foreign', 'email' => 'foreign@example.test']);
+    BillingCountryMismatch::create([
+        'billable_type' => $foreign->getMorphClass(),
+        'billable_id' => $foreign->getKey(),
+        'tax_country_user' => 'AT',
+        'tax_country_payment' => 'DE',
+        'tax_country_ip' => 'CH',
+        'status' => CountryMismatchStatus::Pending,
+    ]);
+
+    // Checkout is mounted outside tenant context, so the app's resolver answers null and
+    // the query-parameter guess decides. Redirect-or-not then told anyone who could name
+    // a route key whether that tenant had an open VAT mismatch — the same oracle
+    // BillingPortalController closed one layer further in.
+    MollieBilling::resolveBillableUsing(fn () => null);
+    MollieBilling::authUsing(fn () => false);
+
+    $route = Route::getRoutes()->getByName('billing.checkout');
+    $request = \Illuminate\Http\Request::create('/billing/checkout?organization='.$foreign->getKey(), 'GET');
+    $request->setRouteResolver(fn () => $route);
+
+    $response = app(RequireResolvedCountryMismatch::class)->handle($request, fn () => response('OK'));
+
+    expect($response->getStatusCode())->toBe(200);
+});
+
+it('still blocks the requester\'s own query-selected billable with an open mismatch', function () {
+    $own = TestBillable::create(['name' => 'Own', 'email' => 'own@example.test']);
+    BillingCountryMismatch::create([
+        'billable_type' => $own->getMorphClass(),
+        'billable_id' => $own->getKey(),
+        'tax_country_user' => 'AT',
+        'tax_country_payment' => 'DE',
+        'tax_country_ip' => 'CH',
+        'status' => CountryMismatchStatus::Pending,
+    ]);
+
+    MollieBilling::resolveBillableUsing(fn () => null);
+    MollieBilling::authUsing(fn () => true);
+
+    $route = Route::getRoutes()->getByName('billing.checkout');
+    $request = \Illuminate\Http\Request::create('/billing/checkout?organization='.$own->getKey(), 'GET');
+    $request->setRouteResolver(fn () => $route);
+
+    $response = app(RequireResolvedCountryMismatch::class)->handle($request, fn () => response('OK'));
+
+    expect($response->isRedirect())->toBeTrue();
+});

@@ -224,7 +224,19 @@ class MollieBilling
         if ($route !== null) {
             $name = $route->getName();
 
-            return is_string($name) && str_contains($name, 'billing.');
+            if (! is_string($name) || ! str_contains($name, 'billing.')) {
+                return false;
+            }
+
+            // The name alone is not proof: the package's names can carry any prefix
+            // (`tenant.billing.checkout`), so it has to be a substring match — which an
+            // app's own `settings.billing.history` satisfies as well, and that is exactly
+            // the kind of page `billing.feature` is applied to. Every package route is
+            // served by one of the package's controllers, which an app route is not.
+            $controller = $route->getControllerClass();
+
+            return is_string($controller)
+                && str_starts_with(ltrim($controller, '\\'), 'GraystackIT\\MollieBilling\\');
         }
 
         return str_contains('/'.trim($request->path(), '/').'/', '/billing/');

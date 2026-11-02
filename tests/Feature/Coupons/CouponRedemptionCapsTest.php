@@ -120,6 +120,64 @@ it('refuses the renewal bypass for a coupon that is not recurring', function ():
     expect(CouponRedemption::where('coupon_id', $coupon->id)->count())->toBe(1);
 });
 
+it('refuses the renewal bypass for a billable that holds no grant of the coupon', function (): void {
+    $service = app(CouponService::class);
+    $customer = capsBillable();
+    $stranger = capsBillable('stranger@x.test');
+
+    $coupon = $service->create([
+        'code' => 'RECURCAP',
+        'name' => 'Recurring capped',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+        'max_redemptions' => 1,
+        'max_redemptions_per_billable' => 12,
+        'active' => true,
+    ]);
+
+    // The only campaign slot goes to the first customer.
+    $service->redeem($coupon, $customer, ['orderAmountNet' => 2900]);
+    expect($coupon->refresh()->redemptions_count)->toBe(1);
+
+    // The renewal exemption re-applies a grant that already exists. Without checking for
+    // that grant, a caller-supplied `renewal` flag let a billable that never had one skip
+    // both caps — and, with `skip_marker` omitted, write itself a fresh discount marker.
+    expect(fn () => $service->redeem($coupon->refresh(), $stranger, [
+        'renewal' => true,
+        'orderAmountNet' => 2900,
+    ]))->toThrow(InvalidCouponException::class);
+
+    expect($stranger->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null)->toBeNull()
+        ->and(CouponRedemption::where('coupon_id', $coupon->id)->count())->toBe(1);
+});
+
+it('does not rewrite the recurring marker on a renewal', function (): void {
+    $service = app(CouponService::class);
+    $billable = capsBillable();
+
+    $coupon = $service->create([
+        'code' => 'RECURKEEP',
+        'name' => 'Recurring keep',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+        'max_redemptions_per_billable' => 12,
+        'active' => true,
+    ]);
+
+    $service->redeem($coupon, $billable, ['orderAmountNet' => 2900]);
+    $before = $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
+
+    // A renewal must not reset what the grant was locked to (base amount, lifetime).
+    $service->redeem($coupon->refresh(), $billable->refresh(), [
+        'renewal' => true,
+        'orderAmountNet' => 9900,
+    ]);
+
+    expect($billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'])->toBe($before);
+});
+
 it('does not let recurring renewals consume the global new-customer cap', function (): void {
     $service = app(CouponService::class);
     $billable = capsBillable();

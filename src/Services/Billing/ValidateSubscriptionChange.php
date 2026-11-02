@@ -7,12 +7,14 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
+use GraystackIT\MollieBilling\Exceptions\AddonNotAllowedException;
 use GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
+use GraystackIT\MollieBilling\Exceptions\SeatCountExceedsMaximumException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
@@ -206,6 +208,14 @@ class ValidateSubscriptionChange
         // LocalSubscriptionDoesNotSupportPaidExtrasException with the richer
         // upgrade-path messaging.
         if ($context->seatsExplicit) {
+            // The ceiling SyncSeats applies, applied where every caller passes through:
+            // `MollieBilling::subscriptions()->update(['seats' => …])` skipped it.
+            $maximum = max(1, (int) config('mollie-billing.max_seats', 1000));
+
+            if ($context->newSeats > $maximum && $context->newSeats !== $context->currentSeats) {
+                throw new SeatCountExceedsMaximumException($billable, $context->newSeats, $maximum);
+            }
+
             if (
                 $seatPriceNet === null
                 && $context->newSeats > $newIncludedSeats
@@ -324,9 +334,24 @@ class ValidateSubscriptionChange
         // the target interval does not sell prices at 0, so switching to yearly used to
         // hand out a monthly-only addon for free, forever. Filtering it out silently
         // would be the other kind of wrong — the customer asked for it and is willing to
-        // pay — so this refuses the change instead. Only when plan or interval move; an
-        // unchanged pair is what the billable already has.
+        // pay — so this refuses the change instead.
+        //
+        // When plan and interval stay put, only the *newly added* codes are judged — the
+        // ones the billable already holds were sold under the rules of their time. They
+        // used to be skipped too, which made an addon-only change the one path with no
+        // eligibility check at all: `enableBillingAddon()` wrote a higher tier's addon
+        // (or an unknown code) into active_addon_codes and FeatureAccess granted it.
         if (! $context->planChanged && ! $context->intervalChanged) {
+            foreach (array_diff($context->newAddons, $context->currentAddons) as $code) {
+                if (! $this->catalog->planAllowsAddon($context->newPlan, $code)) {
+                    throw new AddonNotAllowedException($context->newPlan, $code);
+                }
+
+                if (! $this->catalog->addonOffersInterval($code, $context->newInterval)) {
+                    throw new IntervalNotOfferedException($code, $context->newInterval, 'addon');
+                }
+            }
+
             return;
         }
 

@@ -81,7 +81,7 @@ class ProrataChargeHandler
         }
 
         $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
-        if (empty($pending)) {
+        if (empty($pending) || ! $this->paymentOwnsPending($payment, $pending)) {
             $this->reportOrphanedCharge($payment, $billable);
             return;
         }
@@ -518,6 +518,24 @@ class ProrataChargeHandler
      * would be no invoice, no refund and no notification, and the reservation is
      * finalized so no re-delivery can recover it.
      */
+    /**
+     * Whether this payment is the one the pending change is waiting for.
+     *
+     * `pending_prorata_change` is a single slot. When a change is cancelled while its
+     * payment cannot be (SEPA in flight) and the customer then starts another, the slot
+     * holds the *newer* change by the time the older payment reports — and without this
+     * check the older payment applied, or discarded, the newer change. A pending state
+     * without a recorded id (written before the id was stored) is still accepted.
+     *
+     * @param  array<string, mixed>  $pending
+     */
+    protected function paymentOwnsPending(object $payment, array $pending): bool
+    {
+        $expected = (string) ($pending['charge_payment_id'] ?? '');
+
+        return $expected === '' || $expected === (string) ($payment->id ?? '');
+    }
+
     protected function reportOrphanedCharge(object $payment, Billable $billable): void
     {
         $paymentId = (string) ($payment->id ?? '');
@@ -718,6 +736,13 @@ class ProrataChargeHandler
         // PlanChangeFailed. The user already decided this charge should not
         // apply; we shouldn't surface a "plan change failed" toast for it.
         if ($pending === null) {
+            return;
+        }
+
+        // A payment for a change that was cancelled and replaced: the slot now belongs to
+        // the newer change, whose own payment is still in flight. Wiping it here rolled
+        // back the newer change's seats and addons and orphaned its payment.
+        if (! $this->paymentOwnsPending($payment, (array) $pending)) {
             return;
         }
 

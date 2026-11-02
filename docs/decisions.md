@@ -278,6 +278,10 @@ alternative; they are listed so the alternative is argued rather than rediscover
 | A stuck country correction escalates after 14 days, not 24 hours | `pending` is where a SEPA Direct Debit lives for several business days. Escalating cancels the customer's subscription and mails the admins that the reissue failed — for a payment that is simply still travelling. The figure now matches the overage sweeper's for the structurally identical case. |
 | A PDF line uses the booked VAT, falling back to the rate | The renderer recomputes `net × rate` when given only a percentage, and the stored figure is not always that number — a partial credit note allocates its VAT across the lines it reverses. `unit_tax` is multiplied by the quantity, so it is used only where the stored amount divides evenly; everything else renders exactly as before. |
 | `RetryRefundLineJob` keeps `releaseAfter(30)` | Reported as a hazard: every release counts against `tries`, so a blocked sibling could dead-letter a refund line without ever calling Mollie. The numbers do not support it — `expireAfter(600)` caps one holder at 20 releases against a `tries` budget of 50, and the sibling that *did* choose `dontRelease()` (`RetryUsageOverageChargeJob`) has 3 tries, not 50. Lengthening the interval would also delay every legitimate retry behind a fast sibling, and no test can distinguish the two without real queue timing. Revisit if a dead-lettered line is ever observed with no Mollie attempt recorded. |
+| A coupon is redeemed after the money moved, not reserved before it | Reported twice (first-payment/mandate-only activation, one-time orders): two checkouts can both pass the lock-free `validate()`, both get paid, and the second `redeem()` then finds the campaign full — the customer keeps what they paid for. That is the trade. Redeeming *before* the payment consumed coupons against subscriptions that never came into existence, and refusing activation *after* it takes a customer's money and gives them nothing. The overshoot is bounded by checkouts genuinely in flight at once, and every failed redemption alerts the admins (`FirstPaymentCouponPricing::compensateFailedRedemption()`); `OneTimeOrderHandler` books the paid amount ("the payment wins"). A reservation ledger would close it and is a feature, not a fix. Per-billable limits are a different matter and *are* enforced before payment — see `StartSubscriptionCheckout::couponEligibleForPaidCheckout()`. |
+| A `onetimeonly` product paid twice in parallel is delivered twice | Two checkouts opened before either settles each produce a paid payment. The flag is checked when a checkout is started, against paid invoices; making fulfilment refuse the second would keep money for goods not delivered, and an automatic refund is a product decision. Not changed; an app that needs a hard limit listens for the paid order and refunds. |
+| "Apply now" on a scheduled change works under `plan_change_mode = end_of_period` | Reported as a customer bypass of the mode, including an early prorata refund on a downgrade. The plan-change component's docblock records the opposite as the bug it fixed: the button used to throw under that mode and the catch then deleted the customer's change. The mode governs how a change is *booked*; whether the customer may pull their own booked change forward is a product question this table does not settle — **open for the maintainer**, unchanged until decided. |
+| The cleanup job keeps `BillingScope`; the lifecycle sweeps do not | The scope is documented as the static "this row is not a billable" filter (staff in a shared `users` table), and those rows look exactly like orphans — so the one job that deletes must not remove it. The sweeps only act on rows that carry a subscription, and stay scope-free so a request-dependent scope cannot hide a lapsed subscription from them. |
 | Trials are exempt from the lapsed-period guard | The guard's premise is that a renewal webhook keeps `nextBillingDate()` in the future. A trial's anchor is the mandate-capture time and Mollie charges at the trial end instead, so a trial longer than one interval walks past it with nothing wrong. Nothing is given away: nothing was paid for the period, so a prorata of 0 is the right answer. |
 
 ---
@@ -352,6 +356,16 @@ asserts the replay, plus the 400 for a reused key with a different amount.
 
 Reported, investigated, and **not** changed. Listed with what the investigation showed, so
 the same note does not come back.
+
+### A coupon-expiry retry does not fail when the Mollie ids are missing
+
+Reported as a lost retry: `updateRecurringAmount()` logs and returns when the billable has
+no Mollie customer or subscription id, so `RetrySubscriptionPatchJob` clears its marker as
+if the PATCH had landed. The package never clears `mollie_customer_id`, and an empty
+`mollie_subscription_id` means there is no Mollie subscription left to carry the discounted
+amount. Neither state is one a retry can repair — throwing would only spend a day of
+backoff and then page the admins about a subscription that does not exist. The same skip
+applies on the plan-change branch, deliberately.
 
 ### The wallet balance is not read from a stale cache
 
