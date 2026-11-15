@@ -129,34 +129,10 @@ class StartOneTimeOrderCheckout
         if ($couponCodes === [] && ! empty($request['coupon_code'])) {
             $couponCodes = [(string) $request['coupon_code']];
         }
-        $couponCodes = array_values(array_unique(array_map(
-            'strtoupper',
-            array_filter(array_map('trim', $couponCodes), fn (string $c) => $c !== ''),
-        )));
 
-        // Recurring is intentionally not allowed on one-time-orders: there are no
-        // follow-up charges to attach the recurring marker to. Only SinglePayment
-        // discounts make sense here.
-        /** @var list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}> $resolvedCoupons */
-        $resolvedCoupons = [];
-        $netForCharge = $priceNet;
-        $existingCouponIds = [];
-        $remainingNet = $priceNet;
-        foreach ($couponCodes as $code) {
-            $coupon = $this->couponService->validate($code, $billable, [
-                'productCodes' => [$productCode],
-                'orderAmountNet' => $remainingNet,
-                'existingCouponIds' => $existingCouponIds,
-                'allowed_types' => [
-                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
-                ],
-            ]);
-            $discount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
-            $resolvedCoupons[] = ['coupon' => $coupon, 'discount' => $discount];
-            $netForCharge = max(0, $netForCharge - $discount);
-            $remainingNet = max(0, $remainingNet - $discount);
-            $existingCouponIds[] = $coupon->id;
-        }
+        $quote = $this->quote($billable, $productCode, $couponCodes);
+        $couponCodes = $quote['coupon_codes'];
+        $resolvedCoupons = $quote['coupons'];
 
         // 100%-coverage: skip Mollie entirely and write a local 0-EUR audit invoice.
         // No mandate, no Mollie roundtrip — one-time-orders have no follow-up charges,
@@ -164,26 +140,11 @@ class StartOneTimeOrderCheckout
         // Note: idempotency relies on the caller's UI guard (e.g. the Livewire
         // `processing` flag). There is no BillingProcessedWebhook protection here
         // because no webhook fires for this flow.
-        if ($netForCharge === 0) {
+        if ($quote['net'] === 0) {
             return $this->completeInline($billable, $productCode, $priceNet, $resolvedCoupons);
         }
 
-        $country = $billable->getBillingCountry() ?? (string) config('mollie-billing.checkout_country_fallback', 'DE');
-        $vatResult = $this->vatService->calculate($country, $netForCharge, $billable);
-
-        // OneTimeOrderHandler books this payment as a product line plus one negative
-        // line per coupon, and the invoice header sums their VAT — so the amount we
-        // collect is assembled from the same lines. See
-        // BillingMoney::grossWithLineVat(); rounding the discounted total instead
-        // leaves the customer paying a cent more or less than the invoice states.
-        $lineNets = [$priceNet];
-        foreach ($resolvedCoupons as $entry) {
-            if ((int) $entry['discount'] > 0) {
-                $lineNets[] = -(int) $entry['discount'];
-            }
-        }
-
-        $amountGross = BillingMoney::grossWithLineVat($lineNets, (float) $vatResult['rate']);
+        $amountGross = $quote['gross'];
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
         $urlParams = MollieBilling::resolveUrlParameters($billable);
@@ -234,6 +195,92 @@ class StartOneTimeOrderCheckout
     }
 
     /**
+     * The country a one-time order is taxed in: the billable's, or — for a billable that
+     * has none yet — `checkout_country_fallback`, which is what the webhook then persists
+     * (`WebhookSupport::ensureBillingCountry()`).
+     *
+     * One answer for the products page, the payment and the inline path. They used to
+     * give three: the page hardcoded `AT`, the payment used the fallback, and the inline
+     * (fully coupon-covered) path used neither and threw.
+     */
+    public static function taxCountry(?Billable $billable): string
+    {
+        $country = (string) ($billable?->getBillingCountry() ?? '');
+
+        return $country !== '' ? $country : (string) config('mollie-billing.checkout_country_fallback', 'DE');
+    }
+
+    /**
+     * Price a one-time order: what the product costs, what each coupon takes off, and
+     * the gross that is collected.
+     *
+     * `handle()` charges `gross`; the products page shows `price_gross` and
+     * `price_gross − gross` as the discount, so the arithmetic on the page ends at the
+     * amount that is charged. VAT is rounded per invoice line (the product, and one
+     * negative line per coupon) because that is how OneTimeOrderHandler books the
+     * payment — see BillingMoney::grossWithLineVat(). Grossing the summed discount
+     * instead, as the page did, is a cent off as soon as two coupons are stacked.
+     *
+     * Recurring is intentionally not allowed on one-time-orders: there are no follow-up
+     * charges to attach the recurring marker to. Only SinglePayment discounts apply.
+     *
+     * @param  array<int, string>  $couponCodes
+     * @return array{price_net:int, price_gross:int, net:int, gross:int, rate:float, country:string, coupon_codes:list<string>, coupons:list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>}
+     *
+     * @throws \GraystackIT\MollieBilling\Exceptions\InvalidCouponException
+     */
+    public function quote(Billable $billable, string $productCode, array $couponCodes = []): array
+    {
+        $priceNet = $this->catalog->productPriceNet($productCode);
+
+        $couponCodes = array_values(array_unique(array_map(
+            'strtoupper',
+            array_filter(array_map(fn ($c): string => trim((string) $c), $couponCodes), fn (string $c) => $c !== ''),
+        )));
+
+        $resolvedCoupons = [];
+        $existingCouponIds = [];
+        $remainingNet = $priceNet;
+
+        foreach ($couponCodes as $code) {
+            $coupon = $this->couponService->validate($code, $billable, [
+                'productCodes' => [$productCode],
+                'orderAmountNet' => $remainingNet,
+                'existingCouponIds' => $existingCouponIds,
+                'allowed_types' => [
+                    \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment,
+                ],
+            ]);
+            $discount = $this->couponService->computeRecurringDiscount($coupon, $remainingNet);
+            $resolvedCoupons[] = ['coupon' => $coupon, 'discount' => $discount];
+            $remainingNet = max(0, $remainingNet - $discount);
+            $existingCouponIds[] = $coupon->id;
+        }
+
+        $country = self::taxCountry($billable);
+        $rate = (float) $this->vatService->calculate($country, max(1, $priceNet), $billable)['rate'];
+
+        $lineNets = [$priceNet];
+        foreach ($resolvedCoupons as $entry) {
+            if ((int) $entry['discount'] > 0) {
+                $lineNets[] = -(int) $entry['discount'];
+            }
+        }
+
+        return [
+            'price_net' => $priceNet,
+            'price_gross' => BillingMoney::grossWithLineVat([$priceNet], $rate),
+            'net' => $remainingNet,
+            // Nothing owed is nothing charged — per-line rounding must not leave a cent.
+            'gross' => $remainingNet === 0 ? 0 : BillingMoney::grossWithLineVat($lineNets, $rate),
+            'rate' => $rate,
+            'country' => $country,
+            'coupon_codes' => $couponCodes,
+            'coupons' => $resolvedCoupons,
+        ];
+    }
+
+    /**
      * Inline 0-EUR completion for one-time-orders fully covered by coupons. Mirrors
      * MollieWebhookController::handleOneTimeOrderPaid() — local invoice, redemptions,
      * wallet credit, events — but without the Mollie payment.
@@ -248,7 +295,12 @@ class StartOneTimeOrderCheckout
         array $resolvedCoupons,
     ): array {
         /** @var Model&Billable $billable */
-        $country = (string) ($billable->getBillingCountry() ?? '');
+        // A billable without a country gets the fallback persisted, exactly as the paid
+        // path's webhook does — the invoice needs one, and the next order must be taxed
+        // in the same place as this one.
+        app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class)->ensureBillingCountry($billable);
+
+        $country = self::taxCountry($billable);
         $vat = $this->vatService->calculate($country, $priceNet, $billable);
         $rate = (float) ($vat['rate'] ?? 0.0);
 

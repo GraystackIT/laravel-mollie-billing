@@ -27,8 +27,11 @@ beforeEach(function (): void {
         'feature_keys' => [],
         'allowed_addons' => [],
         'intervals' => [
-            'monthly' => ['base_price_net' => 3000, 'seat_price_net' => null, 'included_usages' => []],
-            'yearly' => ['base_price_net' => 30000, 'seat_price_net' => null, 'included_usages' => []],
+            // Deliberately not 30.00: the dashboard now states the next charge with its
+            // plan line, and the cases below assert that the cross-currency SUM
+            // "€30.00" (10.00 EUR + 20.00 GBP) appears nowhere.
+            'monthly' => ['base_price_net' => 4500, 'seat_price_net' => null, 'included_usages' => []],
+            'yearly' => ['base_price_net' => 45000, 'seat_price_net' => null, 'included_usages' => []],
         ],
     ]);
     config()->set('mollie-billing.currency', 'EUR');

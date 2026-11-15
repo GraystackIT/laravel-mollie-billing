@@ -60,6 +60,7 @@ function everyBillingNotification(): array
         AdminRefundFailedNotification::class => new AdminRefundFailedNotification($billable, $exception),
         CountryMismatchReissueFailedNotification::class => new CountryMismatchReissueFailedNotification($billable, $mismatch, 'declined'),
         CountryMismatchSelfNotification::class => new CountryMismatchSelfNotification($billable, $mismatch),
+        \GraystackIT\MollieBilling\Notifications\GrantExtrasPurchaseRefundedNotification::class => new \GraystackIT\MollieBilling\Notifications\GrantExtrasPurchaseRefundedNotification($billable, 2526, 'EUR'),
         InvoiceAvailableNotification::class => new InvoiceAvailableNotification($billable, $invoice),
         OverageBillingFailedNotification::class => new OverageBillingFailedNotification($billable),
         PlanChangeFailedNotification::class => new PlanChangeFailedNotification($billable, 'tr_x'),

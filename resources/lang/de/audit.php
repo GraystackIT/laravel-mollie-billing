@@ -56,6 +56,7 @@ return [
     'payment_succeeded' => 'Zahlung eingegangen',
     'payment_failed' => 'Zahlung fehlgeschlagen: :reason',
     'renewal_collected_for_ended_subscription' => 'Eine Verlängerung wurde für ein nicht mehr laufendes Abo eingezogen (:status) — muss erstattet werden',
+    'renewal_undercollected' => 'Eine Abrechnungsperiode wurde unter dem Preis ihrer Konfiguration eingezogen — nicht automatisch nachbelastet',
     'payment_amount_mismatch' => 'Gezahlter Betrag weicht vom erwarteten Betrag ab',
     'duplicate_payment_received' => 'Doppelte Zahlung erhalten und ignoriert',
     'checkout_started' => 'Checkout begonnen',
@@ -69,6 +70,9 @@ return [
     'invoice_created' => 'Rechnung :serial erstellt',
     'invoice_refunded' => 'Rechnung :serial erstattet',
     'credit_note_issued' => 'Gutschrift :serial erstellt',
+    'refund_reversed' => 'Erstattung nicht angekommen – Gutschrift mit :serial storniert',
+    'grant_extras_purchase_refunded' => 'Kauf von Extras nicht ausgeführt — der Gratiszeitraum war beendet; Zahlung :serial erstattet',
+    'chargeback_reversed' => 'Rückbuchung zu Rechnung :serial zurückgenommen',
     'invoice_pdf_regenerated' => 'PDF der Rechnung :serial neu erzeugt',
 
     // Zahlungsmethode

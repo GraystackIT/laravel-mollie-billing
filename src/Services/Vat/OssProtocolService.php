@@ -156,7 +156,6 @@ class OssProtocolService
         $country = strtoupper((string) $invoice->country);
         $currency = strtoupper((string) ($invoice->currency ?: config('mollie-billing.currency', 'EUR')));
         $isSale = $invoice->invoice_kind !== InvoiceKind::Refund;
-        $scope = $this->scopeFor($invoice, $country);
 
         // Collect lines by VAT rate so an invoice counts exactly once as a sale per rate.
         $linesByRate = [];
@@ -170,6 +169,9 @@ class OssProtocolService
         }
 
         foreach ($linesByRate as $rate => $totals) {
+            // Decided per rate group, from the VAT the lines actually carry — see scopeFor().
+            $scope = $this->scopeFor($invoice, $country, (float) $rate, (int) $totals['vat']);
+
             // `scope` is part of the key, so the three filings never merge into one
             // bucket even where quarter, currency, country and rate coincide.
             $key = "{$quarter}|{$currency}|{$country}|{$rate}|{$scope}";
@@ -231,7 +233,7 @@ class OssProtocolService
         return $this->sellerCountry;
     }
 
-    private function scopeFor(BillingInvoice $invoice, string $country): string
+    private function scopeFor(BillingInvoice $invoice, string $country, float $rate, int $vatCents): string
     {
         $seller = $this->sellerCountry();
         $isDomestic = $seller !== null && $country !== '' && strtoupper($seller) === $country;
@@ -257,9 +259,23 @@ class OssProtocolService
             return 'non_eu';
         }
 
+        // Reverse charge is a statement about the supply, and the supply says it itself: it
+        // carries no VAT. A valid validation on the document is necessary and not sufficient.
+        // `vat_validation_id` records which VIES answer was on file when the document was
+        // written — also when `VatCalculationService::calculate()` then refused reverse
+        // charge (`vat.require_seller_country` without a seller country charges VAT to every
+        // validated business customer), and, on documents written before credit notes
+        // inherited their original's validation, the customer's status at the time of the
+        // *refund* rather than of the sale. Asking only about the validation filed 19 %
+        // German VAT under `reverse_charge`: the OSS row kept the full sale while its
+        // correction sat on the EC Sales List with negative VAT on a line that is
+        // zero-rated by definition.
+        //
+        // Per rate group, like the buckets: a plan-switch document can carry credits at the
+        // rate the original charged next to charges priced under today's classification.
         $validation = $invoice->vatValidation;
 
-        if ($validation !== null && (bool) $validation->valid) {
+        if ($validation !== null && (bool) $validation->valid && abs($rate) < 0.0001 && $vatCents === 0) {
             return 'reverse_charge';
         }
 

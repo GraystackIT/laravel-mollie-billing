@@ -166,7 +166,43 @@ A negative balance is unpaid debt, and the reset does **not** forgive it while t
 | Month 2 start | Reset **keeps the debt**, credits 100 | 63 |
 | Month 2, day 2 | Overage payment settles, credits 37 | 100 |
 
-Decided per usage type, from the pending-charge snapshot: a type the charge did not cover gets its ordinary reset, and a cycle that already gave up (status `failed`) is not "in flight" — that debt was written off with the past-due transition, so preserving it would strand the wallet negative forever.
+A cycle that already gave up (status `failed`) is not "in flight" — that debt was written off with the past-due transition, so preserving it would strand the wallet negative forever.
+
+### A renewal never zeroes a debt that is still owed
+
+The period-end sweep has one chance to charge a period's overage: the night before `nextBillingDate()`. Whenever that night was missed, the renewal used to find a negative balance with nothing in flight and reset it to the new quota — the overage was given away. Three ordinary ways to miss it:
+
+- **A trial.** Its `nextBillingDate()` is mandate capture plus one interval; a 14-day trial converts long before that, and `debit()` allows overage throughout because the billable holds a mandate.
+- **A renewal that settles ahead of the sweep night.** Routine under SEPA Direct Debit for as long as the period anchor was the previous renewal's `paidAt`, which trails Mollie's fixed collection date by a lag that varies with weekends and bank holidays — a shorter lag this period put the webhook before the sweep. The anchor is now the charge's `createdAt`, the cycle date itself, so the sweep night precedes the charge again; a charge Mollie creates early, or a moved cadence, can still get ahead of it.
+- **A night the sweep did not run.**
+
+So the renewal collects for itself, in two layers:
+
+1. `SubscriptionPaymentHandler::paid()` calls `WebhookSupport::collectOutstandingOverage()` **before** the refill. It goes through `ChargeUsageOverageDirectly::handle()`, whose in-flight guard makes it a no-op whenever the sweep already charged. Once the charge exists, its snapshot is what the reset reads, and everything after that is the table above.
+2. `WebhookSupport::shouldPreserveDebt()` decides what the reset may zero: a debt a charge is collecting, **or** a negative balance that can still be collected (a mandate, and either an overage price on the current plan or a recorded price — see [Restored excess keeps its price](#restored-excess-keeps-its-price)). The second half covers a charge attempt that failed before it could write a snapshot. (The paid trial conversion in `ProrataChargeHandler` runs step 1 as well, while the billable is still on the plan the trial ran on — so trial overage is billed at that plan's price, not carried into the new plan's quota.) A debt carried this way is paid out of the new period's quota; if it exceeds the quota, the wallet stays negative and the next sweep charges the remainder.
+
+| Period | Action | Balance |
+|--------|--------|---------|
+| Trial (grant 10) | Used 60 | −50 |
+| Trial end | First recurring charge settles → overage charge created for 50 units | −50 |
+| Trial end | Reset keeps the debt, credits the full quota of 20 | −30 |
+| A few days later | Overage payment settles, credits 50 | 20 |
+
+A balance nothing could ever bill — no mandate, or no overage price and no recorded one — still gets the ordinary reset.
+
+### A period Mollie does not charge for, and the hand-over back
+
+While a discount covers the whole recurring amount the charge is deferred and no renewal webhook arrives, so `PrepareUsageOverageJob` (case A0) turns the period over itself: collect the ending period's overage, move the anchor to the boundary, refill. When the deferral ends, the webhook takes over again — and the two must not both credit the same period.
+
+A deferral does not have to end on a period boundary. A recurring coupon's ends `N × 30 + 2` days after it was applied: three monthly periods from 10 January defer the charge to 12 April, two days after the boundary of 10 April. Refilling on the 10th and again when the charge settles on the 12th credited one period twice, and a rollover type kept the second quota for good.
+
+So a stretch between a boundary and the returning charge that is **shorter than half an interval** is not a period of its own. The anchor still moves (the lapsed-period guard stays quiet), the overage is still collected, but the quota comes with the charge's own renewal. A longer stretch is a period and is refilled. A plan waiver's deferral ends on a boundary, where the question does not arise.
+
+| Date | Event | Quota credited |
+|------|-------|----------------|
+| 10 Feb, 10 Mar | Boundary under the coupon (nightly pass) | yes |
+| 10 Apr | Boundary, charge returns on 12 Apr (nightly pass) | **no** — anchor moves, overage collected |
+| 12 Apr | First real charge (renewal webhook) | yes |
 
 ### Examples
 
@@ -210,9 +246,9 @@ For metered usage specifically:
 | Behavior | Local subscription |
 |---|---|
 | Plan-quota credit on activation | yes — `included_usages` from the plan/interval are credited like any other source |
-| Plan-quota refill on renewal | yes — `PrepareUsageOverageJob` resets the wallet at each period boundary (`resetLocalQuota`) |
+| Plan-quota refill on renewal | yes — `PrepareUsageOverageJob` resets the wallet at each period boundary (`resetLocalQuota`). Not at a boundary the subscription ends on: an access grant of exactly two months is two periods, and is not refilled the night before it expires |
 | Consumption past zero (negative balance) | **no** — since no overage could ever be collected, `WalletUsageService::debit()` hard-caps at the remaining balance and throws `UsageLimitExceededException` (plus a `UsageLimitReached` event). A booking that fits into the remaining balance always goes through — including one that exceeds `included_usages` because purchased credits raised the balance. |
-| **Charging an overage** | **never** — no mandate, so `PrepareUsageOverageJob` never routes Local billables to `ChargeUsageOverageDirectly`. Negative balances can only arise from a plan change or an admin adjustment, and are reset at the next period boundary. |
+| **Charging an overage** | **never for usage on the Local plan** — it is hard-capped. Negative balances can only arise from a plan change or an admin adjustment, and are reset at the next period boundary. The one exception is plan-change excess that carries a recorded price (see [Restored excess keeps its price](#restored-excess-keeps-its-price)): if the mandate survived the downgrade, the period-boundary pass charges it before the reset and the reset keeps the debt until that payment settles. |
 | Buying purchased credits via one-time orders | **opt-in** via `config('mollie-billing.local_subscription.allow_one_time_orders')`. Default `false` — `StartOneTimeOrderCheckout` throws `LocalSubscriptionCannotPurchaseProductsException` and the products page hides the buy buttons. Set to `true` if your free plan is intended as a default tier monetised through token packs etc. |
 
 In short: a Local user is capped at whatever the wallet actually holds, not at the plan quota. Purchased credits count towards that balance, so with `local_subscription.allow_one_time_orders` enabled a Local user can consume well past `included_usages` — what they can never do is go negative. The app has to handle `UsageLimitExceededException`: `hasBillingQuotaLeft($type)` only answers "is there any balance left (or a chargeable overage)" and reserves nothing, so a booking larger than the remaining balance still throws even right after the gate returned `true`. If your business model requires charging these users for overages, do not make that plan free — price it at the lowest non-zero amount so Mollie collects a mandate during checkout. If you want free users to top up credits manually, enable `local_subscription.allow_one_time_orders`.
@@ -242,6 +278,27 @@ targetBalance      = newIncluded + rolloverCredits + purchasedRemaining - excess
 If `targetBalance < 0`, the remainder is charged as overage via `ChargeUsageOverageDirectly`.
 
 **Key:** `BillingPolicy::computeUsageOverageForPlanChange()` is the single source of truth for excess calculations. It receives `planOnlyBalance` (excluding purchased credits) so purchased credits are never prorated.
+
+### Restored excess keeps its price
+
+The unresolved remainder is consumption on the **old** plan, so it is priced with the old plan's overage price — that is the number the preview shows. When the charge for it cannot be created at once (the overage slot is occupied by a period-end charge that is still settling, or the call fails before anything was posted), the units go back on the wallet as a negative balance for the next sweep.
+
+A negative balance is normally priced when it is charged, from the plan the billable is on *then* — the new one. So the restored units carry their price with them, as `deferred_overage` entries in the wallet's `meta`:
+
+```php
+$wallet->meta['deferred_overage'] = [
+    ['quantity' => 97, 'unit_price_net' => 2],   // old plan's price per unit
+];
+```
+
+`ChargeUsageOverageDirectly` bills these first and at that price, as their own line; whatever the wallet owes beyond them is ordinary overage at the current plan's price. Without the record, 97 units quoted at 2 ct were billed at the smaller plan's 9 ct, and not at all when the new plan sells no overage.
+
+The record never outlives the debt it describes:
+
+- every reader sees it clamped to the wallet's current negative balance, oldest entry first — a credit that pays the debt off ends it;
+- a settled charge removes exactly the units it billed (`SingleChargeHandler` → `WalletUsageService::consumeDeferredOverage()`), so usage that accrued while the payment was settling is not re-labelled with the old price;
+- a reset that forgives the debt drops it, a reset that preserves the debt keeps what is still owed;
+- a second plan change carries it like an in-flight charge's units rather than reading it as consumption on the plan being left.
 
 ### Step-by-step
 
@@ -414,7 +471,7 @@ php artisan billing:sync-purchased-balance
 
 Backfills `purchased_balance` on all wallets from transaction history (one-time orders + coupon credits). Run once after upgrading to a version that tracks purchased credits separately. Safe to re-run — `--dry-run` shows what would change, `--force` skips the prompt.
 
-It replays the wallet's whole transaction history rather than summing a window: purchases add, and every renewal clamps the running total against the balance it found — exactly what `resetAndCredit()` does. A window cannot answer this, because `resetAndCredit()` deliberately *carries* an unconsumed purchase forward by re-persisting `purchased_balance`, so a pack bought last period and still unused has no transaction in this one. Summing the window produced 0 and this command wrote it, after which the next renewal withdrew the whole balance and credited only the plan quota — credits the customer had paid for, gone. Rollover wallets failed the other way: their renewal writes `subscription_renewal_rollover`, which matched no anchor at all, so the reconciliation ran against the wallet's lifetime and relabelled plan units as purchased.
+It replays the wallet's whole transaction history rather than summing a window: purchases add, and every renewal **and every plan change** clamps the running total against the balance it found — exactly what `resetAndCredit()` and `WalletPlanChangeAdjuster` do. A plan change was not a clamp point at first, so a 500-unit pack of which 490 had been used before an upgrade came back as 500 purchased units out of the new plan's quota. A window cannot answer this, because `resetAndCredit()` deliberately *carries* an unconsumed purchase forward by re-persisting `purchased_balance`, so a pack bought last period and still unused has no transaction in this one. Summing the window produced 0 and this command wrote it, after which the next renewal withdrew the whole balance and credited only the plan quota — credits the customer had paid for, gone. Rollover wallets failed the other way: their renewal writes `subscription_renewal_rollover`, which matched no anchor at all, so the reconciliation ran against the wallet's lifetime and relabelled plan units as purchased.
 
 ## Extension Points
 
@@ -536,7 +593,11 @@ balance into the new period, and every future overage for that billable was sile
   the admins. The wallet debt stays outstanding, but the next cycle may charge for it again
   instead of being silenced.
 - **still `open`/`pending` past `HARD_LIMIT_DAYS` (14)** — the same write-off. A payment
-  stuck that long is not going to settle.
+  stuck that long is not going to settle. The 14 days are the **payment's own** age (Mollie's
+  `createdAt`), not the snapshot's: the snapshot's `created_at` is the dunning cycle's start
+  and is inherited from payment to payment. Measured against the cycle, the third SEPA
+  attempt of a cycle — created on day 12 or 13 — was written off two days later, the slot
+  was free for a new charge, and the written-off payment then settled as well.
 - **an invoice already exists** — the webhook did run and only the snapshot was left behind:
   the snapshot and the dunning budget are cleared.
 

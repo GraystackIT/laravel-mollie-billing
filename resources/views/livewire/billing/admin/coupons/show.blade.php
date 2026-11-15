@@ -233,6 +233,11 @@ new class extends Component {
                 <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.max_per_billable')" mono>
                     {{ $coupon->max_redemptions_per_billable ?? '∞' }}
                 </x-mollie-billing::admin.detail>
+                @if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring)
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.discount_periods')" mono>
+                        {{ $coupon->discount_periods ?? __('billing::admin.coupons.show.discount_periods_none') }}
+                    </x-mollie-billing::admin.detail>
+                @endif
                 <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.stackable')">
                     <flux:badge :color="$coupon->stackable ? 'blue' : 'zinc'" size="sm">{{ $coupon->stackable ? __('billing::admin.common.yes') : __('billing::admin.common.no') }}</flux:badge>
                 </x-mollie-billing::admin.detail>

@@ -14,6 +14,7 @@
                     @php($addon = $this->addons()[$addonCode] ?? null)
                     @if ($addon)
                         @php($addonPrice = $money($priceFormatter((int) ($addon['intervals'][$interval]['price_net'] ?? 0))))
+                        @php($addonSeatPrice = $addon['intervals'][$interval]['seat_price_net'] ?? null)
                         <label class="flex items-center justify-between gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50 p-4 transition hover:border-zinc-300 hover:bg-white dark:border-white/10 dark:bg-white/2 dark:hover:border-white/30">
                             <div class="flex items-center gap-3">
                                 <flux:checkbox wire:model="addon_codes" value="{{ $addonCode }}" />
@@ -22,7 +23,7 @@
                                 </div>
                             </div>
                             <div class="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
-                                {{ $addonPrice }} / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
+                                {{ $addonPrice }}@if ($addonSeatPrice !== null && $addonSeatPrice > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $money($priceFormatter((int) $addonSeatPrice))]) }}@endif / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
                             </div>
                         </label>
                     @endif

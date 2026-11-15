@@ -99,7 +99,9 @@ function ledgerBillable(string $periodStart = '2026-01-01T09:00:00Z'): TestBilla
         'active_addon_codes' => ['analytics'],
         'mollie_customer_id' => 'cst_ledger',
         'mollie_mandate_id' => 'mdt_ledger',
-        'subscription_meta' => ['mollie_subscription_id' => 'sub_ledger', 'seat_count' => 2],
+        // Both seats are in use: a plan change lands on the seats in use or included, and
+        // the ledger's upgrade scenarios carry the paid seat across.
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_ledger', 'seat_count' => 2, 'used_seats' => 2],
     ])->save();
 
     return $billable->refresh();

@@ -304,10 +304,10 @@ it('allows plan change with extra seats when new plan supports them', function (
 
     $billable->refresh();
 
-    // Existing seat count (5) is preserved across the plan change.
-    // max(current=5, used=4, included=2) = 5
-    expect($billable->subscription_meta['seat_count'])->toBe(5);
-    expect($result['seatsChanged'])->toBeFalse();
+    // The seats in use come along; the fifth, which nobody sits on, does not:
+    // max(used=4, included=2) = 4 — two of them paid extras on Starter.
+    expect($billable->subscription_meta['seat_count'])->toBe(4);
+    expect($result['seatsChanged'])->toBeTrue();
 });
 
 // ── Bug 2: Incompatible addons stripped on plan change ──

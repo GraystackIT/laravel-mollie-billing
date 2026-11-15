@@ -59,6 +59,7 @@ return [
     'payment_succeeded' => 'Payment received',
     'payment_failed' => 'Payment failed: :reason',
     'renewal_collected_for_ended_subscription' => 'A renewal was collected for a subscription that no longer runs (:status) — needs refunding',
+    'renewal_undercollected' => 'A billing period was collected at less than its configuration costs — not charged automatically',
     'payment_amount_mismatch' => 'Paid amount differs from the expected amount',
     'duplicate_payment_received' => 'Duplicate payment received and ignored',
     'checkout_started' => 'Checkout started',
@@ -72,6 +73,9 @@ return [
     'invoice_created' => 'Invoice :serial issued',
     'invoice_refunded' => 'Invoice :serial refunded',
     'credit_note_issued' => 'Credit note :serial issued',
+    'refund_reversed' => 'Refund did not arrive — credit note reversed by :serial',
+    'grant_extras_purchase_refunded' => 'Purchase of extras not carried out — the free period had ended; payment :serial refunded',
+    'chargeback_reversed' => 'Chargeback on invoice :serial reversed',
     'invoice_pdf_regenerated' => 'Invoice :serial PDF regenerated',
 
     // Payment method

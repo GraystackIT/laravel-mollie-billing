@@ -60,7 +60,7 @@ User -> StartSubscriptionCheckout -> Mollie first payment
 
 ### Trial Flow
 
-A trial starts when the chosen `(planCode, interval)` carries a positive `trial_days` value in the catalog and the billable does **not** yet have a Mollie mandate. Trials only fire on a fresh checkout — `ChangePlan`, `EnableAddon`, and other plan-change services never start or extend trials.
+A trial starts when the chosen `(planCode, interval)` carries a positive `trial_days` value in the catalog, the order costs something, and the billable does **not** yet have a Mollie mandate. The trial is decided *before* the zero-amount branch, so it wins over a coupon that covers the whole first payment — otherwise the confirm step announced a trial and a first-charge date, and the customer got an Active subscription with no trial and the coupon spent on the period that was meant to be free. The checkout does not accept a `single_payment` coupon on a trial signup at all (there is no first payment for it to discount; see [coupons.md](coupons.md)); a `recurring` one is applied by the trial path as before. Trials only fire on a fresh checkout — `ChangePlan`, `EnableAddon`, and other plan-change services never start or extend trials.
 
 ```
 User -> StartSubscriptionCheckout (catalog->trialDays() > 0, no mandate yet)
@@ -84,12 +84,17 @@ Key properties:
 - **Wallet hydration is aliquot** to the trial length (`Support\TrialQuota`). For a 14-day trial on a monthly plan with 10 included Tokens: `ceil(10 * 14 / 30) = 5` tokens. For a 60-day trial: `ceil(10 * 60 / 30) = 20` tokens (2× full quota). Always rounded up so a positive included quota credits at least 1. What was granted is recorded under `subscription_meta.trial_quota` and served by `grantedBillingQuota($type)`, because everything that measures the wallet has to measure against the grant and not against the plan's period quota — otherwise the units that were never credited read as consumption on a subscription minutes old.
 - **Seats and addons are free during the trial.** Everything the current plan allows is part of what is being tried: no prorata charge, no credit when it is removed again, and the trial keeps running. Mollie is PATCHed to the new amount, so the first real charge collects it. See [plan-changes.md](plan-changes.md#nothing-is-prorated-during-a-trial).
 - **A plan or interval change mid-trial ends the trial**, and the wallets then get the full period quota that charge paid for — the same refill the first recurring payment does. See [usage-billing.md](usage-billing.md#a-trial-is-credited-a-prorated-quota); a plan change that leaves the trial running rebalances against the recorded grant instead.
+- **The date the checkout names is the date Mollie charges on.** The confirm step prints `firstChargeDate()` of the checkout component: the trial's end, or — when a `recurring` coupon covers the whole order — the day after that coupon ends if that is later (`CouponService::recurringMarkerValidUntil()`, the same value `CreateSubscription` defers the start date by). It used to print the trial's end regardless.
 - **Mollie's first real charge** fires at `startDate = now + trial_days`. When that webhook arrives, `handleSubscriptionPaymentPaid` flips status from `trial` to `active`, consumes any parked SinglePayment coupon (discounts the line items + creates a redemption), and lets the recurring marker apply for the first time.
 - **Trials never repeat for a returning customer**. Once `mollie_mandate_id` is set, the trial branch is skipped — even on a fresh checkout — and the customer pays the full first period.
 
 If the trial expires without a successful first charge (mandate failure, mandate revoked, customer never paid), `ProcessTrialLifecycleJob` flips the billable to `past_due` **and stamps `past_due_since`**, dispatches `TrialExpired`, and notifies via `TrialExpiredNotification`. `RequireActiveSubscription` then routes the user back to checkout.
 
 The stamp is what keeps the row moving: `PrepareUsageOverageJob`'s auto-cancel pass keys off `past_due_since` alone, so without it the billable stayed in `past_due` indefinitely — never reaching `cancelled → expired` and therefore never reaching the plan-field wipe that closes `hasPlanFeature()`. For the same reason the job's local-quota reset (Case C) skips `past_due`: a past-due local subscription is not renewing, but `nextBillingDate()` keeps cycling for it, so it used to collect a fresh month of consumable quota on every anniversary.
+
+`TrialExpiredNotification` says which of the two happened: "no payment method was added in time" for a trial without a mandate, "the first payment has not reached us" (`trial_expired.body_with_mandate`) for one that had a payment method.
+
+A trial that *does* hold a mandate is left alone by that job at first: Mollie's first charge is scheduled for `trial_ends_at`, and the webhook owns both outcomes (`paid` → `active`, `failed` → `past_due`). That only holds if a webhook arrives. Mollie calls it for payments and nothing else, so a subscription cancelled or suspended at Mollie, a revoked mandate, or a `failed` delivery lost past the retry window leaves the row on `trial` — which grants access unconditionally. After `ProcessTrialLifecycleJob::FIRST_CHARGE_GRACE_DAYS` (14, the same figure as the stuck country-correction and overage sweeps) without either outcome, the job applies the same transition as for a mandate-less trial: `past_due`, `past_due_since` stamped, `TrialExpired` dispatched. A payment that still arrives afterwards is honoured — the renewal handler activates from `past_due`.
 
 If a mandate exists but Mollie's first charge has simply not fallen due yet (`startDate` in the future) at the moment the local trial expires, the billable can sit in `past_due` while Mollie still shows the subscription as `active`. The `MollieSubscriptionGate` (called from `BillingPortalController::checkout`) detects this and redirects to the dashboard instead of opening the checkout — re-entering `CreateSubscriptionRequest` would 422 with "same description already exists". The dashboard surfaces the scheduled charge date and offers a "Charge now" button that PATCHes Mollie's subscription `startDate` to today. Stale `mollie_subscription_id` entries (Mollie reports `canceled`/`completed`/`suspended` or 404) are removed from `subscription_meta` so the next checkout cleanly creates a new subscription. Lookups are cached for 60 seconds.
 
@@ -104,7 +109,7 @@ Ahead of expiry, the same daily job sends a single `TrialEndingSoonNotification`
 ### Local Subscription Activation (Free Plan / Coupon)
 
 ```
-Trigger -> ActivateLocalSubscription::handle()
+Trigger -> ActivateLocalSubscription::handle()   (checkout: order net is 0 — a coupon in the request or session is ignored, there is nothing to discount)
   -> Set source=local, status=active
   -> Credit wallet with included usages
   -> SubscriptionCreated event
@@ -174,6 +179,8 @@ User on free plan -> selects paid plan in plan-change UI
     -> WalletPlanChangeAdjuster::adjust() — rebalance plan credits, preserve purchased_balance
     -> SubscriptionUpgradedFromLocal + PaymentSucceeded events
 ```
+
+The handler treats a payment as a duplicate only when a Mollie subscription is already running. A Local subscription that has simply ended in the meantime — a gift that ran out or was revoked while a SEPA payment was travelling — is not that. An ordinary upgrade is booked and the subscription created. A purchase of extras that was priced on a gift (`keep_grant`) is *not* carried out once the gift is gone: the payment is booked and refunded in full, and nothing about the billable changes — see [coupons.md](coupons.md#a-gifted-plan-with-paid-extras).
 
 **Service:** `UpgradeLocalToMollie`, `MollieWebhookController::handleLocalToMollieUpgrade`, `WalletPlanChangeAdjuster`
 

@@ -21,12 +21,21 @@ class TrialExpiredNotification extends Notification implements ShouldQueue
 
     public readonly ?CarbonInterface $trialEndsAt;
 
+    public readonly bool $hadPaymentMethod;
+
     public function __construct(public readonly Billable $billable)
     {
         // Frozen at construction: subscribing from the CTA in this very mail starts a
         // new period and can move or clear trial_ends_at, and the queued mail would
         // then name a date the expired trial never ended on.
         $this->trialEndsAt = $billable->getBillingTrialEndsAt();
+
+        // Frozen for the same reason. A trial can lapse in two ways and they need
+        // different sentences: no payment method was ever added, or one was and the
+        // first charge never arrived (ProcessTrialLifecycleJob::FIRST_CHARGE_GRACE_DAYS).
+        // Telling the second customer that they "added no payment method in time" is
+        // simply false, and sends them looking for the wrong problem.
+        $this->hadPaymentMethod = $billable->hasMollieMandate();
 
         $this->initializeBillingQueue();
     }
@@ -47,7 +56,12 @@ class TrialExpiredNotification extends Notification implements ShouldQueue
         return (new MailMessage())
             ->subject(__('billing::notifications.trial_expired.subject', ['app' => $app]))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
-            ->line(__('billing::notifications.trial_expired.body', ['date' => $date]))
+            ->line(__(
+                $this->hadPaymentMethod
+                    ? 'billing::notifications.trial_expired.body_with_mandate'
+                    : 'billing::notifications.trial_expired.body',
+                ['date' => $date],
+            ))
             ->action(__('billing::emails.subscribe_now'), route(BillingRoute::checkout(), MollieBilling::resolveUrlParameters($this->billable)));
     }
 
@@ -59,6 +73,7 @@ class TrialExpiredNotification extends Notification implements ShouldQueue
         return [
             'type' => 'trial_expired',
             'trial_ends_at' => $this->trialEndsAt?->toIso8601String(),
+            'had_payment_method' => $this->hadPaymentMethod,
         ];
     }
 }

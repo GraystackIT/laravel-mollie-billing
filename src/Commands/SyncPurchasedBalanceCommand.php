@@ -39,6 +39,14 @@ class SyncPurchasedBalanceCommand extends Command
         'period_reset',
         WalletUsageService::PERIOD_CREDIT_REASON,
         'subscription_renewal_rollover',
+        // A plan change is the other place the live bookkeeping clamps: the adjuster
+        // writes `min(purchasedRemaining, finalBalance)`. Left out of this list, a pack
+        // consumed before an upgrade was measured against the *new* plan's balance at the
+        // very end — 490 used units of a 500 pack came back as purchased, out of a quota
+        // of 1 000, and survived every reset from then on.
+        'plan_change_reset',
+        'plan_change_credit',
+        'plan_change_pending_overage',
     ];
 
     public function handle(): int
@@ -144,6 +152,13 @@ class SyncPurchasedBalanceCommand extends Command
                     $purchased = max(0, min($purchased, $balance));
                     $clampedForThisRenewal = true;
                 } elseif (! $isRenewalMarker) {
+                    // Leaving a clamp point: what it carried forward cannot exceed the
+                    // balance it left behind. A renewal always leaves at least that much; a
+                    // plan change that netted an excess against the new quota may not.
+                    if ($clampedForThisRenewal) {
+                        $purchased = max(0, min($purchased, $balance));
+                    }
+
                     $clampedForThisRenewal = false;
                 }
 

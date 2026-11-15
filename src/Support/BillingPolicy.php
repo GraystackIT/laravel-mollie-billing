@@ -61,6 +61,30 @@ class BillingPolicy
     }
 
     /**
+     * The seat count a change ends up with when the caller did not name one.
+     *
+     * **A plan change does not carry seats over.** It lands on what the new plan needs:
+     * the seats in use, or the seats it includes, whichever is more. Carrying the old
+     * count across turned the old plan's *included* seats into paid extras on a plan that
+     * includes fewer — five seats that came with Enterprise became three paid seats on
+     * Pro (two included), 15.00 a month nobody had ordered. Whoever wants to keep more
+     * than that says so, by passing `seats`.
+     *
+     * Everything else — an interval change, an addon toggled — leaves the seat count
+     * where it is, never below what is in use or included.
+     *
+     * One place, because four have to agree: `UpdateSubscription::buildContext()`,
+     * `ValidateSubscriptionChange::validateSeats()`, `ScheduleSubscriptionChange` and
+     * `PreviewService`.
+     */
+    public static function derivedSeats(int $currentSeats, int $usedSeats, int $newIncludedSeats, bool $planChanged): int
+    {
+        return $planChanged
+            ? max($usedSeats, $newIncludedSeats)
+            : max($currentSeats, $usedSeats, $newIncludedSeats);
+    }
+
+    /**
      * Whole-day breakdown of a billing period: total length and days left from
      * now to periodEnd. Used as the basis for prorata factor and for surfacing
      * "X of Y days remaining" in preview UIs.

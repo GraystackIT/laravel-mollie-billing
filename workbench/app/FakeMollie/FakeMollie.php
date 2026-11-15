@@ -158,6 +158,11 @@ class FakeMollie
             'subscription_id' => $subscriptionId,
             'country_code' => 'DE',
             'paid_at' => self::payment($payment['id'])['status'] === 'paid' ? $scheduled : null,
+            // Mollie CREATES a subscription charge on the scheduled date — that is the
+            // cycle day the package anchors the billing period to
+            // (SubscriptionPaymentHandler::cycleStart()). Left at `now()`, every renewal
+            // of a run carried the same creation time and the period stood still.
+            'created_at' => $scheduled,
             'updated_at' => now(),
         ]);
 

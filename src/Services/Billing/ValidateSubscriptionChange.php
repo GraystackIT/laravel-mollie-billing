@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
+use GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException;
 use GraystackIT\MollieBilling\Exceptions\SeatCountExceedsMaximumException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -58,9 +59,27 @@ class ValidateSubscriptionChange
         $this->validateSubscriptionEstablished($billable);
         $this->validateTargetPlanNotHidden($billable, $context);
         $this->validateTargetIsSold($billable, $context);
+
+        if ($context->intervalChanged) {
+            $this->assertIntervalChangeAllowed($billable);
+        }
         $this->validateSeats($billable, $context);
         $this->validateAddons($billable, $context);
         $this->validateLocalSubscriptionExtras($billable, $context);
+
+        // Not on the Phase-2 re-validation: that change was accepted — and paid for —
+        // before; a plan change is what ends the past-due state in the first place.
+        if (! $context->isPendingReapply) {
+            $this->assertNoPastDueExpansion(
+                $billable,
+                $context->planChanged || $context->intervalChanged,
+                $context->seatsExplicit,
+                $context->currentSeats,
+                $context->newSeats,
+                array_values(array_diff($context->newAddons, $context->currentAddons)),
+                $context->newInterval,
+            );
+        }
         $this->validateWalletUsage($billable, $context);
         $this->validateMollieReadiness($billable, $context);
     }
@@ -139,6 +158,93 @@ class ValidateSubscriptionChange
         if ($this->catalog->planIsHidden($targetPlanCode)) {
             throw new HiddenPlanNotSelectableException($billable, $targetPlanCode);
         }
+    }
+
+    /**
+     * Refuse adding seats or a paid addon while the subscription is past due.
+     *
+     * A past-due period has not been paid, and its end has passed: a seat or addon added
+     * there prorates with a factor of 0. It was accepted, free for the unpaid period, and
+     * Mollie was PATCHed to the higher amount — capacity handed to a customer whose last
+     * charge had just failed. So the expansion is refused until the open payment is
+     * settled. What stays possible:
+     *
+     * - fewer seats, an addon switched off — the customer may always shrink;
+     * - an addon that bills nothing ({@see SubscriptionCatalogInterface::addonIsFree()});
+     * - a plan or interval change: that is the past-due reset, which opens a new period
+     *   and charges it in full, whatever seats and addons it carries.
+     *
+     * Only a seat count the caller asked for counts. A derived one can exceed the stored
+     * count because more members are assigned than seats exist, and refusing to switch an
+     * addon OFF for that reason would be absurd.
+     *
+     * Public so `ScheduleSubscriptionChange::schedule()` and the preview apply the same
+     * rule — a change stored for the period end is the same expansion, and a period end
+     * that has already passed is "now".
+     *
+     * @param  array<int, string>  $addedAddons
+     *
+     * @throws PastDueExpansionNotAllowedException
+     */
+    public function assertNoPastDueExpansion(
+        Billable $billable,
+        bool $planOrIntervalChanged,
+        bool $seatsExplicit,
+        int $currentSeats,
+        int $newSeats,
+        array $addedAddons,
+        string $interval,
+    ): void {
+        if ($planOrIntervalChanged || ! $billable->isBillingPastDue()) {
+            return;
+        }
+
+        $extraSeats = $seatsExplicit ? max(0, $newSeats - $currentSeats) : 0;
+
+        $paidAddons = array_values(array_filter(
+            array_map('strval', $addedAddons),
+            fn (string $code): bool => ! $this->catalog->addonIsFree($code, $interval),
+        ));
+
+        if ($extraSeats > 0 || $paidAddons !== []) {
+            throw new PastDueExpansionNotAllowedException($billable, $extraSeats, $paidAddons);
+        }
+    }
+
+    /**
+     * Refuse an interval change while a plan waiver runs.
+     *
+     * A waiver is denominated in the interval it was given in: its amount is that
+     * interval's plan price, and its end is a date or a number of periods of that length.
+     * None of it translates. Moving a plan that is free until 17 March from monthly to
+     * yearly charged a full year minus one month's price (`ceiling()` caps the waiver at
+     * the amount it was granted for), for a plan the tenant holds as a gift; the other way
+     * round a yearly gift became a discount on twelve separate months, or — counted in
+     * periods — twelve free months turned into twelve free years.
+     *
+     * There is no reading of "the same gift, on the other interval" that does not either
+     * charge for what was given or give more than was given, so the change is refused
+     * with a reason, immediately and as a scheduled change. Plan, seat and addon changes
+     * are unaffected, and the interval can be changed once the waiver has ended.
+     *
+     * Public so `ScheduleSubscriptionChange::schedule()` applies the same rule before it
+     * stores anything.
+     *
+     * @throws InvalidSubscriptionStateException
+     */
+    public function assertIntervalChangeAllowed(Billable $billable): void
+    {
+        $marker = app(PlanWaiver::class)->marker($billable);
+
+        if ($marker === null) {
+            return;
+        }
+
+        throw new InvalidSubscriptionStateException(
+            'The billing interval cannot be changed while the plan is free of charge'
+            .(! empty($marker['valid_until']) ? ' (until '.substr((string) $marker['valid_until'], 0, 10).')' : '')
+            .'. Change it once the free period has ended.'
+        );
     }
 
     /**
@@ -246,20 +352,31 @@ class ValidateSubscriptionChange
         $currentSeatCount = $billable->getBillingSeatCount();
 
         if ($seatPriceNet === null) {
+            // More members than the plan can seat: nothing to derive, they have to go
+            // first.
             if ($usedSeats > $newIncludedSeats) {
                 throw new SeatDowngradeRequiredException($billable, $usedSeats, $newIncludedSeats);
             }
-            if ($currentSeatCount > $newIncludedSeats) {
+
+            // Extra seats on a plan that sells none can only be an inconsistency when the
+            // plan stays (an interval the plan sells no seats in). On a plan CHANGE the
+            // count falls to what the new plan includes — see below — so there is nothing
+            // to refuse.
+            if (! $context->planChanged && $currentSeatCount > $newIncludedSeats) {
                 throw new SeatDowngradeRequiredException($billable, $currentSeatCount, $newIncludedSeats);
             }
         }
 
-        // Auto-derive: preserve existing seat count across plan changes.
-        // Without this, a billable with 14 seats switching plans would be
-        // reset to max(usedSeats, includedSeats) — losing paid extra seats.
-        // When the caller explicitly sets seats (e.g. dropExtraSeats),
-        // seatsExplicit is true and this code is not reached.
-        $context->newSeats = max($currentSeatCount, $usedSeats, $newIncludedSeats);
+        // Derived, not carried over: a plan change lands on the seats in use or included
+        // by the new plan; anything else keeps the count. A caller who wants to keep more
+        // across a plan change passes `seats` and takes the explicit branch above.
+        // See BillingPolicy::derivedSeats().
+        $context->newSeats = BillingPolicy::derivedSeats(
+            $currentSeatCount,
+            $usedSeats,
+            $newIncludedSeats,
+            $context->planChanged,
+        );
     }
 
     /**
@@ -290,7 +407,9 @@ class ValidateSubscriptionChange
         $addonsAdded = array_values(array_diff($context->newAddons, $context->currentAddons));
         $paidAddons = array_values(array_filter(
             $addonsAdded,
-            fn (string $code) => $this->catalog->addonPriceNet($code, $context->newInterval) > 0,
+            // Base AND per-seat price: an addon with base 0 and a seat price bills for
+            // every seat, and nothing can collect that without a mandate.
+            fn (string $code) => ! $this->catalog->addonIsFree($code, $context->newInterval),
         ));
 
         // Seats above the included quota are blocked on Local subscriptions even when

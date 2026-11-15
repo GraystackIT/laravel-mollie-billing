@@ -49,11 +49,20 @@ final class ProrataLine
      */
     public ?string $refundToken = null;
 
+    /**
+     * For a reduction line (a recurring coupon or plan waiver carried onto a prorata
+     * charge): the charge lines it takes its amount off, as `ProrataComposer::lineKey()`
+     * names them. Null for an ordinary reduction, which is spread over every line.
+     *
+     * @var list<string>|null
+     */
+    public ?array $appliesTo = null;
+
     public function __construct(
         public readonly ?BillingInvoice $originalInvoice,
         public readonly ?int $originalLineItemIndex,
-        public readonly string $kind,           // 'plan' | 'seats' | 'addon' | 'coupon'
-        public readonly ?string $code,          // plan_code | null (seats) | addon_code | coupon_code
+        public readonly string $kind,           // 'plan' | 'seats' | 'addon' | 'addon_seats' | 'coupon'
+        public readonly ?string $code,          // plan_code | null (seats) | addon_code (addon, addon_seats) | coupon_code
         public readonly string $label,
         public readonly int $quantity,
         public readonly int $amountNet,         // negative refund / positive charge / 0 coupon-covered
@@ -104,6 +113,8 @@ final class ProrataLine
             'mollie_refund_id' => $this->mollieRefundId,
             'refund_cap_note' => $this->refundCapNote,
             'refund_token' => $this->refundToken,
+            // Only when set, so every other stored line stays byte-identical.
+            ...($this->appliesTo !== null ? ['applies_to' => $this->appliesTo] : []),
         ];
     }
 
@@ -168,6 +179,10 @@ final class ProrataLine
 
         if (isset($data['refund_token']) && is_string($data['refund_token'])) {
             $line->refundToken = $data['refund_token'];
+        }
+
+        if (isset($data['applies_to']) && is_array($data['applies_to'])) {
+            $line->appliesTo = array_values(array_map('strval', $data['applies_to']));
         }
 
         return $line;

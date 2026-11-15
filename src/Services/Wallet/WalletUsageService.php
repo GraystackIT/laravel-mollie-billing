@@ -71,6 +71,12 @@ class WalletUsageService
 
             $balanceBefore = (int) $wallet->balanceInt;
 
+            // A deferred-overage record describes a debt that is on the wallet *now*. Once
+            // the balance is back at zero or above that debt is gone, and the record must
+            // go before this debit can take the wallet negative again — or the new units
+            // would be billed at the old plan's price.
+            self::syncDeferredOverage($wallet);
+
             // Same rule the `hasBillingQuotaLeft()` gate answers with, so a booking
             // the app was told it may make cannot throw here — and a quota whose
             // overage price is missing (or explicitly `false`) is capped instead of
@@ -172,6 +178,9 @@ class WalletUsageService
                 'type' => $type,
                 'reason' => $reason ?? 'credit',
             ]);
+
+            // Whatever this credit paid off is no longer deferred debt.
+            self::syncDeferredOverage($wallet);
         });
 
         event(new WalletCredited($billable, $type, $quantity, $reason ?? 'credit'));
@@ -242,6 +251,10 @@ class WalletUsageService
             }
 
             self::setPurchasedBalance($wallet, $purchasedRemaining);
+
+            // A forgiven debt takes its price record with it; a preserved one keeps as
+            // much of it as is still owed after the quota landed on top.
+            self::syncDeferredOverage($wallet);
         });
 
         event(new WalletReset($billable, $type, $previousBalance, $quota, $reason));
@@ -392,6 +405,155 @@ class WalletUsageService
     public static function computePurchasedRemaining(int $purchasedBalance, int $currentBalance): int
     {
         return max(0, min($purchasedBalance, $currentBalance));
+    }
+
+    // ── Deferred overage: debt that keeps the price it was incurred at ─────────
+    //
+    // A negative balance is normally priced when it is charged, from the billable's
+    // current plan. That is wrong for one kind of debt: plan-change excess the adjuster
+    // could not charge at once (the overage slot was occupied, the call failed). Those
+    // units were consumed on the OLD plan and were quoted at its price; put back on the
+    // wallet as bare units they were later billed at whatever the NEW plan charges —
+    // 4.5 times as much in the reproduction, and nothing at all when the new plan has no
+    // overage price. So the adjuster records them here, as `[quantity, unit_price_net]`
+    // entries in the wallet meta, and `ChargeUsageOverageDirectly` bills them first and
+    // at that price.
+    //
+    // The record never outlives the debt: every reader sees it clamped to the current
+    // negative balance (oldest entries first), and every credit/reset rewrites it.
+
+    /** Wallet-meta key holding the deferred-overage entries. */
+    public const DEFERRED_OVERAGE_META_KEY = 'deferred_overage';
+
+    /**
+     * The deferred-overage entries that are still owed, oldest first.
+     *
+     * Clamped to the wallet's current debt: a wallet at −30 with 97 recorded units owes
+     * 30 of them, and a wallet at zero or above owes none.
+     *
+     * @return list<array{quantity:int,unit_price_net:int}>
+     */
+    public static function getDeferredOverage(WalletModel $wallet): array
+    {
+        $stored = ((array) $wallet->meta)[self::DEFERRED_OVERAGE_META_KEY] ?? null;
+
+        if (! is_array($stored) || $stored === []) {
+            return [];
+        }
+
+        $owed = max(0, -1 * (int) $wallet->balanceInt);
+        $entries = [];
+
+        foreach ($stored as $entry) {
+            if ($owed <= 0) {
+                break;
+            }
+
+            $quantity = min($owed, (int) ($entry['quantity'] ?? 0));
+            $unitPrice = (int) ($entry['unit_price_net'] ?? 0);
+
+            if ($quantity <= 0 || $unitPrice <= 0) {
+                continue;
+            }
+
+            $entries[] = ['quantity' => $quantity, 'unit_price_net' => $unitPrice];
+            $owed -= $quantity;
+        }
+
+        return $entries;
+    }
+
+    /** Units of deferred overage still owed on this wallet. */
+    public static function deferredOverageQuantity(WalletModel $wallet): int
+    {
+        return (int) array_sum(array_column(self::getDeferredOverage($wallet), 'quantity'));
+    }
+
+    /**
+     * Record units that were just put back on the wallet as debt, with their price.
+     *
+     * Call it AFTER the withdrawal: the record is clamped to the balance it finds.
+     */
+    public static function addDeferredOverage(WalletModel $wallet, int $quantity, int $unitPriceNet): void
+    {
+        if ($quantity <= 0 || $unitPriceNet <= 0) {
+            return;
+        }
+
+        $meta = (array) $wallet->meta;
+        $stored = array_values((array) ($meta[self::DEFERRED_OVERAGE_META_KEY] ?? []));
+        $stored[] = ['quantity' => $quantity, 'unit_price_net' => $unitPriceNet];
+        $meta[self::DEFERRED_OVERAGE_META_KEY] = $stored;
+        $wallet->meta = $meta;
+
+        self::syncDeferredOverage($wallet, force: true);
+    }
+
+    /**
+     * Drop units a settled charge has paid for, matched by the price they were billed at.
+     *
+     * Needed on top of the clamp: usage that accrued while the charge was settling keeps
+     * the wallet negative after the settlement credit, and the clamp alone would then
+     * re-label those *new* units with the old price.
+     */
+    public static function consumeDeferredOverage(WalletModel $wallet, int $quantity, int $unitPriceNet): void
+    {
+        $meta = (array) $wallet->meta;
+        $stored = array_values((array) ($meta[self::DEFERRED_OVERAGE_META_KEY] ?? []));
+
+        if ($quantity <= 0 || $stored === []) {
+            return;
+        }
+
+        foreach ($stored as $index => $entry) {
+            if ($quantity <= 0) {
+                break;
+            }
+
+            if ((int) ($entry['unit_price_net'] ?? 0) !== $unitPriceNet) {
+                continue;
+            }
+
+            $taken = min($quantity, (int) ($entry['quantity'] ?? 0));
+            $stored[$index]['quantity'] = (int) ($entry['quantity'] ?? 0) - $taken;
+            $quantity -= $taken;
+        }
+
+        $meta[self::DEFERRED_OVERAGE_META_KEY] = array_values(array_filter(
+            $stored,
+            static fn (array $entry): bool => (int) ($entry['quantity'] ?? 0) > 0,
+        ));
+        $wallet->meta = $meta;
+
+        self::syncDeferredOverage($wallet, force: true);
+    }
+
+    /**
+     * Persist the record as the current balance leaves it. A no-op for the wallets that
+     * never carried one, which is nearly all of them.
+     */
+    public static function syncDeferredOverage(WalletModel $wallet, bool $force = false): void
+    {
+        $meta = (array) $wallet->meta;
+
+        if (! array_key_exists(self::DEFERRED_OVERAGE_META_KEY, $meta)) {
+            return;
+        }
+
+        $owed = self::getDeferredOverage($wallet);
+
+        if (! $force && $owed === array_values((array) $meta[self::DEFERRED_OVERAGE_META_KEY])) {
+            return;
+        }
+
+        if ($owed === []) {
+            unset($meta[self::DEFERRED_OVERAGE_META_KEY]);
+        } else {
+            $meta[self::DEFERRED_OVERAGE_META_KEY] = $owed;
+        }
+
+        $wallet->meta = $meta;
+        $wallet->save();
     }
 
     private function resolveWallet(Billable $billable, string $type): WalletModel

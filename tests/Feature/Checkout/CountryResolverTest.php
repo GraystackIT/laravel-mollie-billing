@@ -28,14 +28,29 @@ it('includes additional countries from config', function (): void {
 
 it('includes countries from checkout_countries.include', function (): void {
     config()->set('mollie-billing.checkout_countries', [
+        'regions' => [],
+        'include' => ['AT', 'DE'],
+        'exclude' => [],
+    ]);
+
+    expect(array_keys(CountryResolver::resolve()))->toEqualCanonicalizing(['AT', 'DE']);
+});
+
+it('leaves out an included country that cannot be invoiced', function (): void {
+    // This test used to assert the opposite — `include => ['GB']` put GB in the selector.
+    // With no rate anywhere, the checkout priced it at 0 % and the paid payment could not
+    // be booked. See UnpriceableCheckoutCountryTest.
+    config()->set('mollie-billing.checkout_countries', [
         'regions' => ['EU'],
         'include' => ['GB'],
         'exclude' => [],
     ]);
 
-    $countries = CountryResolver::resolve();
+    expect(CountryResolver::resolve())->not->toHaveKey('GB');
 
-    expect($countries)->toHaveKey('GB');
+    config()->set('mollie-billing.additional_countries', ['GB' => ['vat_rate' => 20.0, 'name' => 'United Kingdom']]);
+
+    expect(CountryResolver::resolve())->toHaveKey('GB');
 });
 
 it('excludes countries from checkout_countries.exclude', function (): void {

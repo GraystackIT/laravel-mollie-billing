@@ -63,6 +63,7 @@ return [
     'seat_unit' => 'seat',
     'available_addons' => 'Add-ons',
     'addon_price' => '+:currency:price/:interval',
+    'addon_seat_price' => '+ :price / seat',
 
     // Step 3: addons + seats
     'addons_heading' => 'Add-ons',
@@ -117,6 +118,7 @@ return [
     'coupon_min_order' => 'The order does not meet the minimum amount for this coupon.',
     'coupon_requires_billable' => 'This coupon cannot be applied during checkout.',
     'coupon_requires_trial' => 'This coupon extends a trial, and the selected plan does not offer one.',
+    'coupon_not_with_trial' => 'This coupon discounts a first payment, and this plan starts with a free trial — there is no first payment to discount. The code stays valid for a purchase without a trial.',
     'coupon_recurring_conflict' => 'Another recurring coupon is already active on this subscription.',
     'coupon_requires_active_subscription' => 'An active subscription is required to redeem this coupon.',
     'coupon_too_close_to_charge' => 'The next charge is too close to safely apply this coupon. Please try again after the next billing date.',

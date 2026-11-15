@@ -152,4 +152,67 @@ class AddonsSeatsProductsTest extends BrowserTestCase
 
         expect(BillingInvoice::query()->where('invoice_kind', 'one_time_order')->count())->toBe(1);
     }
+
+    /**
+     * The scenario the plan waiver exists for, driven end to end: a tenant who was GIVEN
+     * their plan buys a paid addon. They pay for the addon only, at Mollie; the plan stays
+     * free until the gift ends; the renewal charges the addon again and waives the plan.
+     */
+    public function test_a_gifted_tenant_buys_a_paid_addon_and_keeps_the_free_plan(): void
+    {
+        $billable = $this->makeBillable();
+
+        $coupons = $this->coupons();
+        $coupon = $coupons->accessGrantCoupon('GRANT-BROWSER', 'pro', 'monthly', [], 90);
+        $coupons->redeem($coupon, $billable, []);
+
+        $giftEnds = TestBillable::sole()->getBillingSubscriptionEndsAt();
+
+        $this->browse(function (Browser $browser) use ($billable): void {
+            $this->actAs($browser, $billable, '/billing/addons');
+            $browser->waitForText('Softdrinks', 10)->pause(400);
+
+            // A gift is not a dead end any more.
+            $browser->assertDontSee(__('billing::portal.access_grant_no_paid_extras'));
+            $this->shot($browser, 'Geschenkter Plan: Addons sind kaufbar');
+
+            $this->confirmInModal(
+                $browser,
+                'enable-addon-softdrinks',
+                '[wire\\:click="enableAddon(\'softdrinks\')"]',
+            );
+
+            // Only the addon is paid: 4.90 + 19 % = 5.83 — not the 29.00 plan.
+            $this->settleAtFakeMollie($browser, 'paid');
+            $browser->waitForText(__('billing::portal.return.title'), 15);
+
+            $browser->visit('/billing/addons');
+            $this->waitForPresence($browser, '[wire\\:click="disableAddon(\'softdrinks\')"]');
+            $browser->pause(400);
+            $this->shot($browser, 'Addon aktiv, Plan weiterhin geschenkt');
+        });
+
+        $billable = TestBillable::sole();
+        $first = BillingInvoice::query()->oldest('id')->first();
+        $waiver = app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)->marker($billable);
+
+        expect($billable->getBillingSubscriptionSource())->toBe('mollie')
+            ->and($billable->getActiveBillingAddonCodes())->toBe(['softdrinks'])
+            ->and((int) $first->amount_net)->toBe(490)
+            ->and((int) $first->amount_gross)->toBe(583)
+            ->and($waiver)->not->toBeNull()
+            ->and(\Carbon\Carbon::parse((string) $waiver['valid_until'])->toDateString())->toBe($giftEnds->toDateString());
+
+        // The renewal Mollie generates from the subscription it now holds: again the
+        // addon only, with the plan shown and taken off.
+        $this->renewSubscription($billable);
+
+        $renewal = BillingInvoice::query()->latest('id')->first();
+        $lines = collect($renewal->line_items);
+
+        expect((int) $renewal->amount_net)->toBe(490)
+            ->and((int) $lines->firstWhere('kind', 'plan')['total_net'])->toBe(2900)
+            ->and((int) $lines->firstWhere('kind', 'coupon')['total_net'])->toBe(-2900)
+            ->and($lines->firstWhere('kind', 'adjustment'))->toBeNull();
+    }
 }

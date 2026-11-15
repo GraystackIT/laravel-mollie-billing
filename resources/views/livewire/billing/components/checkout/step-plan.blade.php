@@ -122,7 +122,7 @@
                             @foreach ($planAddons as $addon)
                                 <div class="flex items-baseline justify-between gap-3 text-sm">
                                     <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($addon['description'])) title="{{ $addon['description'] }}" @endif>{{ $addon['name'] }}</span>
-                                    <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</span>
+                                    <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}@if (($addon['seat_price_net'] ?? null) !== null && $addon['seat_price_net'] > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($priceFormatter($addon['seat_price_net']))]) }}@endif</span>
                                 </div>
                             @endforeach
                         </div>
@@ -236,7 +236,7 @@
                         @foreach ($planAddons as $addon)
                             <div class="flex items-baseline justify-between gap-3 text-sm">
                                 <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($addon['description'])) title="{{ $addon['description'] }}" @endif>{{ $addon['name'] }}</span>
-                                <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</span>
+                                <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}@if (($addon['seat_price_net'] ?? null) !== null && $addon['seat_price_net'] > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($priceFormatter($addon['seat_price_net']))]) }}@endif</span>
                             </div>
                         @endforeach
                     </div>

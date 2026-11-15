@@ -75,18 +75,18 @@ class VatCalculationService
      */
     public function calculate(string $country, int $netAmount, ?Billable $billable = null): array
     {
-        $country = strtoupper($country);
-        $isEu = $this->vatCalculator->shouldCollectVAT($country);
-        $hasOverride = $this->hasAdditionalCountry($country);
+        $country = strtoupper(trim($country));
 
-        if (! $isEu && ! $hasOverride) {
+        if (! $this->isInvoiceable($country)) {
             throw new NonEuCountryException($country);
         }
 
         // B2B reverse-charge: an active VIES validation marked valid=true for an
         // EU country other than the seller's -> no VAT. Reads only persisted
-        // state, never VIES.
-        if ($isEu && $billable !== null && $this->reverseChargeApplies($billable, $country)) {
+        // state, never VIES. The intra-EU condition lives inside
+        // reverseChargeApplies() — it is the one decision every price label reads
+        // too, so nothing may be added in front of it here.
+        if ($billable !== null && $this->reverseChargeApplies($billable, $country)) {
             return [
                 'net' => $netAmount,
                 'vat' => 0,
@@ -235,8 +235,14 @@ class VatCalculationService
      * Single decision point for "is this supply reverse-charged?".
      *
      * Used by `calculate()` and intended for every price-display site so the
-     * label and the amount can never disagree. Three conditions must hold:
+     * label and the amount can never disagree. Four conditions must hold:
      *
+     *   0. the country being invoiced is an EU member state — reverse charge under
+     *      Art. 196 is an intra-EU mechanism. A country priced through
+     *      `additional_countries` (GB, CH, NO) is charged its configured rate however
+     *      valid the customer's number is. `calculate()` used to test this on its
+     *      own, in front of this method, so `usesReverseCharge()` and the checkout
+     *      said "reverse charge, net" for a supply that was then charged with VAT;
      *   1. the billable has a persisted VIES validation marked `valid=true`;
      *   2. the VAT number's country differs from the merchant's own country;
      *   3. the country being invoiced differs from the merchant's own country.
@@ -252,6 +258,12 @@ class VatCalculationService
      */
     public function reverseChargeApplies(Billable $billable, ?string $invoiceCountry = null): bool
     {
+        $invoiceCountry ??= $billable->getBillingCountry();
+
+        if (! CountryResolver::isEuMember($invoiceCountry)) {
+            return false;
+        }
+
         $validation = $this->currentValidation($billable);
         if ($validation === null) {
             return false;
@@ -274,8 +286,7 @@ class VatCalculationService
             return false;
         }
 
-        $invoiceCountry ??= $billable->getBillingCountry();
-        if ($invoiceCountry !== null && CountryResolver::sameCountry($invoiceCountry, $sellerCountry)) {
+        if (CountryResolver::sameCountry($invoiceCountry, $sellerCountry)) {
             return false;
         }
 
@@ -297,6 +308,13 @@ class VatCalculationService
      */
     public function reverseChargeCountriesQualify(?string $customerCountry): bool
     {
+        // Same first condition as reverseChargeApplies(): intra-EU only. Asked before
+        // the seller-country policy, which answers "domestic or cross-border" and has
+        // nothing to say about a customer outside the EU.
+        if (! CountryResolver::isEuMember($customerCountry)) {
+            return false;
+        }
+
         $sellerCountry = $this->sellerCountry();
 
         if ($sellerCountry === null) {
@@ -535,7 +553,11 @@ class VatCalculationService
     {
         $country = strtoupper(trim($country));
 
-        return $this->vatCalculator->shouldCollectVAT($country) || $this->hasAdditionalCountry($country);
+        // EU membership from our own list, never from `shouldCollectVAT()`: mpociot's
+        // rule table also knows CH, IM and MC, which made Switzerland billable at 8.1 %
+        // with nothing configured — and offered it in the country-mismatch modal, where
+        // choosing it re-invoiced an Austrian customer's history at the Swiss rate.
+        return CountryResolver::isEuMember($country) || $this->hasAdditionalCountry($country);
     }
 
     private function hasAdditionalCountry(string $country): bool

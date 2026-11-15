@@ -24,6 +24,7 @@ use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -59,9 +60,44 @@ class CouponService
             ? $attributes['type']
             : CouponType::from((string) $attributes['type']);
 
+        $attributes = $this->withLegacyDiscountPeriods($type, $attributes);
+
         $this->validateRequiredFieldsForType($type, $attributes);
 
         return Coupon::create($attributes);
+    }
+
+    /**
+     * A recurring coupon created the way it used to be.
+     *
+     * `max_redemptions_per_billable` was the number of discounted charges for this type
+     * until `discount_periods` took that meaning over. Every app that creates coupons in
+     * code still passes it that way, so a value given WITHOUT `discount_periods` is read
+     * as the period count it was written as and moved over; the per-customer limit
+     * becomes 1, which is what it effectively was. As soon as `discount_periods` is
+     * present — even as null — both fields mean what they say.
+     *
+     * One case is not moved: a limit of 1 next to a `valid_until`. 1 is the column's
+     * default and carries no intent, and the date is a complete lifetime on its own.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @return array<string, mixed>
+     */
+    private function withLegacyDiscountPeriods(CouponType $type, array $attributes): array
+    {
+        if ($type !== CouponType::Recurring || array_key_exists('discount_periods', $attributes)) {
+            return $attributes;
+        }
+
+        $perBillable = (int) ($attributes['max_redemptions_per_billable'] ?? 0);
+        $hasValidUntil = ($attributes['valid_until'] ?? null) !== null && ($attributes['valid_until'] ?? '') !== '';
+
+        if ($perBillable > 1 || ($perBillable === 1 && ! $hasValidUntil)) {
+            $attributes['discount_periods'] = $perBillable;
+            $attributes['max_redemptions_per_billable'] = 1;
+        }
+
+        return $attributes;
     }
 
     public function update(Coupon $coupon, array $attributes): Coupon
@@ -95,6 +131,17 @@ class CouponService
             ? ($attributes['type'] instanceof CouponType ? $attributes['type'] : CouponType::from((string) $attributes['type']))
             : $coupon->type;
 
+        // A redeemed coupon keeps its type. A running recurring marker re-applies "its
+        // coupon" through redeem() at every renewal; with the type changed underneath
+        // it, that call ran the NEW type's effect — a recurring coupon turned into a
+        // credits coupon topped up the wallet of every customer holding it, at every
+        // renewal — and a revoke looked for a snapshot the new type never writes.
+        if ($type !== $coupon->type && $coupon->redemptions()->exists()) {
+            throw new \InvalidArgumentException(
+                'Cannot change the type of a coupon that has already been redeemed.'
+            );
+        }
+
         $this->validateRequiredFieldsForType($type, array_merge($this->typeRuleFields($coupon), $attributes));
 
         $coupon->update($attributes);
@@ -116,6 +163,7 @@ class CouponService
         return [
             'discount_type' => $coupon->discount_type,
             'discount_value' => $coupon->discount_value,
+            'discount_periods' => $coupon->discount_periods,
             'max_redemptions_per_billable' => $coupon->max_redemptions_per_billable,
             'valid_until' => $coupon->valid_until,
             'credits_payload' => $coupon->credits_payload,
@@ -124,6 +172,7 @@ class CouponService
             'grant_interval' => $coupon->grant_interval,
             'grant_duration_days' => $coupon->grant_duration_days,
             'grant_addon_codes' => $coupon->grant_addon_codes,
+            'waiver_periods' => $coupon->waiver_periods,
         ];
     }
 
@@ -232,12 +281,74 @@ class CouponService
                 throw new InvalidCouponException($billable, (string) $coupon->code, 'requires_active_subscription');
             }
 
-            $nextBilling = $billable->nextBillingDate();
+            $extendsTrial = $this->periodExtensionExtendsTrial($billable);
+
+            // A Local subscription without an end date has no date to move. Writing
+            // `now + N days` into it — which is what the apply step did — turned a
+            // perpetual free plan into one that expires in N days.
+            if (
+                $source === SubscriptionSource::Local->value
+                && ! $extendsTrial
+                && $billable->getBillingSubscriptionEndsAt() === null
+            ) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'requires_active_subscription');
+            }
+
+            // A cancelled Mollie subscription has no charge left to push: the PATCH is
+            // sent to a subscription Mollie has cancelled, the grace end does not move,
+            // and the redemption says the customer was given days they never got.
+            if (
+                $source === SubscriptionSource::Mollie->value
+                && $billable->getBillingSubscriptionStatus() === \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled
+            ) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'requires_active_subscription');
+            }
+
+            // The date money is actually collected, not the period end: under a fully
+            // covering coupon the period turns over every interval while the charge sits
+            // months away, and judging by the period end refused the extension on every
+            // last day of a period for a charge that was not coming. A trial's first
+            // charge is its end, whatever the period anchor says.
+            $nextBilling = $extendsTrial
+                ? $billable->getBillingTrialEndsAt()
+                : ChargeDeferral::nextChargeDate($billable);
             if ($source === SubscriptionSource::Mollie->value
                 && $nextBilling !== null
                 && $nextBilling->lessThanOrEqualTo(BillingTime::nowUtc()->addDay())
             ) {
                 throw new InvalidCouponException($billable, (string) $coupon->code, 'too_close_to_charge');
+            }
+        }
+
+        if ($coupon->type === CouponType::PlanWaiver) {
+            $source = $billable->getBillingSubscriptionSource();
+
+            if (
+                ! $billable->hasAccessibleBillingSubscription()
+                || ! in_array($source, [SubscriptionSource::Local->value, SubscriptionSource::Mollie->value], true)
+            ) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'requires_active_subscription');
+            }
+
+            // Free periods on a Local subscription are free time, and only a Local
+            // subscription that ends has any to extend.
+            if ($source === SubscriptionSource::Local->value && $billable->getBillingSubscriptionEndsAt() === null) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'requires_active_subscription');
+            }
+
+            // One recurring-discount slot. Free periods are appended to a waiver that is
+            // already running; next to an ordinary recurring coupon they are refused,
+            // because two discounts repricing the same charge with separate lifetimes is
+            // not something the renewal can book unambiguously.
+            $marker = $this->getActiveRecurringCouponMarker($billable);
+
+            if (
+                $source === SubscriptionSource::Mollie->value
+                && $marker !== null
+                && ! PlanWaiver::isWaiver($marker)
+                && $this->isMarkerStillRedeemable($marker, $billable)
+            ) {
+                throw new InvalidCouponException($billable, (string) $coupon->code, 'recurring_conflict');
             }
         }
 
@@ -583,9 +694,9 @@ class CouponService
      * already-granted Recurring coupon (see redeemRecurringCouponForRenewal). Those are
      * exempt from *both* global rules:
      *
-     *  - the per-billable cap, because for a Recurring coupon
-     *    `max_redemptions_per_billable` means "how many billing periods the discount
-     *    applies" — enforcing it here would abort the very renewals it authorises;
+     *  - the per-billable cap, because `max_redemptions_per_billable` says how often a
+     *    customer may *redeem* the code, and a renewal is not a redemption — enforcing
+     *    it here would abort the renewals `discount_periods` authorises;
      *  - `max_redemptions` and its counter, because that cap sizes the campaign in
      *    *customers*. Charging renewals against it exhausted a 50-redemption coupon with
      *    20 monthly subscribers within months, after which new customers were rejected
@@ -603,8 +714,8 @@ class CouponService
             $coupon = Coupon::query()->lockForUpdate()->findOrFail($coupon->id);
 
             // Only a Recurring coupon can be renewed. The exemption below is justified by
-            // what `max_redemptions_per_billable` means for that type (billing periods,
-            // not grants) and nothing else, and `redeem()` is public API taking a
+            // what a renewal is for that type (a further charge of a grant that already
+            // exists) and nothing else, and `redeem()` is public API taking a
             // caller-supplied array — so a `renewal` flag on a SinglePayment or Credits
             // coupon bought a second redemption past an exhausted campaign. The internal
             // caller resolves its coupon from `active_recurring_coupon`, so this is a
@@ -681,6 +792,11 @@ class CouponService
                     if (isset($context['invoice_id'])) {
                         $redemption->invoice_id = (int) $context['invoice_id'];
                     }
+                    // Marked, so the per-customer limit can tell a further charge of a
+                    // grant from a second redemption of the code.
+                    if ($isRenewal) {
+                        $redemption->grant_applied_snapshot = ['mode' => 'recurring_renewal'];
+                    }
                     // A renewal re-applies the grant the marker describes; rewriting it
                     // would reset the base amount and lifetime the grant was locked to.
                     if (($context['skip_marker'] ?? false) !== true && ! $isRenewal) {
@@ -696,6 +812,10 @@ class CouponService
                             $billable,
                             $baseAmount,
                             isset($context['interval']) ? (string) $context['interval'] : null,
+                            // When the first discounted charge is not now — a code
+                            // applied to a running subscription discounts from its
+                            // next renewal — the lifetime is counted from there.
+                            ($context['lifetime_from'] ?? null) instanceof CarbonInterface ? $context['lifetime_from'] : null,
                         );
                     }
                     break;
@@ -737,6 +857,10 @@ class CouponService
                 case CouponType::AccessGrant:
                     $this->applyAccessGrant($coupon, $billable, $redemption);
                     break;
+
+                case CouponType::PlanWaiver:
+                    $this->applyPlanWaiver($coupon, $billable, $redemption);
+                    break;
             }
 
             $redemption->save();
@@ -771,6 +895,17 @@ class CouponService
             ->where('billable_type', $billable->getMorphClass())
             ->where('billable_id', $billable->getKey())
             ->whereNull('revoked_at')
+            // A plan waiver and a recurring coupon write a row for every renewal they
+            // discount. Those are the grant's history, not further redemptions of the
+            // code: counted here, the first discounted renewal used up the second slot
+            // of a code that may be redeemed twice. (Renewal rows of a recurring coupon
+            // written before they were marked still count — nothing tells them from a
+            // grant — which errs on the side of refusing a second redemption.)
+            ->where(function ($q): void {
+                $q->whereNull('grant_applied_snapshot')
+                    ->orWhereNull('grant_applied_snapshot->mode')
+                    ->orWhereNotIn('grant_applied_snapshot->mode', ['plan_waiver_renewal', 'recurring_renewal']);
+            })
             ->count();
 
         if ($perBillable >= (int) ($coupon->max_redemptions_per_billable ?? 1)) {
@@ -844,25 +979,34 @@ class CouponService
         string $interval,
         array $addonCodes,
         int $durationDays,
+        ?string $onExpiry = null,
+        ?int $maxRedemptions = null,
     ): Coupon {
         return $this->create([
             'code' => $code,
             'name' => 'Auto: '.$code,
             'type' => CouponType::AccessGrant,
+            // Null leaves the code open to everybody who knows it (a campaign). A grant
+            // made for one tenant passes 1.
+            'max_redemptions' => $maxRedemptions,
             'grant_plan_code' => $planCode,
             'grant_interval' => $interval,
             'grant_addon_codes' => $addonCodes,
             'grant_duration_days' => $durationDays,
+            // What happens once the free time is over and the tenant has bought paid
+            // extras in the meantime — see PlanWaiver. Default: the subscription ends.
+            'grant_on_expiry' => PlanWaiver::normalizeOnExpiry($onExpiry),
             'active' => true,
         ]);
     }
 
-    public function addonGrantCoupon(string $code, array $addonCodes): Coupon
+    public function addonGrantCoupon(string $code, array $addonCodes, ?int $maxRedemptions = null): Coupon
     {
         return $this->create([
             'code' => $code,
             'name' => 'Auto: '.$code,
             'type' => CouponType::AccessGrant,
+            'max_redemptions' => $maxRedemptions,
             'grant_plan_code' => null,
             'grant_interval' => null,
             'grant_duration_days' => null,
@@ -892,8 +1036,8 @@ class CouponService
         }
 
         $coupon = $redemption->coupon;
-        if ($coupon === null || $coupon->type !== CouponType::AccessGrant) {
-            throw new \InvalidArgumentException('Only access grants can be revoked.');
+        if ($coupon === null || ! in_array($coupon->type, [CouponType::AccessGrant, CouponType::PlanWaiver], true)) {
+            throw new \InvalidArgumentException('Only access grants and plan waivers can be revoked.');
         }
 
         $billable = $redemption->billable;
@@ -909,6 +1053,8 @@ class CouponService
                 $this->revokeAddonOnlyGrant($billable, $redemption);
             } elseif ($mode === 'full') {
                 $this->revokeFullGrant($billable, $redemption);
+            } elseif ($mode === 'plan_waiver') {
+                $this->revokePlanWaiverPeriods($billable, $redemption);
             }
 
             $redemption->forceFill([
@@ -918,6 +1064,17 @@ class CouponService
 
             if ((int) $coupon->redemptions_count > 0) {
                 $coupon->decrement('redemptions_count');
+            }
+
+            // A code that could only ever be redeemed once was made for this one
+            // redemption (the admin panel's free-time actions and its "issue grant"
+            // screen create exactly that). Freeing its slot put it back on offer: the
+            // code of a waiver is printed on the invoice it reduced, the dashboard
+            // accepts plan-waiver codes, and the tenant could type a revoked gift back
+            // in. A shared campaign code keeps the documented behaviour — its slot is
+            // freed for the next customer.
+            if ((int) ($coupon->max_redemptions ?? 0) === 1 && $coupon->active) {
+                $coupon->forceFill(['active' => false])->save();
             }
 
             event(new GrantRevoked($billable, $coupon, $redemption, $reason));
@@ -944,6 +1101,46 @@ class CouponService
         }
     }
 
+    /**
+     * Take back free plan periods. Periods already waived stay waived — an invoice that
+     * was issued at the reduced amount is not reopened.
+     *
+     * On a Mollie subscription the waiver marker goes and the amount returns to the full
+     * price from the next regular date. On a Local subscription the periods had been
+     * added to its end date, and are taken off it again.
+     */
+    private function revokePlanWaiverPeriods(Billable $billable, CouponRedemption $redemption): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
+            // The whole waiver, also when later periods were appended to it: they share
+            // one marker, and a partial take-back is not something an invoice can state.
+            if (app(PlanWaiver::class)->remove($billable)) {
+                $this->repriceAfterCommit($billable, (int) $redemption->coupon_id);
+            }
+
+            return;
+        }
+
+        $days = (int) ($redemption->grant_days_added ?? 0);
+        $currentEnd = $billable->getBillingSubscriptionEndsAt();
+
+        if ($days <= 0 || $currentEnd === null) {
+            return;
+        }
+
+        $newEnd = $currentEnd->copy()->subDays($days);
+        $now = BillingTime::nowUtc();
+
+        // Never into the past: that would end the subscription retroactively.
+        $billable->forceFill([
+            'subscription_ends_at' => $newEnd->lessThan($now) ? $now : $newEnd,
+        ])->save();
+    }
+
     private function revokeFullGrant(Billable $billable, CouponRedemption $redemption): void
     {
         // The grant has been superseded by a paid Mollie subscription — a Local→Mollie
@@ -955,6 +1152,21 @@ class CouponService
         // caller still marks the redemption revoked and frees the coupon slot, which is
         // what stops the admin UI from listing it as active.
         if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
+            // …unless the grant lives on as a plan waiver on that subscription — the tenant
+            // bought paid extras and kept the gift. Then revoking takes the waiver away:
+            // the plan becomes chargeable from the next regular date, and what was
+            // already waived stays waived. The Mollie PATCH runs after this transaction
+            // commits; a PATCH that fails is left for the hourly sweep, the same way a
+            // coupon-expiry reset is.
+            $waiver = app(PlanWaiver::class)->marker($billable);
+
+            if ($waiver !== null && (int) ($waiver['coupon_id'] ?? 0) === (int) $redemption->coupon_id) {
+                app(PlanWaiver::class)->remove($billable);
+                $this->repriceAfterCommit($billable, (int) $redemption->coupon_id);
+
+                return;
+            }
+
             \Illuminate\Support\Facades\Log::info('Access grant revoked as a record only — a paid Mollie subscription has superseded it', [
                 'billable' => $billable instanceof Model ? $billable->getKey() : null,
                 'redemption' => $redemption->id,
@@ -998,6 +1210,22 @@ class CouponService
             ));
             $billable->forceFill(['active_addon_codes' => $remaining])->save();
         }
+    }
+
+    /**
+     * Bring Mollie's recurring amount in line with the billable once the surrounding
+     * transaction has committed. Never inside it: an HTTP call cannot be rolled back.
+     */
+    private function repriceAfterCommit(Billable $billable, int $couponId): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        DB::afterCommit(function () use ($billable, $couponId): void {
+            // A failure is queued under its own reason — see syncMollieOrQueue().
+            app(PlanWaiver::class)->syncMollieOrQueue($billable->refresh(), $couponId);
+        });
     }
 
     /**
@@ -1091,12 +1319,20 @@ class CouponService
                         'Please choose a discount type and enter a discount value.'
                     );
                 }
-                $hasMax = isset($attributes['max_redemptions_per_billable'])
-                    && (int) $attributes['max_redemptions_per_billable'] > 0;
-                $hasValidUntil = isset($attributes['valid_until']) && $attributes['valid_until'] !== null && $attributes['valid_until'] !== '';
-                if (! $hasMax && ! $hasValidUntil) {
+                // The lifetime: a number of discounted charges, a date, or both (whichever
+                // ends first). `max_redemptions_per_billable` is not one — it says how
+                // often a customer may redeem the code.
+                if (isset($attributes['discount_periods']) && $attributes['discount_periods'] !== '' && (int) $attributes['discount_periods'] <= 0) {
                     throw new \InvalidArgumentException(
-                        'Recurring coupons need a limit. Set either "Max per billable" (number of billing periods the discount applies) or a "Valid until" date.'
+                        'The number of discounted billing periods must be greater than zero.'
+                    );
+                }
+                $hasPeriods = isset($attributes['discount_periods'])
+                    && (int) $attributes['discount_periods'] > 0;
+                $hasValidUntil = isset($attributes['valid_until']) && $attributes['valid_until'] !== null && $attributes['valid_until'] !== '';
+                if (! $hasPeriods && ! $hasValidUntil) {
+                    throw new \InvalidArgumentException(
+                        'Recurring coupons need a limit. Set either "Discount applies for … periods" (number of discounted charges) or a "Valid until" date.'
                     );
                 }
                 $this->guardAgainstFullCoverageDiscount($attributes);
@@ -1153,6 +1389,14 @@ class CouponService
                     );
                 }
                 break;
+
+            case CouponType::PlanWaiver:
+                if ($missing('waiver_periods') || (int) $attributes['waiver_periods'] <= 0) {
+                    throw new \InvalidArgumentException(
+                        'Please enter for how many billing periods the plan should be free.'
+                    );
+                }
+                break;
         }
     }
 
@@ -1162,7 +1406,7 @@ class CouponService
      * The marker's lifetime is locked here as `valid_until`, computed as the
      * earliest of:
      *   - the coupon's own valid_until (if set)
-     *   - now + max_redemptions_per_billable × intervalDays + 1d (1d buffer so
+     *   - now + discount_periods × intervalDays + 1d (1d buffer so
      *     a charge that lands a few hours after the mathematical period end is
      *     still within the discount window)
      *
@@ -1202,13 +1446,13 @@ class CouponService
         Billable $billable,
         int $baseAmountNet,
         ?string $interval = null,
+        ?CarbonInterface $lifetimeFrom = null,
     ): void {
         if (! $billable instanceof Model) {
             return;
         }
 
         $now = BillingTime::nowUtc();
-        $maxRedemptions = (int) ($coupon->max_redemptions_per_billable ?? 0);
 
         // The interval the coupon will be charged at, which is not always the one on
         // the billable right now: `UpdateSubscription::update()` redeems before it
@@ -1225,21 +1469,7 @@ class CouponService
         // {@see isMarkerStillRedeemable()}, not this date: 30-day months are shorter
         // than the calendar wherever February falls, so a 3-period coupon's fourth
         // charge could land inside the window.
-        $intervalDays = $interval === 'yearly' ? 365 : 30;
-
-        $durationValidUntil = $maxRedemptions > 0
-            ? $now->copy()->addDays($maxRedemptions * $intervalDays + 1)
-            : null;
-
-        $couponValidUntil = $coupon->valid_until;
-
-        $markerValidUntil = match (true) {
-            $couponValidUntil !== null && $durationValidUntil !== null
-                => $couponValidUntil->lessThan($durationValidUntil) ? $couponValidUntil : $durationValidUntil,
-            $couponValidUntil !== null => $couponValidUntil,
-            $durationValidUntil !== null => $durationValidUntil,
-            default => null,
-        };
+        $markerValidUntil = $this->recurringMarkerValidUntil($coupon, (string) $interval, $lifetimeFrom ?? $now);
 
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['active_recurring_coupon'] = [
@@ -1253,6 +1483,37 @@ class CouponService
         ];
 
         $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Until when a recurring coupon applied at `$from` discounts: the earlier of the
+     * coupon's own `valid_until` and `from + discount_periods × interval days
+     * + 1 day`. Null when neither limit is set.
+     *
+     * Public because the checkout has to name the date money is first collected, and
+     * under a fully covering coupon that date is this one plus a day
+     * (`CreateSubscription::fullCoverageStartDate()`). A second copy of the arithmetic in
+     * the form is how a shown date and a charged date come apart.
+     */
+    public function recurringMarkerValidUntil(Coupon $coupon, string $interval, ?CarbonInterface $from = null): ?CarbonInterface
+    {
+        $from = $from !== null ? BillingTime::toUtc($from) : BillingTime::nowUtc();
+        $maxRedemptions = (int) ($coupon->discount_periods ?? 0);
+        $intervalDays = $interval === 'yearly' ? 365 : 30;
+
+        $durationValidUntil = $maxRedemptions > 0
+            ? $from->copy()->addDays($maxRedemptions * $intervalDays + 1)
+            : null;
+
+        $couponValidUntil = $coupon->valid_until;
+
+        return match (true) {
+            $couponValidUntil !== null && $durationValidUntil !== null
+                => $couponValidUntil->lessThan($durationValidUntil) ? $couponValidUntil : $durationValidUntil,
+            $couponValidUntil !== null => $couponValidUntil,
+            $durationValidUntil !== null => $durationValidUntil,
+            default => null,
+        };
     }
 
     /**
@@ -1277,15 +1538,41 @@ class CouponService
      * If the user later REDUCES seats/addons below that base, the discount
      * is capped at the actual current charge so it can never exceed it.
      */
-    public function computeMarkerDiscount(Billable $billable, int $netAmount): int
+    /**
+     * `$target` describes the configuration being priced when it is not the billable's
+     * current one — a plan change prices the plan it is moving *to*. Only a plan waiver
+     * reads it (its ceiling follows the plan line); an ordinary coupon is locked to an
+     * amount and needs nothing but `$netAmount`.
+     *
+     * @param  array{plan_code?: ?string, interval?: ?string, addon_codes?: ?array<int, string>, seats?: ?int}  $target
+     */
+    public function computeMarkerDiscount(Billable $billable, int $netAmount, array $target = [], ?CarbonInterface $asOf = null): int
     {
         $marker = $this->getActiveRecurringCouponMarker($billable);
         if ($marker === null || $netAmount <= 0) {
             return 0;
         }
 
-        if (! $this->isMarkerStillRedeemable($marker, $billable)) {
+        // `$asOf` is for the renewal webhook, which prices a charge Mollie created
+        // earlier than it is heard about: the discount that applied is the one valid
+        // when the charge was created, not when its money settled.
+        if (! $this->isMarkerStillRedeemable($marker, $billable, $asOf)) {
             return 0;
+        }
+
+        // A plan waiver takes off the plan line and nothing else: capped at what was
+        // waived when it was given AND at what those lines cost in this configuration.
+        if (PlanWaiver::isWaiver($marker)) {
+            $ceiling = app(PlanWaiver::class)->ceiling(
+                $billable,
+                $marker,
+                $target['plan_code'] ?? null,
+                $target['interval'] ?? null,
+                $target['addon_codes'] ?? null,
+                $target['seats'] ?? null,
+            );
+
+            return max(0, min($ceiling, $netAmount));
         }
 
         $type = (string) ($marker['discount_type'] ?? '');
@@ -1323,7 +1610,19 @@ class CouponService
     {
         $couponId = (int) ($marker['coupon_id'] ?? 0);
         $coupon = $couponId > 0 ? Coupon::query()->find($couponId) : null;
-        if ($coupon === null || ! $coupon->active) {
+        if ($coupon === null) {
+            return false;
+        }
+
+        // Deactivating a recurring coupon ends the discount for everyone who holds it —
+        // that is the documented way to resolve a `recurring_conflict`. A plan waiver is
+        // not a campaign: it is what remains of a gift this one tenant was given, or
+        // free periods an operator granted. Switching the code off stops NEW redemptions
+        // and leaves a Local grant untouched, so it must leave the same grant untouched
+        // once the tenant has bought extras on top — otherwise the next renewal charged
+        // the plan in full and, with `on_expiry = end`, cancelled the subscription.
+        // Taking a gift back is `revokeGrant()`.
+        if (! $coupon->active && ! PlanWaiver::isWaiver($marker)) {
             return false;
         }
 
@@ -1349,7 +1648,29 @@ class CouponService
         // discount arrives with the later charges), and letting it eat an application
         // would give trial signups one discounted period fewer than paid ones.
         if ($billable instanceof Model) {
-            $max = (int) ($coupon->max_redemptions_per_billable ?? 0);
+            // A plan waiver carries its own count: the coupon behind it is a one-off
+            // grant whose `max_redemptions_per_billable` is 1 and means "issued once",
+            // not "one free period". Null there is "the date alone ends it".
+            $isWaiver = PlanWaiver::isWaiver($marker);
+            $max = $isWaiver
+                ? (int) ($marker['max_applications'] ?? 0)
+                : (int) ($coupon->discount_periods ?? 0);
+
+            // Of THIS grant. A code that may be redeemed again
+            // (`max_redemptions_per_billable > 1`) starts a new count with each
+            // redemption; without a lower bound the charges an earlier grant discounted
+            // would use up the new one before it had discounted anything. A waiver's
+            // rows are all written after its marker. A coupon's first row is written a
+            // moment BEFORE the marker in the same redeem(), so its bound is loosened by
+            // a minute — and only applied where a second grant is possible at all, so a
+            // marker written by an older release is counted exactly as before.
+            $since = $this->markerAppliedAt($marker);
+
+            if (! $isWaiver) {
+                $since = $since !== null && (int) ($coupon->max_redemptions_per_billable ?? 1) > 1
+                    ? $since->copy()->subMinute()
+                    : null;
+            }
 
             if ($max > 0) {
                 $applied = CouponRedemption::query()
@@ -1358,6 +1679,12 @@ class CouponService
                     ->where('billable_id', $billable->getKey())
                     ->whereNull('revoked_at')
                     ->where('discount_amount_net', '>', 0)
+                    ->when($isWaiver, fn ($q) => $q->where('grant_applied_snapshot->mode', 'plan_waiver_renewal'))
+                    // Of THIS waiver. The same code can be redeemed again once a waiver
+                    // has run out (`max_redemptions_per_billable > 1`); the renewals the
+                    // earlier one waived would otherwise use up the new one before it
+                    // had waived anything, with the redemption slot already spent.
+                    ->when($since !== null, fn ($q) => $q->where('applied_at', '>=', $since))
                     ->count();
 
                 if ($applied >= $max) {
@@ -1370,6 +1697,24 @@ class CouponService
     }
 
     /**
+     * @param  array<string, mixed>  $marker
+     */
+    private function markerAppliedAt(array $marker): ?Carbon
+    {
+        $value = $marker['first_applied_at'] ?? null;
+
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value)->setTimezone('UTC');
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * Apply a recurring-coupon discount during a Mollie renewal webhook:
      * write a CouponRedemption with the given invoice_id and return it (or null
      * if no marker / coupon is no longer redeemable). Caller is responsible for
@@ -1379,9 +1724,10 @@ class CouponService
         Billable $billable,
         int $netAmount,
         int $invoiceId,
+        ?CarbonInterface $asOf = null,
     ): ?CouponRedemption {
         $marker = $this->getActiveRecurringCouponMarker($billable);
-        if ($marker === null || ! $this->isMarkerStillRedeemable($marker, $billable)) {
+        if ($marker === null || ! $this->isMarkerStillRedeemable($marker, $billable, $asOf)) {
             return null;
         }
 
@@ -1394,7 +1740,29 @@ class CouponService
         // Use the marker-aware computation so the redemption record matches what
         // was actually billed on the invoice (capped at base_amount_net, not the
         // current charge net which may include seats/addons added after apply).
-        $discount = $this->computeMarkerDiscount($billable, $netAmount);
+        $discount = $this->computeMarkerDiscount($billable, $netAmount, [], $asOf);
+
+        // A waived period is recorded as a plain row, never through redeem(): that
+        // would re-run the coupon's own effect — for an access grant, the grant itself.
+        if (PlanWaiver::isWaiver($marker)) {
+            if (! $billable instanceof Model) {
+                return null;
+            }
+
+            $redemption = new CouponRedemption();
+            $redemption->coupon_id = $coupon->id;
+            $redemption->billable_type = $billable->getMorphClass();
+            $redemption->billable_id = $billable->getKey();
+            $redemption->applied_at = BillingTime::nowUtc();
+            $redemption->discount_amount_net = $discount;
+            $redemption->invoice_id = $invoiceId;
+            $redemption->grant_applied_snapshot = ['mode' => 'plan_waiver_renewal'];
+            $redemption->save();
+
+            event(new CouponRedeemed($billable, $coupon, $redemption));
+
+            return $redemption;
+        }
 
         return $this->redeem($coupon, $billable, [
             'discount_amount_net' => $discount,
@@ -1462,6 +1830,28 @@ class CouponService
 
         $source = $billable->getBillingSubscriptionSource();
 
+        if ($this->periodExtensionExtendsTrial($billable)) {
+            // While a trial runs, "everything is free for N more days" IS a longer
+            // trial. The charge was moved off the period anchor instead (mandate capture
+            // plus one interval), which is not when a trial is charged: the charge went
+            // to day 40 while the trial still ended on day 14, and a mandate-holding
+            // trial with no charge 14 days after its end is flipped to past due.
+            // extendBillingTrialUntil() moves the trial end and Mollie's start date
+            // together, after this transaction commits.
+            $billable->extendBillingTrialUntil($billable->getBillingTrialEndsAt()->copy()->addDays($days));
+
+            $redemption->grant_days_added = $days;
+            $redemption->trial_days_added = $days;
+            $redemption->grant_applied_snapshot = [
+                'mode' => 'period_extension',
+                'duration_days' => $days,
+                'source' => $source,
+                'extended' => 'trial',
+            ];
+
+            return;
+        }
+
         if ($source === SubscriptionSource::Local->value) {
             $currentEnd = $billable->getBillingSubscriptionEndsAt();
             $now = BillingTime::nowUtc();
@@ -1478,8 +1868,21 @@ class CouponService
             // the transaction meant a later throw rolled the redemption back while Mollie
             // had already moved the charge: a free period, a campaign slot still open, and
             // a second extension on the retry.
-            $target = ($billable->nextBillingDate() ?? BillingTime::nowUtc())->copy()->addDays($days);
-            app(MollieSubscriptionPatcher::class)->deferNextChargeDate($billable, $target);
+            //
+            // Counted from the date Mollie will really charge. With the charge deferred
+            // past a fully covering coupon that is NOT the period end: `period end + N`
+            // lies before the deferred date, and Mollie — which holds the full price
+            // there — collected it while the coupon was still running. An extension
+            // only ever moves the charge later; under a deferral the days are appended
+            // to it and the period keeps its regular cycle.
+            $deferral = ChargeDeferral::until($billable);
+            $from = $deferral ?? $billable->nextBillingDate() ?? BillingTime::nowUtc();
+            $target = $from->copy()->addDays($days);
+            app(MollieSubscriptionPatcher::class)->deferNextChargeDate(
+                $billable,
+                $target,
+                periodFollows: $deferral === null,
+            );
         }
 
         $redemption->grant_days_added = $days;
@@ -1488,6 +1891,87 @@ class CouponService
             'duration_days' => $days,
             'source' => $source,
         ];
+    }
+
+    /**
+     * Whether a period extension is, for this billable, an extension of its trial.
+     *
+     * A running trial whose charge follows the trial end. One whose charge is deferred
+     * past it (a fully covering coupon or waiver) is extended like any other deferred
+     * subscription: the days are appended to the deferral.
+     */
+    private function periodExtensionExtendsTrial(Billable $billable): bool
+    {
+        $trialEndsAt = $billable->getBillingTrialEndsAt();
+
+        return $billable->getBillingSubscriptionStatus() === \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Trial
+            && $trialEndsAt !== null
+            && $trialEndsAt->isFuture()
+            && ChargeDeferral::until($billable) === null;
+    }
+
+    /**
+     * Apply a PlanWaiver coupon: N billing periods with the plan line waived.
+     *
+     * On a Mollie subscription that is a {@see PlanWaiver} marker — started fresh, or
+     * appended to one already running. On a Local subscription nothing is paid in the
+     * first place, so the periods are simply added to its end date.
+     *
+     * A waiver that came from this coupon type continues as a paid plan when it runs
+     * out: unlike an access grant it is given to a customer who is already paying.
+     */
+    private function applyPlanWaiver(Coupon $coupon, Billable $billable, CouponRedemption $redemption): void
+    {
+        $periods = (int) ($coupon->waiver_periods ?? 0);
+
+        if ($periods <= 0 || ! $billable instanceof Model) {
+            return;
+        }
+
+        $source = $billable->getBillingSubscriptionSource();
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+
+        $redemption->grant_applied_snapshot = [
+            'mode' => 'plan_waiver',
+            'periods' => $periods,
+            'source' => $source,
+        ];
+
+        if ($source === SubscriptionSource::Local->value) {
+            $currentEnd = $billable->getBillingSubscriptionEndsAt();
+            $newEnd = BillingTime::toUtc($currentEnd && $currentEnd->isFuture() ? $currentEnd : BillingTime::nowUtc());
+
+            for ($i = 0; $i < $periods; $i++) {
+                $newEnd = \Carbon\Carbon::instance(BillingTime::addInterval($newEnd, $interval));
+            }
+
+            $billable->forceFill(['subscription_ends_at' => $newEnd])->save();
+            $redemption->grant_days_added = (int) round(($currentEnd ?? BillingTime::nowUtc())->diffInDays($newEnd, true));
+
+            event(new SubscriptionExtended($billable, $currentEnd, $newEnd, $coupon));
+
+            return;
+        }
+
+        $waiver = app(PlanWaiver::class);
+
+        if ($waiver->marker($billable) !== null) {
+            $waiver->extendByPeriods($billable, $periods);
+        } else {
+            $waiver->grant(
+                $billable,
+                $coupon,
+                $planCode,
+                $interval,
+                [],
+                null,
+                $periods,
+                PlanWaiver::ON_EXPIRY_CONTINUE_PAID,
+            );
+        }
+
+        $this->repriceAfterCommit($billable, (int) $coupon->id);
     }
 
     private function applyAccessGrant(Coupon $coupon, Billable $billable, CouponRedemption $redemption): void

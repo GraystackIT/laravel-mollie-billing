@@ -231,13 +231,37 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         }
 
         if (in_array($status, ['failed', 'canceled', 'expired'], true)) {
-            $this->mutateBillingMeta($billable, function (array $current) use ($status): array {
-                unset($current['pending_prorata_change']);
-                $current['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
+            // Through the handler the webhook would have used, not a private copy of half
+            // of it. A seat or addon change is applied locally — and PATCHed at Mollie —
+            // before its prorata charge clears, so "the charge failed" has three things to
+            // undo: the pending marker, the seats/addons, and Mollie's recurring amount.
+            // This branch only did the first. The customer kept capacity they had not
+            // paid for and was billed for it from the next renewal on, with nothing but a
+            // `plan_change_failed_at` stamp to say the charge that was supposed to start
+            // it never happened. It also tells the billing admins, which the webhook path
+            // always did and this one never had.
+            app(\GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler::class)->failed(
+                (object) [
+                    'id' => $paymentId,
+                    'status' => $status,
+                    'details' => is_object($payment) ? ($payment->details ?? null) : null,
+                ],
+                $billable,
+                ['type' => 'prorata_charge'],
+            );
+
+            // The reason this job has always recorded, for whoever reads the marker: the
+            // handler stores Mollie's bare status when it has no failure detail.
+            $this->mutateBillingMeta($billable, function (array $current) use ($status): ?array {
+                if (($current['plan_change_failed_reason'] ?? null) !== $status) {
+                    return null;
+                }
+
                 $current['plan_change_failed_reason'] = "Charge {$status}";
 
                 return $current;
             });
+
             return;
         }
 

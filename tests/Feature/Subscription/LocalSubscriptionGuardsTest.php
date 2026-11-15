@@ -176,7 +176,7 @@ it('allows switching between two free plans on a Local subscription', function (
 
 // ── Paid seats lost on plan change to a plan without extra-seat support ──
 
-it('blocks plan change that would silently drop paid extra seats', function (): void {
+it('blocks a plan change onto a plan that cannot seat the members in use', function (): void {
     config()->set('mollie-billing-plans.plans.pro-with-paid-seats', [
         'name' => 'Pro with paid seats',
         'tier' => 2,
@@ -203,10 +203,15 @@ it('blocks plan change that would silently drop paid extra seats', function (): 
     ])->save();
     $billable->refresh();
 
-    // Pro has 5 seats (1 included + 4 paid), used = 0. Switching to free
-    // (1 included, no extra seats) without an explicit `seats` value would
-    // silently keep 5 seats on a plan that can't host them — must throw.
-    expect(fn () => app(UpdateSubscription::class)->update($billable, [
+    // Pro has 5 seats (1 included + 4 paid), FIVE in use. Free includes one and sells
+    // none: it cannot seat the members, so the change is refused until they are
+    // released. (With seats merely held and not in use the count now falls to what the
+    // new plan includes — see PlanChangeSeatDerivationTest.)
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['used_seats'] = 5;
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    expect(fn () => app(UpdateSubscription::class)->update($billable->refresh(), [
         'plan_code' => 'free',
         'interval' => 'monthly',
     ]))->toThrow(SeatDowngradeRequiredException::class);
@@ -285,7 +290,7 @@ it('allows the same change when seats are explicitly set (drop-extras path)', fu
     expect($result['planChanged'])->toBeTrue();
 });
 
-it('returns paid_seats_lost error in preview when paid extras would be dropped', function (): void {
+it('previews the seat count a plan change lands on instead of raising paid_seats_lost', function (): void {
     config()->set('mollie-billing-plans.plans.pro-with-paid-seats', [
         'name' => 'Pro with paid seats',
         'tier' => 2,
@@ -315,13 +320,13 @@ it('returns paid_seats_lost error in preview when paid extras would be dropped',
         interval: 'monthly',
     ));
 
-    $errors = $preview['errors'] ?? [];
-    $paidSeatsLost = collect($errors)->firstWhere('type', 'paid_seats_lost');
-
-    expect($paidSeatsLost)->not->toBeNull();
-    expect($paidSeatsLost['current'])->toBe(5);
-    expect($paidSeatsLost['included'])->toBe(1);
-    expect($paidSeatsLost['lost'])->toBe(4);
+    // A plan change lands on the seats in use or included: the four paid seats nobody
+    // sits on are not carried over, and that is no longer an error to resolve first —
+    // the preview states the resulting count instead.
+    expect($preview['errors'] ?? [])->toBe([])
+        ->and($preview['currentSeats'])->toBe(5)
+        ->and($preview['newSeats'])->toBe(1)
+        ->and($preview['extraSeatsCharged'])->toBe(0);
 });
 
 it('exposes prorata remaining and total days in the preview', function (): void {

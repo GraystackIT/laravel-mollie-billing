@@ -148,4 +148,95 @@ class AdminPanelTest extends BrowserTestCase
 
         parent::tearDown();
     }
+
+    /**
+     * The coupon form's explanations, rendered. The feature suite passes `<flux:…>` tags
+     * through uncompiled, so only here can it be seen that the (i) next to an option is a
+     * real, openable tooltip — and that the form still submits with the labels moved out
+     * of the controls.
+     */
+    public function test_the_coupon_form_explains_every_option_and_creates_a_plan_waiver(): void
+    {
+        $this->browse(function (Browser $browser): void {
+            $this->loginAdmin($browser);
+            $browser->visit('/billing/admin/coupons/create')
+                ->waitForText(__('billing::admin.coupons.create.title'), 15)->pause(600);
+
+            // One (i) per option, each a compiled Flux tooltip rather than a raw tag.
+            $tooltips = (int) $browser->script('return document.querySelectorAll("[data-flux-tooltip]").length;')[0];
+            expect($tooltips)->toBeGreaterThan(8);
+            expect($browser->driver->getPageSource())->not->toContain('<flux:');
+
+            // The selected type is explained in full, always visible.
+            $browser->assertSee(__('billing::admin.coupons.type_info.single_payment'));
+            $this->shot($browser, 'Coupon-Formular mit Erklärungen');
+
+            // Opening an (i) shows what the option does.
+            $this->clickWire($browser, '[data-flux-tooltip] button');
+            $browser->pause(500)->assertSee(__('billing::admin.coupons.create.info.intent'));
+
+            // …and wraps: these are sentences, and an unwrapped one runs off the screen.
+            $width = (int) $browser->script('const t = document.querySelector("[data-flux-tooltip-content]:popover-open"); return t ? Math.round(t.getBoundingClientRect().width) : -1;')[0];
+            expect($width)->toBeGreaterThan(0)->toBeLessThanOrEqual(360);
+            $this->shot($browser, 'Tooltip geöffnet');
+            $browser->driver->getKeyboard()->sendKeys(\Facebook\WebDriver\WebDriverKeys::ESCAPE);
+            $browser->pause(300);
+
+            // First the intent ("free time"), which swaps the kinds on offer …
+            $browser->script(<<<'JS'
+                const form = document.querySelector('form[wire\\:submit="save"]');
+                window.Livewire.find(form.closest('[wire\\:id]').getAttribute('wire:id')).set('intent', 'free_time');
+            JS);
+            $browser->waitFor('select[wire\\:model\\.live="type"] option[value="plan_waiver"]', 10)
+                ->assertSee(__('billing::admin.coupons.intent_info.free_time'));
+
+            // … then the kind, which swaps the explanation and the fields.
+            $browser->script(<<<'JS'
+                const s = document.querySelector('select[wire\\:model\\.live="type"]');
+                s.value = "plan_waiver";
+                s.dispatchEvent(new Event("change", {bubbles: true}));
+            JS);
+            $browser->waitForText(__('billing::admin.coupons.type_info.plan_waiver'), 10)
+                ->waitFor('input[wire\\:model="waiver_periods"]', 10)->pause(300);
+            $this->shot($browser, 'Typ Plan gratis');
+
+            $browser->type('input[wire\\:model="code"]', 'BROWSERFREE3')
+                ->type('input[wire\\:model="waiver_periods"]', '3')->pause(300);
+            $this->clickWire($browser, 'form[wire\\:submit="save"] button[type="submit"]');
+            $browser->pause(1500);
+        });
+
+        $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()->where('code', 'BROWSERFREE3')->first();
+
+        expect($coupon)->not->toBeNull()
+            ->and($coupon->type)->toBe(\GraystackIT\MollieBilling\Enums\CouponType::PlanWaiver)
+            ->and((int) $coupon->waiver_periods)->toBe(3);
+    }
+
+    /**
+     * Giving free time from the subscription tab — the three actions that replace
+     * "create a coupon and send the code".
+     */
+    public function test_an_operator_gives_free_plan_periods_from_the_subscription_tab(): void
+    {
+        $billable = $this->makeActiveSubscriber('pro', 'monthly');
+
+        $this->browse(function (Browser $browser) use ($billable): void {
+            $this->loginAdmin($browser);
+            $browser->visit('/billing/admin/billables/'.$billable->getKey())
+                ->waitForText(__('billing::admin.billables.subscription.free_time.title'), 15)->pause(600);
+            expect($browser->driver->getPageSource())->not->toContain('<flux:');
+            $this->shot($browser, 'Gratiszeit vergeben');
+
+            $browser->type('input[wire\\:model="freePeriods"]', '2')->pause(300);
+            $this->clickWire($browser, 'form[wire\\:submit="giveFreePlanPeriods"] button[type="submit"]');
+            $browser->waitForText(__('billing::admin.billables.subscription.flash.free_periods_given', ['count' => 2]), 15)->pause(500);
+            $this->shot($browser, 'Plan zwei Perioden gratis');
+        });
+
+        $marker = app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)->marker(TestBillable::sole());
+
+        expect($marker)->not->toBeNull()
+            ->and($marker['max_applications'])->toBe(2);
+    }
 }

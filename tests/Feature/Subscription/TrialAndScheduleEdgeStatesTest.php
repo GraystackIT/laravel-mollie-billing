@@ -220,7 +220,9 @@ it('refuses to extend the trial of a cancelled or expired subscription', functio
 it('still extends a trial for the states where one can run', function (): void {
     $until = BillingTime::nowUtc()->addDays(14);
 
-    foreach ([SubscriptionStatus::New, SubscriptionStatus::Trial, SubscriptionStatus::Active] as $status) {
+    // Not `Active` on a Local subscription: that is a free plan or an access grant, with
+    // no charge a trial could defer — see LocalTrialStateTest for what the flip cost.
+    foreach ([SubscriptionStatus::New, SubscriptionStatus::Trial] as $status) {
         $billable = edgeBillable([
             'subscription_status' => $status,
             'subscription_source' => SubscriptionSource::Local,

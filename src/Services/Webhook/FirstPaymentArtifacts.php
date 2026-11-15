@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
+use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Illuminate\Support\Facades\Log;
 
@@ -85,7 +86,29 @@ class FirstPaymentArtifacts
             (float) ($vat['rate'] ?? 0.0),
         );
 
-        return $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
+        // The window this payment bought, stated explicitly.
+        //
+        // Both callers write the invoice BEFORE `CreateSubscription` puts plan, interval
+        // and anchor on the billable — so leaving `createForPayment()` to read the period
+        // off the billable stamped the document with whatever was there before: nothing
+        // (which falls back to "now + 1 month", also for a yearly plan), the Local period
+        // being upgraded out of, or the anchor of a subscription that expired months ago.
+        // `BillingInvoice::currentPeriodLines()` matches a line by its period end and the
+        // composer prorates over the line's own window, so the invoice that paid for the
+        // running period was either not found at all — a downgrade then charged the new
+        // plan in full and credited nothing — or prorated over a window several periods
+        // long. `CreateSubscription` anchors a checkout at now, so this is the same window.
+        $periodStart = BillingTime::nowUtc();
+        $periodEnd = BillingTime::addInterval($periodStart, $interval === 'yearly' ? 'yearly' : 'monthly');
+
+        return $this->salesInvoiceService->createForPayment(
+            $payment,
+            'subscription',
+            $lineItems,
+            $billable,
+            $periodStart,
+            $periodEnd,
+        );
     }
 
     /**

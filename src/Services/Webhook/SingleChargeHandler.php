@@ -322,6 +322,16 @@ class SingleChargeHandler
 
             try {
                 $this->walletService->credit($billable, $usageType, $quantity, 'overage_settlement');
+
+                // Units billed from a deferred-overage record are paid for now, so the
+                // record goes with them — see WalletUsageService::consumeDeferredOverage().
+                if (($line['deferred_price'] ?? false) === true && $billable instanceof Model) {
+                    $wallet = $billable->getWallet($usageType);
+
+                    if ($wallet !== null) {
+                        WalletUsageService::consumeDeferredOverage($wallet, $quantity, (int) ($line['unit_price_net'] ?? 0));
+                    }
+                }
             } catch (\Throwable $e) {
                 Log::error('Wallet credit after a paid overage charge failed — negative balance stays and would be charged again', [
                     'billable' => $billable instanceof Model ? $billable->getKey() : null,

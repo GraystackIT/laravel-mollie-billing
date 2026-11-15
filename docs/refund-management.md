@@ -165,6 +165,10 @@ When a user downgrades their plan mid-period, the refund is composed and execute
 3. `InvoiceService::createRefund()` calls Mollie per line with a per-line idempotency token that survives a retry, then writes **one** credit note covering the batch and increments `refunded_net`.
 4. Lines Mollie rejected go to `subscription_meta.pending_refund_retries`, which `RetryRefundLineJob` works through.
 
+`createRefund()` holds the per-invoice refund lock (`billing:invoice-refund:{id}`, keyed on the invoice that holds the payment) from a line's Mollie call until the credit note is committed — the same lock `RefundInvoiceService` and the refund webhook use. Mollie calls the payment webhook as soon as the first refund exists, while the credit note carrying the refund ids is only written after the last line; without the lock the webhook booked that refund as "synced from Mollie dashboard" and the credit note then booked it again. A line whose invoice is being refunded by somebody else is not posted at all: it goes to `pending_refund_retries`.
+
+The credit note inherits country, currency **and VAT validation** from the invoice it credits, not from the billable's state on the day of the refund.
+
 ## Webhook Sync (Mollie Dashboard Refunds)
 
 When refunds are initiated directly in the Mollie dashboard, `MollieWebhookController::handleRefundWebhook()` syncs them:
@@ -174,6 +178,16 @@ When refunds are initiated directly in the Mollie dashboard, `MollieWebhookContr
 - Converts gross to net using the original invoice's VAT rate
 - Sets reason to `RefundReasonCode::Other` with text `'synced from Mollie dashboard'`
 - Dispatches `InvoiceRefunded` event
+- Books a refund in any status that can still pay out (`queued`, `pending`, `processing`, `refunded`) and **skips** one Mollie reports as `failed` or `canceled`
+
+### When a booked refund does not pay out
+
+A refund is booked when it is created — by the admin refund, by a plan change, or by this sync — but Mollie can still report it as `failed` (the bank bounced it) or `canceled` afterwards, and the funds return to the merchant. The next delivery for that payment then **reverses** the booking:
+
+- The credit note is not deleted. `InvoiceService::reverseBookedCredit()` writes a reversal document (a `Refund`-kind row with its own `CR-` serial, positive amounts, status `paid`) whose lines mirror the credited lines and carry `reverses_credit: true`.
+- `refunded_net` on the original drops by the reversed amount, and `derivedRefundedNet()`, `creditedPerOriginalLine()`, `creditedVatTotal()` and `currentPeriodLines()` subtract reversal lines, so the invoice is refundable again and the refund can be retried.
+- `RefundReversed` is dispatched and the admins receive `AdminRefundFailedNotification`. Wallet units the refund had handed back are **not** taken away automatically — they may have been consumed since.
+- It is idempotent on the refund id, and it works even when the failed refund was the only one: `amountRefunded` is back at zero then, so the controller also syncs when a refund is still on the books, and it dedups against the *latest* processed outcome rather than any earlier one (the delivery is otherwise byte-identical to the original `paid`).
 
 ### When a refund has to be reduced
 
@@ -200,6 +214,17 @@ Two behaviours are deliberate:
 - **The Mollie subscription is *not* cancelled here.** That decision belongs to the past-due ladder and to the operator. A chargeback on one period is not necessarily the end of the relationship, and cancelling is irreversible — a Mollie subscription can only be recreated, never resumed.
 
 A chargeback on a `cancelled` or `expired` subscription still books its credit note (the money did leave) but does not change the status: forcing `past_due` there would feed an ended subscription back into the auto-cancel ladder.
+
+### When a chargeback is reversed
+
+A chargeback can be disputed and won; Mollie states that on the chargeback itself (`reversedAt`), and the money comes back. `ChargebackHandler` then takes the booking out again, the same way a failed refund is un-booked:
+
+- A chargeback that is already reversed when it is first seen is not booked at all.
+- One that was booked gets a reversal document (`InvoiceService::reverseBookedCredit()`, keyed on `mollie_chargeback_id`); the invoice is refundable in full again.
+- The subscription returns to `active` **only if** this chargeback is what it is past due for — `subscription_meta.payment_failure` still names it. If a renewal has failed since, the dunning episode has another owner and the status is left alone.
+- `ChargebackReversed` is dispatched and the admins are notified.
+
+Not measured against Mollie (the sandbox cannot produce a chargeback): whether `amountChargedBack` changes on a reversal and whether the payment webhook is called for it. The handler therefore reads only `reversedAt`, and the controller looks at a payment's refunds and chargebacks again on every delivery for as long as one of them is still on the books, whatever the totals say.
 
 ## Mollie API Description
 
@@ -231,6 +256,8 @@ Both dedup keys are stamped onto the credit note's lines **before the row is com
 |-------|------|---------|
 | `CreditNoteIssued` | Credit note created | `$billable`, `$creditNote`, `$originalInvoice` (nullable) |
 | `InvoiceRefunded` | Refund completed | `$billable`, `$originalInvoice`, `$creditNote`, `$request` |
+| `ChargebackReversed` | A booked chargeback was reversed and its credit note taken out of the books | `$billable`, `$original`, `$reversal`, `$mollieChargebackId` |
+| `RefundReversed` | A booked refund was reported `failed`/`canceled` and its credit note reversed | `$billable`, `$reversal`, `$mollieRefundId`, `$status` |
 | `WalletCredited` | Wallet units credited back | `$billable`, `$usageType`, `$units`, `$reason` |
 
 ## Notifications

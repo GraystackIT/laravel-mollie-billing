@@ -234,8 +234,35 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
             return;
         }
 
-        if ($createdAt->diffInDays(BillingTime::nowUtc()) >= self::HARD_LIMIT_DAYS) {
+        // The age of THIS payment, not of the snapshot. `created_at` on the snapshot is the
+        // dunning cycle's start: it is inherited from payment to payment so the budget stays
+        // attached. With SEPA every failure takes days to arrive, so the third payment of a
+        // cycle is routinely created when the cycle is already twelve or thirteen days old —
+        // and was written off two days later as "pending for over 14 days". A write-off
+        // frees the slot, the next sweep charges the same units again, and then the payment
+        // that was written off settles after all: the customer has paid twice.
+        $paymentCreatedAt = $this->paymentCreatedAt($payment) ?? $createdAt;
+
+        if ($paymentCreatedAt->diffInDays(BillingTime::nowUtc()) >= self::HARD_LIMIT_DAYS) {
             $this->writeOff($billable, $paymentId, "the charge has been {$status} at Mollie for over ".self::HARD_LIMIT_DAYS.' days');
+        }
+    }
+
+    /**
+     * When Mollie created the payment, or null when the answer does not say.
+     */
+    private function paymentCreatedAt(object $payment): ?CarbonInterface
+    {
+        $createdAt = (string) ($payment->createdAt ?? '');
+
+        if ($createdAt === '') {
+            return null;
+        }
+
+        try {
+            return BillingTime::toUtc($createdAt);
+        } catch (\Throwable) {
+            return null;
         }
     }
 

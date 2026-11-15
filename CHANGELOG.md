@@ -6,6 +6,120 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Next charge, date and amount.** The customer dashboard and the admin subscription tab state when the next charge is and what it is made of (plan, seats, addons, discount or "plan free until", net, VAT, total), from the same calculation the charge uses (`Services\Billing\NextChargeSummary`).
+- `coupons.discount_periods`: the number of discounted charges of a recurring coupon, with
+  its own field on the admin coupon form and on the coupon page. Migration
+  `2026_11_16_000001_add_discount_periods_to_coupons_table` (idempotent; moves the number
+  for existing recurring coupons).
+- `Services\Billing\RedeemCouponFromPortal` and `PortalCouponOutcome`: one entry point for a
+  code typed in by the customer. A recurring discount can now be applied to a running
+  subscription from the dashboard; a gifted plan can be activated there.
+- Admin coupon form: choose the intent (discount / free time / credits) first, then the
+  kind. Addon-only grants moved under "Advanced".
+- `CouponService::redeem()` context key `lifetime_from` for a recurring coupon whose first
+  discounted charge is not now.
+- `BillingCountryRequiredException`; the addons and seats screens tell a gifted tenant
+  without billing details to complete them before buying extras.
+- Translations: `notifications.grant_extras_purchase_refunded.*`,
+  `audit.event.grant_extras_purchase_refunded`, `portal.flash.billing_details_required`
+  (en, de).
+- `RenewalUndercollected` event (billable, renewal invoice, expected / collected / shortfall net,
+  reason `renewal_created_before_change` | `plan_change_spanned_renewal`), audited as
+  `renewal_undercollected`, with an admin notification carrying the amount. Nothing is charged
+  automatically. `Services\Billing\UndercollectionReporter`.
+- `PastDueExpansionNotAllowedException` and the preview error `past_due_expansion`.
+- `BillingPolicy::derivedSeats()`.
+- Plan-change screen: "after the change: N seats" and an explicit "keep N extra seats" choice.
+- A downgrade whose prorata payment spanned a renewal now refunds the difference for the period
+  it lands in (`SupersededRenewalRefund::refundOverpaid()`).
+- **Per-seat addon pricing.** An addon interval can carry `seat_price_net` next to `price_net`, and an addon `included_seats`. Billed addon seats are `max(0, seats − included_seats)` and are invoiced on their own `addon_seats` line. Prorated on addon enable/disable, seat changes, plan and interval changes.
+- **A gifted plan stays free when the tenant buys paid extras.** A tenant on an access grant can buy paid addons and extra seats from the portal; only those are charged, the plan stays free until the grant ends (`PlanWaiver`, `UpgradeLocalToMollie::handleKeepingGrant()`, `StartGrantExtrasPurchase`).
+- Access grants carry `grant_on_expiry` (`end` — default — or `continue_paid`): what happens when the free time ends for a tenant who bought paid extras.
+- New coupon type `plan_waiver`: the plan's base price is free for N billing periods, extras stay paid.
+- Admin: extend a subscription by days, give free plan periods and extend a running grant directly from the billable's subscription tab (`AdminExtensionService`) — no coupon code to create and send. The grant list shows all three kinds.
+- Admin coupon form: every option has an (i) explaining what it does, and the selected coupon type is explained in full.
+- `SubscriptionCatalogInterface::addonSeatPriceNet()`, `addonIncludedSeats()`, `addonIsFree()`.
+- **Hidden features.** `features.{key}.visible => false` keeps a feature off the plan cards (checkout, plan change) and addon cards while it still unlocks like any other — for technical feature codes. `SubscriptionCatalogInterface::featureIsVisible()`, `visiblePlanFeatures()`, `visibleAddonFeatures()`; `billing:check-config` rejects a non-boolean `visible`.
+- Migration `2026_11_15_000001_add_plan_waiver_fields_to_coupons_table` (`grant_on_expiry`, `waiver_periods`).
+
+### Changed
+
+- `max_redemptions_per_billable` means "how often one customer may redeem the coupon" for
+  every type. For recurring coupons the lifetime is `discount_periods` and/or `valid_until`.
+  **Compatibility:** `CouponService::create()` still reads a per-customer limit passed
+  without `discount_periods` as the period count; `update()` does not.
+- A recurring coupon limited only by `valid_until` now discounts until that date without a
+  count (it used to stop after one charge, the column's default).
+- Discounted renewals of a recurring coupon no longer count against the per-customer limit;
+  their redemption rows carry `grant_applied_snapshot.mode = recurring_renewal`.
+- The dashboard no longer answers a recurring or single-payment code with "enter this code
+  when changing your plan". `billing::portal.coupon_redeem_use_in_action` is unused.
+- Texts: `coupons.type_info.recurring`, `create.info.valid_until_recurring`,
+  `create.info.max_per_billable(_recurring)`, `create.validity_hint_recurring`,
+  `portal.coupon_redeem_title/subtitle` (de + en).
+- A purchase of paid extras on a gifted plan is no longer carried out when the gift has
+  ended, been revoked or expired before the payment settles. The payment is booked and
+  refunded in full, no subscription is created, and plan, addons and seats stay as they
+  were. Previously the tenant ended up on a subscription at the full price. New:
+  `GrantExtrasPurchaseRefunded` event (audited), `GrantExtrasPurchaseRefundedNotification`
+  for the tenant, an admin alert.
+- **Breaking behaviour:** a plan change without an explicit `seats` lands on
+  `max(used seats, seats included in the new plan)` instead of carrying the old seat count over.
+  Pass `seats` to keep more. Interval, seat and addon changes are unaffected.
+- **Breaking behaviour:** while a subscription is past due, adding seats or enabling a paid addon
+  is refused (immediate, scheduled, preview). Reducing seats, disabling an addon, a free addon and
+  a plan/interval change remain possible.
+- The preview no longer raises `paid_seats_lost` for a plan change onto a plan that sells no extra
+  seats; the seat count falls to the included seats and is shown as `newSeats`. The error remains
+  for an interval-only change.
+- `plan-change` Livewire component: `dropExtraSeats` / `toggleDropExtraSeats()` are replaced by
+  `keepExtraSeats` / `toggleKeepExtraSeats()` (default off).
+- **Breaking for apps with their own catalog:** `SubscriptionCatalogInterface` has six new methods (see above).
+- `CouponService::computeMarkerDiscount()` takes an optional third argument describing the configuration being priced.
+- `CouponService::revokeGrant()` also revokes plan-waiver redemptions; on a Mollie subscription whose grant lives on as a plan waiver it removes the waiver instead of only recording the revocation.
+- The preview reads addon quantities from the billable, like the charge does; a quantity map in the preview payload is no longer multiplied in.
+- `billing:check-config` rejects a negative or non-integer addon `seat_price_net` and a negative addon `included_seats`.
+
+- **Switzerland, Monaco and the Isle of Man are no longer invoiceable by default.** "EU" is now the package's own list of the 27 member states instead of the VAT library's rule table, which also carries CH (8.1 %), MC and IM. An app selling there adds the country under `additional_countries`.
+- **Overage incurred during a trial is charged** when the trial converts. It used to be reset away with the first paid period.
+- A `single_payment` coupon is refused at checkout when a trial will start; the trial wins over a 100 % coupon instead of being dropped silently.
+- **The billing period starts on the day Mollie created the charge**, not on the day it settled. Invoices, `nextBillingDate()` and prorata windows follow the charge cycle.
+- An interval change is refused while a plan waiver runs.
+- New events `ChargebackReversed` and audit entries for it.
+- A trial whose first charge never reports back moves to `past_due` 14 days after the trial end (`ProcessTrialLifecycleJob::FIRST_CHARGE_GRACE_DAYS`), also when a mandate is on file.
+- `billing:check-config` rejects VAT rates that are not a percentage between 0 and 100 (including `0.19`-style decimals), checks `vat_rate_overrides`, and rejects a `checkout_countries.include` entry that cannot be priced.
+- A scheduled end-of-period change is announced to Mollie when it is scheduled, so the renewal is created at the new amount.
+- New event `RefundReversed` (and an audit entry) when a booked refund turns out not to have paid out.
+
+### Fixed
+
+- An access grant typed into the dashboard was answered with "this coupon type cannot be
+  redeemed here" whatever the customer's situation.
+- A re-delivered webhook for such a refused purchase no longer raises the
+  "incomplete activation" alarm.
+- A seat or addon added while past due was free for the unpaid period and PATCHed into Mollie.
+- The old plan's included seats became paid extra seats on a plan that includes fewer.
+- **Second audit round** (details in `docs/decisions.md`): the billing period follows Mollie's charge cycle instead of the day a payment settled (SEPA periods overlapped or left gaps); a coupon is judged as of the charge, not as of settlement; a deactivated 100 % coupon ends its deferral; "N free periods" count from the next charge, not from today; a period extension during a trial extends the trial; an unlimited free plan no longer gets an end date from a period extension; the running discount is applied to the prorata charge of a plan change; credits are booked when a coupon fully covers the charge; a failed seat/addon prorata is rolled back locally and at Mollie; a renewal no longer writes back a stale seat count; a chargeback that is reversed is taken out of the books (`ChargebackReversed`); a 100 % coupon no longer leaves 0.01; a payment for extras on a gift that ended meanwhile is booked instead of dropped; a revoked one-off code cannot be redeemed again; a redeemed coupon cannot change type; quota is not credited twice at the end of a deferral; the third SEPA attempt of a dunning cycle is not written off after two days; trial overage is charged on a conversion through a plan change; "extend trial" is refused on a free or gifted subscription.
+- 100 % recurring coupon: a seat or addon added while the coupon runs is charged from the next regular billing date instead of staying free until the coupon ends. The deferred Mollie charge date is now stored (`subscription_meta.charge_deferred_until`, `Support\ChargeDeferral`).
+- A period extension or trial extension on a fully covered subscription no longer moves the Mollie charge *earlier*, which collected the full plan price while the coupon was running.
+- A subscription Mollie is not charging (fully covered) now turns its billing period over each interval: included quota is credited every period and seat/addon changes are no longer refused from the second month on.
+- The first invoice of a subscription states the period its payment bought (yearly plans, Local→Mollie upgrades, re-checkout after expiry); a downgrade in the first period refunded nothing.
+- Failed and cancelled Mollie refunds are no longer booked as credit notes; a booked refund that later fails is reversed.
+- A plan-change refund and its own refund webhook can no longer book the same Mollie refund twice.
+- A prorata credit is the unused share of what was *paid* for a line (after coupon and adjustments), not of its list price.
+- Free plan with paid addons on a Mollie subscription: a kept addon is charged again on a downgrade to the free plan, and an addon added or removed mid-period is prorated.
+- A renewal Mollie created for a configuration the customer has since left is refunded for the difference instead of only raising `PaymentAmountMismatch`.
+- A seat or addon increase PATCHes Mollie in the same call that changes the local state, not only once its prorata payment clears.
+- A renewal that settles before the nightly overage pass no longer forgives that period's overage.
+- Plan-change usage excess that had to be deferred keeps the unit price it was quoted at.
+- `billing:sync-purchased-balance` no longer revives purchased balance that was used up before a plan change.
+- Reverse charge: display and charge agree for `additional_countries` (reverse charge applies inside the EU only).
+- A `checkout_countries.include` country without a VAT rate is no longer offered; it used to collect a payment the webhook could never book.
+- A free plan chosen with a promotion coupon in the session is activated locally instead of being sent through mandate collection and never activated.
+- The OSS export classifies a line by the VAT actually charged; credit notes inherit the VAT validation of the invoice they correct.
+
 ## [0.4.1] - 2026-11-03
 
 ### Fixed

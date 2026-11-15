@@ -66,6 +66,22 @@ class ProrataExecutor
             return ['path' => 'sidegrade', 'invoice' => $invoice, 'cancelled_at_mollie' => $cancelledAtMollie];
         }
 
+        // Charge lines that add up to nothing are not a charge. `createCharge()` creates no
+        // payment for them — and with no payment there is no webhook, so the refund lines
+        // handed to it as "pending until the charge clears" were never paid out: a
+        // downgrade whose (small) new price a coupon covered in full lost the customer
+        // the whole credit for the plan they left. Treated as what it is: a change with
+        // credits only, or with nothing to book at all.
+        $chargeGross = array_sum(array_map(fn (ProrataLine $l) => $l->amountGross, $chargeLines));
+
+        if (! empty($chargeLines) && $chargeGross <= 0) {
+            if (empty($refundLines)) {
+                return ['path' => 'noop', 'invoice' => null];
+            }
+
+            $chargeLines = [];
+        }
+
         if (! empty($chargeLines)) {
             // Phase 1: Mollie charge + pending state (PATCH only runs in phase 2 after charge OK).
             $this->invoices->createCharge($billable, $chargeLines, $refundLines, $intent);

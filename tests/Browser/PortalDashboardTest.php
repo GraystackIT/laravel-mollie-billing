@@ -68,12 +68,11 @@ class PortalDashboardTest extends BrowserTestCase
             ->and(TestBillable::sole()->purchasedBillingCredits('Tokens'))->toBe(250);
     }
 
-    public function test_the_dashboard_sends_discount_coupons_to_the_action_that_prices_them(): void
+    public function test_the_dashboard_applies_a_recurring_discount_and_says_from_when(): void
     {
-        // SinglePayment and Recurring coupons are deliberately NOT redeemable
-        // here: their discount only means something against a concrete amount,
-        // so the dashboard points at the checkout / plan-change screen instead of
-        // silently consuming the code.
+        // One field for every code: a recurring discount is applied to the running
+        // subscription on the spot (RedeemCouponFromPortal) instead of sending the
+        // customer to a plan change they did not want.
         $billable = $this->makeActiveSubscriber();
 
         $this->coupons()->create([
@@ -82,7 +81,7 @@ class PortalDashboardTest extends BrowserTestCase
             'type' => CouponType::Recurring,
             'discount_type' => DiscountType::Percentage,
             'discount_value' => 20,
-            'max_redemptions_per_billable' => 12,
+            'discount_periods' => 12,
         ]);
 
         $this->browse(function (Browser $browser) use ($billable): void {
@@ -91,12 +90,15 @@ class PortalDashboardTest extends BrowserTestCase
 
             $browser->type('couponCode', 'LOYAL20');
             $this->clickWire($browser, '[wire\\:click="redeemCoupon"]');
-            $browser->waitForText(__('billing::portal.coupon_redeem_use_in_action'), 10)->pause(400);
-            $this->shot($browser, 'Rabatt-Coupon: Verweis auf die Aktion');
+            $browser->waitForText(__('billing::portal.coupon_recurring_applied_periods', [
+                'code' => 'LOYAL20',
+                'from' => \GraystackIT\MollieBilling\Support\BillingTime::display($billable->nextBillingDate(), $billable)->translatedFormat('d. M Y'),
+                'count' => 12,
+            ]), 10)->pause(400);
+            $this->shot($browser, 'Rabatt-Coupon: am Dashboard angewendet');
         });
 
-        // Nothing consumed: the code still has to work in the plan change.
-        expect($billable->refresh()->getBillingSubscriptionMeta())
-            ->not->toHaveKey('active_recurring_coupon');
+        expect($billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon']['code'] ?? null)
+            ->toBe('LOYAL20');
     }
 }

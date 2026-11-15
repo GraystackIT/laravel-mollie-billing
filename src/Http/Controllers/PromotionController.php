@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Http\Controllers;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Http\RedirectResponse;
@@ -19,8 +20,12 @@ class PromotionController extends Controller
         $coupon = app(CouponService::class)->resolveByAutoApplyToken($token);
 
         if ($coupon && $coupon->isWithinValidity(BillingTime::nowUtc()) && $coupon->hasGlobalRedemptionsLeft()) {
-            session(['billing.auto_apply_coupon' => $coupon->code]);
+            session([StartSubscriptionCheckout::AUTO_APPLY_COUPON_SESSION_KEY => $coupon->code]);
         } else {
+            // An expired or exhausted link also retires whatever an earlier link left
+            // behind — the customer followed THIS one, and it carries no discount.
+            session()->forget(StartSubscriptionCheckout::AUTO_APPLY_COUPON_SESSION_KEY);
+
             // Read by the checkout layout. Under `billing.promotion_status` nothing read it,
             // so a customer following an expired promo link arrived at the full price with
             // no hint that the code had not applied.

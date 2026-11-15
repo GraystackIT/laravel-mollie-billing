@@ -12,6 +12,13 @@ return [
     'trial_expired' => [
         'subject' => 'Deine :app-Testphase ist abgelaufen',
         'body' => 'Deine Testphase ist am :date abgelaufen und es wurde rechtzeitig keine Zahlungsmethode hinterlegt. Du kannst jederzeit ein Abonnement abschließen, um den Zugriff wiederherzustellen — deine bisherige Konfiguration bleibt erhalten.',
+        'body_with_mandate' => 'Deine Testphase ist am :date abgelaufen, die erste Zahlung für dein Abonnement ist aber nicht bei uns eingegangen. Bitte prüfe deine Zahlungsmethode und schließe das Abonnement erneut ab, um den Zugriff wiederherzustellen — deine bisherige Konfiguration bleibt erhalten.',
+    ],
+    'grant_extras_purchase_refunded' => [
+        'subject' => 'Dein Kauf bei :app konnte nicht ausgeführt werden',
+        'body' => 'Dein Kauf von Extras konnte nicht ausgeführt werden, weil dein Gratiszeitraum inzwischen beendet ist.',
+        'refund' => 'Der Betrag von :amount wird auf die verwendete Zahlungsmethode erstattet. Je nach Bank kann das einige Tage dauern.',
+        'next' => 'Du kannst jederzeit einen Plan buchen.',
     ],
     'trial_converted' => [
         'subject' => 'Willkommen bei :app',

@@ -119,7 +119,44 @@ it('charges the catalog price, not the amount carried in the preview', function 
     expect(capturedAmountValue($captured))->toBe('118.80');
 });
 
-it('prices the seats it actually orders when extra seats are dropped', function (): void {
+it('prices the seats it actually orders — the included ones, unless the customer keeps more', function (): void {
+    config()->set('mollie-billing-plans.plans.pro.included_seats', 2);
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.seat_price_net', 500);
+
+    $this->billable->forceFill([
+        'subscription_meta' => ['seat_count' => 5, 'used_seats' => 2],
+    ])->save();
+    $this->billable->refresh();
+
+    $captured = null;
+    Mollie::shouldReceive('send')
+        ->once()
+        ->withArgs(function ($request) use (&$captured) {
+            $captured = $request;
+
+            return $request instanceof CreatePaymentRequest;
+        })
+        ->andReturn(fakeTamperPayment());
+
+    // No choice made: a plan change lands on the seats in use or included.
+    $component = Livewire::test('mollie-billing::plan-change')
+        ->call('previewFor', 'pro');
+
+    expect($component->get('keepExtraSeats'))->toBeFalse()
+        ->and($component->instance()->preview['newSeats'])->toBe(2);
+
+    $component->call('confirmAndPay');
+
+    $metadata = (new ReflectionObject($captured))->getProperty('metadata');
+    $metadata->setAccessible(true);
+
+    // The 2 included seats: no extra seats ordered, and the amount is the bare base
+    // price (€29.00 + 20% = €34.80) rather than base + 3 paid seats.
+    expect($metadata->getValue($captured)['extra_seats'])->toBe(0)
+        ->and(capturedAmountValue($captured))->toBe('34.80');
+});
+
+it('orders and prices the extra seats when the customer chooses to keep them', function (): void {
     config()->set('mollie-billing-plans.plans.pro.included_seats', 2);
     config()->set('mollie-billing-plans.plans.pro.intervals.monthly.seat_price_net', 500);
 
@@ -140,17 +177,19 @@ it('prices the seats it actually orders when extra seats are dropped', function 
 
     $component = Livewire::test('mollie-billing::plan-change')
         ->call('previewFor', 'pro')
-        ->call('toggleDropExtraSeats');
+        ->call('toggleKeepExtraSeats');
+
+    expect($component->get('keepExtraSeats'))->toBeTrue()
+        ->and($component->instance()->preview['newSeats'])->toBe(5);
 
     $component->call('confirmAndPay');
 
     $metadata = (new ReflectionObject($captured))->getProperty('metadata');
     $metadata->setAccessible(true);
 
-    // Dropped to the 2 included seats: no extra seats ordered, and the amount is the
-    // bare base price (€29.00 + 20% = €34.80) rather than base + 3 paid seats.
-    expect($metadata->getValue($captured)['extra_seats'])->toBe(0)
-        ->and(capturedAmountValue($captured))->toBe('34.80');
+    // All five kept: three paid extras. €29.00 + 3 × €5.00 = €44.00, + 20 % = €52.80.
+    expect($metadata->getValue($captured)['extra_seats'])->toBe(3)
+        ->and(capturedAmountValue($captured))->toBe('52.80');
 });
 
 it('refuses to act on a plan code the client substituted', function (): void {

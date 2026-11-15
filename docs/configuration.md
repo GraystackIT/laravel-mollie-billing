@@ -81,12 +81,14 @@ built-in strings. A pinned locale wins over whatever a header switcher sets.
 ```php
 'checkout_countries' => [
     'regions' => ['EU'],   // currently supported: 'EU' (27 member states)
-    'include' => [],       // additional ISO-3166-1 alpha-2 codes, e.g. ['CH', 'GB']
+    'include' => [],       // individual ISO-3166-1 alpha-2 codes that can be invoiced (see below)
     'exclude' => [],       // codes to remove from the resolved list
 ],
 ```
 
 Countries from `additional_countries` (see below) are added automatically.
+
+Only a country that can be invoiced is offered. That is an EU member state, or a code with its own `additional_countries` entry — which carries the VAT rate. A non-EU code under `include` alone (`'GB'`, `'CH'`) has no rate: it is left out of every country selector and `billing:check-config` reports it as an error. To sell to the United Kingdom, declare `'additional_countries' => ['GB' => ['vat_rate' => 20.0, 'name' => 'United Kingdom']]`; nothing needs to go under `include` for it. (Before this was enforced, such a country was priced at 0 % by the checkout and the paid payment could then not be booked.)
 
 ```php
 'default_billing_country' => env('BILLING_DEFAULT_COUNTRY', 'AT'),
@@ -279,8 +281,10 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
   | set but malformed (`AUT`, `Austria`, `de-AT`, `A1`) | **refused regardless of `require_seller_country`**, and logged once per offending value |
 
   The malformed case is deliberately not covered by the compat allowance: the operator opted into the setting, and the old behaviour silently reverse-charged every domestic B2B supply at 0% with the seller paying that VAT out of pocket — which cannot be unwound, while an over-charged invoice can (credit note plus correction). `billing:check-config` reports a malformed value as an **error**, which is where a typo should stop you. Validation is structural (two ASCII letters), not a registry lookup, so GB/CH/NO sellers stay configurable.
-- `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code.
-- `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list.
+- `vat_rate_overrides` — overrides the rates resolved by `mpociot/vat-calculator` per ISO code (uppercase). The value is a **percentage**: `19.0`, not `0.19`.
+- `additional_countries` — adds countries that are not part of the EU VAT system. They are automatically included in the checkout country list. This is the *only* way a non-EU country becomes invoiceable: "EU" is the package's own list of the 27 member states, not whatever `mpociot/vat-calculator` happens to ship a rate for (it also knows Switzerland, the Isle of Man and Monaco). `vat_rate` is a percentage as well. Reverse charge never applies to these countries — it is an intra-EU mechanism, so a business customer there is charged the configured rate however valid their VAT number is.
+
+`billing:check-config` refuses a rate that is not numeric, is negative or above 100, or lies strictly between 0 and 1 — the last one is the decimal notation of the underlying library written where a percentage belongs, and it used to invoice a whole country at a fraction of a percent.
 - `oss.disk` — Laravel filesystem disk where generated OSS protocol CSVs are stored. Works with any S3-compatible private bucket; the admin portal hands out a short-lived presigned URL via `Storage::temporaryUrl()`. When `null`, the disk configured under `invoices.disk` is reused.
 - `oss.path` — base path on the disk. Files are written as `{path}/oss-export-{YYYY}-{timestamp}.csv` so previous exports remain available as an audit trail.
 - `oss.temporary_url_expiry` — validity window of the download link in minutes (only relevant for non-`local` disks).
@@ -470,6 +474,17 @@ Defines the features available in the system. Plans and addons reference these v
 ],
 ```
 
+**Hidden features.** Set `'visible' => false` on a feature to keep it out of everything a customer reads — the plan cards in the checkout, the plan-change screen and the addon cards:
+
+```php
+'features' => [
+    'dashboard'       => ['name' => 'Dashboard'],
+    'internal-beta'   => ['name' => 'Internal beta', 'visible' => false],
+],
+```
+
+A hidden feature works exactly like a visible one: `MollieBilling::features()`, `@planFeature` and the `billing.feature` middleware all resolve it. Use it for technical feature codes your app gates on that are not a selling point. The admin panel shows hidden features. Only the literal `false` hides; `billing:check-config` rejects any other non-boolean value. A custom catalog implements `featureIsVisible()`, `visiblePlanFeatures()` and `visibleAddonFeatures()`.
+
 `name` / `description` are overridden by translations under `billing::features.<key>.{name,description}` when present. Used by:
 
 - `MollieBilling::features()` (list of active features for the billable)
@@ -497,7 +512,44 @@ Bookable add-ons that unlock additional features and/or cost.
 |-------|-------------|
 | `name`, `description` *(optional)* | Overridden by `billing::addons.<code>.{name,description}` when a translation exists. |
 | `feature_keys` | Features unlocked by the addon. Merged with the plan's features into the effective set. |
-| `intervals.{monthly,yearly}.price_net` | Net price in cents per interval. |
+| `intervals.{monthly,yearly}.price_net` | Net **base** price in cents per interval. Required on every interval the addon defines; `0` is valid. |
+| `intervals.{monthly,yearly}.seat_price_net` *(optional)* | Net price in cents **per seat**, charged on top of `price_net`. Omit it (or set `null`) and the addon is priced exactly as before. |
+| `included_seats` *(optional, default `0`)* | Seats the addon's per-seat price does not charge for. |
+
+#### Per-seat addon pricing
+
+```php
+'crm' => [
+    'name'           => 'CRM',
+    'included_seats' => 5,                                             // free addon seats
+    'intervals'      => [
+        'monthly' => ['price_net' => 2000, 'seat_price_net' => 500],   // 20 € + 5 €/seat
+        'yearly'  => ['price_net' => 20000, 'seat_price_net' => 5000],
+    ],
+],
+```
+
+```
+addon net = price_net + seat_price_net × max(0, seats − addon.included_seats)
+```
+
+- The per-seat price counts **every seat of the subscription**, the plan's included seats too.
+  The addon's `included_seats` and the plan's `included_seats` are independent of each other.
+- Example: a plan at 50 € with 10 seats included and 5 € per extra seat, plus an addon at
+  20 € + 5 €/seat with no free seats, on 12 seats: `50 + 2 × 5 + 20 + 12 × 5 = 140 €` net.
+  With `included_seats => 5` on the addon, 7 addon seats are charged.
+- A subscription is billed for at least the plan's included seats, so a stored seat count
+  below them counts as the included number here as well.
+- It is invoiced as a second line: `kind: 'addon'` (the base price, unchanged) and
+  `kind: 'addon_seats'` (same `code`, quantity = charged addon seats; absent when that is 0).
+- An addon with `price_net => 0` and a `seat_price_net` is **not free** —
+  `SubscriptionCatalogInterface::addonIsFree()` looks at both — and cannot be enabled on a
+  Local (free-plan) subscription.
+- `getBillingAddonQuantity()` multiplies the base price only.
+
+A custom `SubscriptionCatalogInterface` has to implement `addonSeatPriceNet()`,
+`addonIncludedSeats()` and `addonIsFree()`. Returning `null`, `0` and
+`addonPriceNet() <= 0` respectively keeps the previous behaviour.
 
 > Addons do **not** contribute to `included_usages` — wallet quotas are plan-scoped.
 
@@ -611,7 +663,9 @@ It reports two classes of issues:
   - `invoices.serial_number.format` empty or missing the `C` (counter) slot
   - `ip_geolocation.driver` not declared in `ip_geolocation.drivers`
   - `checkout_countries.include|exclude` entries that are not uppercase ISO-3166-1 alpha-2 codes
-  - `additional_countries` entries with non-numeric `vat_rate`
+  - `products.<code>.price_net` of 0 (a product cannot be sold for nothing — the purchase is refused)
+  - `checkout_countries.include` entries that are neither an EU member state nor declared under `additional_countries` (no VAT rate to invoice them with)
+  - `additional_countries.<ISO>.vat_rate` and `vat_rate_overrides.<ISO>` that are not a percentage: non-numeric, below 0, above 100, or strictly between 0 and 1 (decimal notation); `vat_rate_overrides` keys that are not uppercase ISO codes
   - `billing_timezone` not a valid IANA identifier
   - `overage_job_time` not in `HH:MM` format
   - `usage_threshold_percent` outside `0–100`
@@ -620,6 +674,7 @@ It reports two classes of issues:
   - Plan `allowed_addons` referencing undefined addons
   - Plan `tier` missing or non-integer; `included_seats` invalid; `trial_days` set at plan root (must move into `intervals.{interval}.trial_days`)
   - Interval `base_price_net` / `seat_price_net` missing or negative
+  - Addon interval `price_net` missing (also next to a `seat_price_net`), addon `seat_price_net` negative or not an integer, addon `included_seats` negative
   - Plan / addon defining an unknown interval (only `monthly` and `yearly` are recognised)
   - Product `group` referencing an undefined product group
   - Product `quantity` invalid
@@ -631,6 +686,7 @@ It reports two classes of issues:
   - `ip_geolocation.drivers.ipinfo_lite.token` empty when IPinfo is selected
   - `ip_geolocation.drivers.db_ip.api_key` empty when DB-IP is selected (falls back to the public free tier)
   - `additional_countries.<ISO>.name` empty
+  - An addon with `seat_price_net` on one interval and not on the other; `included_seats` on an addon without any `seat_price_net`; a plan that allows a per-seat addon but sells no extra seats and includes no more seats than the addon gives away (the seat price is never charged there)
   - Multiple plans sharing the same `tier` (ranking becomes ambiguous)
   - `included_usages` defines a quota without a matching `usage_overage_prices` entry — overages cannot be charged
   - `usage_overage_prices` defines a type without a matching `included_usages` entry — quota defaults to 0

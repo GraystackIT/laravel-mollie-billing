@@ -13,6 +13,8 @@ use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
+use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 
 class PreviewService
 {
@@ -86,7 +88,9 @@ class PreviewService
         $usedSeats = $billable->getUsedBillingSeats();
         $newIncludedSeats = $this->catalog->includedSeats($newPlan);
         $seatPriceNet = $this->catalog->seatPriceNet($newPlan, $newInterval);
-        $newSeats = $dto->seats ?? max($currentSeats, $usedSeats, $newIncludedSeats);
+        // A plan change lands on the seats in use or included by the new plan; anything
+        // else keeps the count. See BillingPolicy::derivedSeats().
+        $newSeats = $dto->seats ?? BillingPolicy::derivedSeats($currentSeats, $usedSeats, $newIncludedSeats, $planChanged);
 
         $warnings = [];
         $errors = [];
@@ -101,7 +105,7 @@ class PreviewService
                     'used' => $usedSeats,
                     'included' => $newIncludedSeats,
                 ];
-            } elseif ($currentSeats > $newIncludedSeats) {
+            } elseif (! $planChanged && $currentSeats > $newIncludedSeats) {
                 // Paid (but unused) extra seats would be lost on a plan that
                 // can't sell them. Resolvable by activating the drop-extra-seats
                 // toggle in the UI (sets `seats` explicitly).
@@ -115,6 +119,7 @@ class PreviewService
         }
 
         $currentNet = $this->computeAmountNet(
+            $billable,
             $currentPlan,
             $currentInterval,
             $currentSeats,
@@ -122,6 +127,7 @@ class PreviewService
         );
 
         $newNet = $this->computeAmountNet(
+            $billable,
             $newPlan,
             $newInterval,
             $newSeats,
@@ -129,6 +135,7 @@ class PreviewService
         );
 
         $lineItems = $this->buildLineItems(
+            $billable,
             $newPlan,
             $newInterval,
             $newSeats,
@@ -207,6 +214,28 @@ class PreviewService
 
         // Prorata
         $intervalChanged = $dto->interval !== null && $dto->interval !== $currentInterval;
+
+        // Adding seats or a paid addon while past due is refused by the validator; the
+        // preview says so as a blocking error instead of quoting "0.00 due now".
+        try {
+            app(ValidateSubscriptionChange::class)->assertNoPastDueExpansion(
+                $billable,
+                $planChanged || $intervalChanged,
+                $dto->seats !== null,
+                $currentSeats,
+                $newSeats,
+                array_values(array_diff(array_map('strval', array_keys(array_filter($newAddons, fn ($q): bool => (int) $q > 0))), array_keys($currentAddons))),
+                $newInterval,
+            );
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+            $errors[] = ['type' => 'past_due_expansion', 'message' => $e->getMessage()];
+        }
+
+        // The change itself is refused (ValidateSubscriptionChange::assertIntervalChangeAllowed);
+        // the preview says so instead of quoting a price for it.
+        if ($intervalChanged && app(PlanWaiver::class)->marker($billable) !== null) {
+            $errors[] = ['type' => 'interval_change_under_waiver'];
+        }
         $prorataFactor = 0.0;
         $prorataChargeNet = 0;
         $prorataCreditNet = 0;
@@ -288,8 +317,29 @@ class PreviewService
             }
         }
         $existingMarkerDiscountNet = (! $alreadyCountedAsNew)
-            ? $this->couponService->computeMarkerDiscount($billable, $newNet)
+            ? $this->couponService->computeMarkerDiscount($billable, $newNet, [
+                // The configuration being previewed: a plan waiver's ceiling follows the
+                // plan line of the plan the customer is moving TO.
+                'plan_code' => $newPlan,
+                'interval' => $newInterval,
+                'addon_codes' => array_map('strval', array_keys($newAddons)),
+                'seats' => $newSeats,
+            ])
             : 0;
+
+        // A change that opens a new period (an interval switch, a past-due reset) puts the
+        // next recurring charge a full new interval away. This is the price of THAT
+        // charge, so the discount counts only if it is still running then — the same
+        // judgement ProrataChargeHandler makes before it PATCHes Mollie. A coupon with
+        // two months left does not discount the renewal of a year bought today.
+        if ($existingMarkerDiscountNet > 0
+            && ($intervalChanged || $isPastDueReset)
+            && is_array($existingMarker)
+            && ! PlanWaiver::isWaiver($existingMarker)
+            && $this->couponService->markerExpired($billable, BillingTime::addInterval(BillingTime::nowUtc(), $newInterval))
+        ) {
+            $existingMarkerDiscountNet = 0;
+        }
         if ($existingMarkerDiscountNet > 0) {
             $couponDiscountNet += $existingMarkerDiscountNet;
             $lineItems[] = [
@@ -677,37 +727,26 @@ class PreviewService
     }
 
     /**
-     * @param  array<string, int>  $addons
+     * Net of a configuration — through SubscriptionAmount, the same call the charge, the
+     * Mollie subscription amount and the renewal invoice make.
+     *
+     * This used to be a second implementation of that arithmetic. Two copies of a price
+     * rule are two prices the moment one of them learns something new (per-seat addon
+     * pricing was the occasion), and the preview is the one that is shown to the customer
+     * before the money moves.
+     *
+     * @param  array<string, int>  $addons  code => quantity; only the codes are used —
+     *                                      quantities are read off the billable, as
+     *                                      everywhere else
      */
     private function computeAmountNet(
+        Billable $billable,
         string $planCode,
         string $interval,
         int $seats,
         array $addons,
     ): int {
-        if ($planCode === '') {
-            return 0;
-        }
-
-        $base = $this->catalog->basePriceNet($planCode, $interval);
-        $includedSeats = $this->catalog->includedSeats($planCode);
-        $seatPrice = $this->catalog->seatPriceNet($planCode, $interval);
-        $extraSeats = max(0, $seats - $includedSeats);
-
-        $total = $base;
-        if ($seatPrice !== null && $extraSeats > 0) {
-            $total += $seatPrice * $extraSeats;
-        }
-
-        foreach ($addons as $addonCode => $qty) {
-            $qty = (int) $qty;
-            if ($qty <= 0) {
-                continue;
-            }
-            $total += $this->catalog->addonPriceNet((string) $addonCode, $interval) * $qty;
-        }
-
-        return $total;
+        return SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, self::activeCodes($addons));
     }
 
     /**
@@ -715,57 +754,48 @@ class PreviewService
      * @return array<int, array<string, mixed>>
      */
     private function buildLineItems(
+        Billable $billable,
         string $planCode,
         string $interval,
         int $seats,
         array $addons,
     ): array {
-        $items = [];
-
-        if ($planCode !== '') {
-            $base = $this->catalog->basePriceNet($planCode, $interval);
-            $items[] = [
-                'kind' => 'plan',
-                'label' => $this->catalog->planName($planCode) ?? $planCode,
-                'code' => $planCode,
-                'quantity' => 1,
-                'unit_price_net' => $base,
-                'total_net' => $base,
-            ];
-
-            $includedSeats = $this->catalog->includedSeats($planCode);
-            $seatPrice = $this->catalog->seatPriceNet($planCode, $interval);
-            $extraSeats = max(0, $seats - $includedSeats);
-
-            if ($seatPrice !== null && $extraSeats > 0) {
-                $items[] = [
-                    'kind' => 'seat',
-                    'label' => 'Extra seats',
-                    'code' => 'seats',
-                    'quantity' => $extraSeats,
-                    'unit_price_net' => $seatPrice,
-                    'total_net' => $extraSeats * $seatPrice,
-                ];
-            }
+        if ($planCode === '') {
+            return [];
         }
 
-        foreach ($addons as $addonCode => $qty) {
-            $qty = (int) $qty;
-            if ($qty <= 0) {
+        $extraSeats = max(0, $seats - $this->catalog->includedSeats($planCode));
+        $sellsSeats = $this->catalog->seatPriceNet($planCode, $interval) !== null;
+
+        $items = [];
+
+        foreach (SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, self::activeCodes($addons)) as $line) {
+            $isSeatLine = $line['kind'] === 'seats';
+
+            // A plan that sells no extra seats shows no seat line, as before.
+            if ($isSeatLine && ! $sellsSeats) {
                 continue;
             }
-            $price = $this->catalog->addonPriceNet((string) $addonCode, $interval);
-            $items[] = [
-                'kind' => 'addon',
-                'label' => $this->catalog->addonName((string) $addonCode) ?? (string) $addonCode,
-                'code' => (string) $addonCode,
-                'quantity' => $qty,
-                'unit_price_net' => $price,
-                'total_net' => $price * $qty,
-            ];
+
+            // The shape this preview has always returned for the plan's seat line.
+            if ($isSeatLine) {
+                $line['kind'] = 'seat';
+                $line['code'] = 'seats';
+            }
+
+            $items[] = $line;
         }
 
         return $items;
+    }
+
+    /**
+     * @param  array<string, int>  $addons
+     * @return array<int, string>
+     */
+    private static function activeCodes(array $addons): array
+    {
+        return array_values(array_map('strval', array_keys(array_filter($addons, static fn ($qty): bool => (int) $qty > 0))));
     }
 
     /**

@@ -5,7 +5,9 @@ declare(strict_types=1);
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler;
+use GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Illuminate\Support\Facades\Notification;
@@ -15,10 +17,17 @@ use Illuminate\Support\Facades\Notification;
 // done. When the charge is then declined (with SEPA, days later) nothing put it back: the
 // customer kept seats they had not paid for, `FeatureAccess` kept granting the add-on's
 // features, and the next renewal rebuilt its lines from the inflated count while Mollie was
-// still billing the old amount, because no PATCH runs on the deferred path.
+// still billing the old amount, because no PATCH ran on the deferred path.
+//
+// Since then the seat/add-on path PATCHes Mollie in the same call that writes the local
+// state (so a renewal in between is collected at the right amount), which gives this
+// handler a second half to undo: the recurring amount goes back together with the seats.
 
 beforeEach(function (): void {
     Notification::fake();
+
+    SpyMollieSubscriptionPatcher::$calls = [];
+    $this->app->bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class);
 
     config()->set('mollie-billing-plans.addons.extra', [
         'name' => 'Extra',
@@ -96,10 +105,13 @@ it('restores the seat count and add-ons when the prorata charge is declined', fu
 
     $billable->refresh();
 
-    // Back to what the customer has actually paid for — which is also what Mollie is
-    // still billing, since the deferred path never PATCHed the subscription.
+    // Back to what the customer has actually paid for — locally and at Mollie, which was
+    // PATCHed to the new amount together with the local write and is PATCHed back here.
     expect($billable->getBillingSeatCount())->toBe(1)
         ->and($billable->getActiveBillingAddonCodes())->toBe([])
+        ->and(SpyMollieSubscriptionPatcher::$calls)->toHaveCount(1)
+        ->and(SpyMollieSubscriptionPatcher::$calls[0][3]['seats'])->toBe(1)
+        ->and(SpyMollieSubscriptionPatcher::$calls[0][3]['addons'])->toBe([])
         ->and($billable->getBillingSubscriptionMeta()['plan_change_failed_reason'] ?? null)
         ->toBe('insufficient_funds')
         ->and($billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null)->toBeNull();

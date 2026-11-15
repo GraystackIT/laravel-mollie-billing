@@ -88,6 +88,24 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return (int) ($this->addon($addonCode)['intervals'][$interval]['price_net'] ?? 0);
     }
 
+    public function addonSeatPriceNet(string $addonCode, string $interval): ?int
+    {
+        $value = $this->addon($addonCode)['intervals'][$interval]['seat_price_net'] ?? null;
+
+        return $value === null ? null : max(0, (int) $value);
+    }
+
+    public function addonIncludedSeats(string $addonCode): int
+    {
+        return max(0, (int) ($this->addon($addonCode)['included_seats'] ?? 0));
+    }
+
+    public function addonIsFree(string $addonCode, string $interval): bool
+    {
+        return $this->addonPriceNet($addonCode, $interval) <= 0
+            && (int) ($this->addonSeatPriceNet($addonCode, $interval) ?? 0) <= 0;
+    }
+
     public function includedSeats(string $planCode): int
     {
         return (int) ($this->plan($planCode)['included_seats'] ?? 1);
@@ -311,6 +329,29 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return is_string($configDescription) && $configDescription !== '' ? $configDescription : null;
     }
 
+    public function featureIsVisible(string $featureKey): bool
+    {
+        // Only an explicit `false` hides. Anything else — absent, null, a typo —
+        // leaves the feature where it was: on the plan card.
+        return ($this->feature($featureKey)['visible'] ?? true) !== false;
+    }
+
+    public function visiblePlanFeatures(string $planCode): array
+    {
+        return array_values(array_filter(
+            array_map('strval', $this->planFeatures($planCode)),
+            fn (string $key): bool => $this->featureIsVisible($key),
+        ));
+    }
+
+    public function visibleAddonFeatures(string $addonCode): array
+    {
+        return array_values(array_filter(
+            array_map('strval', $this->addonFeatures($addonCode)),
+            fn (string $key): bool => $this->featureIsVisible($key),
+        ));
+    }
+
     public function allFeatures(): array
     {
         $keys = array_keys((array) config($this->configKey.'.features', []));
@@ -321,6 +362,7 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
             $result[$key] = [
                 'name' => $this->featureName($key),
                 'description' => $this->featureDescription($key),
+                'visible' => $this->featureIsVisible($key),
             ];
         }
 

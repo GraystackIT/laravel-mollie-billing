@@ -19,7 +19,9 @@ This document explains how the package calculates VAT, validates VAT numbers (UI
 
 Resolution order:
 
-1. **Reverse-charge** — when a `$billable` is passed, the destination is an EU country and `reverseChargeApplies()` says so → VAT = 0, gross = net, rate = 0. Returns immediately.
+1. **Reverse-charge** — when a `$billable` is passed and `reverseChargeApplies()` says so → VAT = 0, gross = net, rate = 0. Returns immediately.
+
+   "The destination is an EU member state" is the first condition *inside* `reverseChargeApplies()` (and inside `reverseChargeCountriesQualify()`), not a test `calculate()` adds in front of it. It used to be the latter, and then the two disagreed for a country priced through `additional_countries`: `usesReverseCharge()` and the checkout showed "reverse charge, net" for a UK business while the charge added the configured 20 %.
 
    `calculate()` never talks to VIES. It reads the billable's *persisted* validation
    (`billing_vat_validations`, `valid = true`), which is written when the VAT number is
@@ -38,6 +40,8 @@ Resolution order:
 3. **Calculation** — `vat = round(net * rate / 100)`, `gross = net + vat`.
 
 For non-EU countries that are also not declared in `additional_countries`, `calculate()` throws `NonEuCountryException`. Apps that sell outside the EU must declare the country in `additional_countries` (with its rate) or override pricing upstream.
+
+"EU" means `CountryResolver::isEuMember()` — the package's own list of the 27 member states. It is deliberately not `VatCalculator::shouldCollectVAT()`: mpociot's rule table also carries Switzerland (8.1 %), the Isle of Man and Monaco, which made those three invoiceable with nothing configured. The library is still where an EU country's *rate* comes from. If you relied on Switzerland or Monaco being priced implicitly, declare them under `additional_countries`.
 
 > **Important:** the country passed in is always the **customer's country** (the destination of the supply), not the seller's. This is what OSS requires: a German private customer paying an Austrian seller pays 19% German VAT, which the seller declares via OSS to the German tax authority.
 
@@ -65,7 +69,7 @@ The trait is wired up via `wire:model.live.debounce.500ms="vat_number"` and via 
 Reverse-charge applies when **all three** are true:
 
 - `vat_number` is filled and VIES-valid (`vatNumberValid === true`),
-- `billing_country` is in the EU-27 list,
+- `billing_country` is in the EU-27 list (`CountryResolver::isEuMember()` — a country sold to through `additional_countries` never qualifies),
 - the seller's tax country (i.e. the country running this app) is also in the EU.
 
 When all three conditions hold, `VatCalculationService::calculate()` returns gross = net, rate = 0, and the invoice line shows the customer's VAT number with a reverse-charge note. The invoice currency and the VAT-rate-source mechanics still flow through the same code path.
@@ -205,7 +209,7 @@ OSS covers cross-border **B2C** supplies inside the EU. The export contains ever
 |---|---|---|
 | `oss` | Cross-border EU consumer supply | **The OSS return.** These rows, and only these. |
 | `domestic` | Customer is in the seller's own country (`vat.seller_country`) | The ordinary national VAT return. |
-| `reverse_charge` | Validated EU business customer (`vat_validation_id`, VIES-accepted) | The EC Sales List. Zero-rated here; declared by the customer. |
+| `reverse_charge` | Validated EU business customer (`vat_validation_id`, VIES-accepted) **and** the lines carry no VAT — a validated customer who was charged VAT stays in `oss` | The EC Sales List. Zero-rated here; declared by the customer. |
 | `non_eu` | Customer outside the EU | Outside the scope of OSS. |
 
 `scope` is part of the bucket key, so a domestic and a cross-border supply at the same rate (Austria and Bulgaria are both 20 %) never merge into one row.

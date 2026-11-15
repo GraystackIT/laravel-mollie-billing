@@ -22,9 +22,11 @@ use Illuminate\Support\Facades\Storage;
  * charging overage for a period the customer already paid for, show a date in the
  * past forever, and price every plan change off a stale window.
  *
- * The anchor is the payment's own `paidAt`, not `now()`: a webhook can arrive
- * minutes or hours late, and the period a customer paid for starts when their
- * money moved, not when our server got round to hearing about it.
+ * The anchor comes from the payment, not from `now()`: a webhook can arrive
+ * minutes or hours late. It is the charge's `createdAt` — the cycle Mollie created it
+ * for — and `paidAt` only where a payment carries no `createdAt`, as the stubs here do.
+ * For a card the two are the same minute; for SEPA they are days apart, see
+ * RenewalLongRunSepaTest.
  */
 class RenewalFakeWebhookController extends MollieWebhookController
 {

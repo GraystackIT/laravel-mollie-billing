@@ -15,6 +15,7 @@ use GraystackIT\MollieBilling\Events\SubscriptionCreated;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
@@ -143,13 +144,19 @@ class CreateSubscription
         // collects full price during months the coupon promised free, and charging at
         // the coupon's end would bill nothing for a trial that ended earlier. The
         // later of the two is the first moment money is actually owed.
+        // Where the charge would sit without the discount — a plan waiver resumes on a
+        // renewal of that cycle (PlanWaiver::chargeResumesAt()).
+        $regularCharge = $trialEndsAt
+            ?? $paidPeriodEndsAt
+            ?? BillingTime::addInterval(BillingTime::nowUtc(), $interval);
+
         $startDate = match (true) {
             $isTrial && $isFullCoverage => BillingTime::latest(
                 $trialEndsAt,
-                $this->fullCoverageStartDate($billable, $interval),
+                $this->fullCoverageStartDate($billable, $interval, $regularCharge),
             ),
             $isTrial => $trialEndsAt,
-            $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
+            $isFullCoverage => $this->fullCoverageStartDate($billable, $interval, $regularCharge),
             $paidPeriodEndsAt !== null => $paidPeriodEndsAt,
             default => BillingTime::addInterval(BillingTime::nowUtc(), $interval),
         };
@@ -191,6 +198,15 @@ class CreateSubscription
         $meta['seat_count'] = $totalSeats;
         $meta['mollie_subscription_id'] = (string) ($subscription->id ?? '');
 
+        // The one stored answer to "when does Mollie next collect" for a subscription
+        // whose charge does not follow its period — see Support\ChargeDeferral. A fresh
+        // subscription never inherits the previous one's.
+        unset($meta[ChargeDeferral::META_KEY]);
+
+        if ($isFullCoverage) {
+            $meta[ChargeDeferral::META_KEY] = BillingTime::toUtc($startDate)->toIso8601String();
+        }
+
         // With an anchor the local period must line up with Mollie's schedule: the
         // period that ends at the anchor started one interval before it, not now.
         // Clamped, because the forward direction is: `nextBillingDate()` derives from this
@@ -223,9 +239,22 @@ class CreateSubscription
      * skips the entire discount lifetime: marker.valid_until + 1 day. Falls
      * back to one period from now if the marker has no valid_until.
      */
-    private function fullCoverageStartDate(Billable $billable, string $interval): \Carbon\CarbonInterface
-    {
+    private function fullCoverageStartDate(
+        Billable $billable,
+        string $interval,
+        ?\Carbon\CarbonInterface $regularCharge = null,
+    ): \Carbon\CarbonInterface {
         $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+        // A plan waiver resumes on a renewal, not on the day after it ends.
+        if (is_array($marker) && $regularCharge !== null) {
+            $resumesAt = PlanWaiver::chargeResumesAt($marker, $regularCharge, $interval);
+
+            if ($resumesAt !== null) {
+                return $resumesAt;
+            }
+        }
+
         $validUntil = is_array($marker) && isset($marker['valid_until']) && $marker['valid_until'] !== null
             ? Carbon::parse((string) $marker['valid_until'])
             : null;

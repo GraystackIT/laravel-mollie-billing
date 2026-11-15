@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Events\ChargebackReversed;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
@@ -15,6 +16,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -43,6 +45,12 @@ use Illuminate\Support\Facades\Notification;
  */
 class ChargebackHandler
 {
+    private const UNKNOWN = 'unknown';
+
+    private const BOOKED = 'booked';
+
+    private const REVERSED = 'reversed';
+
     public function __construct(
         protected readonly InvoiceService $salesInvoiceService,
     ) {
@@ -91,7 +99,20 @@ class ChargebackHandler
                 continue;
             }
 
-            if ($this->chargebackAlreadyPersisted($original->billable_type, $original->billable_id, $chargebackId)) {
+            $booking = $this->bookingState($original->billable_type, $original->billable_id, $chargebackId);
+
+            // A reversed chargeback: the dispute was won and the money is back. Never
+            // booked if it is first seen in that state; taken out of the books again if
+            // it was booked while it stood.
+            if (! empty($chargeback->reversedAt ?? null)) {
+                if ($booking === self::BOOKED) {
+                    $this->reverse($chargebackId, $original, $billable);
+                }
+
+                continue;
+            }
+
+            if ($booking !== self::UNKNOWN) {
                 continue;
             }
 
@@ -229,6 +250,115 @@ class ChargebackHandler
     }
 
     /**
+     * Undo a chargeback's credit note, and the dunning episode it started.
+     *
+     * The status is restored only when this chargeback is what the billable is past due
+     * for — the marker `markPastDue()` wrote still names it. A renewal that failed in the
+     * meantime owns the episode by then, and the payment that stands again is not that one.
+     */
+    protected function reverse(string $chargebackId, BillingInvoice $original, Billable $billable): void
+    {
+        $reversal = $this->salesInvoiceService->reverseBookedCredit(
+            $billable,
+            'mollie_chargeback_id',
+            $chargebackId,
+            sprintf('Reversal: chargeback %s was reversed — the payment stands', $chargebackId),
+            $original,
+        );
+
+        if ($reversal === null) {
+            return;
+        }
+
+        $reversal->refund_reason_code = RefundReasonCode::Chargeback;
+        $reversal->save();
+
+        $restored = false;
+
+        if ($billable instanceof Model && $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue) {
+            $failure = $billable->getBillingSubscriptionMeta()['payment_failure'] ?? null;
+
+            if (is_array($failure)
+                && ($failure['reason'] ?? null) === 'chargeback'
+                && (int) ($failure['invoice_id'] ?? 0) === (int) $original->id
+            ) {
+                $billable->forceFill([
+                    'subscription_status' => SubscriptionStatus::Active,
+                    'subscription_meta' => SubscriptionMetaHygiene::withoutDunningEpisode($billable->getBillingSubscriptionMeta()),
+                ])->save();
+
+                $restored = true;
+            }
+        }
+
+        Log::warning('Chargeback reversed — its credit note was taken out of the books again', [
+            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+            'invoice_id' => (int) $original->id,
+            'reversal_id' => (int) $reversal->id,
+            'mollie_chargeback_id' => $chargebackId,
+            'subscription_restored' => $restored,
+        ]);
+
+        event(new ChargebackReversed($billable, $original, $reversal, $chargebackId));
+
+        $admins = MollieBilling::notifyAdmin();
+        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+        if ($admins === []) {
+            return;
+        }
+
+        Notification::send($admins, MollieBilling::resolveNotification(
+            AdminPlanChangeFailedNotification::class,
+            $restored
+                ? 'A chargeback was reversed — its credit note was reversed and the subscription is active again'
+                : 'A chargeback was reversed — its credit note was reversed; the subscription status was left as it is',
+            [
+                'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'invoice_id' => (int) $original->id,
+                'mollie_payment_id' => (string) $original->mollie_payment_id,
+                'mollie_chargeback_id' => $chargebackId,
+            ],
+        ));
+    }
+
+    /**
+     * Whether a chargeback of this payment is still standing in the books — booked and
+     * not reversed. The controller asks before deciding there is nothing to look at.
+     */
+    public function hasStandingChargebackBookings(object $payment): bool
+    {
+        $paymentId = (string) ($payment->id ?? '');
+
+        if ($paymentId === '') {
+            return false;
+        }
+
+        $original = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first();
+
+        if ($original === null) {
+            return false;
+        }
+
+        $state = [];
+
+        foreach ($this->creditNotes($original->billable_type, $original->billable_id) as $note) {
+            foreach ((array) ($note->line_items ?? []) as $line) {
+                $id = $line['mollie_chargeback_id'] ?? null;
+
+                if (! is_string($id) || $id === '' || (int) ($line['parent_invoice_id'] ?? 0) !== (int) $original->getKey()) {
+                    continue;
+                }
+
+                $state[$id] = ($state[$id] ?? false) || BillingInvoice::creditSign($line) === -1;
+            }
+        }
+
+        return in_array(false, $state, true);
+    }
+
+    /**
      * Whether a credit note for this chargeback id already exists.
      *
      * Keyed on the id rather than the amount, because Mollie can report several
@@ -236,20 +366,39 @@ class ChargebackHandler
      */
     public function chargebackAlreadyPersisted(string $billableType, mixed $billableId, string $chargebackId): bool
     {
-        $notes = BillingInvoice::query()
+        return $this->bookingState($billableType, $billableId, $chargebackId) !== self::UNKNOWN;
+    }
+
+    private function bookingState(string $billableType, mixed $billableId, string $chargebackId): string
+    {
+        $state = self::UNKNOWN;
+
+        foreach ($this->creditNotes($billableType, $billableId) as $note) {
+            foreach ((array) ($note->line_items ?? []) as $line) {
+                if (($line['mollie_chargeback_id'] ?? null) !== $chargebackId) {
+                    continue;
+                }
+
+                if (BillingInvoice::creditSign($line) === -1) {
+                    return self::REVERSED;
+                }
+
+                $state = self::BOOKED;
+            }
+        }
+
+        return $state;
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, BillingInvoice>
+     */
+    private function creditNotes(string $billableType, mixed $billableId): \Illuminate\Support\Collection
+    {
+        return BillingInvoice::query()
             ->where('billable_type', $billableType)
             ->where('billable_id', $billableId)
             ->where('invoice_kind', InvoiceKind::Refund)
             ->get(['line_items']);
-
-        foreach ($notes as $note) {
-            foreach ((array) ($note->line_items ?? []) as $line) {
-                if (($line['mollie_chargeback_id'] ?? null) === $chargebackId) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 }

@@ -90,8 +90,8 @@ class FirstPaymentCouponPricing
         //
         // `recurring_discount_net` is what `CreateSubscription` prices the Mollie
         // subscription at, and every later renewal is reconciled against
-        // `computeMarkerDiscount()` — which stops at `max_redemptions_per_billable`.
-        // At the shipped default of 1, this activation *is* the one application: the
+        // `computeMarkerDiscount()` — which stops at `discount_periods`.
+        // With one period, this activation *is* the one application: the
         // marker refuses immediately afterwards, so a subscription created at the
         // discounted amount charged a second discounted period that the invoice booked at
         // full net with an `adjustment` line, firing `PaymentAmountMismatch` every time.
@@ -102,7 +102,9 @@ class FirstPaymentCouponPricing
         $recurringDiscount = 0;
 
         if ($coupon->type === CouponType::Recurring) {
-            $max = (int) ($coupon->max_redemptions_per_billable ?? 0);
+            // The number of discounted charges — `discount_periods`, not the
+            // per-customer redemption limit. Null: the date alone ends the discount.
+            $max = (int) ($coupon->discount_periods ?? 0);
             $consumedNow = ($trialStarting || $discount <= 0) ? 0 : 1;
 
             $recurringDiscount = ($max <= 0 || $max - $consumedNow > 0) ? $discount : 0;

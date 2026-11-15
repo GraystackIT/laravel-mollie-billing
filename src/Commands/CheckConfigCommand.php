@@ -185,6 +185,7 @@ class CheckConfigCommand extends Command
 
         $this->validateCheckoutCountries($scope);
         $this->validateAdditionalCountries($scope);
+        $this->validateVatRateOverrides($scope);
         $this->validateBillingTimezone($scope);
         $this->validateQueue($scope);
         $this->validateWalletLock($scope);
@@ -487,9 +488,22 @@ class CheckConfigCommand extends Command
             }
         }
 
+        $additional = (array) config('mollie-billing.additional_countries', []);
+
         foreach ((array) ($countries['include'] ?? []) as $iso) {
             if (! is_string($iso) || ! preg_match('/^[A-Z]{2}$/', $iso)) {
                 $this->addError($scope, 'checkout_countries.include entries must be uppercase ISO-3166-1 alpha-2 codes; got ['.var_export($iso, true).'].');
+
+                continue;
+            }
+
+            // Offering a country and being able to invoice it are two lists. A code that
+            // is on the first and not the second used to be priced at 0 % by the checkout
+            // and then could not be booked by the webhook: money collected, no invoice, no
+            // subscription. CountryResolver now leaves such a code out of the selector, so
+            // without this message the entry would just silently do nothing.
+            if (! CountryResolver::isEuMember($iso) && ! array_key_exists($iso, $additional)) {
+                $this->addError($scope, "checkout_countries.include lists [{$iso}], which is not an EU member state and has no additional_countries.{$iso} entry — there is no VAT rate to invoice it with, so it is not offered. Add 'additional_countries' => ['{$iso}' => ['vat_rate' => …, 'name' => …]].");
             }
         }
 
@@ -519,12 +533,75 @@ class CheckConfigCommand extends Command
 
                 continue;
             }
-            if (! isset($data['vat_rate']) || ! is_numeric($data['vat_rate'])) {
+            if (! array_key_exists('vat_rate', $data)) {
                 $this->addError($scope, "additional_countries.{$iso}.vat_rate must be numeric (e.g. 8.1).");
+            } else {
+                $this->validateVatRate($scope, "additional_countries.{$iso}.vat_rate", $data['vat_rate']);
             }
             if (empty($data['name'])) {
                 $this->addWarning($scope, "additional_countries.{$iso}.name is empty — the ISO code will be shown as label.");
             }
+        }
+    }
+
+    /**
+     * `vat_rate_overrides` outranks every other rate source and is cast with `(float)`,
+     * so nothing at runtime ever objects to what is written there.
+     */
+    private function validateVatRateOverrides(string $scope): void
+    {
+        $overrides = config('mollie-billing.vat_rate_overrides', []);
+
+        if ($overrides === null) {
+            return;
+        }
+
+        if (! is_array($overrides)) {
+            $this->addError($scope, 'vat_rate_overrides must be an array of ISO country code => percentage.');
+
+            return;
+        }
+
+        foreach ($overrides as $iso => $rate) {
+            if (! is_string($iso) || ! preg_match('/^[A-Z]{2}$/', $iso)) {
+                // The lookup upper-cases the country, so a lower-case key is never read:
+                // the override the operator wrote silently does not apply.
+                $this->addError($scope, 'vat_rate_overrides keys must be uppercase ISO-3166-1 alpha-2 codes; got ['.var_export($iso, true).'] — the entry is never read.');
+
+                continue;
+            }
+
+            $this->validateVatRate($scope, "vat_rate_overrides.{$iso}", $rate);
+        }
+    }
+
+    /**
+     * A VAT rate is a percentage: 19.0 means 19 %.
+     *
+     * mpociot — the library the package falls back to — speaks decimals (0.19), so the
+     * fraction is the mistake waiting to happen. It is numeric, it used to pass, and every
+     * invoice for that country then carried 0.19 % VAT. No VAT rate lies strictly between
+     * 0 and 1 percent, so that range is refused outright; 0 itself stays valid (a country
+     * sold to without VAT).
+     */
+    private function validateVatRate(string $scope, string $where, mixed $rate): void
+    {
+        if (is_bool($rate) || ! is_numeric($rate)) {
+            $this->addError($scope, "{$where} must be a numeric percentage (e.g. 19.0); got [".var_export($rate, true).'] — a non-numeric value is read as 0 % VAT.');
+
+            return;
+        }
+
+        $value = (float) $rate;
+
+        if ($value < 0.0 || $value > 100.0) {
+            $this->addError($scope, "{$where} [{$rate}] must be between 0 and 100 (a percentage).");
+
+            return;
+        }
+
+        if ($value > 0.0 && $value < 1.0) {
+            $this->addError($scope, "{$where} [{$rate}] looks like a decimal fraction — rates are percentages, so write ".rtrim(rtrim(number_format($value * 100, 4, '.', ''), '0'), '.').' for '.rtrim(rtrim(number_format($value * 100, 4, '.', ''), '0'), '.').' %.');
         }
     }
 
@@ -731,12 +808,22 @@ class CheckConfigCommand extends Command
             $this->addError($scope, 'every plan is marked `hidden` — the checkout plan step would have nothing to offer. At least one plan must stay visible.');
         }
 
+        // `visible` decides whether a customer sees the feature on a plan card. A value
+        // that is not a boolean is almost always a string from an env() call, and
+        // `'false'` is truthy — the feature the operator meant to hide stays on display.
+        foreach ($features as $key => $feature) {
+            if (is_array($feature) && array_key_exists('visible', $feature) && ! is_bool($feature['visible'])) {
+                $this->addError($scope, "features.{$key}.visible must be a boolean (true or false), got ".get_debug_type($feature['visible']).'.');
+            }
+        }
+
         $featureKeys = array_keys($features);
         $addonKeys = array_keys($addons);
         $groupKeys = array_keys($productGroups);
 
         $this->validatePlans($scope, $plans, $featureKeys, $addonKeys);
         $this->validateAddons($scope, $addons, $featureKeys);
+        $this->warnAboutUnreachableAddonSeatPrices($scope, $plans, $addons);
         $this->validateProducts($scope, $products, $groupKeys, $plans);
         $this->validateUsageTypes($scope, $plans);
 
@@ -1084,6 +1171,117 @@ class CheckConfigCommand extends Command
                 } elseif (! is_int($price['price_net']) || $price['price_net'] < 0) {
                     $this->addError($scope, "{$where}.intervals.{$intervalKey}.price_net must be a non-negative integer.");
                 }
+
+                // Per-seat pricing sits ON TOP of the base price, so `price_net` stays
+                // required next to it (0 is a valid base) — the error above covers that. A
+                // negative seat price would be a per-seat rebate that every amount, invoice
+                // line and Mollie PATCH would faithfully subtract.
+                if (array_key_exists('seat_price_net', $price) && $price['seat_price_net'] !== null
+                    && (! is_int($price['seat_price_net']) || $price['seat_price_net'] < 0)
+                ) {
+                    $this->addError($scope, "{$where}.intervals.{$intervalKey}.seat_price_net must be null or a non-negative integer.");
+                }
+            }
+
+            if (array_key_exists('included_seats', $addon)
+                && (! is_int($addon['included_seats']) || $addon['included_seats'] < 0)
+            ) {
+                $this->addError($scope, "{$where}.included_seats must be a non-negative integer.");
+            }
+
+            $this->warnAboutLopsidedAddonSeatPricing($scope, $where, $addon, $intervals);
+        }
+    }
+
+    /**
+     * Per-seat pricing that is valid field by field and still does not bill what its
+     * author meant. Warnings, because each shape can be deliberate.
+     *
+     * @param  array<string, mixed>  $addon
+     * @param  array<string|int, mixed>  $intervals
+     */
+    private function warnAboutLopsidedAddonSeatPricing(string $scope, string $where, array $addon, array $intervals): void
+    {
+        $with = [];
+        $without = [];
+
+        foreach ($intervals as $intervalKey => $interval) {
+            $seatPrice = is_array($interval) ? ($interval['seat_price_net'] ?? null) : null;
+
+            if (is_int($seatPrice) && $seatPrice > 0) {
+                $with[] = (string) $intervalKey;
+            } else {
+                $without[] = (string) $intervalKey;
+            }
+        }
+
+        // The seat price is read per (addon, interval) with no fallback — like every
+        // other price. Sold per seat on one interval and flat on the other, a customer
+        // who switches interval stops (or starts) paying for seats.
+        if ($with !== [] && $without !== []) {
+            $this->addWarning($scope, sprintf(
+                '%s declares seat_price_net on [%s] but not on [%s] — there the addon is billed at its base price only, however many seats the subscription has.',
+                $where,
+                implode(', ', $with),
+                implode(', ', $without),
+            ));
+        }
+
+        if ($with === [] && is_int($addon['included_seats'] ?? null) && $addon['included_seats'] > 0) {
+            $this->addWarning($scope, "{$where}.included_seats is set but no interval has a seat_price_net — there is no per-seat price for those seats to be free of.");
+        }
+    }
+
+    /**
+     * A plan that allows a per-seat addon but can never have a seat the addon charges.
+     *
+     * The addon bills every seat of the subscription beyond its own `included_seats`. A
+     * plan that sells no extra seats stays at its included ones forever, so when those do
+     * not exceed the addon's free seats the per-seat price is dead on that plan: the
+     * addon is sold there at its base price alone.
+     *
+     * @param  array<string, mixed>  $plans
+     * @param  array<string, mixed>  $addons
+     */
+    private function warnAboutUnreachableAddonSeatPrices(string $scope, array $plans, array $addons): void
+    {
+        foreach ($plans as $planCode => $plan) {
+            if (! is_array($plan)) {
+                continue;
+            }
+
+            $planIncluded = is_int($plan['included_seats'] ?? null) ? (int) $plan['included_seats'] : 1;
+
+            foreach ((array) ($plan['allowed_addons'] ?? []) as $addonCode) {
+                $addon = is_string($addonCode) ? ($addons[$addonCode] ?? null) : null;
+
+                if (! is_array($addon)) {
+                    continue;
+                }
+
+                $addonIncluded = is_int($addon['included_seats'] ?? null) ? max(0, (int) $addon['included_seats']) : 0;
+
+                if ($planIncluded > $addonIncluded) {
+                    continue;
+                }
+
+                foreach ((array) ($plan['intervals'] ?? []) as $intervalKey => $interval) {
+                    $addonSeatPrice = $addon['intervals'][$intervalKey]['seat_price_net'] ?? null;
+                    $planSellsSeats = is_array($interval) && ($interval['seat_price_net'] ?? null) !== null;
+
+                    if (is_int($addonSeatPrice) && $addonSeatPrice > 0 && ! $planSellsSeats) {
+                        $this->addWarning($scope, sprintf(
+                            'plans.%s allows the per-seat addon [%s], but on [%s] it sells no extra seats and includes %d — no more than the addon\'s %d free seat(s). The addon\'s seat_price_net is never charged on this plan.',
+                            (string) $planCode,
+                            $addonCode,
+                            (string) $intervalKey,
+                            $planIncluded,
+                            $addonIncluded,
+                        ));
+
+                        continue 2;
+                    }
+                }
             }
         }
     }
@@ -1112,8 +1310,10 @@ class CheckConfigCommand extends Command
 
             if (! array_key_exists('price_net', $product)) {
                 $this->addError($scope, "{$where}.price_net is required.");
-            } elseif (! is_int($product['price_net']) || $product['price_net'] < 0) {
-                $this->addError($scope, "{$where}.price_net must be a non-negative integer.");
+            } elseif (! is_int($product['price_net']) || $product['price_net'] < 1) {
+                // Not "non-negative": StartOneTimeOrderCheckout refuses a product without
+                // a price, so a 0 here is a card on the products page whose button fails.
+                $this->addError($scope, "{$where}.price_net must be a positive integer (in minor currency units) — a product cannot be sold for 0.");
             }
 
             if (isset($product['group']) && $product['group'] !== null) {

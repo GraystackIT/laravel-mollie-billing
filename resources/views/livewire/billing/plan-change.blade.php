@@ -59,7 +59,11 @@ new class extends Component {
     #[Locked]
     public array $preview = [];
     public bool $wasPending = false;
-    public bool $dropExtraSeats = false;
+    /**
+     * A plan change lands on the seats in use or included by the new plan. Set when the
+     * customer chooses to keep the seats they have beyond that — off by default.
+     */
+    public bool $keepExtraSeats = false;
     public bool $showLocalUpgradeConfirmation = false;
 
     /** @var array<int, string> Codes that the user has already applied (uppercased). */
@@ -113,7 +117,7 @@ new class extends Component {
     {
         $this->preview = [];
         $this->selectedPlan = null;
-        $this->dropExtraSeats = false;
+        $this->keepExtraSeats = false;
     }
 
     /**
@@ -198,10 +202,39 @@ new class extends Component {
         $this->refreshPreview($service);
     }
 
-    public function toggleDropExtraSeats(PreviewService $service): void
+    public function toggleKeepExtraSeats(PreviewService $service): void
     {
-        $this->dropExtraSeats = ! $this->dropExtraSeats;
+        $this->keepExtraSeats = ! $this->keepExtraSeats;
         $this->refreshPreview($service);
+    }
+
+    /**
+     * The seat count to ask for explicitly, or null to let the change derive it.
+     *
+     * Only when the customer chose to keep their extra seats across a plan change and the
+     * target plan sells seats at all: then the count they have now travels with the
+     * change (never below what is in use or included). Otherwise nothing is passed and
+     * the change lands on `max(used, included)` — BillingPolicy::derivedSeats().
+     */
+    private function requestedSeats(\GraystackIT\MollieBilling\Contracts\Billable $billable): ?int
+    {
+        if (! $this->keepExtraSeats || ! $this->selectedPlan) {
+            return null;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+
+        if ($this->selectedPlan === $billable->getBillingSubscriptionPlanCode()
+            || $catalog->seatPriceNet($this->selectedPlan, $this->selectedInterval) === null
+        ) {
+            return null;
+        }
+
+        return max(
+            $billable->getBillingSeatCount(),
+            $billable->getUsedBillingSeats(),
+            $catalog->includedSeats($this->selectedPlan),
+        );
     }
 
     public function applyCoupon(CouponService $couponService, PreviewService $previewService): void
@@ -229,9 +262,12 @@ new class extends Component {
         }
 
         $catalog = app(SubscriptionCatalogInterface::class);
-        $newSeats = $this->dropExtraSeats
-            ? max($billable->getUsedBillingSeats(), $catalog->includedSeats($this->selectedPlan))
-            : max($billable->getBillingSeatCount(), $catalog->includedSeats($this->selectedPlan));
+        $newSeats = $this->requestedSeats($billable) ?? \GraystackIT\MollieBilling\Support\BillingPolicy::derivedSeats(
+            $billable->getBillingSeatCount(),
+            $billable->getUsedBillingSeats(),
+            $catalog->includedSeats($this->selectedPlan),
+            $this->selectedPlan !== $billable->getBillingSubscriptionPlanCode(),
+        );
         $newAddons = $billable->getActiveBillingAddonCodes();
         $newNet = \GraystackIT\MollieBilling\Support\SubscriptionAmount::net(
             $catalog,
@@ -355,12 +391,7 @@ new class extends Component {
             return;
         }
 
-        $seats = null;
-        if ($this->dropExtraSeats) {
-            $includedSeats = app(SubscriptionCatalogInterface::class)->includedSeats($this->selectedPlan);
-            $usedSeats = $billable->getUsedBillingSeats();
-            $seats = max($usedSeats, $includedSeats);
-        }
+        $seats = $this->requestedSeats($billable);
 
         $this->preview = $service->previewUpdate($billable, new \GraystackIT\MollieBilling\Services\Billing\SubscriptionUpdateRequest(
             planCode: $this->selectedPlan,
@@ -487,12 +518,9 @@ new class extends Component {
                 'coupon_codes' => $this->appliedCouponCodes,
             ];
 
-            if ($this->dropExtraSeats) {
-                $catalog = app(SubscriptionCatalogInterface::class);
-                $updateData['seats'] = max(
-                    $billable->getUsedBillingSeats(),
-                    $catalog->includedSeats($this->selectedPlan),
-                );
+            $requestedSeats = $this->requestedSeats($billable);
+            if ($requestedSeats !== null) {
+                $updateData['seats'] = $requestedSeats;
             }
 
             $result = $service->update($billable, $updateData);
@@ -587,7 +615,7 @@ new class extends Component {
 
         // Seats and addons come out of the same preview, so the subscription the
         // webhook builds from this payment's metadata is the one that was priced.
-        // Deriving them independently let `dropExtraSeats` shrink the amount while
+        // Deriving them independently let the seat choice change the amount while
         // the metadata still asked for every seat.
         $extraSeats = max(0, (int) ($this->preview['newSeats'] ?? 0) - (int) ($this->preview['newIncludedSeats'] ?? 0));
         $addonCodes = array_values(array_diff(
@@ -1068,7 +1096,8 @@ new class extends Component {
                 $isScheduledTarget = $hasScheduled && $scheduledPlanCode === $code && $scheduledInterval === $selectedInterval;
                 $isSelected = $selectedPlan === $code;
                 $netPrice = $catalog->basePriceNet($code, $selectedInterval);
-                $features = $catalog->planFeatures($code);
+                // Only what a customer should read; a hidden feature code still unlocks.
+                $features = $catalog->visiblePlanFeatures($code);
                 $seats = $catalog->includedSeats($code);
                 $savings = $selectedInterval === 'yearly' ? $catalog->yearlySavingsPercent($code) : 0;
                 $isFree = $netPrice === 0;
@@ -1356,8 +1385,20 @@ new class extends Component {
                                     <flux:text class="text-xs text-zinc-400 dark:text-zinc-500">
                                         {{ __('billing::portal.preview_seats_used', ['count' => $preview['usedSeats'] ?? 0]) }}
                                     </flux:text>
+                                    @php
+                                        // What the change lands on by default, and what the customer holds
+                                        // beyond that today — the seats the choice below is about.
+                                        $seatsNow = (int) ($preview['currentSeats'] ?? 0);
+                                        $seatsByDefault = max((int) ($preview['usedSeats'] ?? 0), (int) $previewNewIncluded);
+                                        $keepableSeats = ($preview['planChanged'] ?? false) && ($preview['seatPriceNet'] ?? null) !== null
+                                            ? max(0, $seatsNow - $seatsByDefault)
+                                            : 0;
+                                    @endphp
+                                    <div class="mt-2 text-xs font-medium text-zinc-600 dark:text-zinc-300" dusk="seats-after-change">
+                                        {{ trans_choice('billing::portal.preview_seats_after_change', $previewNewSeats, ['count' => $previewNewSeats]) }}
+                                    </div>
                                     @if ($previewExtraSeats > 0)
-                                        <div class="mt-2 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                        <div class="mt-1 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
                                             <div>{{ __('billing::portal.preview_seats_total', [
                                                 'total' => $previewNewSeats,
                                                 'included' => $previewNewIncluded,
@@ -1372,18 +1413,16 @@ new class extends Component {
                                                 </div>
                                             @endif
                                         </div>
+                                    @endif
+                                    @if ($keepableSeats > 0)
+                                        @unless ($keepExtraSeats)
+                                            <div class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                                {{ trans_choice('billing::portal.preview_seats_not_kept', $keepableSeats, ['count' => $keepableSeats]) }}
+                                            </div>
+                                        @endunless
                                         <div class="mt-2">
-                                            <flux:button size="xs" variant="subtle" wire:click="toggleDropExtraSeats" icon="{{ $dropExtraSeats ? 'arrow-uturn-left' : 'x-mark' }}">
-                                                {{ $dropExtraSeats ? __('billing::portal.preview_seats_keep_extra') : __('billing::portal.preview_seats_drop_extra') }}
-                                            </flux:button>
-                                        </div>
-                                    @elseif ($this->dropExtraSeats)
-                                        <div class="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
-                                            {{ __('billing::portal.preview_seats_extra_dropped') }}
-                                        </div>
-                                        <div class="mt-2">
-                                            <flux:button size="xs" variant="subtle" wire:click="toggleDropExtraSeats" icon="arrow-uturn-left">
-                                                {{ __('billing::portal.preview_seats_keep_extra') }}
+                                            <flux:button size="xs" variant="subtle" wire:click="toggleKeepExtraSeats" icon="{{ $keepExtraSeats ? 'x-mark' : 'plus' }}">
+                                                {{ $keepExtraSeats ? __('billing::portal.preview_seats_drop_extra') : trans_choice('billing::portal.preview_seats_keep_extra_count', $keepableSeats, ['count' => $keepableSeats]) }}
                                             </flux:button>
                                         </div>
                                     @endif
@@ -1503,10 +1542,15 @@ new class extends Component {
                                             'lost' => $error['lost'],
                                         ]) }}
                                     </div>
-                                    <flux:button size="xs" wire:click="toggleDropExtraSeats" icon="check">
-                                        {{ __('billing::portal.error_paid_seats_lost_confirm') }}
-                                    </flux:button>
                                 </div>
+                            </flux:callout>
+                        @elseif (($error['type'] ?? '') === 'past_due_expansion')
+                            <flux:callout variant="danger" icon="exclamation-triangle">
+                                {{ __('billing::portal.error_past_due_expansion') }}
+                            </flux:callout>
+                        @elseif (($error['type'] ?? '') === 'interval_change_under_waiver')
+                            <flux:callout variant="warning" icon="exclamation-triangle">
+                                {{ __('billing::portal.error_interval_change_under_waiver') }}
                             </flux:callout>
                         @endif
                     @endforeach
@@ -1592,7 +1636,7 @@ new class extends Component {
                                         $linesByCategory = [
                                             'plan' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'plan'),
                                             'seats' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'seats'),
-                                            'addon' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'addon'),
+                                            'addon' => array_filter($prorataLines, fn ($l) => in_array($l['kind'], ['addon', 'addon_seats'], true)),
                                             'coupon' => array_filter($prorataLines, fn ($l) => $l['kind'] === 'coupon'),
                                         ];
 

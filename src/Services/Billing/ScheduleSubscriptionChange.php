@@ -12,7 +12,12 @@ use GraystackIT\MollieBilling\Events\SubscriptionChangeCancelled;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeRescheduled;
 use GraystackIT\MollieBilling\Events\SubscriptionChangeScheduled;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Enums\SubscriptionSource;
+use GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob;
+use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
@@ -27,6 +32,15 @@ use Illuminate\Support\Facades\Notification;
 
 class ScheduleSubscriptionChange
 {
+    use MutatesBillingMeta;
+
+    /**
+     * How long a due change that Mollie was not told about waits for the renewal of its
+     * period. SEPA Direct Debit settles within a handful of business days; past a week
+     * something else is wrong and holding the customer's change back helps nobody.
+     */
+    public const WAIT_FOR_RENEWAL_DAYS = 7;
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly ValidateSubscriptionChange $validator,
@@ -37,7 +51,10 @@ class ScheduleSubscriptionChange
     {
         $dto = SubscriptionUpdateRequest::from($request);
 
-        DB::transaction(function () use ($billable, $dto): void {
+        /** @var array<string, mixed>|null $previous */
+        $previous = null;
+
+        DB::transaction(function () use ($billable, $dto, &$previous): void {
             /** @var Model&Billable $billable */
             if ($billable instanceof Model) {
                 // Scope-free, like every other lock read in the package: with an
@@ -86,6 +103,12 @@ class ScheduleSubscriptionChange
                 $this->validator->assertPlanSelectable($billable, $newPlan);
             }
 
+            // Same rule, same place as the immediate path: see
+            // ValidateSubscriptionChange::assertIntervalChangeAllowed().
+            if ($newInterval !== $currentInterval) {
+                $this->validator->assertIntervalChangeAllowed($billable);
+            }
+
             // A target the catalog does not sell must be refused here too, not just in
             // update(). Stored now, it would price at 0 when it is applied at period end
             // — and `isPermanentApplyFailure()` already expects this exception, which is
@@ -96,14 +119,14 @@ class ScheduleSubscriptionChange
                 throw new IntervalNotOfferedException($newPlan, $newInterval);
             }
 
-            // Auto-derive seats from the new plan. `getBillingSeatCount()` has to be in the
-            // max, exactly as in UpdateSubscription::buildContext() and
-            // ValidateSubscriptionChange::validateSeats() — without it a billable on 14
-            // seats with 10 used would have the change applied with 10, silently losing
-            // four paid seats and dropping the renewal amount.
+            // Derived exactly as in UpdateSubscription::buildContext() and
+            // ValidateSubscriptionChange::validateSeats() — BillingPolicy::derivedSeats().
+            // A plan change lands on the seats in use or included by the new plan; an
+            // interval change keeps the count (a billable on 14 seats with 10 used keeps
+            // its 14).
             $usedSeats = $billable->getUsedBillingSeats();
             $seatsExplicit = $dto->seats !== null;
-            $newSeats = $dto->seats ?? max($usedSeats, $currentSeats, $this->catalog->includedSeats($newPlan));
+            $newSeats = $dto->seats ?? BillingPolicy::derivedSeats($currentSeats, $usedSeats, $this->catalog->includedSeats($newPlan), $planChanged);
 
             // Auto-filter incompatible addons — and persist the filtered map, not the raw
             // request. `validateAddons()` re-runs the same filter at apply time, so the
@@ -111,9 +134,18 @@ class ScheduleSubscriptionChange
             // portal and the admin panel render as "scheduled for <date>". A customer
             // moving from pro to starter was shown an addon starter cannot host, right up
             // to the moment it silently disappeared.
-            $addonPayload = $dto->addons !== null
-                ? array_filter($dto->addons, fn ($q) => (int) $q > 0)
-                : null;
+            //
+            // Both documented shapes are accepted: a code => quantity map and a plain list
+            // of codes. The filter below is right for the map and empties the list —
+            // `(int) 'analytics'` is 0 — so a change scheduled with the list form was
+            // stored with no addons at all and removed every addon when it was applied.
+            $addonPayload = null;
+
+            if ($dto->addons !== null) {
+                $addonPayload = array_is_list($dto->addons)
+                    ? array_fill_keys(array_map('strval', $dto->addons), 1)
+                    : array_filter($dto->addons, fn ($q) => (int) $q > 0);
+            }
 
             if ($planChanged && $addonPayload !== null) {
                 $addonPayload = array_filter(
@@ -122,6 +154,18 @@ class ScheduleSubscriptionChange
                     ARRAY_FILTER_USE_BOTH,
                 );
             }
+
+            // The same refusal the immediate path makes: seats or a paid addon are not
+            // added while the subscription is past due, now or "at the period end".
+            $this->validator->assertNoPastDueExpansion(
+                $billable,
+                $planChanged || $newInterval !== $currentInterval,
+                $seatsExplicit,
+                $currentSeats,
+                $newSeats,
+                $addonPayload === null ? [] : array_values(array_diff(array_map('strval', array_keys($addonPayload)), $currentAddons)),
+                $newInterval,
+            );
 
             $scheduledAt = $this->periodEndFor($billable);
 
@@ -170,6 +214,259 @@ class ScheduleSubscriptionChange
                 event(new SubscriptionChangeScheduled($billable, $scheduledChange, $scheduledAt));
             }
         });
+
+        // After the commit, never inside it: this is a Mollie call.
+        DB::afterCommit(fn () => $this->alignMollieWithSchedule($billable, is_array($previous) ? $previous : null));
+    }
+
+    /**
+     * Tell Mollie about a scheduled change NOW, so the renewal that opens the new period
+     * is already created at the new amount.
+     *
+     * A PATCH of the subscription amount never touches the running period — it prices the
+     * *next* recurring payment. And Mollie creates that payment before our dispatcher can
+     * act: `apply()` only runs once `scheduled_change_at <= now`, i.e. at or after the
+     * charge date, while a SEPA debit is created around two days ahead and stays `pending`
+     * for days. Patching at apply time therefore reached the renewal after next. The one
+     * in flight settled at the OLD amount, the period had lapsed so the prorata factor was
+     * 0 and nothing was credited — a customer who booked Pro → Starter for the period end
+     * paid Pro for the first Starter period, with a `PaymentAmountMismatch` event as the
+     * only trace.
+     *
+     * Only for a change that keeps the interval and still bills something:
+     *
+     * - An interval change needs Mollie's cadence moved, which is the patcher's own
+     *   business and cannot be done ahead of time without moving the charge date.
+     * - A free target has no amount to patch to; cancelling ahead of time could not be
+     *   taken back if the customer withdraws the change.
+     *
+     * Both are caught on the other side instead — {@see SupersededRenewalRefund}.
+     *
+     * @param  array<string, mixed>|null  $previous  the scheduled change this one replaces
+     */
+    private function alignMollieWithSchedule(Billable $billable, ?array $previous): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $billable->refresh();
+        $change = $billable->getBillingSubscriptionMeta()['scheduled_change'] ?? null;
+
+        if (! is_array($change) || ! $this->billsThroughMollie($billable)) {
+            return;
+        }
+
+        $intent = $this->prepatchIntent($billable, $change);
+
+        if ($intent === null) {
+            // Not a change Mollie can be told about ahead of time. If the one it replaces
+            // was, Mollie still holds that amount and has to be put back.
+            if (($previous['mollie_prepatched'] ?? false) === true) {
+                $this->restoreRecurringAmount($billable, $previous);
+            }
+
+            return;
+        }
+
+        try {
+            app(MollieSubscriptionPatcher::class)->updateForIntent($billable, $intent);
+        } catch (\Throwable $e) {
+            // Not fatal: the change is stored and will be applied. Without the marker the
+            // renewal hook leaves it to the dispatcher, and a renewal that arrives at the
+            // old, higher amount is refunded down by SupersededRenewalRefund.
+            Log::warning('Could not pre-patch Mollie for a scheduled change — the renewal will be reconciled instead', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+
+            if (($previous['mollie_prepatched'] ?? false) === true) {
+                $this->restoreRecurringAmount($billable, $previous);
+            }
+
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta): ?array {
+            if (! is_array($meta['scheduled_change'] ?? null)) {
+                return null;
+            }
+
+            $meta['scheduled_change']['mollie_prepatched'] = true;
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Re-announce a stored change to Mollie after something else PATCHed the subscription.
+     *
+     * An immediate seat or addon change PATCHes the amount of the configuration the
+     * billable is on NOW, which overwrites the amount announced for the scheduled change
+     * — and the renewal at the boundary is then created for a plan the customer is about
+     * to leave. Called by whoever just patched; a no-op without a stored change.
+     */
+    public function realignScheduled(Billable $billable): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        try {
+            $billable->refresh();
+            $change = $billable->getBillingSubscriptionMeta()['scheduled_change'] ?? null;
+
+            if (is_array($change)) {
+                $this->alignMollieWithSchedule($billable, $change);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Could not re-align Mollie with the scheduled change', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * The intent that moves Mollie to a scheduled change's target, or null when the change
+     * is not one that can be patched ahead of time.
+     *
+     * @param  array<string, mixed>  $change
+     */
+    private function prepatchIntent(Billable $billable, array $change): ?PlanChangeIntent
+    {
+        $currentPlan = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $currentInterval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
+        $newPlan = (string) ($change['plan_code'] ?? $currentPlan);
+        $newInterval = (string) ($change['interval'] ?? $currentInterval);
+
+        if ($currentPlan === '' || $newPlan === '' || $newInterval !== $currentInterval) {
+            return null;
+        }
+
+        $currentAddons = $billable->getActiveBillingAddonCodes();
+        $newAddons = $this->addonCodesOf($change['addons'] ?? null) ?? $currentAddons;
+
+        if ($newPlan !== $currentPlan) {
+            $newAddons = array_values(array_filter(
+                $newAddons,
+                fn (string $code): bool => $this->catalog->planAllowsAddon($newPlan, $code),
+            ));
+        }
+
+        // An auto-derived count is re-derived against live state, as apply() does.
+        $currentSeats = $billable->getBillingSeatCount();
+        $derivedSeats = BillingPolicy::derivedSeats($currentSeats, $billable->getUsedBillingSeats(), $this->catalog->includedSeats($newPlan), $newPlan !== $currentPlan);
+        $newSeats = ($change['seats_auto_derived'] ?? false) === true || ! isset($change['seats'])
+            ? $derivedSeats
+            : (int) $change['seats'];
+
+        $targetNet = SubscriptionAmount::net($this->catalog, $billable, $newPlan, $newInterval, $newSeats, $newAddons);
+
+        if ($targetNet <= 0) {
+            return null;
+        }
+
+        return new PlanChangeIntent(
+            billable: $billable,
+            currentPlan: $currentPlan,
+            newPlan: $newPlan,
+            currentInterval: $currentInterval,
+            newInterval: $newInterval,
+            currentSeats: $currentSeats,
+            newSeats: $newSeats,
+            currentAddons: array_fill_keys($currentAddons, 1),
+            newAddons: array_fill_keys($newAddons, 1),
+        );
+    }
+
+    /**
+     * PATCH Mollie back to what the billable is on right now — a pre-patched change was
+     * withdrawn or replaced by one that cannot be patched ahead.
+     *
+     * @param  array<string, mixed>  $withdrawn
+     */
+    private function restoreRecurringAmount(Billable $billable, array $withdrawn): void
+    {
+        if (! ($billable instanceof Model) || ! $this->billsThroughMollie($billable)) {
+            return;
+        }
+
+        $plan = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
+
+        if ($plan === '') {
+            return;
+        }
+
+        $addons = array_fill_keys($billable->getActiveBillingAddonCodes(), 1);
+        $seats = $billable->getBillingSeatCount();
+
+        $intent = new PlanChangeIntent(
+            billable: $billable,
+            currentPlan: (string) ($withdrawn['plan_code'] ?? $plan),
+            newPlan: $plan,
+            currentInterval: $interval,
+            newInterval: $interval,
+            currentSeats: (int) ($withdrawn['seats'] ?? $seats),
+            newSeats: $seats,
+            currentAddons: $addons,
+            newAddons: $addons,
+        );
+
+        try {
+            app(MollieSubscriptionPatcher::class)->updateForIntent($billable, $intent);
+        } catch (\Throwable $e) {
+            Log::warning('Could not restore the Mollie amount after a scheduled change was withdrawn — queued for retry', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+
+            $intentData = [
+                ...$intent->toArray(),
+                'billable_type' => (string) config('mollie-billing.billable_model'),
+                'billable_id' => $billable->getKey(),
+            ];
+            $firstAttemptAt = BillingTime::nowUtc()->toIso8601String();
+
+            $this->mutateBillingMeta($billable, function (array $meta) use ($intentData, $firstAttemptAt, $e): array {
+                $meta['pending_subscription_patch'] = [
+                    'intent' => $intentData,
+                    'first_attempt_at' => $firstAttemptAt,
+                    'last_error' => $e->getMessage(),
+                ];
+
+                return $meta;
+            });
+
+            RetrySubscriptionPatchJob::dispatch($intentData, $firstAttemptAt);
+        }
+    }
+
+    private function billsThroughMollie(Billable $billable): bool
+    {
+        return $billable->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value
+            && $this->isApplicable($billable)
+            && ! empty($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? null);
+    }
+
+    /**
+     * Addon codes from a stored `addons` payload, which may be a list of codes or a
+     * code => quantity map. Null when the change does not touch addons.
+     *
+     * @return array<int, string>|null
+     */
+    private function addonCodesOf(mixed $addons): ?array
+    {
+        if (! is_array($addons)) {
+            return null;
+        }
+
+        if (array_is_list($addons)) {
+            return array_values(array_map('strval', $addons));
+        }
+
+        return array_values(array_map('strval', array_keys(array_filter($addons, fn ($q) => (int) $q > 0))));
     }
 
     public function cancel(Billable $billable): void
@@ -195,7 +492,135 @@ class ScheduleSubscriptionChange
             ])->save();
         }
 
+        // The withdrawn change had already been announced to Mollie — take it back, or
+        // the next renewal is collected at an amount for a plan the customer is not on.
+        if (is_array($previous) && ($previous['mollie_prepatched'] ?? false) === true) {
+            DB::afterCommit(fn () => $this->restoreRecurringAmount($billable, $previous));
+        }
+
         event(new SubscriptionChangeCancelled($billable, (array) $previous));
+    }
+
+    /**
+     * Apply a due scheduled change while its renewal is being booked.
+     *
+     * Called by `SubscriptionPaymentHandler::paid()` before it prices the renewal. The
+     * payment in hand opens the period the change was scheduled for, so the change has to
+     * be in place before the invoice lines are built — otherwise a renewal Mollie already
+     * collected at the new amount is invoiced as the old plan plus an `adjustment`, and
+     * the dispatcher then applies the change mid-period with a prorata on top (an upgrade
+     * was charged its difference twice).
+     *
+     * Only for a change Mollie was told about ahead of time (`mollie_prepatched`) or one
+     * whose target bills nothing. Anything else — an interval change, a change whose
+     * pre-patch failed — is left to the dispatcher and to {@see SupersededRenewalRefund},
+     * exactly as before.
+     *
+     * Never throws: a renewal must be booked whatever happens to the change.
+     *
+     * @return bool whether a change was applied
+     */
+    public function applyAtRenewal(Billable $billable): bool
+    {
+        if (! ($billable instanceof Model)) {
+            return false;
+        }
+
+        try {
+            $billable->refresh();
+            $change = $billable->getBillingSubscriptionMeta()['scheduled_change'] ?? null;
+
+            if (! is_array($change)) {
+                return false;
+            }
+
+            // Active or Trial only. A paid renewal on a PastDue subscription is the
+            // recovery of the period that failed, not the opening of the next one.
+            if (! in_array($billable->getBillingSubscriptionStatus(), [SubscriptionStatus::Active, SubscriptionStatus::Trial], true)) {
+                return false;
+            }
+
+            // This renewal has to be the one at the boundary. Two days of slack, because
+            // the local anchor and Mollie's charge date can sit a day apart.
+            $scheduledAt = isset($change['scheduled_at'])
+                ? \Carbon\Carbon::parse((string) $change['scheduled_at'])->setTimezone('UTC')
+                : null;
+
+            if ($scheduledAt === null || $scheduledAt->greaterThan(BillingTime::nowUtc()->addDays(2))) {
+                return false;
+            }
+
+            $currentInterval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
+
+            if ((string) ($change['interval'] ?? $currentInterval) !== $currentInterval) {
+                return false;
+            }
+
+            $prepatched = ($change['mollie_prepatched'] ?? false) === true;
+            $billsNothing = $this->prepatchIntent($billable, $change) === null;
+
+            if (! $prepatched && ! $billsNothing) {
+                return false;
+            }
+
+            $dto = $this->replayRequest($change)->asPeriodBoundary();
+
+            app(UpdateSubscription::class)->update($billable, $dto);
+
+            $this->clearAppliedChange($billable);
+
+            return true;
+        } catch (\Throwable $e) {
+            Log::warning('A scheduled change could not be applied with its renewal — left to the dispatcher', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * The request that replays a stored change through `UpdateSubscription`.
+     *
+     * @param  array<string, mixed>  $scheduledChange
+     */
+    private function replayRequest(array $scheduledChange): SubscriptionUpdateRequest
+    {
+        $payload = $scheduledChange;
+        $allowHiddenPlan = ($payload['allow_hidden_plan'] ?? false) === true;
+        $payload['apply_at'] = 'immediate';
+        unset($payload['scheduled_at'], $payload['allow_hidden_plan'], $payload['internal'], $payload['mollie_prepatched']);
+
+        // Seats that were auto-derived at schedule time must be re-derived against live
+        // state, not replayed as an explicit count — see schedule().
+        if (($payload['seats_auto_derived'] ?? false) === true) {
+            unset($payload['seats']);
+        }
+        unset($payload['seats_auto_derived']);
+
+        // Trusted re-entry: the override was approved when the change was scheduled,
+        // so it is re-applied through the typed API here, and so is the `internal`
+        // marker. `from()` ignores both array keys on purpose — see
+        // SubscriptionUpdateRequest::from().
+        $dto = SubscriptionUpdateRequest::from($payload)->asInternalReentry();
+
+        return $allowHiddenPlan ? $dto->withAllowHiddenPlan() : $dto;
+    }
+
+    private function clearAppliedChange(Billable $billable): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $billable->refresh();
+        $meta = $billable->getBillingSubscriptionMeta();
+        unset($meta['scheduled_change']);
+        $billable->forceFill([
+            'subscription_meta' => $meta,
+            'scheduled_change_at' => null,
+        ])->save();
     }
 
     public function apply(Billable $billable): void
@@ -225,40 +650,18 @@ class ScheduleSubscriptionChange
             return;
         }
 
-        $payload = (array) $scheduledChange;
-        $allowHiddenPlan = ($payload['allow_hidden_plan'] ?? false) === true;
-        $payload['apply_at'] = 'immediate';
-        unset($payload['scheduled_at'], $payload['allow_hidden_plan'], $payload['internal']);
-
-        // Seats that were auto-derived at schedule time must be re-derived against live
-        // state, not replayed as an explicit count — see schedule().
-        if (($payload['seats_auto_derived'] ?? false) === true) {
-            unset($payload['seats']);
+        // Not yet: the renewal that opens the new period has not been booked.
+        if ($this->waitsForItsRenewal($billable, (array) $scheduledChange)) {
+            return;
         }
-        unset($payload['seats_auto_derived']);
 
-        // Trusted re-entry: the override was approved when the change was scheduled,
-        // so it is re-applied through the typed API here, and so is the `internal`
-        // marker. `from()` ignores both array keys on purpose — see
-        // SubscriptionUpdateRequest::from().
-        $dto = SubscriptionUpdateRequest::from($payload)->asInternalReentry();
-        if ($allowHiddenPlan) {
-            $dto = $dto->withAllowHiddenPlan();
-        }
+        $dto = $this->replayRequest((array) $scheduledChange);
 
         try {
             app(UpdateSubscription::class)->update($billable, $dto);
 
             // Clear scheduled change on success.
-            if ($billable instanceof Model) {
-                $billable->refresh();
-                $meta = $billable->getBillingSubscriptionMeta();
-                unset($meta['scheduled_change']);
-                $billable->forceFill([
-                    'subscription_meta' => $meta,
-                    'scheduled_change_at' => null,
-                ])->save();
-            }
+            $this->clearAppliedChange($billable);
         } catch (\Throwable $e) {
             event(new SubscriptionChangeApplyFailed($billable, (array) $scheduledChange, $e));
 
@@ -301,6 +704,55 @@ class ScheduleSubscriptionChange
 
             throw $e;
         }
+    }
+
+    /**
+     * Whether a due change has to wait for the renewal of the period it was scheduled for.
+     *
+     * The dispatcher runs once `scheduled_change_at <= now`, which for a SEPA customer is
+     * days before the renewal settles: the period has lapsed, so the change is applied with
+     * a prorata factor of 0 — nothing charged, nothing credited — and the renewal Mollie
+     * created *before* it heard about the change then settles at the OLD amount for a
+     * period spent on the NEW configuration. For a change Mollie was told about when it
+     * was scheduled (`mollie_prepatched`) that is fine: the renewal already carries the
+     * new amount. For every other change it is not:
+     *
+     * - an upgrade whose announcement failed was simply free for a period;
+     * - an interval change charged the new interval in full while the old interval's
+     *   renewal was still on its way, and had to be untangled afterwards;
+     * - a downgrade relied on the refund net to get its difference back.
+     *
+     * So such a change waits until the renewal is in — `applyAtRenewal()` applies a
+     * free-plan target with it, and everything else is applied on the next dispatcher run
+     * as an ordinary change in a period that has been paid for, with an ordinary prorata.
+     *
+     * Bounded: if no renewal arrives within WAIT_FOR_RENEWAL_DAYS the change is applied
+     * anyway, as before. A PastDue subscription does not wait at all — its renewal failed,
+     * and the past-due reset is the path for it. "Apply now" mid-period is not affected:
+     * the boundary has not been reached.
+     *
+     * @param  array<string, mixed>  $change
+     */
+    private function waitsForItsRenewal(Billable $billable, array $change): bool
+    {
+        if (($change['mollie_prepatched'] ?? false) === true || ! $this->billsThroughMollie($billable)) {
+            return false;
+        }
+
+        if (! in_array($billable->getBillingSubscriptionStatus(), [SubscriptionStatus::Active, SubscriptionStatus::Trial], true)) {
+            return false;
+        }
+
+        $boundary = $this->periodEndFor($billable);
+        $now = BillingTime::nowUtc();
+
+        // The boundary lies ahead (applied early, on request) — or the renewal has been
+        // booked and the anchor moved on: either way there is nothing to wait for.
+        if ($boundary->greaterThan($now)) {
+            return false;
+        }
+
+        return $now->lessThan($boundary->copy()->addDays(self::WAIT_FOR_RENEWAL_DAYS));
     }
 
     /**

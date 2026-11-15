@@ -247,3 +247,31 @@ it('carries a rollover type over the conversion instead of resetting it', functi
     expect((int) $billable->getWallet('Tokens')->refresh()->balanceInt)->toBe(30);
     expect((int) $billable->getWallet('SMS')->refresh()->balanceInt)->toBe(25);
 });
+
+it('bills trial overage at the old plan\'s price when a plan change converts the trial', function (): void {
+    // 60 Tokens used against a trial grant of 10: 50 units of overage on Pro, at 12 ct.
+    // The conversion moves the billable to Enterprise (10 ct) in the same breath, and the
+    // debt used to be carried into the new period uncharged — paid out of Enterprise's
+    // quota, or, for whatever exceeded it, billed later at Enterprise's price.
+    \Mollie\Laravel\Facades\Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+    \Mollie\Laravel\Facades\Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 'tr_trial_debt', 'status' => 'open']);
+
+    $billable = trialConversionBillable(['new_plan' => 'enterprise']);
+    $billable->forceFill(['allows_billing_overage' => true])->save();
+
+    app(WalletUsageService::class)->debit($billable->refresh(), 'Tokens', 60);
+    expect((int) $billable->getWallet('Tokens')->refresh()->balanceInt)->toBe(-50);
+
+    payTrialConversion($billable);
+
+    $snapshot = (array) ($billable->getBillingSubscriptionMeta()['usage_overage'] ?? []);
+    $line = collect((array) ($snapshot['line_items'] ?? []))->firstWhere('type', 'Tokens');
+
+    expect($billable->subscription_plan_code)->toBe('enterprise')
+        ->and((int) ($line['quantity'] ?? 0))->toBe(50)
+        ->and((int) ($line['unit_price_net'] ?? 0))->toBe(12)
+        ->and((int) ($snapshot['amount_net'] ?? 0))->toBe(600);
+
+    // Carried until that payment settles: Enterprise's 100 minus the 50 owed.
+    expect((int) $billable->getWallet('Tokens')->refresh()->balanceInt)->toBe(50);
+});

@@ -138,6 +138,18 @@ class WalletPlanChangeAdjuster
             // permanently for a rollover type.
             $pendingOverage = $this->pendingOverageQuantityFor($billable, $slug);
 
+            // Plan-change excess from an EARLIER change that is still waiting to be charged
+            // (see `restoreUnchargedExcess()`). It is debt with a recorded price, not
+            // consumption on the plan being left now — read as that, a second plan change
+            // would prorate it against the wrong quota and re-price whatever was left at
+            // yet another plan's rate. Carried exactly like the in-flight units above.
+            // What a pending charge already lists is counted there, not twice.
+            $pendingOverage += max(
+                0,
+                WalletUsageService::deferredOverageQuantity($wallet)
+                    - $this->pendingOverageQuantityFor($billable, $slug, deferredOnly: true),
+            );
+
             // Not gated on the old plan including any of this type. A usage type may be
             // priced without an included quota at all — every unit is billed and the wallet
             // only ever goes negative — and that shape computed no excess, so the rebalance
@@ -207,6 +219,10 @@ class WalletPlanChangeAdjuster
 
             // purchased_balance must not exceed the actual wallet balance.
             WalletUsageService::setPurchasedBalance($wallet, min($purchasedRemaining, max(0, $finalBalance)));
+
+            // The carried debt may have been netted against the new quota; the price record
+            // follows the balance.
+            WalletUsageService::syncDeferredOverage($wallet);
         }
 
         // Create wallets for usage types that are new in the target plan.
@@ -362,6 +378,11 @@ class WalletPlanChangeAdjuster
                 'reason' => 'plan_change_excess_uncharged',
             ]);
 
+            // With the price they were quoted at. The wallet only holds units, and the next
+            // sweep prices a bare negative balance from the plan the billable is on *then*
+            // — the new one. These were consumed on the old one.
+            WalletUsageService::addDeferredOverage($wallet, $quantity, (int) ($line['unit_price_net'] ?? 0));
+
             $restored[$type] = $quantity;
         }
 
@@ -393,7 +414,7 @@ class WalletPlanChangeAdjuster
      * plan-change line carries `settles_wallet: false` because its units were already
      * cleared off the balance, so it must not be subtracted a second time here.
      */
-    private function pendingOverageQuantityFor(Billable $billable, string $usageType): int
+    private function pendingOverageQuantityFor(Billable $billable, string $usageType, bool $deferredOnly = false): int
     {
         $meta = $billable->getBillingSubscriptionMeta();
 
@@ -407,6 +428,10 @@ class WalletPlanChangeAdjuster
 
         foreach ($lines as $line) {
             if (! is_array($line) || ($line['settles_wallet'] ?? true) === false) {
+                continue;
+            }
+
+            if ($deferredOnly && ($line['deferred_price'] ?? false) !== true) {
                 continue;
             }
 

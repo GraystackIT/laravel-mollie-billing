@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Jobs\RetrySubscriptionCancelJob;
 use GraystackIT\MollieBilling\MollieBilling;
@@ -93,7 +94,14 @@ class MollieSubscriptionPatcher
         $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
 
         if (is_array($marker)) {
-            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $targetNet);
+            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $targetNet, [
+                // The configuration being moved TO: a plan waiver's ceiling follows the
+                // plan line, and the billable may still carry the old plan here.
+                'plan_code' => $intent->newPlan,
+                'interval' => $intent->newInterval,
+                'addon_codes' => $newAddons,
+                'seats' => $totalSeats,
+            ]);
         }
 
         $this->updateRecurringAmount(
@@ -117,20 +125,207 @@ class MollieSubscriptionPatcher
      * back to one period from now if the marker has no valid_until (shouldn't
      * happen — the validator enforces a lifetime gate — but defensive).
      */
-    private function fullCoverageStartDate(Billable $billable, string $interval): Date
+    private function fullCoverageStartDate(Billable $billable, string $interval): Carbon
     {
         $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
         $validUntil = is_array($marker) && isset($marker['valid_until']) && $marker['valid_until'] !== null
             ? Carbon::parse((string) $marker['valid_until'])
             : null;
 
-        if ($validUntil !== null) {
-            return new Date($validUntil->copy()->addDay());
+        $coverageEnd = $validUntil !== null
+            ? $validUntil->copy()->setTimezone('UTC')->addDay()
+            : Carbon::instance(BillingTime::addInterval(BillingTime::nowUtc(), $interval))->setTimezone('UTC');
+
+        // A plan waiver resumes on a renewal, not on the day after it ends — see
+        // PlanWaiver::chargeResumesAt().
+        if (is_array($marker) && PlanWaiver::isWaiver($marker)) {
+            $regular = ChargeDeferral::undeferredNextChargeDate($billable)
+                ?? Carbon::instance(BillingTime::addInterval(BillingTime::nowUtc(), $interval));
+
+            $coverageEnd = PlanWaiver::chargeResumesAt($marker, $regular, $interval) ?? $coverageEnd;
         }
 
-        return new Date(
-            BillingTime::addInterval(BillingTime::nowUtc(), $interval)
-        );
+        // A deferral already stored later than the coupon's own end is a period
+        // extension granted on top of it. Re-deriving from the marker alone would take
+        // those days back on the next seat or addon PATCH.
+        $stored = $billable->getBillingSubscriptionMeta()[ChargeDeferral::META_KEY] ?? null;
+
+        if (is_string($stored) && $stored !== '') {
+            try {
+                return BillingTime::latest($coverageEnd, Carbon::parse($stored));
+            } catch (\Throwable) {
+                // an unreadable stored value falls back to the coupon's own end
+            }
+        }
+
+        return $coverageEnd;
+    }
+
+    /**
+     * Whether Mollie's start date is (or may be) sitting past a fully covering coupon.
+     *
+     * The stored deferral answers it for every subscription deferred since the value
+     * exists. For older ones the marker has to: a discount that covers the whole amount
+     * it was locked to is the only shape that ever deferred a charge. Checked against the
+     * marker's own base rather than the live configuration on purpose — by the time this
+     * runs the seat or addon that *ends* the full coverage may already be written, and
+     * reading the live amount would then answer "never deferred" for exactly the case
+     * this exists to catch.
+     */
+    private function chargeWasDeferred(Billable $billable): bool
+    {
+        if (ChargeDeferral::until($billable) !== null) {
+            return true;
+        }
+
+        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+        if (! is_array($marker) || empty($marker['valid_until'])) {
+            return false;
+        }
+
+        // A plan waiver is younger than the stored deferral: whenever one deferred a
+        // charge, the date was recorded. And unlike a coupon it usually does NOT cover
+        // the whole amount — it is put on a subscription that has paid extras — so the
+        // "covers its own base" reading below would call every waiver deferred and move
+        // a charge date that was never anywhere but on its regular cycle.
+        if (PlanWaiver::isWaiver($marker)) {
+            return false;
+        }
+
+        try {
+            if (! Carbon::parse((string) $marker['valid_until'])->isFuture()) {
+                return false;
+            }
+        } catch (\Throwable) {
+            return false;
+        }
+
+        // By the marker's own shape, not through `computeMarkerDiscount()`: that answers
+        // 0 for a coupon that has since been switched off, and a deferral whose coupon
+        // was deactivated is the one that most needs ending. A positive answer for a
+        // subscription that has in fact been returned to its regular date is harmless —
+        // the date then sent is the one the package believes anyway
+        // (`ChargeDeferral::undeferredNextChargeDate()`).
+        return self::markerCoveredItsBase($marker);
+    }
+
+    /**
+     * Whether the marker, as it was written, took off everything it was applied against
+     * — the only shape that ever deferred a charge.
+     *
+     * @param  array<string, mixed>  $marker
+     */
+    private static function markerCoveredItsBase(array $marker): bool
+    {
+        $type = (string) ($marker['discount_type'] ?? '');
+        $value = (int) ($marker['discount_value'] ?? 0);
+
+        if ($type === 'percentage') {
+            return $value >= 100;
+        }
+
+        $base = (int) ($marker['base_amount_net'] ?? 0);
+
+        return $type === 'fixed' && $base > 0 && $value >= $base;
+    }
+
+    /**
+     * End a deferral whose coupon has been switched off, and report whether there was one.
+     *
+     * Deactivating a recurring coupon ends its discount "on the next renewal" — that is
+     * the documented way to take one back, and for a partial discount the renewal
+     * webhook does it. A coupon that covers everything has no renewal: Mollie's start
+     * date sits behind the coupon's lifetime, nothing arrives, and the customer stayed
+     * free until the coupon's own end whatever the operator did. The nightly pass calls
+     * this instead.
+     *
+     * The period that is running stays as it is; the full price is charged from the next
+     * regular date. Only while the coupon's own lifetime is still running — once that has
+     * passed, whatever is left of the deferral is a period extension that was given on
+     * top, and those days stand.
+     */
+    public function endDeferralOfDeactivatedCoupon(Billable $billable): bool
+    {
+        if (! $billable instanceof Model
+            || $billable->getBillingSubscriptionSource() !== \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie->value
+        ) {
+            return false;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $marker = $meta['active_recurring_coupon'] ?? null;
+
+        if (! is_array($marker) || PlanWaiver::isWaiver($marker) || empty($marker['valid_until'])) {
+            return false;
+        }
+
+        try {
+            if (! Carbon::parse((string) $marker['valid_until'])->isFuture()) {
+                return false;
+            }
+        } catch (\Throwable) {
+            return false;
+        }
+
+        $couponId = (int) ($marker['coupon_id'] ?? 0);
+        $coupon = $couponId > 0 ? \GraystackIT\MollieBilling\Models\Coupon::query()->find($couponId) : null;
+
+        if ($coupon !== null && $coupon->active) {
+            return false;
+        }
+
+        if (ChargeDeferral::until($billable) === null && ! self::markerCoveredItsBase($marker)) {
+            return false;
+        }
+
+        // A reset that already failed is the retry chain's to finish.
+        $pending = $meta['pending_subscription_patch'] ?? null;
+
+        if (is_array($pending) && ($pending['reason'] ?? null) === 'recurring_coupon_expiry_reset') {
+            return true;
+        }
+
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
+
+        if ($planCode === '' || $interval === '') {
+            return false;
+        }
+
+        try {
+            $this->updateRecurringAmount(
+                billable: $billable,
+                planCode: $planCode,
+                interval: $interval,
+                addons: $billable->getActiveBillingAddonCodes(),
+                extraSeats: $billable->getExtraBillingSeats(),
+                couponDiscountNet: 0,
+            );
+
+            app(CouponService::class)->clearActiveRecurringCouponMarker($billable);
+        } catch (\Throwable $e) {
+            Log::warning('Could not end the deferral of a deactivated coupon — queued for retry', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+
+            // The same reset the renewal handler queues when a coupon expires: full
+            // price, marker cleared. The marker is still on the row when the retry
+            // runs, so it sees the deferral and returns the charge to its regular date.
+            $this->mutateBillingMeta($billable, function (array $meta) use ($couponId, $e): array {
+                $meta['pending_subscription_patch'] = [
+                    'reason' => 'recurring_coupon_expiry_reset',
+                    'coupon_id' => $couponId,
+                    'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                    'last_error' => $e->getMessage(),
+                ];
+
+                return $meta;
+            });
+        }
+
+        return true;
     }
 
     /**
@@ -230,12 +425,19 @@ class MollieSubscriptionPatcher
         //     (interval-change: else Mollie keeps old cadence with new amount;
         //      past-due-reset: else Mollie immediately retries the failed charge
         //      at the new price right after PATCH).
-        //  3. amount-only change → leave cadence untouched (null)
-        $startDate = match (true) {
+        //  3. the charge WAS deferred and this amount is no longer fully covered →
+        //     back to the regular cycle. Mollie keeps a start date it is not sent, so
+        //     without this the deferred date stayed and whatever the customer had just
+        //     added was free until the coupon ended.
+        //  4. amount-only change → leave cadence untouched (null)
+        $wasDeferred = $this->chargeWasDeferred($billable);
+
+        $startAt = match (true) {
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
-            $intervalChanged || $forceResetStartDate => new Date(
+            $intervalChanged || $forceResetStartDate => Carbon::instance(
                 BillingTime::addInterval(BillingTime::nowUtc(), $interval)
             ),
+            $wasDeferred => ChargeDeferral::undeferredNextChargeDate($billable),
             default => null,
         };
 
@@ -245,9 +447,31 @@ class MollieSubscriptionPatcher
             amount: new Money($currency, $value),
             description: "{$planCode} subscription",
             interval: $mollieInterval,
-            startDate: $startDate,
+            startDate: $startAt !== null ? new Date($startAt) : null,
             metadata: $metadata,
         ));
+
+        // Recorded only once Mollie has taken it: the stored deferral is a statement
+        // about what Mollie holds. Nothing to write when neither side of it moved.
+        if ($isFullCoverage || $wasDeferred) {
+            $deferredUntil = $isFullCoverage ? $startAt?->toIso8601String() : null;
+
+            $this->mutateBillingMeta($billable, function (array $meta) use ($deferredUntil): ?array {
+                if ($deferredUntil === null) {
+                    if (! array_key_exists(ChargeDeferral::META_KEY, $meta)) {
+                        return null;
+                    }
+
+                    unset($meta[ChargeDeferral::META_KEY]);
+
+                    return $meta;
+                }
+
+                $meta[ChargeDeferral::META_KEY] = $deferredUntil;
+
+                return $meta;
+            });
+        }
     }
 
     /**
@@ -321,38 +545,59 @@ class MollieSubscriptionPatcher
      * absolute date can be re-sent as often as needed, which is what lets the failure
      * path leave a `pending_subscription_patch` marker for the hourly sweep.
      */
-    public function deferNextChargeDate(Billable $billable, \Carbon\CarbonInterface $target): void
-    {
+    public function deferNextChargeDate(
+        Billable $billable,
+        \Carbon\CarbonInterface $target,
+        bool $periodFollows = true,
+    ): void {
         if (! $billable instanceof Model) {
             return;
         }
 
         $utc = Carbon::instance($target)->setTimezone('UTC');
 
+        // Never earlier than a deferral already in force. A fully covering coupon holds
+        // the FULL price at Mollie and relies on the start date alone to keep it from
+        // being collected, so a target computed from the period end — which is what
+        // both callers have — would pull the charge forward into the coupon's lifetime.
+        $deferral = ChargeDeferral::until($billable);
+        $chargeAt = $deferral !== null ? BillingTime::latest($utc, $deferral) : $utc->copy();
+        $storeDeferral = $deferral !== null || ! $periodFollows;
+
         // Written inside the caller's transaction, so the date the customer is shown and
         // the redemption that bought it stand or fall together.
-        $this->mutateBillingMeta($billable, function (array $meta) use ($utc): array {
-            $meta['next_charge_date_override'] = $utc->toIso8601String();
+        //
+        // `$periodFollows` says whether the billing period itself is being lengthened
+        // (a trial extension, an extension of an ordinarily charged period) or only the
+        // charge is moving while the period keeps turning over underneath it.
+        $this->mutateBillingMeta($billable, function (array $meta) use ($utc, $chargeAt, $periodFollows, $storeDeferral): array {
+            if ($periodFollows) {
+                $meta['next_charge_date_override'] = $utc->toIso8601String();
+            }
+
+            if ($storeDeferral) {
+                $meta[ChargeDeferral::META_KEY] = $chargeAt->toIso8601String();
+            }
 
             return $meta;
         });
 
-        DB::afterCommit(function () use ($billable, $utc): void {
+        DB::afterCommit(function () use ($billable, $chargeAt): void {
             try {
-                $this->setNextChargeDate($billable, $utc);
+                $this->setNextChargeDate($billable, $chargeAt);
             } catch (\Throwable $e) {
                 Log::warning('Mollie next-charge-date PATCH failed — queued for retry', [
                     'billable' => $billable->getKey(),
-                    'target' => $utc->toIso8601String(),
+                    'target' => $chargeAt->toIso8601String(),
                     'error' => $e->getMessage(),
                 ]);
 
                 // Local state says the charge moved; Mollie still holds the old date and
                 // would collect early. SweepPendingRetriesJob picks this up hourly.
-                $this->mutateBillingMeta($billable, function (array $meta) use ($utc, $e): array {
+                $this->mutateBillingMeta($billable, function (array $meta) use ($chargeAt, $e): array {
                     $meta['pending_subscription_patch'] = [
                         'reason' => 'next_charge_date',
-                        'target' => $utc->toIso8601String(),
+                        'target' => $chargeAt->toIso8601String(),
                         'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
                         'last_error' => $e->getMessage(),
                     ];
@@ -430,6 +675,20 @@ class MollieSubscriptionPatcher
         ));
 
         $meta = $billable->getBillingSubscriptionMeta();
+
+        // A date that is the stored charge deferral moves the charge only. Writing it
+        // as the period override as well would stretch the billing period to the end
+        // of the coupon, and `nextBillingDate()` — quota recharge, prorata windows,
+        // the lapsed-period guard — would stand still for as long as the coupon runs.
+        $storedDeferral = $meta[ChargeDeferral::META_KEY] ?? null;
+        $isDeferralOnly = is_string($storedDeferral)
+            && $storedDeferral !== ''
+            && Carbon::parse($storedDeferral)->getTimestamp() === $newDate->getTimestamp();
+
+        if ($isDeferralOnly) {
+            return;
+        }
+
         $meta['next_charge_date_override'] = $newDate->toIso8601String();
         $billable->forceFill(['subscription_meta' => $meta])->save();
     }

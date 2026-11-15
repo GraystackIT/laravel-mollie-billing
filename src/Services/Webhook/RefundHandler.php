@@ -8,14 +8,34 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
+use GraystackIT\MollieBilling\Events\RefundReversed;
 use GraystackIT\MollieBilling\Exceptions\RefundInProgressException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminRefundFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
 
 class RefundHandler
 {
+    /**
+     * Refund statuses that mean the money did not reach the customer.
+     *
+     * `queued`, `pending`, `processing` and `refunded` are all booked: a refund is booked
+     * when it is created (RefundInvoiceService and the plan-change path do exactly that),
+     * and Mollie is not guaranteed to call again for every step in between. What makes
+     * that safe is the other half — a booked refund that ends up here is reversed.
+     */
+    private const NOT_PAID_OUT = ['failed', 'canceled'];
+
+    private const UNKNOWN = 'unknown';
+
+    private const BOOKED = 'booked';
+
+    private const REVERSED = 'reversed';
+
     public function __construct(
         protected readonly InvoiceService $salesInvoiceService,
     ) {
@@ -94,7 +114,27 @@ class RefundHandler
                 continue;
             }
 
-            if ($this->refundIdAlreadyPersisted($original->billable_type, $original->billable_id, $refundId)) {
+            $status = strtolower((string) ($refund->status ?? ''));
+            $booking = $this->bookingState($original->billable_type, $original->billable_id, $refundId);
+
+            // A refund that did not pay out is not a refund. Every entry Mollie lists used
+            // to be booked whatever its status, so a refund the bank bounced (`failed`) or
+            // one withdrawn while still queued (`canceled`) got a credit note for money
+            // that never left: 5.00 returned and 5.95 failed booked 10.95 of credit,
+            // revenue and VAT under-declared, and `refunded_net` then refused the retry of
+            // the very refund that had failed.
+            if (in_array($status, self::NOT_PAID_OUT, true)) {
+                // Booked earlier, while it was still on its way — by this handler, by
+                // RefundInvoiceService or by a plan change, all of which book at creation.
+                // The money is back, so the credit comes out of the books again.
+                if ($booking === self::BOOKED) {
+                    $this->reverse($refundId, $status, $original, $billable);
+                }
+
+                continue;
+            }
+
+            if ($booking !== self::UNKNOWN) {
                 continue;
             }
 
@@ -160,24 +200,143 @@ class RefundHandler
     }
 
     /**
+     * Undo the credit note of a refund Mollie now reports as not paid out.
+     */
+    private function reverse(string $refundId, string $status, BillingInvoice $original, Billable $billable): void
+    {
+        $reason = sprintf(
+            'Reversal: Mollie reports refund %s as %s — the amount was not paid out',
+            $refundId,
+            $status,
+        );
+
+        $reversal = $this->salesInvoiceService->reverseBookedCredit($billable, 'mollie_refund_id', $refundId, $reason, $original);
+
+        if ($reversal === null) {
+            return;
+        }
+
+        $reversal->refund_reason_code = RefundReasonCode::Other;
+        $reversal->save();
+
+        Log::warning('A booked refund did not pay out — its credit note was reversed', [
+            'invoice_id' => $original->id,
+            'reversal_id' => $reversal->id,
+            'mollie_refund_id' => $refundId,
+            'status' => $status,
+        ]);
+
+        event(new RefundReversed($billable, $reversal, $refundId, $status));
+
+        // Somebody has to act on this: the customer was told about a refund that never
+        // arrived, and any wallet units handed back with it are still in the wallet.
+        $admins = MollieBilling::notifyAdmin();
+
+        if (! empty($admins)) {
+            Notification::send($admins, MollieBilling::resolveNotification(
+                AdminRefundFailedNotification::class,
+                $billable,
+                new \RuntimeException($reason),
+                $original,
+            ));
+        }
+    }
+
+    /**
+     * Whether any booked refund of this payment is still standing — booked and not
+     * reversed.
+     *
+     * The controller asks before deciding there is nothing to sync: once a refund fails,
+     * Mollie's `amountRefunded` drops back (to zero, if it was the only one), and "no
+     * refunds on the payment" was exactly the delivery that has to undo a booking.
+     */
+    public function hasStandingRefundBookings(object $payment): bool
+    {
+        $paymentId = (string) ($payment->id ?? '');
+
+        if ($paymentId === '') {
+            return false;
+        }
+
+        $original = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first();
+
+        if ($original === null) {
+            return false;
+        }
+
+        // Its own lines, and those of documents settled out of its payment (the
+        // plan-switch invoice refunds through its root).
+        $invoiceIds = BillingInvoice::query()
+            ->where('settled_by_invoice_id', $original->getKey())
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->push((int) $original->getKey())
+            ->all();
+
+        $state = [];
+
+        foreach ($this->creditNotes($original->billable_type, $original->billable_id) as $note) {
+            foreach ((array) ($note->line_items ?? []) as $line) {
+                $refundId = $line['mollie_refund_id'] ?? null;
+
+                if (! is_string($refundId) || $refundId === ''
+                    // A credit note written from custom line items names no parent; it
+                    // counts, since asking Mollie once too often costs nothing.
+                    || ! in_array((int) ($line['parent_invoice_id'] ?? 0), [0, ...$invoiceIds], true)
+                ) {
+                    continue;
+                }
+
+                $state[$refundId] = ($state[$refundId] ?? false) || BillingInvoice::creditSign($line) === -1;
+            }
+        }
+
+        return in_array(false, $state, true);
+    }
+
+    /**
      * Idempotency check: does a refund invoice exist for this billable that carries
      * this mollie_refund_id in any of its line_items?
      */
     public function refundIdAlreadyPersisted(string $billableType, mixed $billableId, string $refundId): bool
     {
-        $refunds = BillingInvoice::query()
+        return $this->bookingState($billableType, $billableId, $refundId) !== self::UNKNOWN;
+    }
+
+    /**
+     * What the books know about a Mollie refund: nothing, a credit note, or a credit note
+     * that has since been reversed.
+     */
+    private function bookingState(string $billableType, mixed $billableId, string $refundId): string
+    {
+        $state = self::UNKNOWN;
+
+        foreach ($this->creditNotes($billableType, $billableId) as $note) {
+            foreach ((array) ($note->line_items ?? []) as $line) {
+                if (($line['mollie_refund_id'] ?? null) !== $refundId) {
+                    continue;
+                }
+
+                if (BillingInvoice::creditSign($line) === -1) {
+                    return self::REVERSED;
+                }
+
+                $state = self::BOOKED;
+            }
+        }
+
+        return $state;
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, BillingInvoice>
+     */
+    private function creditNotes(string $billableType, mixed $billableId): \Illuminate\Support\Collection
+    {
+        return BillingInvoice::query()
             ->where('billable_type', $billableType)
             ->where('billable_id', $billableId)
             ->where('invoice_kind', InvoiceKind::Refund)
             ->get(['line_items']);
-
-        foreach ($refunds as $refund) {
-            foreach ((array) ($refund->line_items ?? []) as $line) {
-                if (($line['mollie_refund_id'] ?? null) === $refundId) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 }

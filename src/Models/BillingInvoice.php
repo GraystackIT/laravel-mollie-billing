@@ -283,11 +283,29 @@ class BillingInvoice extends Model
                 if ((int) ($line['parent_invoice_id'] ?? 0) !== (int) $this->getKey()) {
                     continue;
                 }
-                $sum += (int) abs((int) ($line['amount_net'] ?? 0));
+                $sum += self::creditSign($line) * (int) abs((int) ($line['amount_net'] ?? 0));
             }
         }
 
-        return $sum;
+        return max(0, $sum);
+    }
+
+    /**
+     * +1 for a credit line, −1 for a line that takes a credit back out of the books.
+     *
+     * A refund Mollie later reports as `failed` or `canceled` never reached the customer,
+     * so its credit note is undone by a reversal document
+     * ({@see \GraystackIT\MollieBilling\Services\Billing\InvoiceService::reverseBookedCredit()}).
+     * That document is a Refund-kind child too and points at the same original line —
+     * which every reader here would have added on top, since they sum magnitudes. The
+     * flag is what tells a reversal from a credit; the amount's own sign cannot, because
+     * the readers have always been tolerant of either spelling.
+     *
+     * @param  array<string, mixed>  $line
+     */
+    public static function creditSign(array $line): int
+    {
+        return ($line['reverses_credit'] ?? false) === true ? -1 : 1;
     }
 
     /**
@@ -321,9 +339,13 @@ class BillingInvoice extends Model
 
                 $index = (int) $line['parent_line_item_index'];
                 $credited[$index] ??= ['net' => 0, 'vat' => 0];
-                $credited[$index]['net'] += abs((int) ($line['amount_net'] ?? 0));
-                $credited[$index]['vat'] += abs((int) ($line['vat_amount'] ?? 0));
+                $credited[$index]['net'] += self::creditSign($line) * abs((int) ($line['amount_net'] ?? 0));
+                $credited[$index]['vat'] += self::creditSign($line) * abs((int) ($line['vat_amount'] ?? 0));
             }
+        }
+
+        foreach ($credited as $index => $totals) {
+            $credited[$index] = ['net' => max(0, $totals['net']), 'vat' => max(0, $totals['vat'])];
         }
 
         return $credited;
@@ -349,11 +371,11 @@ class BillingInvoice extends Model
                     continue;
                 }
 
-                $credited += abs((int) ($line['vat_amount'] ?? 0));
+                $credited += self::creditSign($line) * abs((int) ($line['vat_amount'] ?? 0));
             }
         }
 
-        return $credited;
+        return max(0, $credited);
     }
 
     public function hasPdf(): bool
@@ -512,10 +534,13 @@ class BillingInvoice extends Model
                 if ($pid === null || $pidx === null) {
                     continue;
                 }
-                if (! in_array(($rline['kind'] ?? null), ['plan', 'seats', 'seat', 'addon'], true)) {
+                if (! in_array(($rline['kind'] ?? null), ['plan', 'seats', 'seat', 'addon', 'addon_seats'], true)) {
                     continue;
                 }
-                $alreadyRefunded[$pid][$pidx] = ($alreadyRefunded[$pid][$pidx] ?? 0) + (int) ($rline['quantity'] ?? 0);
+                // A reversed refund gives its units back: the money never left, so the
+                // quantity it had consumed is refundable again.
+                $alreadyRefunded[$pid][$pidx] = ($alreadyRefunded[$pid][$pidx] ?? 0)
+                    + self::creditSign($rline) * (int) ($rline['quantity'] ?? 0);
             }
         }
 

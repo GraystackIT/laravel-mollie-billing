@@ -81,6 +81,8 @@ return [
         'SMS' => ['rollover' => false],
     ],
 
+    // `'visible' => false` keeps a feature off the plan and addon cards a customer reads,
+    // while it still unlocks like any other — for technical feature codes.
     'features' => [
         'dashboard' => [
             'name' => 'Dashboard',

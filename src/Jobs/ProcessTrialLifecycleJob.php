@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Notifications\TrialEndingSoonNotification;
 use GraystackIT\MollieBilling\Notifications\TrialExpiredNotification;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -41,9 +42,11 @@ use Throwable;
  *   B. Expire billables whose trial_ends_at lies in the past while status is still
  *      Trial *and* that never captured a mandate — no payment method means no charge
  *      is coming. Flip them to PastDue and notify; RequireActiveSubscription routes
- *      them to checkout. Mandate holders are deliberately left alone: their first
- *      charge is scheduled for exactly trial_ends_at, and the webhook owns both of
- *      its outcomes (paid → Active, failed → PastDue). See trialGenuinelyLapsed().
+ *      them to checkout. Mandate holders are left alone for FIRST_CHARGE_GRACE_DAYS:
+ *      their first charge is scheduled for exactly trial_ends_at, and the webhook owns
+ *      both of its outcomes (paid → Active, failed → PastDue). Past that window with
+ *      neither outcome recorded no charge is coming either, and they take the same
+ *      transition. See trialGenuinelyLapsed().
  *
  * Trial-lifecycle is intentionally separate from PrepareUsageOverageJob — different
  * concerns, easier to reason about, easier to test, easier to disable independently.
@@ -58,6 +61,17 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
     use UsesBillingQueue;
 
     public int $uniqueFor = 3600;
+
+    /**
+     * How long a mandate-holding trial may sit past `trial_ends_at` with no word from
+     * Mollie before it is treated as a charge that is not coming.
+     *
+     * The same figure as the stuck country correction and the stuck overage charge
+     * (`HARD_LIMIT_DAYS` on both sweepers), for the same reason: it has to outlast a
+     * SEPA Direct Debit that is merely still travelling, and nothing is lost by waiting
+     * that long — but waiting forever is a paid plan nobody pays for.
+     */
+    public const FIRST_CHARGE_GRACE_DAYS = 14;
 
     /**
      * Pass A sends mail, so a retry is not free the way the sweeps' re-dispatches
@@ -204,7 +218,8 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
      * TrialExpiredNotification's wording ("no payment method was added in time")
      * is true for, and the only case that warrants revoking access here.
      *
-     * A mandate holder is NOT expired by this pass. CreateSubscription schedules
+     * A mandate holder is NOT expired by this pass until FIRST_CHARGE_GRACE_DAYS have
+     * gone by without either outcome of the first charge. CreateSubscription schedules
      * Mollie's first charge for the same date as `trial_ends_at`, so a signup
      * between 00:00 and this job's run time already has a past `trial_ends_at` on
      * charge day, and SEPA Direct Debit stays unsettled well beyond the next run.
@@ -222,6 +237,55 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
         // Defensive: a recorded charge failure while still on Trial means the
         // webhook path did not (or could not) do the transition itself.
         if (! empty($billable->getBillingSubscriptionMeta()['payment_failure'] ?? null)) {
+            return true;
+        }
+
+        // The upper bound on "the webhook owns both outcomes". It only owns them if it
+        // arrives. Mollie calls it for payments and for nothing else, so a subscription
+        // that was cancelled or suspended at Mollie, or bound to a mandate that has since
+        // been revoked, produces no payment and therefore no delivery — and a `failed`
+        // delivery lost past Mollie's retry window is gone for good. `Trial` grants access
+        // unconditionally (hasAccessibleBillingSubscription()) and no other pass looks at
+        // the row again, so without a limit that was a paid plan for free, indefinitely.
+        //
+        // A payment that does arrive after this is still honoured: the renewal handler
+        // accepts PastDue and activates.
+        $trialEndsAt = $billable->getBillingTrialEndsAt();
+
+        // The first charge is not always due at the trial's end. A trial started with a
+        // fully covering recurring coupon (or given free plan periods) has it deferred
+        // to the later of trial end and the end of that discount — `CreateSubscription`
+        // and `Support\ChargeDeferral`. Measured from the trial end, a customer promised
+        // "14 days trial, then three months free" was declared past due on day 29,
+        // months before anything was owed. The grace window starts at the date the
+        // charge is really scheduled for.
+        if (ChargeDeferral::until($billable) !== null) {
+            return false;
+        }
+
+        $storedDeferral = $billable->getBillingSubscriptionMeta()[ChargeDeferral::META_KEY] ?? null;
+
+        if ($trialEndsAt !== null && is_string($storedDeferral) && $storedDeferral !== '') {
+            try {
+                $deferredTo = \Carbon\Carbon::parse($storedDeferral)->setTimezone('UTC');
+
+                if ($deferredTo->greaterThan($trialEndsAt)) {
+                    $trialEndsAt = $deferredTo;
+                }
+            } catch (Throwable) {
+                // an unreadable value leaves the trial end as the yardstick
+            }
+        }
+
+        if ($trialEndsAt !== null
+            && $trialEndsAt->lt(BillingTime::nowUtc()->subDays(self::FIRST_CHARGE_GRACE_DAYS))
+        ) {
+            Log::warning('ProcessTrialLifecycleJob: no first charge arrived within the grace window — expiring the trial', [
+                'billable_id' => $billable->getKey(),
+                'trial_ends_at' => $trialEndsAt->toIso8601String(),
+                'grace_days' => self::FIRST_CHARGE_GRACE_DAYS,
+            ]);
+
             return true;
         }
 

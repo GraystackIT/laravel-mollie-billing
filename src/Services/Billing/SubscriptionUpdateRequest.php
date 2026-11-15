@@ -46,6 +46,7 @@ class SubscriptionUpdateRequest
         public readonly bool $allowHiddenPlan = false,
         ?array $couponCodes = null,
         ?bool $applyAtExplicit = null,
+        public readonly bool $atPeriodBoundary = false,
     ) {
         $this->applyAt = $applyAt ?? 'immediate';
         $this->applyAtExplicit = $applyAtExplicit ?? ($applyAt !== null);
@@ -118,6 +119,7 @@ class SubscriptionUpdateRequest
             allowHiddenPlan: $this->allowHiddenPlan,
             couponCodes: $this->couponCodes,
             applyAtExplicit: $this->applyAtExplicit,
+            atPeriodBoundary: $this->atPeriodBoundary,
         );
     }
 
@@ -144,6 +146,33 @@ class SubscriptionUpdateRequest
             allowHiddenPlan: $allow,
             couponCodes: $this->couponCodes,
             applyAtExplicit: $this->applyAtExplicit,
+            atPeriodBoundary: $this->atPeriodBoundary,
+        );
+    }
+
+    /**
+     * Trusted copy that is applied exactly at a period roll-over.
+     *
+     * Only `ScheduleSubscriptionChange::applyAtRenewal()` uses it: the renewal payment
+     * that is being booked right now pays for the whole new period at the new
+     * configuration, so there is no remainder of anything to prorate — no charge, no
+     * credit, and the wallets are left to the renewal's own period refill. Like
+     * `internal`, it cannot be produced from array data: it waives the prorata.
+     */
+    public function asPeriodBoundary(): self
+    {
+        return new self(
+            planCode: $this->planCode,
+            interval: $this->interval,
+            seats: $this->seats,
+            addons: $this->addons,
+            couponCode: $this->couponCode,
+            applyAt: $this->applyAt,
+            internal: true,
+            allowHiddenPlan: $this->allowHiddenPlan,
+            couponCodes: $this->couponCodes,
+            applyAtExplicit: $this->applyAtExplicit,
+            atPeriodBoundary: true,
         );
     }
 

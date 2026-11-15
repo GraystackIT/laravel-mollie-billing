@@ -63,6 +63,7 @@ return [
     'seat_unit' => 'Platz',
     'available_addons' => 'Add-ons',
     'addon_price' => '+:currency:price/:interval',
+    'addon_seat_price' => '+ :price / Sitz',
 
     // Step 3: addons + seats
     'addons_heading' => 'Add-ons',
@@ -117,6 +118,7 @@ return [
     'coupon_min_order' => 'Die Bestellung erreicht nicht den Mindestbetrag für diesen Gutschein.',
     'coupon_requires_billable' => 'Dieser Gutschein kann beim Checkout nicht angewendet werden.',
     'coupon_requires_trial' => 'Dieser Gutschein verlängert eine Testphase; der gewählte Plan bietet keine an.',
+    'coupon_not_with_trial' => 'Dieser Gutschein rabattiert eine erste Zahlung, der gewählte Plan beginnt aber mit einer kostenlosen Testphase – es gibt keine erste Zahlung, die rabattiert werden könnte. Der Code bleibt für einen Kauf ohne Testphase gültig.',
     'coupon_recurring_conflict' => 'Auf diesem Abonnement ist bereits ein anderer wiederkehrender Gutschein aktiv.',
     'coupon_requires_active_subscription' => 'Zum Einlösen dieses Gutscheins ist ein aktives Abonnement erforderlich.',
     'coupon_too_close_to_charge' => 'Die nächste Abrechnung steht zu kurz bevor, um diesen Gutschein noch sicher anzuwenden. Bitte versuchen Sie es nach der nächsten Abrechnung erneut.',

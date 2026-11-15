@@ -195,7 +195,7 @@ it('keeps a scheduled change the current seat usage blocks, and tells the operat
 
     $billable = unsoldBillable([
         'subscription_plan_code' => 'pro',
-        'subscription_meta' => ['mollie_subscription_id' => 'sub_unsold', 'seat_count' => 14],
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_unsold', 'seat_count' => 14, 'used_seats' => 14],
     ]);
 
     app(ScheduleSubscriptionChange::class)->schedule($billable, [
@@ -203,7 +203,7 @@ it('keeps a scheduled change the current seat usage blocks, and tells the operat
         'interval' => 'monthly',
     ]);
 
-    // starter includes 2 seats and sells none extra; the billable has 14. At period end
+    // starter includes 2 seats and sells none extra; 14 members are assigned. At period end
     // the validator refuses. Re-thrown, that failed ApplyScheduledChangesJob — which
     // allows a single attempt — every night for as long as the customer kept the seats,
     // and nobody was told: the admin branch was an empty `if` with a "out of scope for

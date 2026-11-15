@@ -36,6 +36,7 @@ use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
@@ -1980,6 +1981,167 @@ class InvoiceService
         return $capped;
     }
 
+    /**
+     * Take the per-invoice refund lock, waiting briefly for a holder to finish.
+     *
+     * Waits rather than refusing outright, unlike RefundInvoiceService: that one answers an
+     * operator who can click again, this one runs inside a plan change whose charge has
+     * already settled. Returns null when the lock stays taken — the caller then queues the
+     * line for {@see \GraystackIT\MollieBilling\Jobs\RetryRefundLineJob}.
+     */
+    private function acquireRefundLock(int|string $invoiceId): ?\Illuminate\Contracts\Cache\Lock
+    {
+        $lock = Cache::lock('billing:invoice-refund:'.$invoiceId, 120);
+
+        try {
+            $lock->block(3);
+        } catch (\Illuminate\Contracts\Cache\LockTimeoutException) {
+            return null;
+        }
+
+        return $lock;
+    }
+
+    /**
+     * Take a booked credit back out of the books, because the money never left.
+     *
+     * A refund is booked when it is created — that is the only moment the package is
+     * guaranteed to hear about it — but Mollie can still report it as `failed` (the bank
+     * bounced it) or `canceled` (withdrawn while queued) afterwards, and the funds return
+     * to the merchant. The credit note then stated a refund the customer never received:
+     * revenue and output VAT under-declared, and `refunded_net` refusing a second attempt
+     * at the very refund that had just failed.
+     *
+     * A credit note is a tax document and is not deleted. It is reversed by a document of
+     * its own that mirrors the affected lines with the sign flipped and `reverses_credit`
+     * set, which is what {@see BillingInvoice::creditSign()} reads to subtract instead of
+     * add. `refunded_net` on every invoice the lines pointed at drops by the same amount.
+     *
+     * Idempotent: lines carrying `$referenceKey = $referenceValue` are reversed once.
+     * `$fallbackParent` is the invoice whose `refunded_net` to restore for lines that name
+     * no `parent_invoice_id` of their own.
+     * Wallet units a refund handed back are NOT taken away again — they may have been
+     * consumed since; the caller alerts an operator instead.
+     *
+     * @return BillingInvoice|null  the reversal document, or null when there was nothing
+     *                              (left) to reverse
+     */
+    public function reverseBookedCredit(
+        Billable $billable,
+        string $referenceKey,
+        string $referenceValue,
+        ?string $description = null,
+        ?BillingInvoice $fallbackParent = null,
+    ): ?BillingInvoice {
+        /** @var Model&Billable $billable */
+        $reversal = DB::transaction(function () use ($billable, $referenceKey, $referenceValue, $description, $fallbackParent): ?BillingInvoice {
+            $notes = BillingInvoice::query()
+                ->where('billable_type', $billable->getMorphClass())
+                ->where('billable_id', $billable->getKey())
+                ->where('invoice_kind', InvoiceKind::Refund)
+                ->orderBy('id')
+                ->get();
+
+            $source = null;
+            $lines = [];
+            $sumNet = 0;
+            $sumVat = 0;
+            $sumGross = 0;
+            $netPerParent = [];
+
+            foreach ($notes as $note) {
+                foreach ((array) ($note->line_items ?? []) as $line) {
+                    if (! is_array($line) || ($line[$referenceKey] ?? null) !== $referenceValue) {
+                        continue;
+                    }
+
+                    if (BillingInvoice::creditSign($line) === -1) {
+                        return null;
+                    }
+
+                    $source ??= $note;
+
+                    $mirrored = $line;
+                    unset($mirrored['wallet_credits'], $mirrored['refund_cap_note'], $mirrored['refund_token']);
+
+                    foreach (['unit_price', 'unit_price_net', 'total_net', 'amount_net', 'vat_amount', 'amount_gross'] as $field) {
+                        if (isset($mirrored[$field])) {
+                            $mirrored[$field] = abs((int) $mirrored[$field]);
+                        }
+                    }
+
+                    $mirrored['reverses_credit'] = true;
+                    $mirrored['reversed_credit_note_id'] = (int) $note->getKey();
+
+                    $net = (int) ($mirrored['amount_net'] ?? $mirrored['total_net'] ?? 0);
+                    $vat = (int) ($mirrored['vat_amount'] ?? 0);
+
+                    $sumNet += $net;
+                    $sumVat += $vat;
+                    $sumGross += (int) ($mirrored['amount_gross'] ?? ($net + $vat));
+
+                    // A credit note written from custom line items names no parent on its
+                    // lines; the caller knows which invoice it was booked against.
+                    $parentId = (int) ($line['parent_invoice_id'] ?? $fallbackParent?->getKey() ?? 0);
+                    if ($parentId > 0) {
+                        $netPerParent[$parentId] = ($netPerParent[$parentId] ?? 0) + $net;
+                    }
+
+                    $lines[] = $mirrored;
+                }
+            }
+
+            if ($source === null || $lines === []) {
+                return null;
+            }
+
+            // Snapshot BEFORE the reversal exists: afterwards `effectiveRefundedNet()`
+            // already derives the lower figure from it.
+            $parents = [];
+            foreach ($netPerParent as $parentId => $net) {
+                $parent = BillingInvoice::query()->whereKey($parentId)->lockForUpdate()->first();
+
+                if ($parent !== null) {
+                    $parents[] = [$parent, max(0, $parent->effectiveRefundedNet() - $net)];
+                }
+            }
+
+            $document = new BillingInvoice;
+            $document->billable_type = $source->billable_type;
+            $document->billable_id = $source->billable_id;
+            $document->mollie_payment_id = null;
+            $document->mollie_subscription_id = $source->mollie_subscription_id;
+            $document->invoice_kind = InvoiceKind::Refund;
+            // Not `Refunded`: nothing was. This document restores a charge.
+            $document->status = InvoiceStatus::Paid;
+            $document->country = $source->country;
+            $document->currency = self::normalizeCurrency($source->currency);
+            $document->amount_net = $sumNet;
+            $document->amount_vat = $sumVat;
+            $document->amount_gross = $sumGross;
+            $document->line_items = $lines;
+            $document->payment_method_details = $source->payment_method_details;
+            $document->refund_reason_text = $description;
+            $document->refunded_net = 0;
+            // Same tax event as the credit note it undoes.
+            $document->vat_validation_id = $source->vat_validation_id;
+            $this->persistWithSerial($document, 'refund');
+
+            foreach ($parents as [$parent, $refundedNet]) {
+                $parent->refunded_net = $refundedNet;
+                $parent->save();
+            }
+
+            return $document;
+        });
+
+        if ($reversal !== null) {
+            $this->generateAndStorePdf($reversal, $billable);
+        }
+
+        return $reversal;
+    }
+
     public function createRefund(
         Billable $billable,
         array $refundLines,
@@ -2006,246 +2168,296 @@ class InvoiceService
         // own stale `refunded_net` and clobber the previous iteration's increment.
         $refundedNetPerInvoice = [];
 
-        foreach ($effective as $line) {
-            $original = $line->originalInvoice;
-            // A settled invoice (the saldo-zero plan switch) holds no payment of its own —
-            // its charges were paid for out of the invoice it settles against, and that is
-            // where the refund has to be posted.
-            $refundPaymentId = $original?->refundablePaymentId();
+        // One refund per invoice at a time, under the lock RefundInvoiceService and the
+        // refund webhook already share — taken per line, for the invoice that holds the
+        // payment, and held until the credit note below is committed.
+        //
+        // This path posts its refunds line by line and writes the document that carries
+        // their `mollie_refund_id` only after the LAST call, while Mollie calls the payment
+        // webhook as soon as the first refund exists. RefundHandler found no id on record,
+        // booked the refund as "synced from Mollie dashboard", and the credit note written
+        // here then booked it a second time: `effectiveRefundedNet()` read 50.00 for 30.00
+        // returned, and the invoice refused every further refund. The reservation cannot
+        // help — that delivery is for the original payment, a different id from the one
+        // being processed. A cache lock rather than a transaction, because the Mollie calls
+        // sit inside it.
+        /** @var array<int|string, \Illuminate\Contracts\Cache\Lock|null> $refundLocks */
+        $refundLocks = [];
 
-            if ($original === null || $refundPaymentId === null) {
-                $failedLines[] = ['line' => $line->toArray(), 'error' => 'Missing original invoice or payment_id'];
-                continue;
-            }
+        try {
+            foreach ($effective as $line) {
+                $original = $line->originalInvoice;
+                // A settled invoice (the saldo-zero plan switch) holds no payment of its own —
+                // its charges were paid for out of the invoice it settles against, and that is
+                // where the refund has to be posted.
+                $refundPaymentId = $original?->refundablePaymentId();
 
-            // No (parent_invoice_id, idx, amount_net)-style idempotency check here:
-            // the same triple can legitimately recur when a user reduces seats,
-            // re-adds them, then reduces again — each event is a distinct refund.
-            // BillingInvoice::currentPeriodLines() already filters by remaining
-            // quantity, so the composer never produces a refund line that exceeds
-            // what's still on the original invoice.
+                if ($original === null || $refundPaymentId === null) {
+                    $failedLines[] = ['line' => $line->toArray(), 'error' => 'Missing original invoice or payment_id'];
+                    continue;
+                }
 
-            $absGross = abs($line->amountGross);
+                // Keyed on the invoice that holds the payment: that is the one the webhook
+                // resolves from the payment id, and a settled plan-switch document refunds
+                // out of its root's payment.
+                $lockInvoiceId = (self::settlementRoot($original) ?? $original)->getKey();
 
-            // Mollie only knows the original payment's gross charge — it has
-            // no concept of our local net/VAT split. The refund amount must
-            // therefore never exceed what Mollie actually collected, minus
-            // anything already refunded on that payment. If our local gross
-            // drifts above Mollie's charge (e.g. due to a VAT-classification
-            // change between original payment and refund), clamp and warn so
-            // the drift is investigable.
-            //
-            // Use the running per-invoice tracker so successive lines targeting
-            // the same original see refunds from earlier iterations in this loop
-            // — the in-memory $original may be a separate clone whose attributes
-            // are still stale after another iteration's save().
-            //
-            // The cap has two components:
-            //   1. amount_gross is the absolute upper bound (what Mollie collected).
-            //   2. The remaining refundable amount must be computed in net space
-            //      (refunded_net is a net counter, consistent with
-            //      remainingRefundableNet() and the CountryMatch /
-            //      CountryMismatchResolution services) and converted back to
-            //      gross via the original's per-line VAT before comparing to
-            //      Mollie — one line's rate applied to the whole rest would
-            //      misprice every mixed-VAT invoice.
-            $originalKey = $original->getKey();
-            $lineCurrency = self::normalizeCurrency($original->currency);
-            $batchCurrency ??= $lineCurrency;
+                if (! array_key_exists($lockInvoiceId, $refundLocks)) {
+                    $refundLocks[$lockInvoiceId] = $this->acquireRefundLock($lockInvoiceId);
+                }
 
-            if ($lineCurrency !== $batchCurrency) {
-                // One credit note can only carry one currency — flag it so the
-                // split is investigable instead of silently mis-booked.
-                Log::warning('Refund batch spans multiple currencies', [
-                    'billable' => $billable->getKey(),
-                    'original_invoice_id' => $originalKey,
-                    'batch_currency' => $batchCurrency,
-                    'line_currency' => $lineCurrency,
-                ]);
-            }
+                if ($refundLocks[$lockInvoiceId] === null) {
+                    // Somebody else is refunding this invoice right now — an admin refund,
+                    // or the webhook syncing a dashboard refund. Whatever this line
+                    // validated is about to be stale, so it goes to the retry queue, which
+                    // re-reads the remaining balance when its turn comes.
+                    $failedLines[] = ['line' => $line->toArray(), 'error' => 'Another refund of this invoice is in progress', 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
 
-            // effectiveRefundedNet(), not the raw column: a credit note whose
-            // `refunded_net` write was lost is still a refund that happened, and reading
-            // the column alone reported the full amount as still refundable.
-            //
-            // Measured against the value the invoice itself holds, not its header. They are
-            // the same number for every invoice that collected a payment — but a settled
-            // plan-switch invoice nets to zero by construction, so the header said there was
-            // nothing to refund while its charge line was real, unused service. See
-            // BillingInvoice::refundableBaseNet().
-            $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? $original->effectiveRefundedNet();
-            $restRefundableNet = max(0, $original->refundableBaseNet() - $alreadyRefundedNet);
-            $restRefundableGross = $restRefundableNet + ($restRefundableNet > 0 ? $this->creditNoteVat($original, $restRefundableNet) : 0);
+                    continue;
+                }
 
-            $restRefundable = min($original->refundableBaseGross(), $restRefundableGross);
-            $refundAmount = min($absGross, $restRefundable);
+                // No (parent_invoice_id, idx, amount_net)-style idempotency check here:
+                // the same triple can legitimately recur when a user reduces seats,
+                // re-adds them, then reduces again — each event is a distinct refund.
+                // BillingInvoice::currentPeriodLines() already filters by remaining
+                // quantity, so the composer never produces a refund line that exceeds
+                // what's still on the original invoice.
 
-            if ($refundAmount < $absGross) {
-                Log::warning('Refund amount clamped below local gross', [
-                    'billable' => $billable->getKey(),
-                    'original_invoice_id' => $original->getKey(),
-                    'mollie_payment_id' => $refundPaymentId,
-                    'local_gross' => $absGross,
-                    'rest_refundable' => $restRefundable,
-                    'refund_sent' => $refundAmount,
-                ]);
+                $absGross = abs($line->amountGross);
 
-                // The clamp used to affect the API call ONLY. The line was persisted
-                // unchanged and `refunded_net` incremented by the full net, so the credit
-                // note — a tax document — stated more than Mollie returned, `refunded_net`
-                // could exceed `amount_net`, and every later refund decision read an
-                // inflated base. The customer was short the difference with a log line as
-                // the only trace. Reached whenever something else refunded part of the same
-                // invoice between a plan change's Phase 1 and its Phase 2, which for SEPA
-                // is days apart.
+                // Mollie only knows the original payment's gross charge — it has
+                // no concept of our local net/VAT split. The refund amount must
+                // therefore never exceed what Mollie actually collected, minus
+                // anything already refunded on that payment. If our local gross
+                // drifts above Mollie's charge (e.g. due to a VAT-classification
+                // change between original payment and refund), clamp and warn so
+                // the drift is investigable.
                 //
-                // Rebuilt exactly as ProrataComposer caps a line: net from the clamped
-                // gross via the invoice's own line composition, VAT proportional to the
-                // line's own rate, and a `refundCapNote` so the reduction is visible
-                // rather than inferred.
-                $line = $this->cappedRefundLine($line, $original, $refundAmount, $absGross);
+                // Use the running per-invoice tracker so successive lines targeting
+                // the same original see refunds from earlier iterations in this loop
+                // — the in-memory $original may be a separate clone whose attributes
+                // are still stale after another iteration's save().
+                //
+                // The cap has two components:
+                //   1. amount_gross is the absolute upper bound (what Mollie collected).
+                //   2. The remaining refundable amount must be computed in net space
+                //      (refunded_net is a net counter, consistent with
+                //      remainingRefundableNet() and the CountryMatch /
+                //      CountryMismatchResolution services) and converted back to
+                //      gross via the original's per-line VAT before comparing to
+                //      Mollie — one line's rate applied to the whole rest would
+                //      misprice every mixed-VAT invoice.
+                $originalKey = $original->getKey();
+                $lineCurrency = self::normalizeCurrency($original->currency);
+                $batchCurrency ??= $lineCurrency;
+
+                if ($lineCurrency !== $batchCurrency) {
+                    // One credit note can only carry one currency — flag it so the
+                    // split is investigable instead of silently mis-booked.
+                    Log::warning('Refund batch spans multiple currencies', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $originalKey,
+                        'batch_currency' => $batchCurrency,
+                        'line_currency' => $lineCurrency,
+                    ]);
+                }
+
+                // effectiveRefundedNet(), not the raw column: a credit note whose
+                // `refunded_net` write was lost is still a refund that happened, and reading
+                // the column alone reported the full amount as still refundable.
+                //
+                // Measured against the value the invoice itself holds, not its header. They are
+                // the same number for every invoice that collected a payment — but a settled
+                // plan-switch invoice nets to zero by construction, so the header said there was
+                // nothing to refund while its charge line was real, unused service. See
+                // BillingInvoice::refundableBaseNet().
+                $alreadyRefundedNet = $refundedNetPerInvoice[$originalKey] ?? $original->effectiveRefundedNet();
+                $restRefundableNet = max(0, $original->refundableBaseNet() - $alreadyRefundedNet);
+                $restRefundableGross = $restRefundableNet + ($restRefundableNet > 0 ? $this->creditNoteVat($original, $restRefundableNet) : 0);
+
+                $restRefundable = min($original->refundableBaseGross(), $restRefundableGross);
+                $refundAmount = min($absGross, $restRefundable);
+
+                if ($refundAmount < $absGross) {
+                    Log::warning('Refund amount clamped below local gross', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $original->getKey(),
+                        'mollie_payment_id' => $refundPaymentId,
+                        'local_gross' => $absGross,
+                        'rest_refundable' => $restRefundable,
+                        'refund_sent' => $refundAmount,
+                    ]);
+
+                    // The clamp used to affect the API call ONLY. The line was persisted
+                    // unchanged and `refunded_net` incremented by the full net, so the credit
+                    // note — a tax document — stated more than Mollie returned, `refunded_net`
+                    // could exceed `amount_net`, and every later refund decision read an
+                    // inflated base. The customer was short the difference with a log line as
+                    // the only trace. Reached whenever something else refunded part of the same
+                    // invoice between a plan change's Phase 1 and its Phase 2, which for SEPA
+                    // is days apart.
+                    //
+                    // Rebuilt exactly as ProrataComposer caps a line: net from the clamped
+                    // gross via the invoice's own line composition, VAT proportional to the
+                    // line's own rate, and a `refundCapNote` so the reduction is visible
+                    // rather than inferred.
+                    $line = $this->cappedRefundLine($line, $original, $refundAmount, $absGross);
+                }
+
+                if ($refundAmount <= 0) {
+                    $failedLines[] = ['line' => $line->toArray(), 'error' => 'Nothing left to refund on the original payment', 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+                    continue;
+                }
+
+                // Without an explicit idempotency key, Mollie deduplicates refund requests
+                // against (payment_id, amount) — so two legitimate refunds for identical
+                // amounts on the same payment (e.g. seat reduce → re-add → reduce again) get
+                // rejected with 409 "duplicate refund". A token per refund line marks each
+                // call as a distinct operation so Mollie processes them all.
+                //
+                // The token is minted once and then carried by the line, rather than being
+                // fresh randomness per attempt: a refund whose HTTP response is lost has
+                // already been created at Mollie, and the retry that follows must replay it
+                // instead of paying the customer a second time.
+                $line->refundToken ??= bin2hex(random_bytes(4));
+
+                $idempotencyKey = sprintf(
+                    'refund:%s:%s:%s:%d:%d:%s',
+                    $billable->getMorphClass(),
+                    (string) $billable->getKey(),
+                    (string) $original->getKey(),
+                    (int) ($line->originalLineItemIndex ?? 0),
+                    (int) $refundAmount,
+                    $line->refundToken,
+                );
+
+                // Set here, cleared in the `finally` below.
+                //
+                // The SDK's `ResetIdempotencyKey` middleware only runs on a response, and
+                // `ConvertResponseToException` turns a 4xx into a throw before it gets there —
+                // so a refund Mollie rejects left its key on the shared client, and the next
+                // mutating request through that client (a payment, a PATCH) carried it. Mollie
+                // answers a reused key with the *previous* response, which is how a plan
+                // change's charge could come back as the rejected refund's error.
+                Mollie::setIdempotencyKey($idempotencyKey);
+
+                // The try covers the Mollie call and nothing else. It used to wrap the
+                // bookkeeping below as well, so a failing `save()` — a lock-wait timeout
+                // against a concurrent admin refund is enough — filed the line in
+                // `$persistedLines` *and* in `$failedLines`: the credit note was written and a
+                // retry marker queued for a refund Mollie had already paid out. The retry then
+                // read `refunded_net` (whose write had just failed) as the remaining headroom
+                // and paid the customer twice.
+                try {
+                    $refund = MollieCall::send(new CreatePaymentRefundRequest(
+                        paymentId: $refundPaymentId,
+                        description: $description ?? "Plan change refund: {$line->label}",
+                        amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
+                    ));
+                } catch (\Throwable $e) {
+                    $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+
+                    continue;
+                } finally {
+                    // Whatever happened. The SDK clears the key from a *response*, and a 4xx
+                    // is converted to a throw before that runs — leaving the key on the shared
+                    // client for the next mutating request to reuse.
+                    self::forgetIdempotencyKey();
+                }
+
+                $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
+                $persistedLines[] = $line;
+
+                // Keep `refunded_net` on the original in sync with what we just
+                // refunded at Mollie. Without this, a subsequent admin-initiated
+                // refund on the same invoice would compute remainingRefundableNet()
+                // against a stale base and either offer a refund that's already
+                // exhausted or accept an amount that gets rejected by Mollie.
+                //
+                // Drive the new value off the running tracker (not $original->refunded_net)
+                // because $original may be a stale clone whose in-memory attribute hasn't
+                // been refreshed after an earlier iteration saved a different clone of the
+                // same DB row.
+                $newRefundedNet = $alreadyRefundedNet + (int) abs($line->amountNet);
+                $refundedNetPerInvoice[$originalKey] = $newRefundedNet;
+
+                // Logged, never retried: the money has moved and the credit note carries the
+                // line, so `effectiveRefundedNet()` derives the amount from the credit note
+                // even when this cache write is lost. Queueing a retry here is what turned a
+                // lost write into a second payout.
+                try {
+                    $original->refunded_net = $newRefundedNet;
+                    $original->save();
+                } catch (\Throwable $e) {
+                    Log::error('Refund booked at Mollie but refunded_net could not be updated', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $originalKey,
+                        'mollie_refund_id' => $line->mollieRefundId,
+                        'refunded_net' => $newRefundedNet,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
             }
 
-            if ($refundAmount <= 0) {
-                $failedLines[] = ['line' => $line->toArray(), 'error' => 'Nothing left to refund on the original payment', 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
-                continue;
+            if (! empty($failedLines)) {
+                $this->appendPendingRefundRetries($billable, $failedLines);
             }
 
-            // Without an explicit idempotency key, Mollie deduplicates refund requests
-            // against (payment_id, amount) — so two legitimate refunds for identical
-            // amounts on the same payment (e.g. seat reduce → re-add → reduce again) get
-            // rejected with 409 "duplicate refund". A token per refund line marks each
-            // call as a distinct operation so Mollie processes them all.
-            //
-            // The token is minted once and then carried by the line, rather than being
-            // fresh randomness per attempt: a refund whose HTTP response is lost has
-            // already been created at Mollie, and the retry that follows must replay it
-            // instead of paying the customer a second time.
-            $line->refundToken ??= bin2hex(random_bytes(4));
-
-            $idempotencyKey = sprintf(
-                'refund:%s:%s:%s:%d:%d:%s',
-                $billable->getMorphClass(),
-                (string) $billable->getKey(),
-                (string) $original->getKey(),
-                (int) ($line->originalLineItemIndex ?? 0),
-                (int) $refundAmount,
-                $line->refundToken,
-            );
-
-            // Set here, cleared in the `finally` below.
-            //
-            // The SDK's `ResetIdempotencyKey` middleware only runs on a response, and
-            // `ConvertResponseToException` turns a 4xx into a throw before it gets there —
-            // so a refund Mollie rejects left its key on the shared client, and the next
-            // mutating request through that client (a payment, a PATCH) carried it. Mollie
-            // answers a reused key with the *previous* response, which is how a plan
-            // change's charge could come back as the rejected refund's error.
-            Mollie::setIdempotencyKey($idempotencyKey);
-
-            // The try covers the Mollie call and nothing else. It used to wrap the
-            // bookkeeping below as well, so a failing `save()` — a lock-wait timeout
-            // against a concurrent admin refund is enough — filed the line in
-            // `$persistedLines` *and* in `$failedLines`: the credit note was written and a
-            // retry marker queued for a refund Mollie had already paid out. The retry then
-            // read `refunded_net` (whose write had just failed) as the remaining headroom
-            // and paid the customer twice.
-            try {
-                $refund = MollieCall::send(new CreatePaymentRefundRequest(
-                    paymentId: $refundPaymentId,
-                    description: $description ?? "Plan change refund: {$line->label}",
-                    amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
-                ));
-            } catch (\Throwable $e) {
-                $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
-
-                continue;
-            } finally {
-                // Whatever happened. The SDK clears the key from a *response*, and a 4xx
-                // is converted to a throw before that runs — leaving the key on the shared
-                // client for the next mutating request to reuse.
-                self::forgetIdempotencyKey();
+            if (empty($persistedLines)) {
+                return null;
             }
 
-            $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
-            $persistedLines[] = $line;
+            // Persist the batch refund invoice.
+            $sumNet = 0;
+            $sumVat = 0;
+            $sumGross = 0;
+            $lineItemsForPersist = [];
+            $countryFromOriginal = null;
+            $currencyFromOriginal = null;
+            $firstOriginal = null;
 
-            // Keep `refunded_net` on the original in sync with what we just
-            // refunded at Mollie. Without this, a subsequent admin-initiated
-            // refund on the same invoice would compute remainingRefundableNet()
-            // against a stale base and either offer a refund that's already
-            // exhausted or accept an amount that gets rejected by Mollie.
-            //
-            // Drive the new value off the running tracker (not $original->refunded_net)
-            // because $original may be a stale clone whose in-memory attribute hasn't
-            // been refreshed after an earlier iteration saved a different clone of the
-            // same DB row.
-            $newRefundedNet = $alreadyRefundedNet + (int) abs($line->amountNet);
-            $refundedNetPerInvoice[$originalKey] = $newRefundedNet;
+            foreach ($persistedLines as $line) {
+                $sumNet += $line->amountNet;
+                $sumVat += $line->amountVat;
+                $sumGross += $line->amountGross;
+                $lineItemsForPersist[] = $line->toArray();
+                if ($line->originalInvoice !== null) {
+                    $firstOriginal ??= $line->originalInvoice;
+                    $countryFromOriginal ??= (string) $line->originalInvoice->country;
+                    $currencyFromOriginal ??= (string) $line->originalInvoice->currency;
+                }
+            }
 
-            // Logged, never retried: the money has moved and the credit note carries the
-            // line, so `effectiveRefundedNet()` derives the amount from the credit note
-            // even when this cache write is lost. Queueing a retry here is what turned a
-            // lost write into a second payout.
-            try {
-                $original->refunded_net = $newRefundedNet;
-                $original->save();
-            } catch (\Throwable $e) {
-                Log::error('Refund booked at Mollie but refunded_net could not be updated', [
-                    'billable' => $billable->getKey(),
-                    'original_invoice_id' => $originalKey,
-                    'mollie_refund_id' => $line->mollieRefundId,
-                    'refunded_net' => $newRefundedNet,
-                    'error' => $e->getMessage(),
-                ]);
+            $invoice = new BillingInvoice;
+            $invoice->billable_type = $billable->getMorphClass();
+            $invoice->billable_id = $billable->getKey();
+            $invoice->mollie_payment_id = null;
+            $invoice->mollie_subscription_id = null;
+            $invoice->invoice_kind = InvoiceKind::Refund;
+            $invoice->status = InvoiceStatus::Refunded;
+            $invoice->country = strtoupper($countryFromOriginal ?? (string) ($billable->getBillingCountry() ?? ''));
+            // Derived document: inherit the refunded invoice's currency, like country above.
+            $invoice->currency = self::normalizeCurrency($currencyFromOriginal);
+            $invoice->amount_net = $sumNet;
+            $invoice->amount_vat = $sumVat;
+            $invoice->amount_gross = $sumGross;
+            $invoice->line_items = $lineItemsForPersist;
+            $invoice->refund_reason_text = $description;
+            $invoice->refunded_net = 0;
+            // The original's validation, not today's — the same rule createCreditNote() states:
+            // a credit note corrects one specific tax event, it is not a fresh decision. This
+            // used to stamp `currentVatValidation()`, so a customer who bought as a consumer,
+            // registered a VAT number and then downgraded got a credit note for the VAT they
+            // had paid that pointed at a validation the sale never relied on.
+            $invoice->vat_validation_id = $firstOriginal !== null
+                ? $firstOriginal->vat_validation_id
+                : $billable->currentVatValidation()?->getKey();
+            $this->persistWithSerial($invoice, 'refund');
+        } finally {
+            foreach ($refundLocks as $refundLock) {
+                $refundLock?->release();
             }
         }
-
-        if (! empty($failedLines)) {
-            $this->appendPendingRefundRetries($billable, $failedLines);
-        }
-
-        if (empty($persistedLines)) {
-            return null;
-        }
-
-        // Persist the batch refund invoice.
-        $sumNet = 0;
-        $sumVat = 0;
-        $sumGross = 0;
-        $lineItemsForPersist = [];
-        $countryFromOriginal = null;
-        $currencyFromOriginal = null;
-
-        foreach ($persistedLines as $line) {
-            $sumNet += $line->amountNet;
-            $sumVat += $line->amountVat;
-            $sumGross += $line->amountGross;
-            $lineItemsForPersist[] = $line->toArray();
-            if ($line->originalInvoice !== null) {
-                $countryFromOriginal ??= (string) $line->originalInvoice->country;
-                $currencyFromOriginal ??= (string) $line->originalInvoice->currency;
-            }
-        }
-
-        $invoice = new BillingInvoice;
-        $invoice->billable_type = $billable->getMorphClass();
-        $invoice->billable_id = $billable->getKey();
-        $invoice->mollie_payment_id = null;
-        $invoice->mollie_subscription_id = null;
-        $invoice->invoice_kind = InvoiceKind::Refund;
-        $invoice->status = InvoiceStatus::Refunded;
-        $invoice->country = strtoupper($countryFromOriginal ?? (string) ($billable->getBillingCountry() ?? ''));
-        // Derived document: inherit the refunded invoice's currency, like country above.
-        $invoice->currency = self::normalizeCurrency($currencyFromOriginal);
-        $invoice->amount_net = $sumNet;
-        $invoice->amount_vat = $sumVat;
-        $invoice->amount_gross = $sumGross;
-        $invoice->line_items = $lineItemsForPersist;
-        $invoice->refund_reason_text = $description;
-        $invoice->refunded_net = 0;
-        $invoice->vat_validation_id = $billable->currentVatValidation()?->getKey();
-        $this->persistWithSerial($invoice, 'refund');
 
         $this->generateAndStorePdf($invoice, $billable);
         event(new CreditNoteIssued($billable, $invoice, null));

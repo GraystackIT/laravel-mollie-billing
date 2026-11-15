@@ -113,9 +113,27 @@ Two rules are worth calling out because they are easy to trip over:
 
 ### Seats
 
-- If `usedSeats > newIncludedSeats` and the new plan supports extra seats (`seat_price_net !== null`): seats are automatically increased to `max(usedSeats, newIncludedSeats)`.
-- If the new plan does NOT support extra seats: `SeatDowngradeRequiredException` is thrown.
-- When seats are explicitly provided by the caller, auto-derivation is skipped.
+**A plan change does not carry seats over.** Without an explicit `seats` it lands on
+`max(usedSeats, newIncludedSeats)` — the seats in use, or the seats the new plan includes
+(`BillingPolicy::derivedSeats()`). That holds for upgrades and downgrades, immediate and
+scheduled, and for the preview (`newSeats`, `extraSeatsCharged`).
+
+Carrying the old count across turned the old plan's *included* seats into paid extras on a plan
+that includes fewer: five seats that came with one plan became three paid seats on a plan that
+includes two. Paid extra seats nobody sits on are not carried either; what was paid for them is
+credited pro-rata like everything else.
+
+- **Keeping more** is an explicit choice: pass `seats`. It is validated as any explicit count
+  (not below the seats in use, not above the included seats on a plan that sells none, not above
+  `max_seats`). The plan-change screen shows "after the change: N seats" before the customer
+  confirms and offers "keep N extra seats" (`keepExtraSeats`, off by default) when the target plan
+  sells seats and the customer holds more than the change would leave them with.
+- **More seats in use than the new plan can seat** (a plan without `seat_price_net`):
+  `SeatDowngradeRequiredException`, as before — the members have to be released first. The
+  preview reports `seats_exceed_plan`.
+- **An interval change, a seat change, an addon change** leave the seat count where it is (never
+  below the seats in use or included).
+- A scheduled change stores the derived count for display and re-derives it when it is applied.
 
 ### Addons
 
@@ -153,6 +171,135 @@ A trial is free, and everything the current plan allows is part of what is being
 A **plan or interval change is the exception**: it ends the trial and is charged. That is a product decision, not an arithmetic one — testing one plan does not entitle anyone to test a different one for the rest of the same trial.
 
 `BillingPolicy::isFreeTrialAdjustment()` is the single predicate, for the same reason `isPastDueReset()` is: `ProrataComposer`, `UpdateSubscription::buildContext()` and `PreviewService` all have to give the same answer. Before it existed the composer and the context disagreed with the preview — the preview quoted €0 for extra seats during a trial and the change then collected the prorated amount anyway, converting the trial with it.
+
+### A credit is prorated from what was paid
+
+An invoice line states the *list price* of its component; whatever reduced the payment sits on a
+negative line of its own — a recurring coupon (`kind = coupon`) or the `adjustment` that books an
+invoice down to what Mollie collected. `ProrataComposer::paidLineNet()` spreads those reductions
+over the charge lines in proportion, so each line is worth `list × (charges − reductions) / charges`
+and the credit is the unused share of *that*. A period bought with a 50 % coupon (plan 2900,
+coupon −1450) and left on day 16 of 31 credits `1450 × 16/31 = 748`, not the whole 1450. A
+surplus (positive adjustment) never raises a component above its list price.
+
+### The running discount is on both sides of a change
+
+A recurring coupon or a [plan waiver](coupons.md) lives in one slot
+(`subscription_meta.active_recurring_coupon`) and every *recurring* amount honours it. So does
+the prorata charge: what a change owes is the difference between two recurring amounts for the
+days that are left, and the credit for the old configuration is already the unused share of what
+was *paid* — with the discount in it.
+
+| Change | Discount on the charge |
+|---|---|
+| Plan change, interval change, past-due reset (the whole new configuration is charged) | what `CouponService::computeMarkerDiscount()` gives the **new** configuration, × the charge's factor |
+| Seats, addons (only what was added is charged) | what the discount **grows by** between the old and the new configuration, × factor |
+
+For a coupon locked to its base amount the second row is nothing — a seat added on top is paid in
+full, now and at every renewal. For a waiver it is the granted addon coming back: switching a
+gifted addon off and on again costs nothing either way. The line is booked as `kind: 'coupon'`
+on the charge; a waiver's carries `applies_to`, exactly as on a renewal.
+
+Under a waiver that makes a plan change read as it should:
+
+- **Upgrade** (Pro 50.00 free → Enterprise 200.00, day 11 of 31): nothing is credited for Pro — it
+  was paid with 0 — and Enterprise is charged `(200.00 − 50.00) × 21/31 = 101.61`. The waiver
+  keeps taking off what it was given for, never more. The next renewal is 150.00.
+- **Downgrade** (Pro free → Starter 20.00): nothing is charged and nothing is credited for the
+  plan; paid extras are credited and charged again for the same days. The waiver is capped at
+  Starter's price and does not spill onto the extras.
+
+A charge the discount covers **in full** is not a charge: the composer emits no charge lines at
+all, so the change takes the credit-only path (credits are paid out at once) or books nothing.
+`ProrataExecutor` guards the same case on its own — a charge of 0.00 creates no payment, and
+credits parked "until the charge clears" would never be paid out.
+
+When a change opens a **new period** (interval change, past-due reset, trial conversion) the next
+recurring charge is a full interval away. Mollie is PATCHed to the amount of *that* charge, so a
+coupon that is live today but over by then is dropped before the PATCH — the renewal handler's
+own rule (`markerExpired($billable, $newPeriodEnd)`), applied at the one other place a period
+begins. The charge made today is still discounted.
+
+### An interval change is refused while a plan waiver runs
+
+A waiver is denominated in the interval it was given in — its amount is that interval's plan
+price, its end a date or a number of periods of that length — and none of it translates: monthly
+→ yearly charged a year minus one month's price for a plan held as a gift, and a period-based
+gift became twelve times as long. `ValidateSubscriptionChange::assertIntervalChangeAllowed()`
+refuses it (`InvalidSubscriptionStateException`), immediately and as a scheduled change; the
+preview reports `errors: [{type: 'interval_change_under_waiver'}]`. Plan, seat and addon changes
+are unaffected.
+
+A coupon entered with a change while a waiver runs is refused by `CouponService::validate()`
+before anything is charged, patched or written.
+
+### A free plan with paid addons is prorated like any other
+
+`isFreePlan()` looks at base and seat price only, so it is also true for a free plan that carries
+a paid addon — and that one bills through Mollie. The composer only skips a free origin when the
+subscription is **Local** (Free → paid runs through `UpgradeLocalToMollie`). On a Mollie
+subscription an addon added mid-period is charged and one removed is credited; and a downgrade
+*onto* a free plan charges the addons it keeps, since the refund side has just credited them.
+
+### Seats and addons: local state and Mollie move together
+
+A seat or addon change writes `seat_count` / `active_addon_codes` at once, even while its prorata
+charge is still in flight. Mollie's recurring amount is PATCHed in that same call — not when the
+charge clears — so a renewal in between is collected for what is active. If the charge is
+declined, `ProrataChargeHandler::failed()` restores the local state *and* PATCHes Mollie back.
+A plan or interval change is different: it switches locally only once its charge has cleared, and
+its PATCH stays with that switch in Phase 2.
+
+`CleanupStalePendingProrataChangeJob` — the sweep for a prorata charge whose webhook never
+arrived — hands a `failed`/`canceled`/`expired` charge to the same `failed()` handler, so seats,
+addons and Mollie go back together there too.
+
+### Addons priced per seat
+
+An addon with a `seat_price_net` has two lines — `addon` (base) and `addon_seats` (per seat,
+quantity = seats beyond the addon's `included_seats`, see
+[configuration](configuration.md#per-seat-addon-pricing)) — and they move on different axes:
+
+| Change | `addon` line | `addon_seats` line |
+|---|---|---|
+| Addon switched on mid-period | charged pro-rata | charged pro-rata for every charged seat |
+| Addon switched off mid-period | credited pro-rata | credited pro-rata, all of it |
+| Seats changed, addon stays | untouched | the **difference in charged seats** only — with 5 free addon seats, 4 → 6 seats charges exactly one |
+| Plan or interval change | credited and charged again, like everything else | credited and charged again |
+| Past-due reset | full first period | full first period |
+| Trial (seats/addons) | free | free; the first real charge carries it |
+
+Credits are taken newest line first, like the plan's seat line, and are prorated from what was
+paid for the line (coupons and adjustments included). `BillingInvoice::deriveSeatCount()` reads
+the plan's `seats` line only — an `addon_seats` quantity is not a seat count.
+
+All of it is priced by `SubscriptionAmount` (`net()`, `lineItems()`, `addonChargedSeats()`), which
+the preview, the prorata composer, the Mollie subscription amount and the renewal invoice share.
+
+### A period collected at less than it costs is reported, not charged
+
+Two cases the package recognises with certainty:
+
+| `RenewalUndercollected::$reason` | What happened | Where it is recognised |
+|---|---|---|
+| `renewal_created_before_change` | A seat or addon was booked after Mollie had already created the next debit. That renewal settles at the old amount while the new configuration is active for the whole period. | `SupersededRenewalRefund::settle()`, on the renewal: the invoice carries a negative `adjustment` **and** the payment's own metadata names another configuration. |
+| `plan_change_spanned_renewal` | A plan change's prorata payment (SEPA) was still pending when the period renewed. The renewal was collected for the old plan; the change then took effect inside the period it had paid for. | `ProrataChargeHandler::paid()`, in Phase 2: the same change is composed as if it were made now; a positive balance is the shortfall. |
+
+`UndercollectionReporter` then does three things and nothing else: it dispatches
+`RenewalUndercollected` (billable, renewal invoice, expected / collected / shortfall net, reason),
+which lands in the audit trail as `renewal_undercollected`; it logs; and it notifies the admins
+(`MollieBilling::notifyAdmin()`) with the amount. **No payment is created, no status changes and
+the invoice stays as booked** — taking money from inside a webhook is a decision for a person.
+
+It reports once per case: both places run behind the per-payment invoice guard, so a re-delivered
+webhook does not get there. It stays silent for a difference a discount or waiver explains (those
+are part of the expected amount), for a shortfall whose payment metadata matches the current
+configuration (a PATCH that did not land — `PaymentAmountMismatch`, as before), and within the
+one-cent rounding slack.
+
+The mirror image of the second case — a *downgrade* that spanned a renewal — is not reported but
+settled: the difference is refunded against the renewal, like any renewal collected at a
+superseded price.
 
 ### Day Granularity
 
@@ -231,6 +378,8 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 5. Runs `WalletPlanChangeAdjuster` to reduce plan credits to the free-plan quota; `purchased_balance` is preserved.
 6. Refunds any prorata credit through `ProrataExecutor` → `InvoiceService::createRefund()` if `apply_at = immediate` and a mandate is still available.
 
+This is the path for a target that bills **nothing**. A free plan that keeps a paid addon still has a recurring amount: the subscription stays on Mollie, the kept addon is charged for the rest of the period (its old line was credited with everything else), and the switch waits for that charge like any other plan change.
+
 `config('mollie-billing.plan_change_mode')` controls whether this happens immediately or is scheduled (`ScheduleSubscriptionChange::apply()` re-enters `UpdateSubscription::update()` as an internal re-entry to bypass the user-input mode check). The marker is set only through the typed `SubscriptionUpdateRequest::asInternalReentry()`; `SubscriptionUpdateRequest::from()` ignores an `internal` key in array data, like `allow_hidden_plan`, because it also waives the lapsed-period guard.
 
 ### When "end of period" falls
@@ -238,6 +387,57 @@ When the target plan is free (`catalog->isFreePlan()`), `UpdateSubscription::upd
 `ScheduleSubscriptionChange::schedule()` anchors on `nextBillingDate()`, except **on a trial**, where it takes the earlier of `nextBillingDate()` and `trial_ends_at`. A trial's first charge lands on `trial_ends_at` (day 14), not on the period anniversary (day 30) — anchoring on the latter applied the change in the middle of the first paid period, and since `apply()` re-enters as an `internal` immediate update the lapsed-period guard is waived, so it raised the very prorata charge the customer scheduled the change to avoid.
 
 `schedule()` refuses (`InvalidSubscriptionStateException`) for any status `apply()` would not act on — i.e. anything other than `active`, `trial`, `past_due`. A cancelled-in-grace customer used to get a "scheduled for &lt;date&gt;" confirmation for a change the daily dispatcher then silently discarded; the path for them is to resubscribe.
+
+### The renewal at the boundary is created at the new amount
+
+Mollie creates a recurring payment with the amount the subscription holds *at that moment* —
+for a SEPA debit around two days before the charge date — and a PATCH only ever reaches the
+next payment to be created. `apply()` runs once `scheduled_change_at <= now`, i.e. at or after
+the charge date, so patching there reached the renewal after next: the one in flight settled at
+the old amount, the period had lapsed (factor 0, nothing credited), and a customer who booked
+Pro → Starter for the period end paid Pro for the first Starter period.
+
+So a scheduled change is announced to Mollie **when it is scheduled**:
+
+| Scheduled change | At schedule time | At the boundary |
+|---|---|---|
+| Same interval, target still bills something | Mollie is PATCHed to the target amount (`scheduled_change.mollie_prepatched = true`). Nothing local moves. | `SubscriptionPaymentHandler::paid()` calls `ScheduleSubscriptionChange::applyAtRenewal()` before it prices the renewal: the change is applied without prorata (`SubscriptionUpdateRequest::asPeriodBoundary()`), and the renewal is invoiced as the new configuration. If the dispatcher gets there first (SEPA still pending) it applies with factor 0 as before, and the renewal that follows already matches. |
+| Target bills nothing (free plan) | Mollie is left alone — there is no amount to patch to, and a cancel could not be taken back. | Applied with the renewal (or by the dispatcher); the renewal Mollie collected is refunded in full, see below. |
+| Interval change | Mollie is left alone — the cadence cannot be moved ahead of time without moving the charge date. | The dispatcher waits for the old interval's renewal, then applies it as a normal interval change in that paid period: the new interval charged in full, the renewal just paid credited. |
+
+A due change that Mollie was **not** told about — an interval change, a free target, or one whose
+announcement failed — is not applied by the dispatcher while the period has lapsed and its
+renewal is still outstanding (`ScheduleSubscriptionChange::WAIT_FOR_RENEWAL_DAYS`, 7). Applied
+there it had a prorata factor of 0: an upgrade was free for a period, and an interval change
+charged the new interval on top of the old interval's renewal that was still on its way. Once
+the renewal is booked the next run applies it as an ordinary change in a paid period (a free
+target is applied *with* the renewal). A PastDue subscription does not wait — its renewal
+failed, and the past-due reset is its path — and "apply now" mid-period is unaffected.
+
+Withdrawing the change (`cancel()`) PATCHes Mollie back to the current configuration, and so
+does replacing it by a change that cannot be announced. An immediate seat or addon change made
+while a change is scheduled PATCHes the *current* configuration's amount, so
+`realignScheduled()` re-announces the stored change right after it.
+
+### A renewal that was created too early
+
+Where a renewal could not hear about a change in time, `SupersededRenewalRefund` gives back what
+it collected for a configuration the customer has left. The payment's own metadata — Mollie
+copies the subscription's `plan_code`, `interval`, `extra_seats` and `addon_codes` onto every
+payment it creates — says what it was priced for:
+
+- It differs from the local configuration and **more** was collected than the current one costs:
+  the surplus (the `adjustment` line) is refunded, and the payment is booked as the renewal it is.
+- The payment bought **nothing**: the billable is on a Local plan, or on another interval (whose
+  own charge pays for these days). It is refunded in full and not booked as a new period.
+
+It is one-sided on purpose. A renewal that collected *less* than the current configuration costs
+is not topped up from inside a webhook, and a mismatch whose metadata agrees with the local state
+(a failed PATCH, a coupon) is not a superseded renewal and stays with `PaymentAmountMismatch`.
+
+An interval change whose own charge clears only after a renewal of the old interval was booked is
+handled in Phase 2: the refund lines are composed again for the period that renewal opened,
+instead of the ones stored in Phase 1.
 
 ## Past-Due Reset
 
@@ -253,7 +453,11 @@ Past-Due reset triggers when **all** of the following hold:
 - The new plan is **not** a free plan (`! catalog->isFreePlan(newPlan, newInterval)`).
 - Either the plan or the interval changed (`planChanged || intervalChanged`).
 
-Pure seat or addon changes on a `past_due` subscription do **not** reset — they go through the normal prorata path. The reset is intentionally limited to plan/interval switches because that is the recovery action exposed to users in the UI.
+Pure seat or addon changes on a `past_due` subscription do **not** reset. The reset is intentionally limited to plan/interval switches because that is the recovery action exposed to users in the UI.
+
+**Adding** seats or a paid addon while past due is refused (`PastDueExpansionNotAllowedException`, "Please settle the outstanding payment first"): the period has not been paid and its end has passed, so the addition prorates with a factor of 0 — it used to be accepted and was free for the unpaid period. The rule lives in `ValidateSubscriptionChange::assertNoPastDueExpansion()` and applies to immediate and scheduled changes and to the preview (`errors: [{type: 'past_due_expansion'}]`); the seats, addons and plan-change screens show the hint.
+
+Still possible while past due: fewer seats, an addon switched off, an addon that bills nothing (`addonIsFree()`), and a plan or interval change — the reset above, which may carry more seats and addons because it charges the new period in full. Only a seat count the caller *asked for* counts as an addition; a count derived from the members in use does not.
 
 A `past_due` user downgrading to a free plan does **not** reset either — the existing `Mollie → Free downgrade` path runs and the subscription switches to `local`, no charge.
 

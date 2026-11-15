@@ -289,6 +289,49 @@ new class extends Component {
 
         $this->ensureMinSeats();
 
+        // A tenant who was GIVEN their plan buys extra seats: the gift stays, the seats
+        // are paid. See the same branch in the addons screen.
+        $purchase = app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class);
+
+        if ($purchase->eligible($billable)
+            && $purchase->needsPayment($billable, $billable->getActiveBillingAddonCodes(), (int) $this->seatCount)
+        ) {
+            try {
+                $url = $purchase->handle($billable, $billable->getActiveBillingAddonCodes(), (int) $this->seatCount);
+            } catch (\GraystackIT\MollieBilling\Exceptions\BillingCountryRequiredException) {
+                // A gifted tenant without billing details: say what is missing and where
+                // to add it, instead of "something went wrong".
+                $this->flash = __('billing::portal.flash.billing_details_required', [
+                    'page' => __('billing::portal.nav.billing_data'),
+                ]);
+                $this->flashSuccess = false;
+
+                return;
+            } catch (SeatCountExceedsMaximumException $e) {
+                $this->flash = __('billing::portal.seats_flash.too_many', ['max' => $e->maximum]);
+                $this->flashSuccess = false;
+
+                return;
+            } catch (\Throwable $e) {
+                report($e);
+                $this->flash = __('billing::portal.flash.error');
+                $this->flashSuccess = false;
+
+                return;
+            }
+
+            if ($url === null) {
+                $this->flash = __('billing::portal.flash.error');
+                $this->flashSuccess = false;
+
+                return;
+            }
+
+            $this->redirect($url, navigate: false);
+
+            return;
+        }
+
         try {
             $billable->syncBillingSeats(
                 $this->seatCount,
@@ -307,6 +350,10 @@ new class extends Component {
             // Its own message: the generic error banner left the customer guessing which
             // number the form would accept.
             $this->flash = __('billing::portal.seats_flash.too_many', ['max' => $e->maximum]);
+            $this->flashSuccess = false;
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+            // Not an error to report: the customer is told what to do first.
+            $this->flash = $e->getMessage();
             $this->flashSuccess = false;
         } catch (\Throwable $e) {
             report($e);
@@ -343,10 +390,31 @@ new class extends Component {
             }
         }
 
+        // What one more seat really costs: the plan's seat price plus the per-seat price of
+        // every active addon that has one.
+        $addonSeatPriceNet = 0;
+        foreach (($billable?->getActiveBillingAddonCodes() ?? []) as $addonCode) {
+            $addonSeatPriceNet += (int) ($catalog->addonSeatPriceNet((string) $addonCode, $interval) ?? 0);
+        }
+
+        $effectiveSeatPrice = null;
+        if ($seatPriceNet !== null && $addonSeatPriceNet > 0) {
+            $effectiveSeatPrice = $seatPriceNet + $addonSeatPriceNet;
+            if (! $reverseCharge && $billable !== null) {
+                try {
+                    $effectiveSeatPrice = (int) app(VatCalculationService::class)
+                        ->calculate((string) ($billable->getBillingCountry() ?? 'AT'), $effectiveSeatPrice, $billable)['gross'];
+                } catch (\Throwable) {
+                    // fall back to net
+                }
+            }
+        }
+
         return [
             'billable' => $billable,
             'includedSeats' => $includedSeats,
             'seatPrice' => $seatPrice,
+            'effectiveSeatPrice' => $effectiveSeatPrice,
             'usedSeats' => $usedSeats,
             'extraSeats' => $extraSeats,
             'extraCost' => $seatPrice !== null ? $extraSeats * $seatPrice : null,
@@ -374,7 +442,9 @@ new class extends Component {
     $hasPendingPlanChange = $billable?->hasPendingBillingPlanChange() ?? false;
     // Local subs (free plans, access grants) cannot bill for extra seats — no mandate.
     // Hide the adjust-seats card entirely; the stat cards alone are informative.
-    $localBlocksPaidSeats = $billable && $billable->isLocalBillingSubscription();
+    // A GIFTED plan is the exception: seats can be bought on top, keeping the gift.
+    $grantAllowsExtras = app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class)->eligible($billable);
+    $localBlocksPaidSeats = $billable && $billable->isLocalBillingSubscription() && ! $grantAllowsExtras;
     // Layout: when there's no seat-price card (free plan) we have 3 cards → use a 3-col grid.
     $statsCols = $seatPrice !== null ? 'lg:grid-cols-4' : 'lg:grid-cols-3';
 @endphp
@@ -387,6 +457,21 @@ new class extends Component {
             {{ __('billing::portal.seats_subtitle') }}
         </flux:subheading>
     </div>
+
+    {{-- A gifted tenant may never have been through a checkout and so may have no
+         billing address. Extras cannot be priced without the billing country — say so
+         here, with the way to fix it, rather than only when the purchase is refused. --}}
+    @if ($billable
+        && app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class)->eligible($billable)
+        && trim((string) ($billable->getBillingCountry() ?? '')) === '')
+        <flux:callout variant="warning" icon="exclamation-triangle" dusk="billing-details-required">
+            <span>{{ __('billing::portal.flash.billing_details_required', ['page' => __('billing::portal.nav.billing_data')]) }}</span>
+            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('billing-data'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                {{ __('billing::portal.nav.billing_data') }}
+            </flux:button>
+        </flux:callout>
+    @endif
+
 
     @if ($flash)
         <flux:callout icon="{{ $flashSuccess ? 'check-circle' : 'exclamation-triangle' }}" color="{{ $flashSuccess ? 'lime' : 'red' }}" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" inline>{{ $flash }}</flux:callout>
@@ -403,12 +488,18 @@ new class extends Component {
             $isAccessGrant = ($billable->getBillingSubscriptionStatus()->value !== 'cancelled')
                 && ($billable->getBillingSubscriptionEndsAt()?->isFuture() ?? false);
         @endphp
-        <flux:callout icon="information-circle" color="blue">
-            <span>{{ $isAccessGrant ? __('billing::portal.access_grant_no_paid_extras') : __('billing::portal.free_plan_no_paid_extras') }}</span>
-            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
-                {{ __('billing::portal.plan_change') }}
-            </flux:button>
-        </flux:callout>
+        @if ($isAccessGrant)
+            <flux:callout icon="gift" color="teal">
+                <span>{{ __('billing::portal.access_grant_extras_available', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::display($billable->getBillingSubscriptionEndsAt(), $billable)?->translatedFormat('d. M Y')]) }}</span>
+            </flux:callout>
+        @else
+            <flux:callout icon="information-circle" color="blue">
+                <span>{{ __('billing::portal.free_plan_no_paid_extras') }}</span>
+                <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                    {{ __('billing::portal.plan_change') }}
+                </flux:button>
+            </flux:callout>
+        @endif
     @endif
 
     @if (! $billable)
@@ -420,6 +511,11 @@ new class extends Component {
             {{ __('billing::portal.seats_not_available') }}
         </flux:callout>
     @else
+        @if ($billable->isBillingPastDue())
+            <flux:callout variant="warning" icon="exclamation-triangle" class="mb-4">
+                {{ __('billing::portal.error_past_due_expansion') }}
+            </flux:callout>
+        @endif
         {{-- Stat cards --}}
         <div class="grid gap-4 sm:grid-cols-2 {{ $statsCols }}">
             {{-- Total seats --}}
@@ -481,6 +577,9 @@ new class extends Component {
                     <div class="mt-3">
                         <span class="text-3xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($seatPrice) }}</span>
                     </div>
+                    @if ($effectiveSeatPrice !== null)
+                        <flux:text class="mt-1 text-xs tabular-nums text-zinc-500">{{ __('billing::portal.seat_price_with_addons', ['price' => BillingMoney::format($effectiveSeatPrice)]) }}</flux:text>
+                    @endif
                     <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                 </flux:card>
             @endif

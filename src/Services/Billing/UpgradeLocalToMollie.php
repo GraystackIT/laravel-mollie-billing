@@ -10,9 +10,11 @@ use GraystackIT\MollieBilling\Exceptions\HiddenPlanNotSelectableException;
 use GraystackIT\MollieBilling\Exceptions\SeatDowngradeRequiredException;
 use GraystackIT\MollieBilling\Exceptions\LocalSubscriptionUpgradeRequiresMolliePathException;
 use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use GraystackIT\MollieBilling\Support\MollieCall;
@@ -102,6 +104,152 @@ class UpgradeLocalToMollie
         return [
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
             'payment_id' => $payment->id,
+        ];
+    }
+
+    /**
+     * Start the purchase of paid addons or extra seats by a tenant who was *given* their
+     * plan, keeping the gift.
+     *
+     * The plan (and any addons the grant itself included) stays free for as long as the
+     * grant runs; only what is added is paid. This is the one path where the amount is
+     * computed here rather than handed in: the price depends on what the gift waives, and
+     * that must not be something a form can submit.
+     *
+     * The first payment covers one full period of the paid extras and starts that period
+     * now. The webhook turns the rest of the grant into a plan waiver on the new Mollie
+     * subscription — see `LocalToMollieUpgradeHandler` and `PlanWaiver`.
+     *
+     * @param  array<int, string>  $addonCodes  the complete addon set after the purchase
+     * @param  int  $seats  the complete seat count after the purchase
+     * @return array{checkout_url:?string,payment_id:string,amount_gross:int,amount_net:int}
+     *
+     * @throws LocalSubscriptionUpgradeRequiresMolliePathException when there is no running grant to keep
+     * @throws SeatDowngradeRequiredException when the plan does not sell the requested seats
+     * @throws \InvalidArgumentException when nothing in the request has to be paid for
+     */
+    public function handleKeepingGrant(Billable $billable, array $addonCodes, int $seats): array
+    {
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly');
+        $grantEndsAt = $billable->getBillingSubscriptionEndsAt();
+
+        if (
+            ! $billable->isLocalBillingSubscription()
+            || $planCode === ''
+            || $grantEndsAt === null
+            || ! $grantEndsAt->isFuture()
+            || $billable->getBillingSubscriptionStatus() !== \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Active
+        ) {
+            throw new LocalSubscriptionUpgradeRequiresMolliePathException($billable, $planCode);
+        }
+
+        $grantedAddons = array_values($billable->getActiveBillingAddonCodes());
+        $addonCodes = array_values(array_unique(array_map('strval', $addonCodes)));
+
+        foreach (array_diff($addonCodes, $grantedAddons) as $code) {
+            if (! $this->catalog->planAllowsAddon($planCode, $code)) {
+                throw new \GraystackIT\MollieBilling\Exceptions\AddonNotAllowedException($planCode, $code);
+            }
+
+            if (! $this->catalog->addonOffersInterval($code, $interval)) {
+                throw new \GraystackIT\MollieBilling\Exceptions\IntervalNotOfferedException($code, $interval, 'addon');
+            }
+        }
+
+        $included = $this->catalog->includedSeats($planCode);
+        $seats = max($seats, $included, $billable->getUsedBillingSeats());
+        $extraSeats = $seats - $included;
+
+        if ($extraSeats > 0 && $this->catalog->seatPriceNet($planCode, $interval) === null) {
+            throw new SeatDowngradeRequiredException($billable, $seats, $included);
+        }
+
+        if ($seats > (int) config('mollie-billing.max_seats', 1000)) {
+            throw new \GraystackIT\MollieBilling\Exceptions\SeatCountExceedsMaximumException(
+                $billable,
+                $seats,
+                (int) config('mollie-billing.max_seats', 1000),
+            );
+        }
+
+        $fullNet = SubscriptionAmount::net($this->catalog, $billable, $planCode, $interval, $seats, $addonCodes);
+        $waived = min($fullNet, app(PlanWaiver::class)->waivedNet(
+            $billable,
+            $planCode,
+            $interval,
+            $seats,
+            $grantedAddons,
+            $addonCodes,
+        ));
+        $netDue = $fullNet - $waived;
+
+        if ($netDue <= 0) {
+            throw new \InvalidArgumentException('Nothing in this change has to be paid for — it does not need a Mollie subscription.');
+        }
+
+        // A gifted tenant may never have been through a checkout, so there may be no
+        // billing address at all. That is not "a country we cannot invoice" — it is a
+        // tenant who has to fill in their billing details first, and the portal says so.
+        $country = trim((string) ($billable->getBillingCountry() ?? ''));
+
+        if ($country === '') {
+            throw new \GraystackIT\MollieBilling\Exceptions\BillingCountryRequiredException;
+        }
+
+        $vat = app(VatCalculationService::class)->calculate($country, $netDue, $billable);
+
+        // Per line, like every other first payment: the invoice the webhook writes sums
+        // per-line VAT, and the Mollie subscription is created from the same lines.
+        $amountGross = BillingMoney::grossWithLineVat(
+            MollieSubscriptionPatcher::recurringLineNets(
+                $this->catalog,
+                $billable,
+                $planCode,
+                $interval,
+                $addonCodes,
+                $extraSeats,
+                $netDue,
+            ),
+            (float) $vat['rate'],
+        );
+
+        $customerId = $this->customerResolver->resolve($billable);
+        $currency = (string) config('mollie-billing.currency', 'EUR');
+        $urlParams = MollieBilling::resolveUrlParameters($billable);
+
+        $payment = MollieCall::send(new CreatePaymentRequest(
+            description: "Extras on {$planCode}",
+            amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
+            redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            locale: MollieBilling::mollieLocale(),
+            cancelUrl: route(BillingRoute::name('index'), $urlParams),
+            webhookUrl: route(BillingRoute::webhook()),
+            metadata: [
+                'billable_type' => $billable->getMorphClass(),
+                'billable_id' => (string) $billable->getKey(),
+                'type' => 'subscription',
+                'plan_code' => $planCode,
+                'interval' => $interval,
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'coupon_code' => null,
+                'upgrade_from_local' => true,
+                // The webhook turns the remaining grant into a plan waiver. The granted
+                // addons are recorded here, at the moment the customer agreed to the
+                // price — they are what was free before anything was bought.
+                'keep_grant' => true,
+                'granted_addon_codes' => $grantedAddons,
+            ],
+            sequenceType: 'first',
+            customerId: $customerId,
+        ));
+
+        return [
+            'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
+            'payment_id' => $payment->id,
+            'amount_gross' => $amountGross,
+            'amount_net' => $netDue,
         ];
     }
 }

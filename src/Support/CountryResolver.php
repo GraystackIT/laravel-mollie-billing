@@ -42,7 +42,9 @@ class CountryResolver
      *
      * Sources (in order):
      *  1. checkout_countries.regions (currently only 'EU')
-     *  2. checkout_countries.include (individual ISO codes)
+     *  2. checkout_countries.include (individual ISO codes — EU members, or codes that
+     *     also have an `additional_countries` entry; anything else cannot be invoiced
+     *     and is left out)
      *  3. additional_countries from config (auto-included)
      *  4. checkout_countries.exclude (removed)
      *
@@ -63,10 +65,22 @@ class CountryResolver
             }
         }
 
-        // 2. Add individual ISO codes from 'include'
+        // 2. Add individual ISO codes from 'include' — but only ones that can be priced.
+        //    `include` feeds a selector; whether a country can be invoiced is decided
+        //    elsewhere (EU member, or declared with its rate under `additional_countries`).
+        //    A code that is neither used to be offered anyway: the checkout priced it at
+        //    0 %, collected the payment, and the webhook then threw on every delivery
+        //    because it could not write the invoice. `billing:check-config` reports the
+        //    entry; here it is simply not offered.
+        $additional = (array) config('mollie-billing.additional_countries', []);
+
         foreach ($config['include'] ?? [] as $iso) {
+            if (! is_string($iso) || (! self::isEuMember($iso) && ! isset($additional[$iso]))) {
+                continue;
+            }
+
             if (! isset($countries[$iso])) {
-                $countries[$iso] = $iso;
+                $countries[$iso] = self::EU_COUNTRIES[$iso] ?? $iso;
             }
         }
 
@@ -113,6 +127,24 @@ class CountryResolver
     public static function euCountryCodes(): array
     {
         return array_keys(self::EU_COUNTRIES);
+    }
+
+    /**
+     * Whether a country is one of the EU-27 member states.
+     *
+     * This list, and not the VAT library's rule table, is what "EU" means in this
+     * package. mpociot/vat-calculator also ships rates for Switzerland, the Isle of Man
+     * and Monaco; reading membership from "does the library know a rate" made those
+     * three invoiceable with nothing configured and opened the reverse-charge branch
+     * for them. Accepts the VIES prefix as well (`EL` is Greece).
+     */
+    public static function isEuMember(?string $country): bool
+    {
+        if ($country === null || trim($country) === '') {
+            return false;
+        }
+
+        return isset(self::EU_COUNTRIES[self::isoFromVatPrefix($country)]);
     }
 
     /**

@@ -27,6 +27,19 @@ use Illuminate\Support\Str;
  * `BILLING_PG_HOST` / `BILLING_PG_PORT` / `BILLING_PG_USER` / `BILLING_PG_PASSWORD` /
  * `BILLING_PG_DATABASE`.
  */
+// Shared with WalletMorphKeyTypeTest. Declared here as well, because under `--parallel` the
+// two files can land in different workers — this one then called a function nobody had
+// loaded and failed with "undefined function" instead of testing anything.
+if (! function_exists('rerunWalletMorphMigration')) {
+    function rerunWalletMorphMigration(string $keyType): void
+    {
+        config()->set('mollie-billing.billable_key_type', $keyType);
+
+        $migration = require __DIR__.'/../../../database/migrations/2026_01_01_000006_alter_wallet_morphs_for_billable_key_type.php';
+        $migration->up();
+    }
+}
+
 function pgConnectionOrSkip(): void
 {
     config()->set('database.connections.pgcheck', [

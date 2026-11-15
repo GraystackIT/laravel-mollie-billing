@@ -37,6 +37,9 @@ class StartSubscriptionCheckout
      */
     public const CHECKOUT_SUBJECT_SESSION_KEY = 'billing.checkout_subject';
 
+    /** Session key a promotion link stores its coupon code under. See forgetSessionCoupon(). */
+    public const AUTO_APPLY_COUPON_SESSION_KEY = 'billing.auto_apply_coupon';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly MollieCustomerResolver $customerResolver,
@@ -115,7 +118,7 @@ class StartSubscriptionCheckout
         $couponFromSession = false;
 
         if ($couponCode === null || $couponCode === '') {
-            $auto = Session::get('billing.auto_apply_coupon');
+            $auto = Session::get(self::AUTO_APPLY_COUPON_SESSION_KEY);
 
             if ($auto) {
                 $couponCode = (string) $auto;
@@ -154,17 +157,40 @@ class StartSubscriptionCheckout
 
                 $this->couponService->redeem($coupon, $billable, []);
 
+                $this->forgetSessionCoupon($couponFromSession);
+
                 return ['checkout_url' => null, 'payment_id' => ''];
             }
         }
 
-        if ($amountGross === 0) {
-            $planIsFree = $this->catalog->basePriceNet($request['plan_code'], $request['interval']) === 0;
-            $hasCoupon = $couponCode !== null && $couponCode !== '';
+        $planIsFree = $this->catalog->basePriceNet($request['plan_code'], $request['interval']) === 0;
+        $hasCoupon = $couponCode !== null && $couponCode !== '';
 
-            // Free plan with no coupon → activate as a Local subscription directly.
-            // No Mollie mandate is required; the dashboard is reachable immediately.
-            if ($planIsFree && ! $hasCoupon) {
+        if ($amountGross === 0 && $planIsFree) {
+            // Free plan → activate as a Local subscription directly. No Mollie mandate
+            // is required; the dashboard is reachable immediately.
+            //
+            // A coupon does not change that when the order itself costs nothing: there
+            // is no amount for it to discount. The branch used to read "free AND no
+            // coupon", and a promotion link leaves its code in the session for every
+            // checkout that follows — so a customer who arrived through one and picked
+            // the free plan was sent to Mollie to authorise a payment method for a plan
+            // that costs nothing, and the webhook then refused the activation because a
+            // coupon cannot cover 100 % of 0. Mandate captured, no subscription, and the
+            // mandate cost them the trial on any later paid checkout.
+            //
+            // A free base with priced extras and a coupon is still the full-coverage
+            // case below: there the coupon is what makes the total zero.
+            $orderIsFree = $this->orderAmountNet($billable, $request) === 0;
+
+            if (! $hasCoupon || $orderIsFree) {
+                if ($hasCoupon) {
+                    Log::info('Coupon ignored — the order is free, there is nothing to discount', [
+                        'billable_id' => $billable->getKey(),
+                        'coupon_code' => $couponCode,
+                    ]);
+                }
+
                 $this->activateLocal->handle(
                     $billable,
                     planCode: $request['plan_code'],
@@ -172,10 +198,55 @@ class StartSubscriptionCheckout
                     addonCodes: $request['addon_codes'] ?? [],
                 );
 
+                $this->forgetSessionCoupon($couponFromSession);
+
                 return ['checkout_url' => null, 'payment_id' => ''];
             }
+        }
 
-            // Full-coverage single_payment coupon → first charge is 0 €. Mollie rejects
+        // From here on a payment is created at Mollie, so the country has to be one the
+        // webhook can write an invoice for. See assertCountryIsInvoiceable().
+        $this->assertCountryIsInvoiceable($billable);
+
+        // Trial branch: when the (plan, interval) carries a positive trialDays
+        // and the billable has not yet captured a Mollie mandate, route to the
+        // Mandate-Only flow. The mandate is captured at 0 EUR; the actual Mollie
+        // subscription is created in the webhook with startDate = now + trialDays
+        // (no charge during the trial window). Trials only fire on first checkout —
+        // the `! hasMollieMandate()` guard prevents granting a fresh trial to a
+        // returning customer who has previously paid.
+        //
+        // Decided BEFORE the zero-amount branch, so the trial wins over a coupon that
+        // covers the whole first payment. In the other order a 100 % coupon dropped
+        // `trial_days`: the confirm step had announced "14 days free, first charge on
+        // <date>", and the customer got no trial, an Active subscription at once and
+        // the coupon spent on the period that was supposed to be free. What the coupon
+        // then does is the trial path's own, documented rule (docs/coupons.md): a
+        // Recurring one sets its marker and defers Mollie's start date to the later of
+        // trial end and coupon end; a SinglePayment one is parked, not consumed.
+        $trialDays = $this->catalog->trialDays($request['plan_code'], $request['interval']);
+        if ($trialDays > 0
+            && ! $billable->hasMollieMandate()
+            // A trial is for something that costs money. `amount_gross` alone cannot say
+            // so any more — it is 0 under a full-coverage coupon — so ask the catalog.
+            && ($amountGross > 0 || $this->orderAmountNet($billable, $request) > 0)
+        ) {
+            return $this->mandateCheckout->handle(
+                $billable,
+                redirectUrl: route(BillingRoute::name('return'), $urlParams),
+                subscriptionSpec: [
+                    'plan_code' => $request['plan_code'],
+                    'interval' => $request['interval'],
+                    'addon_codes' => $request['addon_codes'] ?? [],
+                    'extra_seats' => $request['extra_seats'] ?? 0,
+                    'coupon_code' => $couponCode,
+                    'trial_days' => $trialDays,
+                ],
+            );
+        }
+
+        if ($amountGross === 0) {
+            // Full-coverage coupon with no trial to start → first charge is 0 €. Mollie rejects
             // 0-EUR subscription charges, so we route to the Mandate-Only flow instead:
             // a 0-EUR mandate-collection payment, with the subscription spec embedded in
             // metadata. The webhook activates the subscription once the mandate is captured.
@@ -191,29 +262,6 @@ class StartSubscriptionCheckout
                     'addon_codes' => $request['addon_codes'] ?? [],
                     'extra_seats' => $request['extra_seats'] ?? 0,
                     'coupon_code' => $couponCode,
-                ],
-            );
-        }
-
-        // Trial branch: when the (plan, interval) carries a positive trialDays
-        // and the billable has not yet captured a Mollie mandate, route to the
-        // Mandate-Only flow. The mandate is captured at 0 EUR; the actual Mollie
-        // subscription is created in the webhook with startDate = now + trialDays
-        // (no charge during the trial window). Trials only fire on first checkout —
-        // the `! hasMollieMandate()` guard prevents granting a fresh trial to a
-        // returning customer who has previously paid.
-        $trialDays = $this->catalog->trialDays($request['plan_code'], $request['interval']);
-        if ($trialDays > 0 && ! $billable->hasMollieMandate()) {
-            return $this->mandateCheckout->handle(
-                $billable,
-                redirectUrl: route(BillingRoute::name('return'), $urlParams),
-                subscriptionSpec: [
-                    'plan_code' => $request['plan_code'],
-                    'interval' => $request['interval'],
-                    'addon_codes' => $request['addon_codes'] ?? [],
-                    'extra_seats' => $request['extra_seats'] ?? 0,
-                    'coupon_code' => $couponCode,
-                    'trial_days' => $trialDays,
                 ],
             );
         }
@@ -240,6 +288,7 @@ class StartSubscriptionCheckout
             ]);
 
             $couponCode = null;
+            $this->forgetSessionCoupon(true);
         }
 
         // Judged against this billable, not just the campaign. The component validated
@@ -279,6 +328,48 @@ class StartSubscriptionCheckout
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
             'payment_id' => $payment->id,
         ];
+    }
+
+    /**
+     * Drop the promotion coupon from the session once it has reached a definitive end:
+     * redeemed (an access grant), or shown to be unusable for this checkout.
+     *
+     * `PromotionController` writes the key and nothing ever removed it, so one promotion
+     * link steered every later checkout of that session — including ones the code could
+     * do nothing for. It is deliberately NOT cleared when a payment has merely been
+     * created: a customer who cancels on Mollie's page and comes back must still find
+     * their promotion applied.
+     */
+    private function forgetSessionCoupon(bool $fromSession): void
+    {
+        if ($fromSession) {
+            Session::forget(self::AUTO_APPLY_COUPON_SESSION_KEY);
+        }
+    }
+
+    /**
+     * Refuse to open a payment for a country no invoice can be written for.
+     *
+     * The webhook prices the paid payment through `VatCalculationService::calculate()`
+     * with no catch, so a billing country that is neither an EU member nor declared under
+     * `additional_countries` made every delivery throw: money collected, no invoice, no
+     * subscription. The probe goes through `calculate()` itself — the one owner of "is
+     * this country billable" — and reads only persisted state.
+     *
+     * A billable without a country is not refused here: the webhook adopts
+     * `checkout_country_fallback` for it (WebhookSupport::ensureBillingCountry()).
+     *
+     * @throws \GraystackIT\MollieBilling\Exceptions\NonEuCountryException
+     */
+    private function assertCountryIsInvoiceable(Billable $billable): void
+    {
+        $country = (string) ($billable->getBillingCountry() ?? '');
+
+        if ($country === '') {
+            $country = (string) config('mollie-billing.checkout_country_fallback', 'DE');
+        }
+
+        $this->vatService->calculate($country, 1, $billable);
     }
 
     /**
@@ -356,6 +447,8 @@ class StartSubscriptionCheckout
                 'coupon_code' => $couponCode,
                 'reason' => $e->reason(),
             ]);
+
+            $this->forgetSessionCoupon(true);
 
             return null;
         }

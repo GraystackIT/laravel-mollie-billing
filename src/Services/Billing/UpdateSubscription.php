@@ -261,6 +261,10 @@ class UpdateSubscription
         // already spent, while the next change in that period found no line for the plan it is
         // now on and credited nothing.
         $hasProrata = $context->isMollie
+            // A change applied at the period roll-over has no remainder to prorate — the
+            // renewal being booked pays for the whole new period. See
+            // SubscriptionUpdateRequest::asPeriodBoundary().
+            && ! $dto->atPeriodBoundary
             && ($context->prorataChargeNet > 0
                 || $context->prorataCreditNet > 0
                 || $this->composerWouldBook($billable, $context));
@@ -306,8 +310,10 @@ class UpdateSubscription
 
             // Only real plan switches (plan or interval) defer the local switch and surface
             // the legacy `pending_plan_change` marker that the plan-change-modal cancel-button
-            // operates on. Seat/addon changes continue synchronously — they reach Mollie
-            // immediately anyway, and the webhook clears the `pending_prorata_change` marker.
+            // operates on. Seat/addon changes continue synchronously: the local state flips
+            // now, and so does Mollie's recurring amount — phase 2c below PATCHes it in this
+            // same call rather than waiting for the prorata charge to clear. If that charge
+            // is declined, ProrataChargeHandler::failed() puts both back.
             if ($hasPendingCharge && ($context->planChanged || $context->intervalChanged)) {
                 $meta = $billable->getBillingSubscriptionMeta();
                 // Serialized via the context so every field Phase 2 reconstructs
@@ -390,6 +396,30 @@ class UpdateSubscription
                 $mollieSubscriptionPatched = $prorataResult['path'] === 'sidegrade'
                     || $prorataResult['path'] === 'refund';
                 $patchedAmountNet = $newNet;
+
+                // A seat or addon change whose prorata charge is still in flight. The local
+                // state is written in phase 3 below, so Mollie's recurring amount has to
+                // move now as well — the two must change at the same moment. Leaving the
+                // PATCH to Phase 2 meant that with a slow payment method (SEPA Direct
+                // Debit stays `pending` for days) a renewal in between was collected at the
+                // OLD amount while the new seat was active for the whole new period: the
+                // invoice was reconciled down with an `adjustment` and the seat was never
+                // paid for. Plan and interval changes do not get here — they returned above
+                // and switch locally only once the charge clears, so their PATCH stays in
+                // Phase 2 with the switch.
+                if ($prorataResult['path'] === 'deferred_charge') {
+                    $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+                    try {
+                        $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                        $mollieSubscriptionPatched = true;
+                    } catch (\Throwable $e) {
+                        Log::warning('Mollie-Subscription PATCH failed for a seat/addon change — queued for retry', [
+                            'billable' => $billable->getKey(),
+                            'error' => $e->getMessage(),
+                        ]);
+                        $patchRetry = $this->queuePatchRetry($billable, $intent, $e);
+                    }
+                }
             }
         }
 
@@ -541,7 +571,14 @@ class UpdateSubscription
                 ])->save();
             }
 
-            if ($context->planChanged || $context->intervalChanged) {
+            // Not at a period roll-over onto a paying configuration: the renewal that is
+            // being booked refills the wallets for the new plan itself, and rebalancing
+            // first would settle a period that has simply ended and then grant the new
+            // quota twice for a rollover type. A downgrade to Local has no renewal coming,
+            // so it is still rebalanced here.
+            $rebalanceWallets = ! $dto->atPeriodBoundary || $downgradeToLocal;
+
+            if ($rebalanceWallets && ($context->planChanged || $context->intervalChanged)) {
                 // The rebalance itself is local and belongs in this transaction; the charge
                 // for whatever it could not resolve is a Mollie call and is handed back out.
                 $deferredOverage = $this->walletAdjuster->adjust(
@@ -563,6 +600,15 @@ class UpdateSubscription
         });
 
         $this->walletAdjuster->chargeDeferredOverage($billable, $deferredOverage);
+
+        // This call may just have PATCHed Mollie to the amount of the configuration the
+        // billable is on now. If a change is scheduled for the period end, Mollie was
+        // already told its amount — put that back, or the renewal at the boundary is
+        // created for the wrong plan. Not on the re-entries that apply the stored change
+        // itself: they clear it right after.
+        if (! $dto->internal && $context->isMollie) {
+            $this->scheduleService->realignScheduled($billable);
+        }
 
         return $result;
     }
@@ -1311,7 +1357,14 @@ class UpdateSubscription
         $planChanged = $newPlan !== $currentPlan;
         $intervalChanged = $newInterval !== $currentInterval;
 
-        $newSeats = $dto->seats ?? max($billable->getBillingSeatCount(), $billable->getUsedBillingSeats(), $this->catalog->includedSeats($newPlan));
+        // See BillingPolicy::derivedSeats(): a plan change lands on the seats in use or
+        // included; anything else keeps the count.
+        $newSeats = $dto->seats ?? BillingPolicy::derivedSeats(
+            $billable->getBillingSeatCount(),
+            $billable->getUsedBillingSeats(),
+            $this->catalog->includedSeats($newPlan),
+            $planChanged,
+        );
 
         $newAddons = $dto->addons !== null
             ? $this->normalizeAddonCodes($dto->addons)
@@ -1333,7 +1386,12 @@ class UpdateSubscription
 
         $isPastDueReset = BillingPolicy::isPastDueReset($billable, $planChanged, $intervalChanged);
 
-        if (BillingPolicy::isFreeTrialAdjustment($billable, $planChanged, $intervalChanged)) {
+        if ($dto->atPeriodBoundary) {
+            // Applied at the roll-over: nothing of the old period is left and the renewal
+            // pays for the new one in full. Both amounts stay at 0.
+            $prorataChargeNet = 0;
+            $prorataCreditNet = 0;
+        } elseif (BillingPolicy::isFreeTrialAdjustment($billable, $planChanged, $intervalChanged)) {
             // Free while the trial runs — see BillingPolicy::isFreeTrialAdjustment().
             // Both amounts stay at 0, which is what keeps `$hasProrata` false and lets
             // the change apply straight through with only the Mollie PATCH.

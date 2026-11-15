@@ -88,7 +88,10 @@ function mismatchRenewalBillable(): TestBillable
         'subscription_meta' => ['mollie_subscription_id' => 'sub_drift'],
     ])->save();
 
-    // Spent most of the period's quota, so the recharge is observable.
+    // Spent most of the period's quota, so the recharge is observable. The quota has to
+    // be on the wallet first: debited from an empty one, these 40 units are overage, and
+    // a renewal collects uncharged overage rather than resetting it away.
+    $b->refresh()->creditBillingUsage('SMS', 50);
     $b->refresh()->recordBillingUsage('SMS', 40);
 
     return $b->refresh();

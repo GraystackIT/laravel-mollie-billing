@@ -21,6 +21,8 @@ class Coupon extends Model
         return [
             'type' => CouponType::class,
             'discount_type' => DiscountType::class,
+            'discount_periods' => 'integer',
+            'max_redemptions_per_billable' => 'integer',
             'active' => 'bool',
             'stackable' => 'bool',
             'credits_payload' => 'array',

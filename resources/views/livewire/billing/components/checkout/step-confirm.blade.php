@@ -1,11 +1,13 @@
 @php($plan = $this->selectedPlan())
-@php($trialApplies = $this->trialApplies($plan_code, $interval))
 {{-- Plan days plus whatever an applied TrialExtension coupon adds: the activation
      redeems that coupon against the trial it just started, so the customer really
      does get the sum. Advertising the plan's own length here promised less than
      they get and, worse, named the wrong first-charge date. --}}
-@php($trialDays = $trialApplies ? $this->planTrialDays($plan_code, $interval) + (int) ($applied_coupon['trial_days'] ?? 0) : 0)
-@php($trialFirstChargeDate = $trialDays > 0 ? \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays($trialDays)->translatedFormat('d. M Y') : null)
+@php($trialDays = $this->announcedTrialDays())
+{{-- The date money is first collected, from the component: under a fully covering
+     recurring coupon that is later than the trial's end. --}}
+@php($firstCharge = $this->firstChargeDate())
+@php($trialFirstChargeDate = $trialDays > 0 && $firstCharge !== null ? $firstCharge->translatedFormat('d. M Y') : null)
 
 @if ($trialDays > 0)
     <flux:callout icon="sparkles" color="lime" inline class="mt-4">

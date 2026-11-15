@@ -701,6 +701,38 @@ trait HasBilling
             );
         }
 
+        // A running Local subscription has no trial to extend: there is no charge to
+        // defer, so the flip to `Trial` below bought nothing and scheduled a lapse.
+        // ProcessTrialLifecycleJob expires a trial without a mandate into PastDue — which
+        // locked a free-plan customer, or the holder of an access grant, out of a plan
+        // they were not paying for, and auto-cancelled them a month later. The admin panel
+        // offers this action on whatever billable is open, and catches this exception.
+        if ($this->isLocalBillingSubscription() && $this->subscription_status === SubscriptionStatus::Active) {
+            throw new InvalidSubscriptionStateException(
+                'Cannot extend a trial on a local subscription that is not on one. '
+                .'Extend the grant or the period instead.'
+            );
+        }
+
+        // A subscription that is already paying has a charge date of its own, and the
+        // PATCH below sets Mollie's start date to the new trial end. A "trial" ending
+        // before that date therefore moved the next charge EARLIER: paid until day 20,
+        // trial until day 5, charged on day 5. The same holds for a charge deferred past
+        // a fully covering coupon or waiver. An extension only ever moves a charge later.
+        if (
+            $this->subscription_status === SubscriptionStatus::Active
+            && $this->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value
+        ) {
+            $nextCharge = \GraystackIT\MollieBilling\Support\ChargeDeferral::nextChargeDate($this);
+
+            if ($nextCharge !== null && $nextCharge->isFuture() && ! $until->greaterThan($nextCharge)) {
+                throw new InvalidSubscriptionStateException(
+                    'This subscription is not charged before '.$nextCharge->copy()->utc()->toDateString()
+                    .'. A trial ending on or before that date would not give the customer anything — pick a later date.'
+                );
+            }
+        }
+
         $previous = $this->trial_ends_at;
         $newEnd = $previous && $previous->isAfter($until) ? $previous : $until;
 
@@ -929,6 +961,13 @@ trait HasBilling
         $codes = [];
         foreach ($invoices as $lineItems) {
             foreach ((array) $lineItems as $item) {
+                // Product lines only. A coupon line carries a `code` too — the coupon's —
+                // and an order paid with one reported that code as a bought product.
+                // Lines written before `kind` existed have none and still count.
+                if (! in_array($item['kind'] ?? 'one_time_order', ['one_time_order', 'product'], true)) {
+                    continue;
+                }
+
                 if (! empty($item['code'])) {
                     $codes[] = (string) $item['code'];
                 }

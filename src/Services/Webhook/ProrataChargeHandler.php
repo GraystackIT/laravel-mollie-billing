@@ -240,6 +240,12 @@ class ProrataChargeHandler
             // granted. It also only ran when plan or interval moved, so a seat change
             // mid-trial converted the trial, started a new period, charged for it — and
             // left the wallet on the trial's fraction for the whole month that followed.
+            //
+            // The trial's own overage is collected first, exactly as the ordinary renewal
+            // does it — and while the billable is still on the plan it was consumed on, so
+            // it is priced there. Carried uncharged instead, it was paid out of the new
+            // plan's quota or billed later at the new plan's price.
+            $this->support->collectOutstandingOverage($billable);
             $this->support->creditPeriodQuota($billable, $newPlanCode, $newIntervalCode, 'subscription_trial_conversion');
         } elseif ($planOrIntervalChanged) {
             try {
@@ -261,11 +267,41 @@ class ProrataChargeHandler
         }
 
         $refundLinesData = (array) ($pending['refund_lines'] ?? []);
-        if (! empty($refundLinesData)) {
-            $refundLines = array_map(
-                fn (array $data) => ProrataLine::fromArray($data),
-                $refundLinesData,
+        $refundLines = array_map(
+            fn (array $data) => ProrataLine::fromArray($data),
+            $refundLinesData,
+        );
+
+        // An interval change whose charge was created in one period and settles in the
+        // next. The stored refund lines were composed in Phase 1, against the period that
+        // was running then — but a renewal of the OLD interval has been booked since
+        // (Mollie is only moved to the new cadence below, and with SEPA the charge takes
+        // days). The charge that just cleared pays for a full new interval from now, so
+        // what that renewal bought is unused from here on and nothing in the stored list
+        // credits it: the customer had paid a month and a year for the same days.
+        // Composed again here, while the billable still describes the old configuration.
+        if ($startsNewPeriod && ! $wasTrial && ! $forcesResetStartDate
+            && $this->periodMovedSince($billable, $pending)
+        ) {
+            $refundLines = $this->recomposeRefundLines($billable, $pending, $refundLines);
+        }
+
+        // A plan change inside one interval whose charge was created in one period and
+        // settles in the next. Locally and at Mollie the subscription was still on the old
+        // plan when the period renewed — the two agree — so that renewal was collected
+        // and booked for the old plan. The change takes effect now, in the middle of the
+        // period that renewal paid for, and the Phase-1 lines settle only the period that
+        // has since ended.
+        if (! $startsNewPeriod && $planOrIntervalChanged && $this->periodMovedSince($billable, $pending)) {
+            $this->support->safely(
+                fn () => $this->settlePeriodTheChangeLandsIn($billable, $pending, $oldPlan),
+                'prorata_charge.spanned_renewal',
+                $billable,
+                ['payment_id' => (string) ($payment->id ?? '')],
             );
+        }
+
+        if (! empty($refundLines)) {
             try {
                 $this->invoiceService->createRefund($billable, $refundLines, 'Plan change refund');
             } catch (\Throwable $e) {
@@ -283,8 +319,17 @@ class ProrataChargeHandler
         if ($intentData !== null) {
             $meta = $billable->getBillingSubscriptionMeta();
 
+            // The intent first: it is the change that was validated, and what the PATCH
+            // below prices Mollie from. The charge invoice only *suggests* a count —
+            // included seats plus the quantity of its `seats` line — and that line is left
+            // off whenever it rounds to nothing (a change on the last day of a period, a
+            // low seat price, a zero-decimal currency) or the new plan does not price its
+            // seats. Read first, it collapsed the count to the plan's included seats: the
+            // customer lost seats they hold while Mollie went on charging for all of them.
             $derivedFromCharge = isset($chargeInvoice) ? $chargeInvoice->deriveSeatCount() : null;
-            $meta['seat_count'] = $derivedFromCharge ?? (int) ($intentData['new_seats'] ?? $billable->getBillingSeatCount());
+            $meta['seat_count'] = isset($intentData['new_seats'])
+                ? (int) $intentData['new_seats']
+                : ($derivedFromCharge ?? $billable->getBillingSeatCount());
 
             unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
 
@@ -349,6 +394,32 @@ class ProrataChargeHandler
             return;
         }
 
+        // The charge that just cleared opened a new period, so the next recurring charge
+        // is a full interval away — and Mollie collects whatever it is PATCHed to below.
+        // A recurring coupon that is live today but over by then must not be in that
+        // amount. The renewal handler makes the same judgement at every renewal
+        // (`markerExpired($billable, $newPeriodEnd)`); a change that opens a period is
+        // the one other place a period begins, and it had no such check: a monthly
+        // subscription with two coupon months left that switched to yearly was PATCHed
+        // to the discounted yearly amount, and the renewal a year later was collected
+        // with a discount that had ended ten months earlier.
+        //
+        // A plan waiver is left alone: what its end means (`on_expiry`) is the renewal
+        // handler's decision, not something to settle in passing here.
+        if ($startsNewPeriod) {
+            $this->support->safely(function () use ($billable, $newPeriodEnd): void {
+                $marker = $this->couponService->getActiveRecurringCouponMarker($billable);
+
+                if (is_array($marker)
+                    && ! \GraystackIT\MollieBilling\Services\Billing\PlanWaiver::isWaiver($marker)
+                    && $this->couponService->markerExpired($billable, $newPeriodEnd)
+                ) {
+                    $this->couponService->clearActiveRecurringCouponMarker($billable);
+                    $billable->refresh();
+                }
+            }, 'prorata_charge.marker_expiry', $billable, ['payment_id' => (string) ($payment->id ?? '')]);
+        }
+
         // A converted trial needs Mollie's schedule moved, even on a same-interval
         // change. Mollie's `startDate` is the trial end (CreateSubscription sets it
         // there), and the composer priced this charge as "the rest of the local period"
@@ -375,6 +446,112 @@ class ProrataChargeHandler
         $this->safelyPatch($billable, $intent);
 
         $this->clearPendingState($billable);
+
+        // The PATCH above set the amount of the configuration that just became current.
+        // A change scheduled for the period end had its own amount announced to Mollie
+        // already — see ScheduleSubscriptionChange::realignScheduled().
+        app(\GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange::class)->realignScheduled($billable);
+    }
+
+    /**
+     * What the plan change costs for the rest of the period it actually lands in.
+     *
+     * Composed as the same change would be composed if it were made now, while the
+     * billable still describes the old plan: the new configuration for the days that are
+     * left, less the unused share of what the renewal collected.
+     *
+     * - **More** than was collected (an upgrade): nothing is charged. A second prorata
+     *   payment from inside a webhook is a new money flow, and one the customer never
+     *   saw a price for. It is reported — {@see UndercollectionReporter}.
+     * - **Less** (a downgrade): the difference is given back against the renewal, the
+     *   same way a renewal collected at a superseded price is.
+     *
+     * @param  array<string, mixed>  $pending
+     */
+    protected function settlePeriodTheChangeLandsIn(Billable $billable, array $pending, string $oldPlan): void
+    {
+        $lines = app(\GraystackIT\MollieBilling\Services\Billing\ProrataComposer::class)
+            ->compose(PlanChangeIntent::fromArray((array) ($pending['intent'] ?? [])));
+
+        $net = 0;
+        foreach ($lines as $line) {
+            $net += $line->amountNet;
+        }
+
+        $candidates = \GraystackIT\MollieBilling\Models\BillingInvoice::currentPeriodLines($billable, 'plan', $oldPlan);
+        $renewal = $candidates[0]['invoice'] ?? null;
+
+        if ($net > 0) {
+            $collected = (int) ($renewal?->amount_net ?? 0);
+
+            app(\GraystackIT\MollieBilling\Services\Billing\UndercollectionReporter::class)->report(
+                $billable,
+                $renewal,
+                $collected + $net,
+                $collected,
+                \GraystackIT\MollieBilling\Events\RenewalUndercollected::REASON_PLAN_CHANGE_SPANNED_RENEWAL,
+            );
+
+            return;
+        }
+
+        if ($net < 0 && $renewal !== null) {
+            app(\GraystackIT\MollieBilling\Services\Billing\SupersededRenewalRefund::class)->refundOverpaid(
+                $billable,
+                $renewal,
+                -$net,
+                'Plan change took effect in a period that had renewed at the previous plan\'s price',
+            );
+        }
+    }
+
+    /**
+     * Whether a renewal moved the billing period after the pending change was created.
+     *
+     * @param  array<string, mixed>  $pending
+     */
+    protected function periodMovedSince(Billable $billable, array $pending): bool
+    {
+        $createdAt = $pending['created_at'] ?? null;
+        $anchor = $billable->getBillingPeriodStartsAt();
+
+        if (! is_string($createdAt) || $createdAt === '' || $anchor === null) {
+            return false;
+        }
+
+        return $anchor->greaterThan(Carbon::parse($createdAt)->setTimezone('UTC'));
+    }
+
+    /**
+     * Refund lines for the period that is running NOW, for a stored intent.
+     *
+     * Falls back to the stored lines when the intent cannot be rebuilt or the composer
+     * finds nothing — crediting what Phase 1 promised is never wrong, only incomplete.
+     *
+     * @param  array<string, mixed>  $pending
+     * @param  list<ProrataLine>  $stored
+     * @return list<ProrataLine>
+     */
+    protected function recomposeRefundLines(Billable $billable, array $pending, array $stored): array
+    {
+        try {
+            $lines = app(\GraystackIT\MollieBilling\Services\Billing\ProrataComposer::class)
+                ->compose(PlanChangeIntent::fromArray((array) ($pending['intent'] ?? [])));
+        } catch (\Throwable $e) {
+            Log::warning('Prorata Phase 2: could not recompose the refund lines for the current period', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $stored;
+        }
+
+        $fresh = array_values(array_filter($lines, fn (ProrataLine $l): bool => $l->direction === 'refund'));
+
+        // Instead of the stored lines, not on top of them: those credit the remainder of
+        // the period Phase 1 saw, and that period has since run to its end on the old
+        // configuration — it was used in full. What is unused now is the renewal's period.
+        return $fresh === [] ? $stored : $fresh;
     }
 
     /**
@@ -645,6 +822,42 @@ class ProrataChargeHandler
     }
 
     /**
+     * PATCH Mollie back to the configuration a declined seat/addon change started from.
+     *
+     * @param  array<string, mixed>  $intent  the stored `pending_prorata_change.intent`
+     */
+    protected function revertRecurringAmount(Billable $billable, array $intent): void
+    {
+        foreach (['current_plan', 'new_plan', 'current_interval', 'new_interval', 'current_seats', 'new_seats'] as $key) {
+            if (! array_key_exists($key, $intent)) {
+                return;
+            }
+        }
+
+        if ((string) $intent['current_plan'] !== (string) $intent['new_plan']
+            || (string) $intent['current_interval'] !== (string) $intent['new_interval']
+        ) {
+            return;
+        }
+
+        if (! in_array($billable->getBillingSubscriptionStatus(), self::APPLICABLE_STATES, true)) {
+            return;
+        }
+
+        $this->safelyPatch($billable, new PlanChangeIntent(
+            billable: $billable,
+            currentPlan: (string) $intent['new_plan'],
+            newPlan: (string) $intent['current_plan'],
+            currentInterval: (string) $intent['new_interval'],
+            newInterval: (string) $intent['current_interval'],
+            currentSeats: (int) $intent['new_seats'],
+            newSeats: (int) $intent['current_seats'],
+            currentAddons: (array) ($intent['new_addons'] ?? []),
+            newAddons: (array) ($intent['current_addons'] ?? []),
+        ));
+    }
+
+    /**
      * A prorata charge settled for a subscription that has since been cancelled or
      * expired.
      *
@@ -783,6 +996,15 @@ class ProrataChargeHandler
         }
 
         $billable->forceFill($attributes)->save();
+
+        // ...and put Mollie back with it. A seat or addon change PATCHes the recurring
+        // amount in the same call that writes the local state (UpdateSubscription, phase
+        // 2c), so that the two never disagree across a renewal. Restoring only the local
+        // half here would leave Mollie collecting for seats the customer no longer has.
+        // A plan or interval change never patched before its charge cleared — there is
+        // nothing to take back.
+        $this->revertRecurringAmount($billable, $intent);
+        app(\GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange::class)->realignScheduled($billable);
 
         event(new PlanChangeFailed($billable, $pending, (string) $payment->id, $reason));
 

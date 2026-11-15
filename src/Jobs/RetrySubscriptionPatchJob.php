@@ -157,6 +157,8 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
             $this->resetRecurringAmount($patcher, $coupons);
         } elseif (($this->intentData['reason'] ?? null) === 'next_charge_date') {
             $this->applyNextChargeDate($patcher);
+        } elseif (($this->intentData['reason'] ?? null) === 'plan_waiver_sync') {
+            $this->syncPlanWaiver();
         } else {
             $intent = PlanChangeIntent::fromArray($this->intentData);
 
@@ -322,6 +324,22 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
         }
 
         $patcher->setNextChargeDate($billable, \Carbon\Carbon::parse($target)->setTimezone('UTC'));
+    }
+
+    /**
+     * A plan waiver was given, extended or taken away and the PATCH that follows did not
+     * land. Nothing is carried in the payload: the billable is priced as it stands now —
+     * waiver or none — so a retry can neither undo a gift nor resurrect a revoked one.
+     */
+    private function syncPlanWaiver(): void
+    {
+        $billable = $this->resolveBillable();
+
+        if ($billable === null) {
+            return;
+        }
+
+        app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)->syncMollie($billable);
     }
 
     private function giveUp(): void

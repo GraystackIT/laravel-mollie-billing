@@ -160,14 +160,13 @@ class CouponMidCycleTest extends BrowserTestCase
     }
 
     /**
-     * The two types that belong in an action flow, and the one that belongs nowhere here.
-     *
-     * A discount has nothing to attach to on the dashboard — there is no order — so it is
-     * pointed at the flow where there will be one, rather than being redeemed against
-     * nothing or refused as invalid. An access grant would replace the subscription the
-     * customer already has, so it is refused outright.
+     * One field for every code. A one-off discount has nothing to attach to on a running
+     * subscription, so the customer is told what it is for; a recurring discount is
+     * applied on the spot and the customer is told from when it counts; an access grant
+     * would replace the subscription the customer pays for, so it is refused with that
+     * reason. See Services\Billing\RedeemCouponFromPortal.
      */
-    public function test_the_dashboard_points_discount_codes_at_the_flow_that_can_use_them(): void
+    public function test_the_dashboard_recognises_what_kind_of_code_it_was_given(): void
     {
         $this->coupons()->create([
             'code' => 'ONCE20',
@@ -201,19 +200,26 @@ class CouponMidCycleTest extends BrowserTestCase
             $this->actAs($browser, $billable, '/billing');
             $browser->waitForText('Starter', 10);
 
-            foreach (['ONCE20', 'ALWAYS20'] as $code) {
-                $this->redeemOnDashboard($browser, $code);
-                $browser->waitForText(__('billing::portal.coupon_redeem_use_in_action'), 10);
-            }
-            $this->shot($browser, 'Rabattcode am Dashboard: Hinweis auf den Aktionsfluss');
+            $this->redeemOnDashboard($browser, 'ONCE20');
+            $browser->waitForText(__('billing::portal.coupon_single_payment_checkout'), 10);
+            $this->shot($browser, 'Einmal-Rabatt am Dashboard: wofür der Code gilt');
 
             $this->redeemOnDashboard($browser, 'PARTNER');
-            $browser->waitForText(__('billing::checkout.coupon_type_not_allowed_in_context'), 10);
+            $browser->waitForText(__('billing::portal.coupon_grant_has_paid_subscription'), 10);
             $this->shot($browser, 'Access-Grant bei laufendem Abo: abgelehnt');
+
+            $this->redeemOnDashboard($browser, 'ALWAYS20');
+            $browser->waitForText(__('billing::portal.coupon_recurring_applied_periods', [
+                'code' => 'ALWAYS20',
+                'from' => \GraystackIT\MollieBilling\Support\BillingTime::display($billable->nextBillingDate(), $billable)->translatedFormat('d. M Y'),
+                'count' => 6,
+            ]), 10);
+            $this->shot($browser, 'Wiederkehrender Rabatt am Dashboard: angewendet');
         });
 
-        // Pointed elsewhere, not spent.
-        expect(CouponRedemption::query()->count())->toBe(0);
+        // The recurring discount is the only one that was spent.
+        expect(CouponRedemption::query()->count())->toBe(1)
+            ->and($billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon']['code'] ?? null)->toBe('ALWAYS20');
     }
 
     /**

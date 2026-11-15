@@ -384,6 +384,32 @@ class ChargeUsageOverageDirectly
 
             $slug = (string) $wallet->slug;
             $quantity = abs($balance);
+
+            // Debt that carries its own price goes first, and at that price: plan-change
+            // excess that could not be charged when the plan changed was consumed on the
+            // OLD plan. Priced from the current plan it was billed 4.5 times too high in
+            // the reproduction, and not at all when the new plan has no overage price.
+            foreach (WalletUsageService::getDeferredOverage($wallet) as $deferred) {
+                $items[] = [
+                    'kind' => 'overage',
+                    'code' => $slug,
+                    'type' => $slug,
+                    'label' => $this->overageLabel($slug),
+                    'quantity' => $deferred['quantity'],
+                    'unit_price_net' => $deferred['unit_price_net'],
+                    'total_net' => $deferred['quantity'] * $deferred['unit_price_net'],
+                    // Tells the settlement which record these units came from.
+                    'deferred_price' => true,
+                ];
+
+                $quantity -= $deferred['quantity'];
+            }
+
+            if ($quantity <= 0) {
+                continue;
+            }
+
+            // What is left is ordinary period overage, priced by the plan the billable is on.
             $unitPrice = (int) ($this->catalog->usageOveragePrice($planCode, $interval, $slug) ?? 0);
 
             if ($unitPrice <= 0) {

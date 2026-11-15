@@ -22,6 +22,8 @@ new class extends Component {
     /** @var array<int, string> */
     public array $addonCodes = [];
     public int $durationDays = 30;
+    /** What happens when the free time ends and the tenant has bought paid extras — see PlanWaiver. */
+    public string $onExpiry = 'end';
     public ?string $error = null;
 
     /**
@@ -73,9 +75,12 @@ new class extends Component {
         $coupon = null;
 
         try {
+            // One redemption: the code is made for this tenant. Unlimited, anybody who
+            // learned it — it is printed on the tenant's invoices once they buy extras
+            // on top of the gift — could redeem a free plan with it at checkout.
             $coupon = $this->mode === 'full'
-                ? $service->accessGrantCoupon($code, $this->planCode, $this->interval, $this->addonCodes, $this->durationDays)
-                : $service->addonGrantCoupon($code, $this->addonCodes);
+                ? $service->accessGrantCoupon($code, $this->planCode, $this->interval, $this->addonCodes, $this->durationDays, $this->onExpiry, 1)
+                : $service->addonGrantCoupon($code, $this->addonCodes, 1);
 
             // Every other redeem site validates first. Without this, an addon grant
             // lands on a live Mollie subscription: each renewal then invoices an addon
@@ -172,6 +177,16 @@ new class extends Component {
                         <flux:select.option value="monthly">{{ __('billing::admin.common.monthly') }}</flux:select.option>
                         <flux:select.option value="yearly">{{ __('billing::admin.common.yearly') }}</flux:select.option>
                     </flux:select>
+
+                    <x-mollie-billing::admin.labelled
+                        :label="__('billing::admin.grants.on_expiry_label')"
+                        :info="__('billing::admin.grants.on_expiry_info')"
+                    >
+                        <flux:select wire:model="onExpiry">
+                            <flux:select.option value="end">{{ __('billing::admin.grants.on_expiry.end') }}</flux:select.option>
+                            <flux:select.option value="continue_paid">{{ __('billing::admin.grants.on_expiry.continue_paid') }}</flux:select.option>
+                        </flux:select>
+                    </x-mollie-billing::admin.labelled>
                 @endif
             </div>
         </x-mollie-billing::admin.section>

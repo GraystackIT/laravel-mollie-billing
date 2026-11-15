@@ -37,6 +37,7 @@ return [
         'trial_extension' => 'Trial extension',
         'access_grant' => 'Access grant',
         'period_extension' => 'Period extension',
+        'plan_waiver' => 'Plan free (periods)',
     ],
     'discount_type' => [
         'percentage' => 'Percentage',

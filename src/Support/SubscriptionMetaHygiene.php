@@ -54,6 +54,7 @@ final class SubscriptionMetaHygiene
         'pending_amount_net',
         'pending_amount_recorded_at',
         'next_charge_date_override',
+        'charge_deferred_until',
     ];
 
     /**

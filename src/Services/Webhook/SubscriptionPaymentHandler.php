@@ -23,6 +23,7 @@ use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
@@ -91,10 +92,19 @@ class SubscriptionPaymentHandler
             return;
         }
 
+        // A change scheduled for this period boundary has to be in place before the
+        // renewal is priced — see ScheduleSubscriptionChange::applyAtRenewal(). Never
+        // throws; a no-op without a due, pre-announced change.
+        if (app(\GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange::class)->applyAtRenewal($billable)) {
+            $billable->refresh();
+        }
+
         $planCode = $billable->getBillingSubscriptionPlanCode() ?? (string) ($metadata['plan_code'] ?? '');
         $interval = $billable->getBillingSubscriptionInterval() ?? (string) ($metadata['interval'] ?? 'monthly');
         $addonCodes = $billable->getActiveBillingAddonCodes();
         $extraSeats = $billable->getExtraBillingSeats();
+        // What the lines below are built from — see the write-back at the end.
+        $seatCountAtStart = $billable->getBillingSubscriptionMeta()['seat_count'] ?? null;
 
         $newPaymentCountry = strtoupper((string) ($payment->countryCode ?? ''));
         if ($newPaymentCountry !== '' && $newPaymentCountry !== strtoupper((string) ($billable->tax_country_payment ?? ''))) {
@@ -144,14 +154,47 @@ class SubscriptionPaymentHandler
             $pendingTrialDiscountNet = 0;
         }
 
-        $couponDiscountNet = $this->couponService->computeMarkerDiscount($billable, $expectedNet);
+        // The cycle this charge belongs to, and the day its amount was fixed.
+        //
+        // Mollie collects what the subscription held when it CREATED the charge, and that
+        // was decided at the previous renewal by asking whether the discount would still
+        // be valid on this cycle's day (`markerExpired()` below). The invoice has to ask
+        // the same question about the same day — not about now. With SEPA the money
+        // settles days later: a coupon that ended between the charge and its settlement
+        // was collected at the discounted amount and then invoiced at full price, with an
+        // `adjustment` line taking the difference back off, `PaymentAmountMismatch` fired
+        // and no redemption written for a discount the customer did receive. Day
+        // granularity on both sides, because Mollie creates the charge at some hour of
+        // the cycle date that nobody controls.
+        $newPeriodStart = $this->cycleStart($payment);
+        $newPeriodEnd = BillingTime::addInterval($newPeriodStart, $interval);
+        $chargeDay = $newPeriodStart->copy()->startOfDay();
+        $nextChargeDay = Carbon::instance($newPeriodEnd)->setTimezone('UTC')->startOfDay();
+
+        $couponDiscountNet = $this->couponService->computeMarkerDiscount($billable, $expectedNet, [], $chargeDay);
         $netForCharge = max(0, $expectedNet - $couponDiscountNet - $pendingTrialDiscountNet);
         $vat = $this->vatService->calculate((string) ($billable->getBillingCountry() ?? ''), $netForCharge, $billable);
 
         $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
         if ($couponDiscountNet > 0) {
-            $markerCode = (string) ($this->couponService->getActiveRecurringCouponMarker($billable)['code'] ?? '');
-            $lineItems[] = $this->couponLine($couponDiscountNet, $markerCode);
+            $marker = $this->couponService->getActiveRecurringCouponMarker($billable) ?? [];
+            $markerCode = (string) ($marker['code'] ?? '');
+            $line = $this->couponLine($couponDiscountNet, $markerCode);
+
+            // A plan waiver says which lines it takes off, and until when — so the
+            // invoice reads "plan free", and a later prorata credit leaves the free plan
+            // alone while crediting the paid extras in full (ProrataComposer::paidLineNet).
+            if (\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::isWaiver($marker)) {
+                $line['applies_to'] = \GraystackIT\MollieBilling\Services\Billing\PlanWaiver::appliesTo($marker, $addonCodes);
+
+                try {
+                    $line['label'] = 'Plan free until '.Carbon::parse((string) $marker['valid_until'])->utc()->toDateString();
+                } catch (\Throwable) {
+                    // keep the generic label
+                }
+            }
+
+            $lineItems[] = $line;
         }
         if ($pendingTrialCoupon !== null && $pendingTrialDiscountNet > 0) {
             $lineItems[] = $this->couponLine(
@@ -179,7 +222,6 @@ class SubscriptionPaymentHandler
             (float) ($vat['rate'] ?? 0.0),
         );
 
-        $paidAt = $payment->paidAt ?? null;
 
         // The window this payment bought, computed before the invoice rather than after it.
         //
@@ -191,10 +233,17 @@ class SubscriptionPaymentHandler
         // mid-period downgrade after a renewal composed its refund against nothing and
         // credited 0. MandateOnlyPaymentHandler writes its anchor before invoicing and
         // ProrataChargeHandler stamps the new window explicitly, for the same reason.
-        $newPeriodStart = $paidAt !== null
-            ? Carbon::parse((string) $paidAt)->setTimezone('UTC')
-            : BillingTime::nowUtc();
-        $newPeriodEnd = BillingTime::addInterval($newPeriodStart, $interval);
+        //
+        // And it starts on the cycle the charge was created for, not on the day the money
+        // settled. For a card the two are the same minute. For SEPA Direct Debit Mollie
+        // creates the charge on the cycle date and it settles one to five business days
+        // later, a different number every month: anchored on `paidAt` a month that
+        // settled faster than the one before overlapped it, a slower one left a hole, and
+        // `nextBillingDate()` named a day up to a week after the one Mollie charges on —
+        // the date the overage pass, every prorata window and the coupon-expiry check
+        // below (`$newPeriodEnd` is "the next charge") all work from.
+        // (`$newPeriodStart` / `$newPeriodEnd` are resolved further up, where the discount
+        // is priced as of the same cycle.)
 
         $invoice = $this->salesInvoiceService->createForPayment(
             $payment,
@@ -222,6 +271,13 @@ class SubscriptionPaymentHandler
         if (! $this->isBillableState($billable)) {
             $this->support->reportRenewalForEndedSubscription($billable, $payment, $invoice);
 
+            return;
+        }
+
+        // A renewal Mollie created for a configuration the customer has since left: what
+        // it collected beyond the current one is given back, and a payment that bought
+        // nothing at all is not booked as a new period. See SupersededRenewalRefund.
+        if (app(\GraystackIT\MollieBilling\Services\Billing\SupersededRenewalRefund::class)->settle($billable, $invoice, $metadata)) {
             return;
         }
 
@@ -254,6 +310,7 @@ class SubscriptionPaymentHandler
                     $billable,
                     $expectedNet,
                     (int) $invoice->id,
+                    $chargeDay,
                 );
             } catch (\Throwable $e) {
                 Log::warning('Recurring coupon redemption failed during renewal webhook', [
@@ -274,10 +331,22 @@ class SubscriptionPaymentHandler
             $this->clearPendingTrialCouponSlot($billable);
         }
 
+        // The charge a deferral was holding back has now been collected, so the deferral
+        // is spent — before anything below asks the patcher about it.
+        $this->forgetSpentChargeDeferral($billable, $chargeDay);
+
         // Judged as of the *next* charge, not now — the PATCH is what stops the discount and
         // Mollie charges what it holds, so a date-gated coupon reset a period too late runs
         // one discounted period over. See CouponService::markerExpired().
-        if ($this->couponService->markerExpired($billable, $newPeriodEnd)) {
+        //
+        // A plan waiver given to *end* is the exception: when it will not cover the next
+        // charge there is no full price to return to — the tenant was given this plan and
+        // never agreed to pay for it. The subscription is cancelled at the end of the
+        // period this payment bought instead (further down, once the anchor has moved).
+        $waiverEndsSubscription = app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)
+            ->endsSubscription($billable, $nextChargeDay);
+
+        if (! $waiverEndsSubscription && $this->couponService->markerExpired($billable, $nextChargeDay)) {
             try {
                 $this->patcher->updateRecurringAmount(
                     billable: $billable,
@@ -309,6 +378,14 @@ class SubscriptionPaymentHandler
                 $billable->forceFill(['subscription_meta' => $meta])->save();
             }
         }
+
+        // Before the reset, never after: this renewal is the last moment the period that
+        // just ended can still be billed for its overage. The sweep normally did that the
+        // night before and this is then a no-op — but a trial's first charge, a SEPA
+        // renewal that settled ahead of the sweep night and a night the sweep missed all
+        // arrive here with a negative wallet and nothing in flight, and the reset below
+        // used to zero it. Outside any transaction, like the PATCH above.
+        $this->support->collectOutstandingOverage($billable);
 
         // Shared with the paid trial conversion in ProrataChargeHandler, so a trial that
         // ends by changing plan lands in the same wallet state as one that ends by simply
@@ -345,8 +422,14 @@ class SubscriptionPaymentHandler
         // row said n and the next renewal rebuilt its lines from the stale count.
         $this->mutateBillingMeta(
             $billable,
-            static function (array $meta) use ($derivedSeatCount, $wasPastDue, $wasTrial, $periodStartsAt): array {
-                if ($derivedSeatCount !== null) {
+            static function (array $meta) use ($derivedSeatCount, $seatCountAtStart, $wasPastDue, $wasTrial, $periodStartsAt): array {
+                // Compare-and-set. The count on the invoice is the one this handler read
+                // at the top, so writing it back is a no-op — unless somebody changed it
+                // in between, and then it is a revert: a seat sync that raised the count
+                // and PATCHed Mollie while the invoice was being written was rolled back
+                // here, so Mollie billed seven seats while the row said five. Taking the
+                // lock around the write does not help when the value written is stale.
+                if ($derivedSeatCount !== null && ($meta['seat_count'] ?? null) === $seatCountAtStart) {
                     $meta['seat_count'] = $derivedSeatCount;
                 }
 
@@ -385,6 +468,23 @@ class SubscriptionPaymentHandler
             $updates,
         );
 
+        // The gift ends with this period: cancel now, gracefully. Run only after the anchor
+        // above has moved, because the grace boundary is read from it — before, the
+        // subscription would have been set to end at the start of the period just paid for.
+        if ($waiverEndsSubscription) {
+            try {
+                app(\GraystackIT\MollieBilling\Services\Billing\CancelSubscription::class)
+                    ->handle($billable->refresh(), false, 'grant_expired');
+            } catch (\Throwable $e) {
+                // Loud: if this does not land, Mollie charges the waived amount's absence —
+                // i.e. the discounted price — for a period the gift no longer covers.
+                Log::error('Could not end the subscription with its plan waiver', [
+                    'billable' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         // AFTER the save, not before. Firing it first meant a throwing app listener left
         // the billable on status Trial with a past `trial_ends_at` — which
         // `hasAccessibleBillingSubscription()` refuses — so a customer who had just paid
@@ -418,6 +518,81 @@ class SubscriptionPaymentHandler
             $this->countryMatchService->check($billable);
         } catch (\Throwable $e) {
             Log::warning('Country match check failed during recurring', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Drop `charge_deferred_until` once the charge it deferred has arrived.
+     *
+     * The stored value carries the time of day it was written at, while Mollie's start
+     * date is a date: the first charge after a fully covering coupon is created at some
+     * hour of that day. Created before the stored hour, the deferral still read as "in
+     * the future" inside this very webhook — so the expiry PATCH below believed the
+     * charge was still deferred and sent a start date "back on the regular cycle", which
+     * by then was the period boundary two days earlier a month on. The customer paid a
+     * month on the 12th and was charged the next one on the 10th. Created after the
+     * stored hour, nothing of the sort happened. Which of the two a customer got depended
+     * on the hour Mollie's scheduler ran.
+     */
+    protected function forgetSpentChargeDeferral(Billable $billable, Carbon $chargeDay): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $stored = $billable->getBillingSubscriptionMeta()[ChargeDeferral::META_KEY] ?? null;
+
+        if (! is_string($stored) || $stored === '') {
+            return;
+        }
+
+        try {
+            $deferredDay = Carbon::parse($stored)->setTimezone('UTC')->startOfDay();
+        } catch (\Throwable) {
+            return;
+        }
+
+        if ($deferredDay->greaterThan($chargeDay)) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, static function (array $meta): array {
+            unset($meta[ChargeDeferral::META_KEY]);
+
+            return $meta;
+        });
+    }
+
+    /**
+     * The moment the period a recurring payment bought begins: when Mollie created the
+     * charge, i.e. the subscription's cycle date.
+     *
+     * `paidAt` is the fallback for a payment object without `createdAt` (older stubs and
+     * replays), and `now` for one with neither. A `createdAt` later than `paidAt` cannot
+     * come from Mollie and is not trusted.
+     */
+    protected function cycleStart(object $payment): Carbon
+    {
+        $paidAt = $this->parseMoment($payment->paidAt ?? null);
+        $createdAt = $this->parseMoment($payment->createdAt ?? null);
+
+        if ($createdAt !== null && ($paidAt === null || $createdAt->lessThanOrEqualTo($paidAt))) {
+            return $createdAt;
+        }
+
+        return $paidAt ?? Carbon::instance(BillingTime::nowUtc());
+    }
+
+    private function parseMoment(mixed $value): ?Carbon
+    {
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value)->setTimezone('UTC');
+        } catch (\Throwable) {
+            return null;
         }
     }
 

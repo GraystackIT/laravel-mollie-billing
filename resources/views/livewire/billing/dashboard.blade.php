@@ -283,13 +283,16 @@ new class extends Component {
         }
     }
 
-    public function redeemCoupon(CouponService $service): void
+    /**
+     * One field for every kind of code. What a code does — and why it may not work here —
+     * is decided by RedeemCouponFromPortal; this only authorises, calls and shows.
+     */
+    public function redeemCoupon(\GraystackIT\MollieBilling\Services\Billing\RedeemCouponFromPortal $redeem): void
     {
         $this->couponMessage = null;
         $this->couponMessageError = false;
 
-        $code = trim($this->couponCode);
-        if ($code === '') {
+        if (trim($this->couponCode) === '') {
             return;
         }
 
@@ -302,39 +305,8 @@ new class extends Component {
 
         $this->authorizeBillingAction($billable);
 
-        $catalog = app(SubscriptionCatalogInterface::class);
-        $planCode = $billable->getBillingSubscriptionPlanCode() ?? '';
-        $interval = $billable->getBillingSubscriptionInterval() ?? 'monthly';
-        $totalSeats = $planCode ? $catalog->includedSeats($planCode) + max(0, $billable->getExtraBillingSeats()) : 0;
-        $addonCodes = $billable->getActiveBillingAddonCodes();
-        $orderAmountNet = $planCode
-            ? SubscriptionAmount::net($catalog, $billable, $planCode, $interval, $totalSeats, $addonCodes)
-            : 0;
-
-        // Validate with an extended allow-list that also accepts SinglePayment /
-        // Recurring. This ensures expired / inactive / not-yet-valid coupons
-        // surface their real reason here instead of being silently masked by a
-        // type-only short-circuit. If validation passes and the coupon is one
-        // of those action-flow types, we then surface a "use in action flow"
-        // hint instead of attempting to redeem here.
         try {
-            $coupon = $service->validate($code, $billable, [
-                'planCode' => $planCode ?: null,
-                'interval' => $interval,
-                'addonCodes' => $addonCodes,
-                'orderAmountNet' => $orderAmountNet,
-                'allowed_types' => [
-                    CouponType::Credits,
-                    CouponType::TrialExtension,
-                    CouponType::PeriodExtension,
-                    CouponType::SinglePayment,
-                    CouponType::Recurring,
-                ],
-            ]);
-        } catch (InvalidCouponException $e) {
-            $this->couponMessage = $this->translateCouponReason($e->reason());
-            $this->couponMessageError = true;
-            return;
+            $outcome = $redeem->handle($billable, $this->couponCode);
         } catch (\Throwable $e) {
             report($e);
             $this->couponMessage = __('billing::portal.coupon_redeem_failed');
@@ -342,52 +314,39 @@ new class extends Component {
             return;
         }
 
-        if (in_array($coupon->type, [CouponType::SinglePayment, CouponType::Recurring], true)) {
-            $this->couponMessage = __('billing::portal.coupon_redeem_use_in_action');
-            $this->couponMessageError = false;
-            return;
-        }
+        $this->couponMessage = $outcome->message;
+        $this->couponMessageError = ! $outcome->redeemed;
 
-        try {
-            $service->redeem($coupon, $billable, [
-                'planCode' => $planCode ?: null,
-                'interval' => $interval,
-                'orderAmountNet' => $orderAmountNet,
-            ]);
-            $this->couponMessage = __('billing::portal.coupon_redeem_success', ['code' => $coupon->code]);
-            $this->couponMessageError = false;
+        if ($outcome->redeemed) {
             $this->couponCode = '';
-        } catch (\Throwable $e) {
-            report($e);
-            $this->couponMessage = __('billing::portal.coupon_redeem_failed');
-            $this->couponMessageError = true;
         }
     }
 
-    private function translateCouponReason(string $reason): string
+    /**
+     * @return array{until: string, on_expiry: string}|null
+     */
+    private function resolvePlanWaiver(Billable $b): ?array
     {
-        return match ($reason) {
-            'not_found' => __('billing::checkout.coupon_not_found'),
-            'inactive' => __('billing::checkout.coupon_inactive'),
-            'not_yet_valid' => __('billing::checkout.coupon_not_yet_valid'),
-            'expired' => __('billing::checkout.coupon_expired'),
-            'globally_exhausted' => __('billing::checkout.coupon_exhausted'),
-            'plan_not_applicable' => __('billing::checkout.coupon_plan_mismatch'),
-            'interval_not_applicable' => __('billing::checkout.coupon_interval_mismatch'),
-            'addon_not_applicable' => __('billing::checkout.coupon_addon_mismatch'),
-            'product_not_applicable' => __('billing::checkout.coupon_product_mismatch'),
-            'usage_not_applicable' => __('billing::checkout.coupon_usage_mismatch'),
-            'min_order_not_met' => __('billing::checkout.coupon_min_order'),
-            'requires_billable' => __('billing::checkout.coupon_requires_billable'),
-            'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
-            'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
-            'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
-            'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
-            'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
-            'recurring_already_active' => __('billing::checkout.coupon_recurring_already_active'),
-            'type_not_allowed_in_context' => __('billing::checkout.coupon_type_not_allowed_in_context'),
-            default => __('billing::portal.coupon_redeem_failed'),
-        };
+        $marker = app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)->marker($b);
+
+        if ($marker === null || empty($marker['valid_until'])) {
+            return null;
+        }
+
+        try {
+            $until = \Carbon\Carbon::parse((string) $marker['valid_until']);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! $until->isFuture()) {
+            return null;
+        }
+
+        return [
+            'until' => (string) BillingTime::display($until, $b)?->translatedFormat('d. M Y'),
+            'on_expiry' => \GraystackIT\MollieBilling\Services\Billing\PlanWaiver::normalizeOnExpiry($marker['on_expiry'] ?? null),
+        ];
     }
 
     public function dashboardData(?Billable $billable): array
@@ -558,6 +517,12 @@ new class extends Component {
             'isAccessGrant' => $b->isLocalBillingSubscription()
                 && $status !== SubscriptionStatus::Cancelled
                 && ($b->getBillingSubscriptionEndsAt()?->isFuture() ?? false),
+            // A plan given for free on a subscription that pays for its extras — see
+            // PlanWaiver. The customer has to be told both halves: until when the plan
+            // is free, and what happens then.
+            'planWaiver' => $this->resolvePlanWaiver($b),
+            // Date AND amount of the next charge, from the sources the charge is built from.
+            'nextCharge' => app(\GraystackIT\MollieBilling\Services\Billing\NextChargeSummary::class)->for($b),
             'scheduledChange' => $this->resolveScheduledChange($b),
             'usageTypes' => $usageTypes,
             'invoices' => $invoices,
@@ -759,6 +724,20 @@ new class extends Component {
                     @endif
                 </div>
             </div>
+
+            @if (! empty($d['planWaiver']))
+                <div class="border-t border-zinc-200/75 px-6 py-4 dark:border-zinc-700/50">
+                    <flux:callout icon="gift" color="teal" inline>
+                        {{ __('billing::portal.plan_waiver_notice_'.$d['planWaiver']['on_expiry'], ['date' => $d['planWaiver']['until']]) }}
+                    </flux:callout>
+                </div>
+            @endif
+
+            @if ($d['hasSubscription'] && ! empty($d['nextCharge']))
+                <div class="border-t border-zinc-200/75 px-6 py-5 dark:border-zinc-700/50">
+                    <x-mollie-billing::next-charge :summary="$d['nextCharge']" :billable="$billable" class="max-w-md" />
+                </div>
+            @endif
 
             @if ($d['hasSubscription'])
                 <div class="border-t border-zinc-200/75 bg-zinc-50/50 px-6 py-5 dark:border-zinc-700/50 dark:bg-white/[0.02]">

@@ -254,6 +254,42 @@ new class extends Component {
             return;
         }
 
+        // A tenant who was GIVEN their plan buys this addon: the gift stays, only the
+        // addon is paid. That needs a payment method first, so it goes to Mollie — and
+        // returns as a real subscription whose plan line is waived for as long as the
+        // gift runs. Free addons, and everybody else, take the ordinary path below.
+        $purchase = app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class);
+        $addonsAfter = array_values(array_unique([...$billable->getActiveBillingAddonCodes(), $addonCode]));
+
+        if ($purchase->eligible($billable) && $purchase->needsPayment($billable, $addonsAfter, $billable->getBillingSeatCount())) {
+            try {
+                $url = $purchase->handle($billable, $addonsAfter, $billable->getBillingSeatCount());
+            } catch (\GraystackIT\MollieBilling\Exceptions\BillingCountryRequiredException) {
+                // A gifted tenant without billing details: say what is missing and where
+                // to add it, instead of "something went wrong".
+                $this->toast(__('billing::portal.flash.billing_details_required', [
+                    'page' => __('billing::portal.nav.billing_data'),
+                ]), 'warning');
+
+                return;
+            } catch (\Throwable $e) {
+                report($e);
+                $this->toast(__('billing::portal.flash.error'), 'danger');
+
+                return;
+            }
+
+            if ($url === null) {
+                $this->toast(__('billing::portal.flash.error'), 'danger');
+
+                return;
+            }
+
+            $this->redirect($url, navigate: false);
+
+            return;
+        }
+
         $codes = $this->appliedCouponCodes[$addonCode] ?? [];
 
         try {
@@ -272,6 +308,9 @@ new class extends Component {
                 $this->couponErrors[$addonCode],
                 $this->couponDiscounts[$addonCode],
             );
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+            // Not an error to report: the customer is told what to do first.
+            $this->toast($e->getMessage(), 'danger');
         } catch (\Throwable $e) {
             report($e);
             $this->toast(__('billing::portal.flash.error'), 'danger');
@@ -369,11 +408,27 @@ new class extends Component {
                 }
             }
 
+            // The per-seat part, shown next to the base price ("10,00 € + 2,00 €/seat").
+            $seatPriceNet = $catalog->addonSeatPriceNet($code, $interval);
+            $displaySeatPrice = $seatPriceNet;
+            if ($seatPriceNet !== null && $seatPriceNet > 0 && ! $reverseCharge && $billable !== null) {
+                try {
+                    $displaySeatPrice = (int) $vatService->calculate($country, $seatPriceNet, $billable)['gross'];
+                } catch (\Throwable) {
+                    // fall back to net
+                }
+            }
+
             $addons[] = [
                 'code' => $code,
                 'name' => $catalog->addonName($code) ?? $code,
                 'price' => $displayPrice,
-                'features' => $catalog->addonFeatures($code),
+                'seatPrice' => $seatPriceNet !== null && $seatPriceNet > 0 ? $displaySeatPrice : null,
+                'includedSeats' => $catalog->addonIncludedSeats($code),
+                // Base AND per-seat price — an addon with base 0 and a seat price is not free.
+                'isFree' => $catalog->addonIsFree($code, $interval),
+                // Only what a customer should read; a hidden feature code still unlocks.
+                'features' => $catalog->visibleAddonFeatures($code),
                 'isActive' => in_array($code, $activeAddons, true),
                 'isAllowed' => $allowed,
             ];
@@ -412,17 +467,38 @@ new class extends Component {
         </flux:callout>
     @endif
 
+    {{-- A gifted tenant may never have been through a checkout and so may have no
+         billing address. Extras cannot be priced without the billing country — say so
+         here, with the way to fix it, rather than only when the purchase is refused. --}}
+    @if ($billable
+        && app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class)->eligible($billable)
+        && trim((string) ($billable->getBillingCountry() ?? '')) === '')
+        <flux:callout variant="warning" icon="exclamation-triangle" dusk="billing-details-required">
+            <span>{{ __('billing::portal.flash.billing_details_required', ['page' => __('billing::portal.nav.billing_data')]) }}</span>
+            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('billing-data'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                {{ __('billing::portal.nav.billing_data') }}
+            </flux:button>
+        </flux:callout>
+    @endif
+
     @if ($billable && $billable->isLocalBillingSubscription())
         @php
             $isAccessGrant = ($billable->getBillingSubscriptionStatus()->value !== 'cancelled')
                 && ($billable->getBillingSubscriptionEndsAt()?->isFuture() ?? false);
         @endphp
-        <flux:callout icon="information-circle" color="blue">
-            <span>{{ $isAccessGrant ? __('billing::portal.access_grant_no_paid_extras') : __('billing::portal.free_plan_no_paid_extras') }}</span>
-            <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
-                {{ __('billing::portal.plan_change') }}
-            </flux:button>
-        </flux:callout>
+        @if ($isAccessGrant)
+            {{-- A gift is not a dead end: paid addons can be bought on top of it. --}}
+            <flux:callout icon="gift" color="teal">
+                <span>{{ __('billing::portal.access_grant_extras_available', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::display($billable->getBillingSubscriptionEndsAt(), $billable)?->translatedFormat('d. M Y')]) }}</span>
+            </flux:callout>
+        @else
+            <flux:callout icon="information-circle" color="blue">
+                <span>{{ __('billing::portal.free_plan_no_paid_extras') }}</span>
+                <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('plan'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" class="mt-3">
+                    {{ __('billing::portal.plan_change') }}
+                </flux:button>
+            </flux:callout>
+        @endif
     @endif
 
     @if (! $billable)
@@ -434,6 +510,11 @@ new class extends Component {
             {{ __('billing::portal.addons_none_available') }}
         </flux:callout>
     @else
+        @if ($billable->isBillingPastDue())
+            <flux:callout variant="warning" icon="exclamation-triangle" class="mb-4">
+                {{ __('billing::portal.error_past_due_expansion') }}
+            </flux:callout>
+        @endif
         <div class="space-y-4">
             @foreach ($addons as $addon)
                 <flux:card class="relative p-0! hover:shadow-md transition">
@@ -470,11 +551,19 @@ new class extends Component {
                                     <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($addon['price']) }}</span>
                                     <span class="text-sm text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }}</span>
                                 </div>
+                                @if ($addon['seatPrice'] !== null)
+                                    <flux:text class="text-xs tabular-nums text-zinc-500">{{ __('billing::portal.addon_price_per_seat', ['price' => BillingMoney::format($addon['seatPrice'])]) }}@if ($addon['includedSeats'] > 0) · {{ trans_choice('billing::portal.addon_included_seats', $addon['includedSeats'], ['count' => $addon['includedSeats']]) }}@endif</flux:text>
+                                @endif
                                 <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                             </div>
 
                             @php
-                                $localBlocksThisAddon = $billable && $billable->isLocalBillingSubscription() && $addon['price'] > 0;
+                                // A free plan cannot be charged for an addon. A GIFTED plan can: the
+                                // purchase collects a payment method and keeps the gift.
+                                $localBlocksThisAddon = $billable
+                                    && $billable->isLocalBillingSubscription()
+                                    && ! $addon['isFree']
+                                    && ! app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class)->eligible($billable);
                             @endphp
                             <div class="w-32 flex justify-end">
                                 @if ($hasPendingPlanChange)

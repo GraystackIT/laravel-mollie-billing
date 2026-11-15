@@ -67,8 +67,15 @@ class ResubscribeSubscription
             // auto-cancelled the same night with no dunning window at all.
             $meta = SubscriptionMetaHygiene::withoutDunningEpisode($meta);
 
+            // Cancelled mid-trial: back to the trial it was, on its original end date —
+            // the rule the Mollie branch below has always followed. `Active` here handed
+            // out the plan with no end date and no payment behind it, and nothing ever
+            // reclaimed it: the trial job only looks at status `Trial`.
+            $trialEndsAt = $billable->getBillingTrialEndsAt();
+            $resumesTrial = $trialEndsAt !== null && $trialEndsAt->isFuture();
+
             $billable->forceFill([
-                'subscription_status' => SubscriptionStatus::Active,
+                'subscription_status' => $resumesTrial ? SubscriptionStatus::Trial : SubscriptionStatus::Active,
                 'subscription_ends_at' => $restoredEndsAt,
                 'subscription_meta' => $meta,
             ])->save();

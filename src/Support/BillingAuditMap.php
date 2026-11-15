@@ -85,7 +85,7 @@ final class BillingAuditMap
 
             Events\SubscriptionExtended::class => self::make('subscription_extended', AuditCategory::Subscription,
                 fn (Events\SubscriptionExtended $e): array => [
-                    'code' => $e->coupon->code,
+                    'code' => $e->coupon?->code ?? '—',
                     'previous_ends_at' => $e->previousEndsAt?->toIso8601String(),
                     'new_ends_at' => $e->newEndsAt->toIso8601String(),
                 ]),
@@ -113,6 +113,16 @@ final class BillingAuditMap
                     'invoice_id' => $e->invoiceId,
                     'amount' => $e->amountGross,
                     'status' => $e->status,
+                ]),
+
+            Events\RenewalUndercollected::class => self::make('renewal_undercollected', AuditCategory::Payment,
+                fn (Events\RenewalUndercollected $e): array => [
+                    'invoice_id' => $e->invoice?->getKey(),
+                    'serial' => $e->invoice?->serial_number,
+                    'expected_cents' => $e->expectedNet,
+                    'actual_cents' => $e->collectedNet,
+                    'amount_cents' => $e->shortfallNet,
+                    'reason' => $e->reason,
                 ]),
 
             Events\PlanChanged::class => self::make('plan_changed', AuditCategory::Subscription,
@@ -247,6 +257,31 @@ final class BillingAuditMap
                     'serial' => $e->creditNote->serial_number,
                     'original_serial' => $e->originalInvoice?->serial_number,
                     'amount_cents' => (int) abs((int) $e->creditNote->amount_gross),
+                ]),
+
+            Events\RefundReversed::class => self::make('refund_reversed', AuditCategory::Invoice,
+                fn (Events\RefundReversed $e): array => [
+                    'serial' => $e->reversal->serial_number,
+                    'amount_cents' => (int) abs((int) $e->reversal->amount_gross),
+                    'mollie_refund_id' => $e->mollieRefundId,
+                    'status' => $e->status,
+                ]),
+
+            Events\GrantExtrasPurchaseRefunded::class => self::make('grant_extras_purchase_refunded', AuditCategory::Invoice,
+                fn (Events\GrantExtrasPurchaseRefunded $e): array => [
+                    'serial' => $e->invoice->serial_number,
+                    'credit_note_serial' => $e->creditNote?->serial_number,
+                    'amount_cents' => (int) abs((int) $e->invoice->amount_gross),
+                    'mollie_payment_id' => $e->paymentId,
+                    'refund_queued' => $e->creditNote === null,
+                ]),
+
+            Events\ChargebackReversed::class => self::make('chargeback_reversed', AuditCategory::Invoice,
+                fn (Events\ChargebackReversed $e): array => [
+                    'serial' => $e->original->serial_number,
+                    'reversal_serial' => $e->reversal->serial_number,
+                    'amount_cents' => (int) abs((int) $e->reversal->amount_gross),
+                    'mollie_chargeback_id' => $e->mollieChargebackId,
                 ]),
 
             Events\InvoicePdfRegenerated::class => self::make('invoice_pdf_regenerated', AuditCategory::Invoice,

@@ -50,6 +50,11 @@ class WebhookSupport
      * Rollover types add on top; the rest are reset and re-credited, preserving a debt an
      * overage charge is still collecting (see `resetAndCredit`). One failing wallet must
      * not cost the others, so each is isolated.
+     *
+     * The reset never zeroes a debt that is still owed — see {@see shouldPreserveDebt()}.
+     * Callers on a path where a Mollie call is allowed run
+     * {@see collectOutstandingOverage()} first, so the debt is normally a charge in
+     * flight by the time this looks at it.
      */
     public function creditPeriodQuota(
         Billable $billable,
@@ -71,13 +76,128 @@ class WebhookSupport
                         (string) $type,
                         (int) $units,
                         $reason,
-                        preserveDebt: $this->hasUnsettledOverageFor($billable, (string) $type),
+                        preserveDebt: $this->shouldPreserveDebt($billable, (string) $type),
                     );
                 }
             } catch (\Throwable $e) {
                 Log::warning('Wallet credit failed during webhook', ['type' => $type, 'error' => $e->getMessage()]);
             }
         }
+    }
+
+    /**
+     * Charge whatever overage the wallets still owe, before a period reset looks at them.
+     *
+     * The period-end sweep is the ordinary collector, and it has exactly one chance: the
+     * night before `nextBillingDate()`. Every way of missing that night used to end the
+     * same way — the renewal found a negative balance with no charge in flight and reset
+     * it to the new quota, so the overage was simply given away:
+     *
+     *  - a trial. Its `nextBillingDate()` is mandate capture plus one interval, the trial
+     *    ends (and converts) long before that, and `debit()` allows overage throughout
+     *    because the billable holds a mandate;
+     *  - a renewal that settles before the sweep night. The anchor is the previous
+     *    renewal's `paidAt`, and with SEPA that trails Mollie's fixed collection date by a
+     *    lag that varies — a shorter lag this period puts the webhook ahead of the sweep;
+     *  - a night on which the sweep did not run at all.
+     *
+     * So the renewal collects for itself. `ChargeUsageOverageDirectly::handle()` carries
+     * the in-flight guard, which makes this a no-op whenever the sweep did its job; and
+     * once the charge exists its snapshot is what `hasUnsettledOverageFor()` reads, so the
+     * reset preserves the debt and the settlement clears it — the existing mechanism,
+     * entered one step later.
+     *
+     * Never throws: the renewal it runs inside has already booked its invoice.
+     * Posts a Mollie payment, so it must not be called inside a transaction.
+     */
+    public function collectOutstandingOverage(Billable $billable): void
+    {
+        if (! $billable instanceof Model || ! $billable->hasMollieMandate()) {
+            return;
+        }
+
+        try {
+            // The guard reads the snapshot off the model, and this one was hydrated before
+            // the invoice work — long enough for the nightly sweep to have claimed the slot.
+            $fresh = $billable->newQuery()
+                ->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
+                ->whereKey($billable->getKey())
+                ->first();
+
+            if ($fresh instanceof Model) {
+                // Only this column, and without marking it dirty: the caller keeps working
+                // with the model and must not write this read back over the row.
+                $billable->setRawAttributes(array_merge(
+                    $billable->getAttributes(),
+                    ['subscription_meta' => $fresh->getRawOriginal('subscription_meta')],
+                ));
+                $billable->syncOriginalAttribute('subscription_meta');
+            }
+
+            // A cycle that gave up was written off with its past-due transition (see
+            // hasUnsettledOverageFor()). Re-charging it here would be a fourth attempt on
+            // a payment method that failed three times yesterday; the next period-end
+            // sweep is where a new cycle starts, as before.
+            if (($billable->getBillingSubscriptionMeta()['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_FAILED) {
+                return;
+            }
+
+            app(ChargeUsageOverageDirectly::class)->handle($billable);
+        } catch (\Throwable $e) {
+            // `charge()` has already recorded what it knows: a snapshot, and the
+            // payment-unknown marker if the request left the process. Either keeps the
+            // debt through the reset; a throw before that leaves shouldPreserveDebt() to.
+            Log::warning('Overage charge at renewal failed — the debt is carried into the new period', [
+                'billable_id' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Whether a period reset has to leave this wallet's negative balance standing.
+     *
+     * Two cases. A charge for these units is in flight — forgiving the debt and then
+     * crediting the charged quantity at settlement hands the units out twice. Or nothing
+     * is in flight but the debt is one that can still be collected: then zeroing it is
+     * simply giving it away, and it is carried instead, where it is paid out of the new
+     * period's quota or, if it exceeds that, stays negative for the next sweep.
+     *
+     * The one debt that is NOT carried is a cycle that already gave up: it was written
+     * off with the past-due transition, and preserving it would strand the wallet.
+     */
+    public function shouldPreserveDebt(Billable $billable, string $usageType): bool
+    {
+        return $this->hasUnsettledOverageFor($billable, $usageType)
+            || $this->owesCollectableOverage($billable, $usageType);
+    }
+
+    /**
+     * A negative balance nobody has charged yet, on a billable it can be charged to.
+     */
+    public function owesCollectableOverage(Billable $billable, string $usageType): bool
+    {
+        if (! $billable instanceof Model || ! $billable->hasMollieMandate()) {
+            return false;
+        }
+
+        if (($billable->getBillingSubscriptionMeta()['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_FAILED) {
+            return false;
+        }
+
+        $wallet = $billable->getWallet($usageType);
+
+        if ($wallet === null || (int) $wallet->balanceInt >= 0) {
+            return false;
+        }
+
+        // Debt with a recorded price is owed whatever the current plan charges.
+        if (WalletUsageService::deferredOverageQuantity($wallet) > 0) {
+            return true;
+        }
+
+        return ! $billable->isLocalBillingSubscription()
+            && ($billable->billingOveragePrice($usageType) ?? 0) > 0;
     }
 
     /**
@@ -277,10 +397,38 @@ class WebhookSupport
         $actualGross = $this->amountFromMolliePayment($payment);
         $expectedGross = $this->grossForLineItems($lineItems, $vatRate);
 
-        // 1 cent of slack: gross is rounded per invoice, so an exact match is not
-        // guaranteed even when nothing is wrong.
-        if (abs($actualGross - $expectedGross) <= 1) {
+        if ($actualGross === $expectedGross) {
             return $lineItems;
+        }
+
+        // 1 cent of slack: gross is rounded per invoice, so an exact match is not
+        // guaranteed even when nothing is wrong. That cent is not a mismatch — no event,
+        // no warning — but it is still booked, wherever a document at exactly the paid
+        // amount exists. Left as it was, an invoice could state a cent MORE than Mollie
+        // collected, on every renewal of a subscription whose amount predates per-line
+        // VAT rounding: output VAT declared on money that never arrived, and a full
+        // refund that asks Mollie for more than the payment holds, which Mollie refuses.
+        if (abs($actualGross - $expectedGross) <= 1) {
+            $delta = $this->reconcilingDelta($lineItems, $actualGross, $vatRate);
+
+            if ($delta === 0) {
+                return $lineItems;
+            }
+
+            $rounded = $lineItems;
+            $rounded[] = [
+                'kind' => 'adjustment',
+                'code' => null,
+                'label' => 'Rounding',
+                'quantity' => 1,
+                'unit_price' => $delta,
+                'unit_price_net' => $delta,
+                'total_net' => $delta,
+            ];
+
+            // Only when it lands exactly: `net + round(net × rate)` skips values, and a
+            // rounding line that still misses would be noise on a customer document.
+            return $this->grossForLineItems($rounded, $vatRate) === $actualGross ? $rounded : $lineItems;
         }
 
         event(new PaymentAmountMismatch($billable, (string) ($payment->id ?? ''), $expectedGross, $actualGross));

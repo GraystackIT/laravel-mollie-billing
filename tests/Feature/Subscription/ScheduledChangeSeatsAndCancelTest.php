@@ -113,9 +113,11 @@ it('re-derives auto-derived seats at apply time so a plan without extra seats do
     ]);
 
     $billable->refresh();
-    expect($billable->getBillingSubscriptionMeta()['scheduled_change']['seats'])->toBe(14);
+    // A plan change lands on the seats in use or included — two — and that is what is
+    // stored for display; it is re-derived when the change is applied.
+    expect($billable->getBillingSubscriptionMeta()['scheduled_change']['seats'])->toBe(2);
+    expect($billable->getBillingSubscriptionMeta()['scheduled_change']['seats_auto_derived'])->toBeTrue();
 
-    // Seat count must be down to what Starter allows before the change can apply.
     $meta = $billable->getBillingSubscriptionMeta();
     $meta['seat_count'] = 2;
     $billable->forceFill(['subscription_meta' => $meta])->save();

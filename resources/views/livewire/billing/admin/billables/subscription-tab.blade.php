@@ -6,6 +6,9 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
+use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
+use GraystackIT\MollieBilling\Services\Billing\AdminExtensionService;
+use GraystackIT\MollieBilling\Services\Billing\PlanWaiver;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\ResubscribeSubscription;
@@ -20,6 +23,12 @@ new class extends Component {
     public ?string $trialUntil = null;
     public ?string $flash = null;
     public ?string $error = null;
+
+    /** Free-time actions — see AdminExtensionService. */
+    public string $extendDays = '';
+    public string $freePeriods = '';
+    public string $grantDays = '';
+    public string $grantOnExpiry = '';
 
     /** Locked: which grant revokeGrant() revokes is decided by openRevoke(), not by the browser. */
     #[Locked]
@@ -70,9 +79,109 @@ new class extends Component {
             ->where('billable_type', $b->getMorphClass())
             ->where('billable_id', $b->getKey())
             ->whereNull('revoked_at')
-            ->whereHas('coupon', fn ($q) => $q->where('type', CouponType::AccessGrant->value))
+            ->whereHas('coupon', fn ($q) => $q->whereIn('type', [
+                CouponType::AccessGrant->value,
+                CouponType::PeriodExtension->value,
+                CouponType::PlanWaiver->value,
+            ]))
             ->latest('applied_at')
-            ->get();
+            ->get()
+            // One row per thing that was GIVEN. A plan waiver also writes a row for each
+            // renewal it waived; those are its history, not further grants.
+            ->reject(fn (CouponRedemption $r): bool => (((array) ($r->grant_applied_snapshot ?? []))['mode'] ?? null) === 'plan_waiver_renewal')
+            ->values();
+    }
+
+    /**
+     * Everything is free for N more days: the next charge (Mollie) or the end date
+     * (Local) moves later.
+     */
+    public function extendSubscription(AdminExtensionService $service): void
+    {
+        $this->runExtension(
+            $this->extendDays,
+            fn ($b, int $n) => $service->extendByDays($b, $n),
+            'extended_days',
+            'extendDays',
+        );
+    }
+
+    /** Only the plan is free, for N billing periods. Seats and addons stay paid. */
+    public function giveFreePlanPeriods(AdminExtensionService $service): void
+    {
+        $this->runExtension(
+            $this->freePeriods,
+            fn ($b, int $n) => $service->freePlanPeriods($b, $n),
+            'free_periods_given',
+            'freePeriods',
+        );
+    }
+
+    /** A running gift ends N days later; optionally change what happens at its end. */
+    public function extendGrant(AdminExtensionService $service): void
+    {
+        $onExpiry = in_array($this->grantOnExpiry, [PlanWaiver::ON_EXPIRY_END, PlanWaiver::ON_EXPIRY_CONTINUE_PAID], true)
+            ? $this->grantOnExpiry
+            : null;
+
+        $this->runExtension(
+            $this->grantDays,
+            fn ($b, int $n) => $service->extendGrant($b, $n, $onExpiry),
+            'grant_extended',
+            'grantDays',
+        );
+    }
+
+    /**
+     * Shared shell of the three free-time actions: a whole number greater than zero,
+     * the billable this tab is locked to, and every refusal shown as a message rather
+     * than thrown out of the Livewire action as a 500.
+     */
+    private function runExtension(string $input, \Closure $action, string $flashKey, string $field): void
+    {
+        $this->error = $this->flash = null;
+
+        $n = filter_var(trim($input), FILTER_VALIDATE_INT);
+
+        if ($n === false || $n <= 0 || $n > 3650) {
+            $this->error = __('billing::admin.billables.subscription.flash.extension_number_invalid');
+
+            return;
+        }
+
+        $b = $this->billable();
+
+        if (! $b) {
+            $this->error = __('billing::admin.common.billable_not_found');
+
+            return;
+        }
+
+        try {
+            $action($b, (int) $n);
+        } catch (InvalidCouponException $e) {
+            // A reason this screen has no sentence for is shown as its code rather than
+            // as a raw translation key.
+            $reasonKey = 'billing::admin.billables.subscription.extension_reason.'.$e->reason();
+
+            $this->error = __('billing::admin.billables.subscription.flash.extension_refused', [
+                'reason' => \Illuminate\Support\Facades\Lang::has($reasonKey) ? __($reasonKey) : $e->reason(),
+            ]);
+
+            return;
+        } catch (InvalidSubscriptionStateException|\InvalidArgumentException $e) {
+            $this->error = $e->getMessage();
+
+            return;
+        } catch (\Throwable $e) {
+            report($e);
+            $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
+
+            return;
+        }
+
+        $this->flash = __('billing::admin.billables.subscription.flash.'.$flashKey, ['count' => (int) $n]);
+        $this->reset($field);
     }
 
     public function extendTrial(): void
@@ -224,6 +333,15 @@ new class extends Component {
             return null;
         }
 
+        // A period extension has already moved a charge that may since have happened;
+        // there is nothing coherent to take back. The view offers no button for it —
+        // this is for the request that does not come from the view.
+        $mode = ((array) ($redemption->grant_applied_snapshot ?? []))['mode'] ?? null;
+        if (! in_array($mode, ['full', 'addon_only', 'plan_waiver'], true)) {
+            $this->error = __('billing::admin.billables.subscription.flash.grant_not_revocable');
+            return null;
+        }
+
         return $redemption;
     }
 
@@ -334,6 +452,11 @@ new class extends Component {
                         @endif
                     </x-mollie-billing::admin.detail>
                 </dl>
+
+                <flux:separator variant="subtle" />
+
+                {{-- What the customer will be charged next, and what it is made of. --}}
+                <x-mollie-billing::next-charge :summary="app(\GraystackIT\MollieBilling\Services\Billing\NextChargeSummary::class)->for($b)" />
             </x-mollie-billing::admin.section>
 
             @php
@@ -376,7 +499,7 @@ new class extends Component {
                                 :description="__('billing::admin.billables.subscription.extend_trial_description')"
                                 class="flex-1"
                             />
-                            <flux:button type="submit" size="sm" variant="primary" icon="clock" class="shrink-0">{{ __('billing::admin.billables.subscription.extend') }}</flux:button>
+                            <flux:button type="submit" variant="primary" icon="clock" class="shrink-0">{{ __('billing::admin.billables.subscription.extend') }}</flux:button>
                         </form>
                     @endif
 
@@ -398,6 +521,87 @@ new class extends Component {
                 @endif
             </x-mollie-billing::admin.section>
         </div>
+
+        @php
+            $waiver = app(PlanWaiver::class)->marker($b);
+            $isLocalGift = $b->isLocalBillingSubscription()
+                && $status === SubscriptionStatus::Active
+                && $endsAt !== null && $endsAt->isFuture();
+            $isMollie = $b->getBillingSubscriptionSource() === 'mollie';
+            $running = in_array($status, [SubscriptionStatus::Active, SubscriptionStatus::Trial], true);
+            // What each action needs, so a button is only offered where it can work.
+            $canExtendDays = $running && ($isMollie || $isLocalGift);
+            $canFreePeriods = $running && ($isMollie || $isLocalGift);
+            // Only a gift has an end date to move; free periods on a paying
+            // subscription are extended by giving more periods.
+            $canExtendGrant = $isLocalGift || ($isMollie && $waiver !== null && app(PlanWaiver::class)->isGift($waiver));
+            $currentOnExpiry = $waiver['on_expiry'] ?? ($b->getBillingSubscriptionMeta()['grant_on_expiry'] ?? null);
+        @endphp
+
+        @if ($canExtendDays || $canFreePeriods || $canExtendGrant)
+            <x-mollie-billing::admin.section
+                :title="__('billing::admin.billables.subscription.free_time.title')"
+                :description="__('billing::admin.billables.subscription.free_time.description')"
+            >
+                <div class="grid gap-6 lg:grid-cols-3">
+                    @if ($canExtendDays)
+                        <form wire:submit="extendSubscription" class="space-y-2">
+                            <div class="flex items-center gap-1">
+                                <flux:heading size="sm">{{ __('billing::admin.billables.subscription.free_time.extend_days_title') }}</flux:heading>
+                                <x-mollie-billing::admin.info :text="__('billing::admin.billables.subscription.free_time.extend_days_info')" />
+                            </div>
+                            <div class="flex items-end gap-2">
+                                <flux:input type="number" min="1" max="3650" wire:model="extendDays" placeholder="14" :suffix="__('billing::admin.common.days')" class="flex-1" />
+                                <flux:button type="submit" variant="primary" icon="calendar-days" class="shrink-0" wire:loading.attr="disabled">{{ __('billing::admin.billables.subscription.extend') }}</flux:button>
+                            </div>
+                        </form>
+                    @endif
+
+                    @if ($canFreePeriods)
+                        <form wire:submit="giveFreePlanPeriods" class="space-y-2">
+                            <div class="flex items-center gap-1">
+                                <flux:heading size="sm">{{ __('billing::admin.billables.subscription.free_time.free_periods_title') }}</flux:heading>
+                                <x-mollie-billing::admin.info :text="__('billing::admin.billables.subscription.free_time.free_periods_info')" />
+                            </div>
+                            <div class="flex items-end gap-2">
+                                <flux:input type="number" min="1" max="120" wire:model="freePeriods" placeholder="3" :suffix="__('billing::admin.billables.subscription.free_time.periods')" class="flex-1" />
+                                <flux:button type="submit" variant="primary" icon="gift" class="shrink-0" wire:loading.attr="disabled">{{ __('billing::admin.billables.subscription.free_time.give') }}</flux:button>
+                            </div>
+                        </form>
+                    @endif
+
+                    @if ($canExtendGrant)
+                        <form wire:submit="extendGrant" class="space-y-2">
+                            <div class="flex items-center gap-1">
+                                <flux:heading size="sm">{{ __('billing::admin.billables.subscription.free_time.extend_grant_title') }}</flux:heading>
+                                <x-mollie-billing::admin.info :text="__('billing::admin.billables.subscription.free_time.extend_grant_info')" />
+                            </div>
+                            <div class="flex items-end gap-2">
+                                <flux:input type="number" min="1" max="3650" wire:model="grantDays" placeholder="30" :suffix="__('billing::admin.common.days')" class="flex-1" />
+                                <flux:button type="submit" variant="primary" icon="arrow-right-circle" class="shrink-0" wire:loading.attr="disabled">{{ __('billing::admin.billables.subscription.extend') }}</flux:button>
+                            </div>
+                            <div class="flex items-center gap-1">
+                                <flux:select wire:model="grantOnExpiry" class="flex-1">
+                                    <flux:select.option value="">{{ __('billing::admin.billables.subscription.free_time.on_expiry_keep', ['current' => __('billing::admin.grants.on_expiry.'.PlanWaiver::normalizeOnExpiry($currentOnExpiry))]) }}</flux:select.option>
+                                    <flux:select.option value="end">{{ __('billing::admin.grants.on_expiry.end') }}</flux:select.option>
+                                    <flux:select.option value="continue_paid">{{ __('billing::admin.grants.on_expiry.continue_paid') }}</flux:select.option>
+                                </flux:select>
+                                <x-mollie-billing::admin.info :text="__('billing::admin.grants.on_expiry_info')" />
+                            </div>
+                        </form>
+                    @endif
+                </div>
+
+                @if ($waiver !== null)
+                    <flux:callout icon="gift" color="teal" inline>
+                        {{ __('billing::admin.billables.subscription.free_time.waiver_running', [
+                            'until' => BillingTime::displayUtc(\Carbon\Carbon::parse((string) $waiver['valid_until']))?->format('Y-m-d'),
+                            'on_expiry' => __('billing::admin.grants.on_expiry.'.PlanWaiver::normalizeOnExpiry($waiver['on_expiry'] ?? null)),
+                        ]) }}
+                    </flux:callout>
+                @endif
+            </x-mollie-billing::admin.section>
+        @endif
 
         @php $grants = $this->grants(); @endphp
         <x-mollie-billing::admin.section
@@ -436,9 +640,22 @@ new class extends Component {
                             <flux:table.row :key="$g->id">
                                 <flux:table.cell variant="strong" class="font-mono">{{ $g->coupon?->code ?? '—' }}</flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:badge size="sm" :color="$mode === 'full' ? 'cyan' : 'blue'">
-                                        {{ $mode === 'full' ? __('billing::admin.billables.subscription.mode_full') : ($mode === 'addon_only' ? __('billing::admin.billables.subscription.mode_addon_only') : $mode) }}
-                                    </flux:badge>
+                                    @php
+                                        $modeLabel = match ($mode) {
+                                            'full' => __('billing::admin.billables.subscription.mode_full'),
+                                            'addon_only' => __('billing::admin.billables.subscription.mode_addon_only'),
+                                            'period_extension' => __('billing::admin.billables.subscription.mode_period_extension'),
+                                            'plan_waiver' => __('billing::admin.billables.subscription.mode_plan_waiver', ['count' => (int) ($snap['periods'] ?? 0)]),
+                                            default => $mode,
+                                        };
+                                        $modeColor = match ($mode) {
+                                            'full' => 'cyan',
+                                            'period_extension' => 'sky',
+                                            'plan_waiver' => 'teal',
+                                            default => 'blue',
+                                        };
+                                    @endphp
+                                    <flux:badge size="sm" :color="$modeColor">{{ $modeLabel }}</flux:badge>
                                 </flux:table.cell>
                                 <flux:table.cell>
                                     <div class="space-y-1">
@@ -460,12 +677,14 @@ new class extends Component {
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">{{ $g->grant_days_added ?? '—' }}</flux:table.cell>
                                 <flux:table.cell>
-                                    <flux:button
-                                        size="xs"
-                                        variant="danger"
-                                        icon="x-mark"
-                                        wire:click="openRevoke({{ $g->id }})"
-                                    >{{ __('billing::admin.billables.subscription.revoke') }}</flux:button>
+                                    @if (in_array($mode, ['full', 'addon_only', 'plan_waiver'], true))
+                                        <flux:button
+                                            size="xs"
+                                            variant="danger"
+                                            icon="x-mark"
+                                            wire:click="openRevoke({{ $g->id }})"
+                                        >{{ __('billing::admin.billables.subscription.revoke') }}</flux:button>
+                                    @endif
                                 </flux:table.cell>
                             </flux:table.row>
                         @endforeach

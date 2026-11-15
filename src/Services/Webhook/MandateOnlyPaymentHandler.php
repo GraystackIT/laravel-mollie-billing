@@ -339,16 +339,33 @@ class MandateOnlyPaymentHandler
         ])->save();
 
         $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
-        $discountNet = (int) $pricedCoupon['discount_net'];
-        $lineItems[] = [
-            'kind' => 'coupon',
-            'code' => (string) $pricedCoupon['coupon']->code,
-            'label' => 'Coupon '.$pricedCoupon['coupon']->code,
-            'quantity' => 1,
-            'unit_price' => -$discountNet,
-            'unit_price_net' => -$discountNet,
-            'total_net' => -$discountNet,
-        ];
+
+        // One coupon line per charged line, each taking exactly that line off.
+        //
+        // This document records a payment of 0, and VAT is rounded per line. A single
+        // line for the whole discount does not cancel the charges it covers: Pro 29.50
+        // and an addon 15.50 at 19 % carry 5.61 + 2.95 = 8.56 of VAT, the one coupon line
+        // −45.00 carries −8.55, and the invoice for a €0 payment stated a gross of 0.01.
+        // Mirrored line by line the roundings are symmetric and the total is 0 for every
+        // rate and any number of lines. The coverage check above guarantees the discount
+        // IS the sum of these lines.
+        foreach ($lineItems as $line) {
+            $lineNet = (int) ($line['total_net'] ?? 0);
+
+            if ($lineNet <= 0) {
+                continue;
+            }
+
+            $lineItems[] = [
+                'kind' => 'coupon',
+                'code' => (string) $pricedCoupon['coupon']->code,
+                'label' => 'Coupon '.$pricedCoupon['coupon']->code.' — '.(string) ($line['label'] ?? ''),
+                'quantity' => 1,
+                'unit_price' => -$lineNet,
+                'unit_price_net' => -$lineNet,
+                'total_net' => -$lineNet,
+            ];
+        }
 
         try {
             $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);

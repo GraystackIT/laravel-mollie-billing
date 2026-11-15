@@ -114,7 +114,12 @@ class MollieWebhookController extends Controller
             return response('', 200);
         }
 
-        if ($this->outcomeAlreadyProcessed($paymentId, $outcome)) {
+        // A payment with a refund or a chargeback still on the books is looked at again
+        // even when its outcome has not moved: whether one of them has since failed or
+        // been reversed is stated on the refund or chargeback, not on the payment, and
+        // nothing guarantees the totals in the signature change with it. Every handler
+        // behind route() is idempotent, so the cost is one extra read at Mollie.
+        if ($this->outcomeAlreadyProcessed($paymentId, $outcome) && ! $this->hasStandingCredits($payment)) {
             Log::info('Webhook skipped — this outcome was already processed', [
                 'payment_id' => $paymentId,
                 'outcome' => $outcome,
@@ -132,6 +137,14 @@ class MollieWebhookController extends Controller
             // earlier made a billable whose activation threw look abandoned to
             // CleanupOrphanedBillablesJob.
             $this->clearPendingFirstPaymentAfterSuccess($payment, $billable);
+
+            // An earlier row can already hold this signature when a state recurs (see
+            // outcomeAlreadyProcessed()); the pair is unique, and this delivery supersedes it.
+            BillingProcessedWebhook::query()
+                ->where('mollie_payment_id', $paymentId)
+                ->where('event_signature', $outcome)
+                ->whereKeyNot($reservation->getKey())
+                ->delete();
 
             $reservation->update([
                 'event_signature' => $outcome,
@@ -303,11 +316,19 @@ class MollieWebhookController extends Controller
      */
     protected function outcomeAlreadyProcessed(string $paymentId, string $outcome): bool
     {
-        return BillingProcessedWebhook::query()
+        // The LATEST processed outcome, not any earlier one. Every delivery fetches the
+        // payment live, so its signature is the payment's current state — and a state can
+        // come back: a refund that fails returns `amountRefunded` to what it was, making
+        // the delivery that has to undo the booking byte-identical to the original
+        // `…:paid` on record. Matching any historical row deduped it away.
+        $latest = BillingProcessedWebhook::query()
             ->where('mollie_payment_id', $paymentId)
-            ->where('event_signature', $outcome)
             ->whereNotNull('processed_at')
-            ->exists();
+            ->orderByDesc('processed_at')
+            ->orderByDesc('id')
+            ->value('event_signature');
+
+        return $latest === $outcome;
     }
 
     protected function fetchPayment(string $paymentId): object
@@ -609,13 +630,24 @@ class MollieWebhookController extends Controller
      * at once (a partial refund and then a chargeback of the rest), so they are checked
      * independently rather than as an either/or.
      */
+    protected function hasStandingCredits(object $payment): bool
+    {
+        return $this->refundHandler->hasStandingRefundBookings($payment)
+            || $this->chargebackHandler->hasStandingChargebackBookings($payment);
+    }
+
     protected function syncMollieCredits(object $payment, Billable $billable): void
     {
-        if ($this->hasRefunds($payment)) {
+        // Also when Mollie reports no refunded amount but a refund is still on the books:
+        // a refund that failed after it was booked drops `amountRefunded` back, and that
+        // delivery is the one that has to reverse the credit note.
+        if ($this->hasRefunds($payment) || $this->refundHandler->hasStandingRefundBookings($payment)) {
             $this->handleRefundWebhook($payment, $billable);
         }
 
-        if ($this->support->hasChargebacks($payment)) {
+        // Likewise for a chargeback that is still on the books: its reversal is stated on
+        // the chargeback, and nothing guarantees the charged-back total is still there.
+        if ($this->support->hasChargebacks($payment) || $this->chargebackHandler->hasStandingChargebackBookings($payment)) {
             $this->handleChargebackWebhook($payment, $billable);
         }
     }

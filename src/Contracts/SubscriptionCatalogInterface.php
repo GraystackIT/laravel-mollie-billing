@@ -79,6 +79,33 @@ interface SubscriptionCatalogInterface
 
     public function addonPriceNet(string $addonCode, string $interval): int;
 
+    /**
+     * The addon's price per seat for this interval, or null when it has none.
+     *
+     * Charged on top of the base price ({@see addonPriceNet()}) for every seat of the
+     * subscription beyond {@see addonIncludedSeats()} — the plan's own included seats
+     * count here like any other seat. Null is "this addon is not priced per seat" and
+     * leaves it exactly as an addon was before per-seat pricing existed.
+     */
+    public function addonSeatPriceNet(string $addonCode, string $interval): ?int;
+
+    /**
+     * Seats the addon's per-seat price does not charge for. Independent of the plan's
+     * included seats; 0 by default.
+     */
+    public function addonIncludedSeats(string $addonCode): int;
+
+    /**
+     * Whether the addon bills nothing in this interval — neither a base price nor a
+     * per-seat price.
+     *
+     * The one question "may this be enabled without a payment instrument?" has to ask.
+     * `addonPriceNet() > 0` answered it while the base price was the only price; an
+     * addon with base 0 and a seat price would read as free and could be switched on
+     * for a Local subscription that nothing can bill.
+     */
+    public function addonIsFree(string $addonCode, string $interval): bool;
+
     public function includedSeats(string $planCode): int;
 
     /** @return array<int, string> */
@@ -153,7 +180,35 @@ interface SubscriptionCatalogInterface
 
     public function featureDescription(string $featureKey): ?string;
 
-    /** @return array<string, array{name: string, description: ?string}> */
+    /**
+     * Whether a feature is shown where plans and addons are presented to the customer
+     * (checkout plan cards, the plan-change screen, addon cards).
+     *
+     * A hidden feature is fully effective — `FeatureAccess`, `@planFeature` and the
+     * `billing.feature` middleware resolve it like any other. It is only left out of
+     * the lists a customer reads. That is what makes technical feature codes possible:
+     * a flag an app gates on, which is not a selling point and has no place on a plan card.
+     *
+     * An unknown key is visible: a plan referencing a feature nobody defined is a
+     * misconfiguration `billing:check-config` reports, not something to hide.
+     */
+    public function featureIsVisible(string $featureKey): bool;
+
+    /**
+     * The plan's features a customer is shown, in the plan's order.
+     *
+     * @return array<int, string>
+     */
+    public function visiblePlanFeatures(string $planCode): array;
+
+    /**
+     * The addon's features a customer is shown, in the addon's order.
+     *
+     * @return array<int, string>
+     */
+    public function visibleAddonFeatures(string $addonCode): array;
+
+    /** @return array<string, array{name: string, description: ?string, visible: bool}> */
     public function allFeatures(): array;
 
     // One-time products

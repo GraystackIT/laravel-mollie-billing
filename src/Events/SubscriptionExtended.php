@@ -19,7 +19,9 @@ class SubscriptionExtended
         public readonly Billable $billable,
         public readonly ?CarbonInterface $previousEndsAt,
         public readonly CarbonInterface $newEndsAt,
-        public readonly Coupon $coupon,
+        // Null when free time is given to a Local subscription that no coupon stands
+        // behind (an app activating a plan with an end date of its own).
+        public readonly ?Coupon $coupon = null,
     ) {
     }
 }

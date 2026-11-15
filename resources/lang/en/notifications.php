@@ -12,6 +12,13 @@ return [
     'trial_expired' => [
         'subject' => 'Your :app trial has expired',
         'body' => 'Your trial ended on :date and no payment method was added in time. Subscribe at any time to restore access — your previous configuration is remembered.',
+        'body_with_mandate' => 'Your trial ended on :date, but the first payment for your subscription has not reached us. Please check your payment method and subscribe again to restore access — your previous configuration is remembered.',
+    ],
+    'grant_extras_purchase_refunded' => [
+        'subject' => 'Your purchase at :app could not be completed',
+        'body' => 'Your purchase of extras could not be carried out, because your free period has ended in the meantime.',
+        'refund' => 'The amount of :amount is being refunded to the payment method you used. Depending on your bank this can take a few days.',
+        'next' => 'You can book a plan at any time.',
     ],
     'trial_converted' => [
         'subject' => 'Welcome to :app',

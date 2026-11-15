@@ -10,12 +10,16 @@ use Illuminate\Support\Facades\Schema;
 // only appear off that default: the migration aborted `php artisan migrate` halfway,
 // and on the drivers where it did get through it destroyed bavix's `transfers` table.
 
-function rerunWalletMorphMigration(string $keyType): void
-{
-    config()->set('mollie-billing.billable_key_type', $keyType);
+// Guarded: WalletMorphPostgresTest uses it too and may be loaded by a different
+// parallel worker than this file, or by the same one.
+if (! function_exists('rerunWalletMorphMigration')) {
+    function rerunWalletMorphMigration(string $keyType): void
+    {
+        config()->set('mollie-billing.billable_key_type', $keyType);
 
-    $migration = require __DIR__.'/../../../database/migrations/2026_01_01_000006_alter_wallet_morphs_for_billable_key_type.php';
-    $migration->up();
+        $migration = require __DIR__.'/../../../database/migrations/2026_01_01_000006_alter_wallet_morphs_for_billable_key_type.php';
+        $migration->up();
+    }
 }
 
 /** @return array<int, string> */

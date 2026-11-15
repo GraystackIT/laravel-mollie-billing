@@ -17,7 +17,9 @@ use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Services\Webhook\WebhookSupport;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -374,35 +376,245 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         // Trial-lifecycle notifications and expiry transitions live in
         // ProcessTrialLifecycleJob — this job is concerned with overage charging
         // and renewal-period bookkeeping only.
+        //
+        // How this fits together with the renewal, because the two are easy to read as
+        // one thing and are not:
+        //
+        //  - TRIGGER. Exactly one case below matches a billable on a given night, keyed on
+        //    "tomorrow": `nextBillingDate()` (period anchor + one interval) or
+        //    `subscription_ends_at`. Each case is one line here and one method below.
+        //  - CHARGE (Mollie source). This pass only *creates* the overage payment. It never
+        //    resets a wallet and never moves the period anchor — both belong to the
+        //    renewal webhook (`SubscriptionPaymentHandler::paid()`), which sets the anchor
+        //    to the payment's `paidAt` and refills through
+        //    `WebhookSupport::creditPeriodQuota()`.
+        //  - SAFETY NET. Missing the trigger night no longer loses the overage: the renewal
+        //    calls `WebhookSupport::collectOutstandingOverage()` before its reset, and the
+        //    reset keeps any debt that is still owed (`shouldPreserveDebt()`). So a case
+        //    added here does not have to be the only thing standing between a negative
+        //    balance and a reset.
+        //  - RESET (Local source). There is no webhook, so this pass is the renewal: it
+        //    refills the wallets and moves the anchor itself (`renewLocalPeriod()`). Any
+        //    new case that advances a period without a payment follows that shape — and
+        //    must move `subscription_period_starts_at`, or it matches again tomorrow.
 
-        // Case A — Mollie subscription continues, charge overages now.
+        // Case A0 — Mollie subscription whose charge is deferred past this period: this
+        // pass is its renewal, exactly as it is for a Local one.
+        //
+        // A discount that covers the whole recurring amount keeps Mollie from charging
+        // for as long as it runs, so no renewal webhook arrives — and the webhook is what
+        // moves the anchor and refills the wallets for a Mollie subscription. Without this
+        // case the first period never ended: the included quota was credited once for the
+        // whole coupon, and `nextBillingDate()` slid into the past, where
+        // `UpdateSubscription::guardPeriodNotLapsed()` refused every seat and addon
+        // change with "wait for the renewal" — a renewal that was months away.
+        //
+        // "Due" rather than "tomorrow", so a period that already slid is caught up on the
+        // first night instead of never matching again. Trial and PastDue are not periods
+        // being renewed; a cancelled subscription is running out, not turning over.
+        $status = $billable->getBillingSubscriptionStatus();
+
+        // A fully covering coupon that has been switched off. Deactivating a coupon ends
+        // its discount "on the next renewal", and a deferred charge has no renewal for
+        // that to happen on — so this pass ends the deferral itself: full price from the
+        // next regular date. From then on the billable is an ordinary subscription and
+        // falls through to the cases below. See
+        // MollieSubscriptionPatcher::endDeferralOfDeactivatedCoupon().
+        if ($isMollie
+            && in_array($status, [SubscriptionStatus::Active, SubscriptionStatus::Trial], true)
+            && app(\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::class)
+                ->endDeferralOfDeactivatedCoupon($billable)
+        ) {
+            $billable->refresh();
+        }
+
+        $deferredUntil = $isMollie ? ChargeDeferral::until($billable) : null;
+        $periodIsDue = $nextBilling !== null && $nextBilling->lessThanOrEqualTo($tomorrowEnd);
+
+        if (
+            $deferredUntil !== null
+            && $periodIsDue
+            && $deferredUntil->greaterThan($tomorrowEnd)
+            && $status === SubscriptionStatus::Active
+        ) {
+            $this->renewDeferredPeriod($billable, $nextBilling, $tomorrowStart, $deferredUntil);
+
+            return;
+        }
+
+        // Case A — Mollie subscription renews tomorrow: charge the period's overage now.
         if ($isMollie && $renewsTomorrow && ! $isCancelled && $hasMandate) {
             $this->safeCharge($billable, $chargeService);
 
             return;
         }
 
-        // Case B — Mollie subscription ends tomorrow.
+        // Case B — Mollie subscription ends tomorrow: last chance to charge its overage.
         if ($isMollie && $endsTomorrow && $isCancelled && $hasMandate) {
             $this->safeCharge($billable, $chargeService);
 
             return;
         }
 
-        // Case C — Local subscription continues: reset wallet quota.
+        // Case C — Local subscription renews tomorrow: this pass is its renewal.
         //
         // PastDue is excluded: a past-due local subscription is not renewing, it is
         // waiting to be cancelled. `nextBillingDate()` keeps cycling for it (the period
         // anchor is never cleared), so a mandate-less expired trial parked in PastDue
         // used to collect a fresh month of consumable quota on every anniversary —
         // indefinitely, for a customer who never paid.
-        if ($isLocal && $renewsTomorrow && ! $isCancelled && ! $isPastDue) {
-            $this->resetLocalQuota($billable, $walletService, $tomorrowStart);
+        //
+        // Nor does a subscription that ends on (or before) that boundary: an access grant
+        // of exactly two months is two periods. Refilled here it got a third quota the
+        // night before it expired — and what a rollover type holds outlives the expiry.
+        $endsByBoundary = $endsAt !== null && $endsAt->lessThanOrEqualTo($tomorrowEnd);
+
+        if ($isLocal && $renewsTomorrow && ! $isCancelled && ! $isPastDue && ! $endsByBoundary) {
+            $this->renewLocalPeriod($billable, $chargeService, $walletService, $tomorrowStart);
 
             return;
         }
 
         // Case D — Local ending tomorrow: no-op (admin-driven).
+    }
+
+    /**
+     * A Local subscription's period boundary: collect what can be collected, then refill.
+     *
+     * Local plans are hard-capped, so the only debt a Local wallet can hold is one a plan
+     * change left behind — typically a downgrade to the free plan whose excess could not
+     * be charged at the time. If the mandate survived, that is still collectable, at the
+     * price it was recorded with; without the charge the reset below was the end of it.
+     */
+    private function renewLocalPeriod(
+        Model $billable,
+        ChargeUsageOverageDirectly $chargeService,
+        WalletUsageService $walletService,
+        CarbonInterface $tomorrowStart,
+    ): void {
+        // Only for debt that carries a recorded price. Everything else on a Local wallet
+        // is not something a customer was ever quoted, and stays uncharged as documented.
+        $owesDeferredOverage = $billable->hasMollieMandate()
+            && $billable->wallets()->get()->contains(
+                static fn ($wallet): bool => WalletUsageService::deferredOverageQuantity($wallet) > 0,
+            );
+
+        if ($owesDeferredOverage) {
+            $this->safeCharge($billable, $chargeService);
+        }
+
+        $this->resetLocalQuota($billable, $walletService, $tomorrowStart);
+    }
+
+    /**
+     * The period boundary of a Mollie subscription that is not being charged for it.
+     *
+     * Same three steps the renewal webhook performs, minus the payment: collect what the
+     * ending period still owes, move the anchor, refill. The overage is collected first
+     * and outside any transaction — it is a Mollie payment — and the refill keeps a debt
+     * that is still owed (`WebhookSupport::shouldPreserveDebt()`).
+     *
+     * The anchor moves to the boundary itself, not to midnight: the cycle stays the one
+     * the subscription was created on, so the date the regular charge returns to when the
+     * deferral ends (`ChargeDeferral::regularNextBillingDate()`) does not drift.
+     */
+    private function renewDeferredPeriod(
+        Model $billable,
+        CarbonInterface $boundary,
+        CarbonInterface $tomorrowStart,
+        CarbonInterface $deferredUntil,
+    ): void {
+        /** @var Model&Billable $billable */
+        $interval = $billable->getBillingSubscriptionInterval();
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+
+        if ($planCode === '' || $interval === null) {
+            return;
+        }
+
+        // Several boundaries may have passed for a subscription deferred before this
+        // case existed. The quota is per period and not owed in arrears, so it is
+        // credited once, for the period now beginning.
+        $periodStart = \Carbon\CarbonImmutable::instance($boundary);
+
+        for ($i = 0; $i < 600; $i++) {
+            $next = BillingTime::addInterval($periodStart, $interval);
+
+            if ($next->greaterThan($tomorrowStart)) {
+                break;
+            }
+
+            $periodStart = $next;
+        }
+
+        $support = app(WebhookSupport::class);
+        $support->collectOutstandingOverage($billable);
+
+        // Anchor first: a refill that failed half-way must not be repeated in full
+        // tomorrow, which is what an unmoved anchor would cause.
+        $this->mutateBillingMeta($billable, function (array $meta): array {
+            // An override that has passed describes a period that is over.
+            $override = $meta['next_charge_date_override'] ?? null;
+
+            if (is_string($override) && $override !== '') {
+                try {
+                    if (! \Carbon\Carbon::parse($override)->isFuture()) {
+                        unset($meta['next_charge_date_override']);
+                    }
+                } catch (Throwable) {
+                    unset($meta['next_charge_date_override']);
+                }
+            }
+
+            return $meta;
+        }, ['subscription_period_starts_at' => $periodStart]);
+
+        $billable->refresh();
+        $periodEnd = $billable->nextBillingDate();
+
+        // A plan waiver given to end, which will not cover the charge after this period:
+        // end the subscription with it. Left alone, the deferred charge would fire the day
+        // after the gift ends — at the full price of a plan nobody agreed to pay for.
+        $endsWithWaiver = $periodEnd !== null
+            && app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)->endsSubscription($billable, $periodEnd);
+
+        // The hand-over back to the renewal webhook. A deferral does not have to end on a
+        // period boundary — a recurring coupon's ends `N × 30 + 2` days after it was
+        // applied, which for three monthly periods from 10 January is 12 April. Refilling
+        // on 10 April and again when the charge settles on the 12th credited the same
+        // period twice, and a rollover type kept the second quota for good.
+        //
+        // So a stretch that is cut short by the returning charge is not a period of its
+        // own: it belongs to the one before it, and the charge's own renewal brings the
+        // quota. "Short" is less than half an interval — anything longer is a period the
+        // customer would otherwise spend without an allowance. The anchor has moved either
+        // way, so the lapsed-period guard stays quiet in between.
+        $chargeCutsPeriodShort = ! $endsWithWaiver
+            && $periodEnd !== null
+            && $deferredUntil->lessThan($this->midpoint($periodStart, $periodEnd));
+
+        if (! $chargeCutsPeriodShort) {
+            $support->creditPeriodQuota($billable, $planCode, $interval, 'subscription_renewal');
+        }
+
+        if ($endsWithWaiver) {
+            $billable->refresh();
+
+            try {
+                app(CancelSubscription::class)->handle($billable, false, 'grant_expired');
+            } catch (Throwable $e) {
+                Log::error('PrepareUsageOverageJob: could not end the subscription with its plan waiver', [
+                    'billable_id' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
+    private function midpoint(CarbonInterface $from, CarbonInterface $to): CarbonInterface
+    {
+        return \Carbon\CarbonImmutable::instance($from)
+            ->addSeconds(intdiv((int) abs($to->getTimestamp() - $from->getTimestamp()), 2));
     }
 
     private function safeCharge(Model $billable, ChargeUsageOverageDirectly $chargeService): void
@@ -490,8 +702,9 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $interval = $billable->getBillingSubscriptionInterval();
 
         $included = $catalog->includedUsages($planCode, $interval);
+        $support = app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class);
 
-        DB::transaction(function () use ($billable, $walletService, $catalog, $included, $tomorrowStart): void {
+        DB::transaction(function () use ($billable, $walletService, $catalog, $included, $tomorrowStart, $support): void {
             foreach ($included as $type => $quantity) {
                 if ((int) $quantity > 0) {
                     if ($catalog->usageRollover((string) $type)) {
@@ -502,7 +715,15 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                         // every later reset.
                         $walletService->creditRollover($billable, (string) $type, (int) $quantity);
                     } else {
-                        $walletService->resetAndCredit($billable, (string) $type, (int) $quantity, 'subscription_renewal');
+                        // Same rule as the webhook renewal: a debt a charge is collecting,
+                        // or one that still can be collected, is not zeroed here.
+                        $walletService->resetAndCredit(
+                            $billable,
+                            (string) $type,
+                            (int) $quantity,
+                            'subscription_renewal',
+                            preserveDebt: $support->shouldPreserveDebt($billable, (string) $type),
+                        );
                     }
                 }
             }

@@ -55,14 +55,12 @@ class PlanChangeTest extends BrowserTestCase
             $browser->waitForText('Starter', 10)->pause(400);
 
             $this->clickWire($browser, '[wire\\:click="previewFor(\'starter\')"]');
-            $browser->waitForText(__('billing::portal.preview_seats_drop_extra'), 10)->pause(400);
-            $this->shot($browser, 'Downgrade blockiert: zu viele Seats');
 
-            // Business includes 10 seats, Starter one — the preview refuses to
-            // apply until the extra seats are given up, and offers exactly that.
-            $this->clickWire($browser, '[wire\\:click="toggleDropExtraSeats"]');
-            $browser->waitForText(__('billing::portal.preview_seats_extra_dropped'), 10)->pause(400);
-            $this->shot($browser, 'Extra-Seats aufgegeben — Downgrade möglich');
+            // Business includes 10 seats, Starter one. A plan change lands on the seats
+            // in use or included, and the preview says how many that is before anything
+            // is confirmed — keeping more is an explicit choice (`toggleKeepExtraSeats`).
+            $browser->waitFor('[dusk="seats-after-change"]', 10)->pause(400);
+            $this->shot($browser, 'Downgrade: Sitze nach dem Wechsel');
 
             // Alpine toggle first, then the one apply button submits applyAt.
             $browser->press(__('billing::portal.schedule_end_of_period'));

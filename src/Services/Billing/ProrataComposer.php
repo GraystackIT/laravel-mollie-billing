@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ProrataLine;
+use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 
 /**
  * Pure computation of pro-rata lines for a plan-change intent.
@@ -19,8 +20,12 @@ use GraystackIT\MollieBilling\Support\ProrataLine;
  * Returns a mixed list of charge and refund lines.
  * Charges before refunds; within the same direction: plan, seats, addons.
  *
- * Free-plan origin (currentPlan = Free): empty list — Free→Mollie runs through UpgradeLocalToMollie.
- * Mollie→Free: refunds only, no charge.
+ * Free-plan origin on a Local subscription: empty list — Free→Mollie runs through UpgradeLocalToMollie.
+ * A free plan that bills paid addons through Mollie is priced like any other plan.
+ * Mollie→Free: the old configuration is credited; whatever the free target still bills
+ * (paid addons it keeps) is charged, so a target that bills nothing yields refunds only.
+ * Credits are prorated from what was actually paid for a line, not from its list price
+ * ({@see paidLineNet()}).
  * Mollie→Mollie: plan switch = refund of the old + charge of the new plan, separately.
  *
  * Pricing follows BillingPolicy::computeProrata(): within one interval both sides are
@@ -42,8 +47,17 @@ class ProrataComposer
     {
         $billable = $intent->billable;
 
-        // Free origin: nothing at all (Free→Mollie runs through UpgradeLocalToMollie).
-        if ($this->catalog->isFreePlan($intent->currentPlan, $intent->currentInterval)) {
+        // Free origin on a Local subscription: nothing at all (Free→Mollie runs through
+        // UpgradeLocalToMollie, which collects a full first payment).
+        //
+        // Scoped to Local on purpose. `isFreePlan()` looks at base and seat price only, so
+        // it also says yes for a free plan that carries a paid addon — and that one bills
+        // through a Mollie subscription like any paid plan. Short-circuiting it here meant
+        // an addon added mid-period was never charged until the renewal, and one removed
+        // mid-period was never credited.
+        if ($this->catalog->isFreePlan($intent->currentPlan, $intent->currentInterval)
+            && $billable->isLocalBillingSubscription()
+        ) {
             return [];
         }
 
@@ -62,7 +76,8 @@ class ProrataComposer
         if (BillingPolicy::isPastDueReset($billable, $intent->currentPlan !== $intent->newPlan, $intent->currentInterval !== $intent->newInterval)
             && ! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)
         ) {
-            return $this->composePastDueReset($intent);
+            // A full first period, priced as a renewal would price it.
+            return $this->withMarkerDiscount($intent, $this->composePastDueReset($intent), 1.0, wholeConfiguration: true);
         }
 
         // Plan switch
@@ -113,6 +128,11 @@ class ProrataComposer
                     continue;
                 }
                 $refunds = array_merge($refunds, $this->addonRefundLines($billable, (string) $code, $qty));
+                $refunds = array_merge($refunds, $this->addonSeatsRefundLines(
+                    $billable,
+                    (string) $code,
+                    $this->currentAddonSeats($intent, (string) $code),
+                ));
             }
 
             // An interval change grants a FULL new period — ProrataChargeHandler opens a
@@ -132,33 +152,45 @@ class ProrataComposer
                 ? $this->newIntervalWindow($intent)
                 : [$periodStart, $periodEnd];
 
-            if (! $this->catalog->isFreePlan($intent->newPlan, $intent->newInterval)) {
-                $chargeLine = $this->planChargeLine($intent, $chargeStart, $chargeEnd);
+            // No `isFreePlan(newPlan)` gate around this block. A free target still bills
+            // whatever paid addons it keeps, and the refund side above has just credited
+            // every current addon — so skipping the charges handed a kept, paid addon out
+            // for free until the renewal. The helpers already return null for a component
+            // the target does not price (base 0, no seat price), so a target that bills
+            // nothing still produces no charge line.
+            $chargeLine = $this->planChargeLine($intent, $chargeStart, $chargeEnd);
+            if ($chargeLine !== null) {
+                $charges[] = $chargeLine;
+            }
+
+            $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
+            if ($newExtraSeats > 0) {
+                $chargeLine = $this->seatsChargeLine($intent, $newExtraSeats, $chargeStart, $chargeEnd);
+                if ($chargeLine !== null) {
+                    $charges[] = $chargeLine;
+                }
+            }
+
+            foreach ($intent->newAddons as $code => $qty) {
+                $qty = (int) $qty;
+                if ($qty <= 0) {
+                    continue;
+                }
+                $chargeLine = $this->addonChargeLine($intent, (string) $code, $qty, $chargeStart, $chargeEnd);
                 if ($chargeLine !== null) {
                     $charges[] = $chargeLine;
                 }
 
-                $newExtraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
-                if ($newExtraSeats > 0) {
-                    $chargeLine = $this->seatsChargeLine($intent, $newExtraSeats, $chargeStart, $chargeEnd);
-                    if ($chargeLine !== null) {
-                        $charges[] = $chargeLine;
-                    }
-                }
-
-                foreach ($intent->newAddons as $code => $qty) {
-                    $qty = (int) $qty;
-                    if ($qty <= 0) {
-                        continue;
-                    }
-                    $chargeLine = $this->addonChargeLine($intent, (string) $code, $qty, $chargeStart, $chargeEnd);
-                    if ($chargeLine !== null) {
-                        $charges[] = $chargeLine;
-                    }
+                $chargeLine = $this->addonSeatsChargeLine($intent, (string) $code, $this->newAddonSeats($intent, (string) $code), $chargeStart, $chargeEnd);
+                if ($chargeLine !== null) {
+                    $charges[] = $chargeLine;
                 }
             }
 
             $refunds = $this->applyRemainingRefundablePool($refunds);
+
+            ['factor' => $chargeFactor] = $this->periodMath($chargeStart, $chargeEnd);
+            $charges = $this->withMarkerDiscount($intent, $charges, $chargeFactor, wholeConfiguration: true);
 
             return array_merge($charges, $refunds);
         }
@@ -200,11 +232,153 @@ class ProrataComposer
                     $charges[] = $chargeLine;
                 }
             }
+
+            // The per-seat part of the addon, which moves on its own axis: with the addon
+            // itself (on → every charged seat, off → every one back) and with the seat
+            // count while the addon stays (only the difference in CHARGED seats — the
+            // addon's free seats absorb a change below them, so 4 → 6 seats with 5 free
+            // charges exactly one). The base line above is untouched by a seat change.
+            $currentSeatUnits = $currentQty > 0 ? $this->currentAddonSeats($intent, (string) $code) : 0;
+            $newSeatUnits = $newQty > 0 ? $this->newAddonSeats($intent, (string) $code) : 0;
+            $seatUnitDiff = $newSeatUnits - $currentSeatUnits;
+
+            if ($seatUnitDiff < 0) {
+                $refunds = array_merge($refunds, $this->addonSeatsRefundLines($billable, (string) $code, abs($seatUnitDiff)));
+            } elseif ($seatUnitDiff > 0) {
+                $chargeLine = $this->addonSeatsChargeLine($intent, (string) $code, $seatUnitDiff, $periodStart, $periodEnd);
+                if ($chargeLine !== null) {
+                    $charges[] = $chargeLine;
+                }
+            }
         }
 
         $refunds = $this->applyRemainingRefundablePool($refunds);
 
+        ['factor' => $chargeFactor] = $this->periodMath($periodStart, $periodEnd);
+        $charges = $this->withMarkerDiscount($intent, $charges, $chargeFactor, wholeConfiguration: false);
+
         return array_merge($charges, $refunds);
+    }
+
+    /**
+     * Carry the running recurring discount — a coupon or a plan waiver — onto the charge.
+     *
+     * The discount lives in one slot (`active_recurring_coupon`) and every *recurring*
+     * amount honours it: the renewal invoice, the Mollie subscription amount, the preview.
+     * The prorata charge did not. It priced the new configuration at list, while the
+     * credit for the old one is the unused share of what was actually paid — so across a
+     * change the customer paid the discount back for the rest of the period:
+     *
+     * - Plan free under a waiver, Pro (50.00) → Enterprise (200.00) on day 11 of 31:
+     *   nothing was paid for Pro, so nothing is credited; Enterprise was charged
+     *   200.00 × 21/31 = 135.48. The recurring amount is 150.00 — the waiver keeps taking
+     *   the 50.00 it was given for off — so the remaining days cost 150.00 × 21/31 =
+     *   101.61. The customer paid 33.87 for a plan that is theirs for free.
+     * - A granted addon switched off and on again was charged pro-rata, although the next
+     *   renewal waives it again.
+     *
+     * What the change owes is the difference between two recurring amounts for the days
+     * that are left, so the same discount has to be on both sides:
+     *
+     * - A change that credits the whole old configuration and charges the whole new one
+     *   (plan, interval, past-due reset) takes the discount the NEW configuration gets.
+     * - A seat or addon change charges only what was added, so it takes only what the
+     *   discount GROWS by. For a coupon locked to its base amount that is nothing — a seat
+     *   added on top is paid in full, now and at every renewal. For a waiver it is the
+     *   granted addon coming back.
+     *
+     * Never more than the charge itself: a discount does not turn a change into a payout.
+     *
+     * @param  list<ProrataLine>  $charges
+     * @return list<ProrataLine>
+     */
+    private function withMarkerDiscount(PlanChangeIntent $intent, array $charges, float $factor, bool $wholeConfiguration): array
+    {
+        $chargeNet = 0;
+        foreach ($charges as $line) {
+            $chargeNet += $line->amountNet;
+        }
+
+        if ($charges === [] || $chargeNet <= 0 || $factor <= 0) {
+            return $charges;
+        }
+
+        $coupons = app(CouponService::class);
+        $marker = $coupons->getActiveRecurringCouponMarker($intent->billable);
+
+        if (! is_array($marker)) {
+            return $charges;
+        }
+
+        $newAddons = array_values(array_map('strval', array_keys(array_filter($intent->newAddons, fn ($q): bool => (int) $q > 0))));
+        $newNet = SubscriptionAmount::net($this->catalog, $intent->billable, $intent->newPlan, $intent->newInterval, $intent->newSeats, $newAddons);
+
+        $discount = $coupons->computeMarkerDiscount($intent->billable, $newNet, [
+            'plan_code' => $intent->newPlan,
+            'interval' => $intent->newInterval,
+            'addon_codes' => $newAddons,
+            'seats' => $intent->newSeats,
+        ]);
+
+        if (! $wholeConfiguration) {
+            $currentAddons = array_values(array_map('strval', array_keys(array_filter($intent->currentAddons, fn ($q): bool => (int) $q > 0))));
+            $currentNet = SubscriptionAmount::net($this->catalog, $intent->billable, $intent->currentPlan, $intent->currentInterval, $intent->currentSeats, $currentAddons);
+
+            $discount -= $coupons->computeMarkerDiscount($intent->billable, $currentNet, [
+                'plan_code' => $intent->currentPlan,
+                'interval' => $intent->currentInterval,
+                'addon_codes' => $currentAddons,
+                'seats' => $intent->currentSeats,
+            ]);
+        }
+
+        $discountNet = min((int) round($discount * $factor), $chargeNet);
+
+        if ($discountNet <= 0) {
+            return $charges;
+        }
+
+        // Fully covered: there is nothing to pay, so there is nothing to charge — and no
+        // pair of lines that cancel each other to preview, send or book. Returning them
+        // made the executor take the "charge" path for a charge of 0.00, which creates no
+        // payment and therefore never reaches the Phase 2 that pays the credits out.
+        if ($discountNet >= $chargeNet) {
+            return [];
+        }
+
+        $first = $charges[0];
+        $vatRate = (float) $first->vatRate;
+        $discountVat = (int) round($discountNet * $vatRate / 100);
+        $code = (string) ($marker['code'] ?? '');
+
+        $line = new ProrataLine(
+            originalInvoice: null,
+            originalLineItemIndex: null,
+            kind: 'coupon',
+            code: $code !== '' ? $code : null,
+            label: __('billing::portal.coupon_label', ['code' => $code]),
+            quantity: 1,
+            amountNet: -$discountNet,
+            vatRate: $vatRate,
+            amountVat: -$discountVat,
+            amountGross: -($discountNet + $discountVat),
+            periodStart: $first->periodStart->copy(),
+            periodEnd: $first->periodEnd->copy(),
+            daysActive: $first->daysActive,
+            daysRemaining: $first->daysRemaining,
+            isCouponCovered: false,
+            // Netted into the Mollie charge, like a coupon entered with the change.
+            direction: 'charge',
+        );
+
+        // A waiver names the lines it takes its amount off, exactly as on a renewal, so a
+        // later credit of this charge leaves the free plan alone and credits the paid
+        // extras in full ({@see paidLineNet()}).
+        if (PlanWaiver::isWaiver($marker)) {
+            $line->appliesTo = PlanWaiver::appliesTo($marker, $newAddons);
+        }
+
+        return [...$charges, $line];
     }
 
     /**
@@ -315,7 +489,7 @@ class ProrataComposer
 
         [$lineStart, $lineEnd] = $this->resolveLinePeriod($line, $invoice, $periodStart, $periodEnd);
 
-        $cashNet = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+        $cashNet = $this->paidLineNet($invoice, $line);
         $vatRate = (float) ($line['vat_rate'] ?? 0);
 
         ['days' => $days, 'factor' => $factor] = $this->periodMath($lineStart, $lineEnd);
@@ -381,6 +555,132 @@ class ProrataComposer
             isCouponCovered: false,
             direction: 'refund',
         );
+    }
+
+    /**
+     * What was actually paid for one line of an invoice — the base every credit is
+     * prorated from.
+     *
+     * A line states the LIST price of its component. Whatever reduced the payment sits on
+     * a line of its own: a recurring coupon (`kind = coupon`) or the `adjustment` that
+     * books an invoice down to the amount Mollie really collected. Prorating the credit
+     * from the list price therefore credited value that was never paid: on a period bought
+     * with a 50 % coupon (plan 2900, coupon −1450) a downgrade on day 16 of 31 credited
+     * 2900 × 16/31 = 1497, capped by the per-invoice pool at 1450 — the whole payment, for
+     * a period that was half used. The pool bounds the invoice total, not the share.
+     *
+     * A reduction that carries `applies_to` (a plan waiver) is taken off the lines it names
+     * first; see the comment in the body.
+     *
+     * The remaining reductions are spread over the charge lines in proportion: each line is worth
+     * `list × (charges − reductions) / charges`. Lines carrying a `parent_invoice_id` are
+     * credits against ANOTHER invoice (the saldo-zero plan-switch document) and reduce
+     * nothing here. A positive adjustment — Mollie collected more than the lines state —
+     * never raises a line above its list price; that surplus is not this component's.
+     *
+     * @param  array<string, mixed>  $line
+     */
+    private function paidLineNet(BillingInvoice $invoice, array $line): int
+    {
+        $lineNet = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+
+        if ($lineNet <= 0) {
+            return $lineNet;
+        }
+
+        // A reduction that names what it reduces is taken off exactly those lines first.
+        //
+        // A plan waiver is one: the plan (and the addons the gift included) is free, the
+        // extras bought on top are paid in full. Spreading it over every line like an
+        // ordinary coupon would call a fully paid addon two-thirds unpaid — its credit on
+        // removal would shrink accordingly — and would call the free plan partly paid,
+        // so a later plan change credited money nobody had paid for it.
+        $own = self::lineKey($line);
+        $ownAfterTargeted = $lineNet;
+        $charges = 0;
+        $reductions = 0;
+
+        /** @var array<string, int> $chargeByKey */
+        $chargeByKey = [];
+        /** @var list<array{amount: int, targets: list<string>}> $targeted */
+        $targeted = [];
+
+        foreach ((array) ($invoice->line_items ?? []) as $other) {
+            if (! is_array($other) || ($other['parent_invoice_id'] ?? null) !== null) {
+                continue;
+            }
+
+            $net = (int) ($other['amount_net'] ?? $other['total_net'] ?? 0);
+
+            if ($net > 0) {
+                // A positive adjustment is money collected on top of the components, not
+                // a component a reduction could be spread over.
+                if (($other['kind'] ?? null) !== 'adjustment') {
+                    $charges += $net;
+                    $key = self::lineKey($other);
+                    $chargeByKey[$key] = ($chargeByKey[$key] ?? 0) + $net;
+                }
+
+                continue;
+            }
+
+            $targets = array_values(array_filter(array_map('strval', (array) ($other['applies_to'] ?? []))));
+
+            if ($targets !== []) {
+                $targeted[] = ['amount' => -$net, 'targets' => $targets];
+            } else {
+                $reductions += -$net;
+            }
+        }
+
+        foreach ($targeted as $reduction) {
+            $base = 0;
+            foreach ($reduction['targets'] as $key) {
+                $base += $chargeByKey[$key] ?? 0;
+            }
+
+            // Whatever it cannot place on its own lines is an ordinary reduction.
+            $placed = min($reduction['amount'], $base);
+            $reductions += $reduction['amount'] - $placed;
+
+            if ($placed <= 0 || $base <= 0) {
+                continue;
+            }
+
+            $charges -= $placed;
+
+            if (in_array($own, $reduction['targets'], true)) {
+                // This line's share of the targeted reduction, in proportion to the
+                // lines it names.
+                $ownAfterTargeted -= (int) round($placed * $lineNet / $base);
+            }
+        }
+
+        $ownAfterTargeted = max(0, $ownAfterTargeted);
+
+        if ($reductions <= 0 || $charges <= 0) {
+            return $ownAfterTargeted;
+        }
+
+        $paid = max(0, $charges - $reductions);
+
+        return (int) round($ownAfterTargeted * $paid / $charges);
+    }
+
+    /**
+     * How a reduction line refers to the charge line it reduces: `plan`, `seats`,
+     * `addon:<code>`, `addon_seats:<code>`.
+     *
+     * @param  array<string, mixed>  $line
+     */
+    public static function lineKey(array $line): string
+    {
+        $kind = (string) ($line['kind'] ?? '');
+        $kind = $kind === 'seat' ? 'seats' : $kind;
+
+        return in_array($kind, ['addon', 'addon_seats'], true)
+            ? $kind.':'.(string) ($line['code'] ?? '')
+            : $kind;
     }
 
     /**
@@ -514,6 +814,11 @@ class ProrataComposer
             $addonLine = $this->addonChargeLine($intent, (string) $code, $qty, $periodStart, $periodEnd);
             if ($addonLine !== null) {
                 $charges[] = $addonLine;
+            }
+
+            $addonSeatsLine = $this->addonSeatsChargeLine($intent, (string) $code, $this->newAddonSeats($intent, (string) $code), $periodStart, $periodEnd);
+            if ($addonSeatsLine !== null) {
+                $charges[] = $addonSeatsLine;
             }
         }
 
@@ -715,6 +1020,103 @@ class ProrataComposer
         );
     }
 
+    /** Seats the addon's per-seat price is charged for in the configuration being left. */
+    private function currentAddonSeats(PlanChangeIntent $intent, string $code): int
+    {
+        return SubscriptionAmount::addonChargedSeats(
+            $this->catalog, $code, $intent->currentPlan, $intent->currentInterval, $intent->currentSeats,
+        );
+    }
+
+    /** Seats the addon's per-seat price is charged for in the configuration being entered. */
+    private function newAddonSeats(PlanChangeIntent $intent, string $code): int
+    {
+        return SubscriptionAmount::addonChargedSeats(
+            $this->catalog, $code, $intent->newPlan, $intent->newInterval, $intent->newSeats,
+        );
+    }
+
+    /**
+     * Credit `$reduction` charged addon seats, newest line first — the per-seat
+     * counterpart of {@see seatsRefundLines()}.
+     *
+     * @return list<ProrataLine>
+     */
+    private function addonSeatsRefundLines(Billable $billable, string $code, int $reduction): array
+    {
+        if ($reduction <= 0) {
+            return [];
+        }
+
+        $remaining = $reduction;
+        $lines = [];
+
+        foreach (BillingInvoice::currentPeriodLines($billable, 'addon_seats', $code) as $candidate) {
+            if ($remaining <= 0) {
+                break;
+            }
+
+            $takeQty = min($remaining, (int) $candidate['remaining_quantity']);
+
+            // See seatsRefundLines(): the quantity is consumed only once a line exists.
+            $line = $this->buildRefundLine($candidate['invoice'], $candidate['line_index'], 'addon_seats', $code, $takeQty);
+            if ($line !== null) {
+                $remaining -= $takeQty;
+                $lines[] = $line;
+            }
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Charge `$seats` addon seats for the window — the per-seat counterpart of
+     * {@see seatsChargeLine()}. Null when the addon has no per-seat price in the new
+     * interval or nothing is charged.
+     */
+    private function addonSeatsChargeLine(PlanChangeIntent $intent, string $code, int $seats, CarbonInterface $periodStart, CarbonInterface $periodEnd): ?ProrataLine
+    {
+        $seatPrice = $this->catalog->addonSeatPriceNet($code, $intent->newInterval);
+        if ($seats <= 0 || $seatPrice === null || $seatPrice <= 0) {
+            return null;
+        }
+
+        ['factor' => $factor] = $this->periodMath($periodStart, $periodEnd);
+
+        $chargeNet = (int) round($seatPrice * $seats * $factor);
+        if ($chargeNet === 0) {
+            return null;
+        }
+
+        $vat = $this->liveVat($intent->billable, $chargeNet);
+
+        [$stampStart, $stampDays] = $this->chargeStamp($periodStart, $periodEnd);
+
+        return new ProrataLine(
+            originalInvoice: null,
+            originalLineItemIndex: null,
+            kind: 'addon_seats',
+            code: $code,
+            label: trans_choice('billing::portal.prorata_label_addon_seats_charge', $seats, [
+                'count' => $seats,
+                'addon' => $this->catalog->addonName($code) ?? $code,
+                'plan' => $this->catalog->planName($intent->newPlan) ?? $intent->newPlan,
+            ]),
+            quantity: $seats,
+            amountNet: $chargeNet,
+            vatRate: $vat['rate'],
+            amountVat: $vat['amount'],
+            amountGross: $chargeNet + $vat['amount'],
+            // Priced from the period, stamped from now — see chargeStamp().
+            periodStart: $stampStart->copy(),
+            periodEnd: $periodEnd->copy(),
+            daysActive: $stampDays['total'],
+            daysRemaining: $stampDays['remaining'],
+            isCouponCovered: false,
+            direction: 'charge',
+        );
+    }
+
     /**
      * Builds a refund line for a specific original line with a given quantity reduction.
      *
@@ -729,7 +1131,7 @@ class ProrataComposer
         }
 
         $originalQty = max(1, (int) ($line['quantity'] ?? 1));
-        $originalCashNet = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+        $originalCashNet = $this->paidLineNet($invoice, $line);
         $vatRate = (float) ($line['vat_rate'] ?? 0);
 
         // Resolve period with fallback to billable period (for legacy invoices without line/invoice period).
@@ -834,6 +1236,11 @@ class ProrataComposer
 
         return match ($kind) {
             'seats' => trans_choice('billing::portal.prorata_label_seats_refund', $quantity, ['count' => $quantity, 'plan' => $planName]),
+            'addon_seats' => trans_choice('billing::portal.prorata_label_addon_seats_refund', $quantity, [
+                'count' => $quantity,
+                'addon' => $code !== null ? ($this->catalog->addonName($code) ?? $code) : '',
+                'plan' => $planName,
+            ]),
             'addon' => __('billing::portal.prorata_label_addon_refund', [
                 'addon' => $code !== null ? ($this->catalog->addonName($code) ?? $code) : '',
                 'plan' => $planName,

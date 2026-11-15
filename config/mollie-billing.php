@@ -40,7 +40,12 @@ return [
 
     // Countries available in the checkout country selector.
     // 'regions': built-in groups — currently only 'EU' (27 member states).
-    // 'include': additional ISO-3166-1 alpha-2 codes (e.g. ['CH', 'GB']).
+    // 'include': individual ISO-3166-1 alpha-2 codes to offer on top of the regions.
+    //            Only countries that can be invoiced are offered: EU member states, or
+    //            codes that ALSO have an 'additional_countries' entry with their VAT
+    //            rate. A non-EU code listed here alone (e.g. 'GB') is ignored and
+    //            reported by `billing:check-config` — declare it under
+    //            'additional_countries' instead, which adds it to this list by itself.
     // 'exclude': codes to remove from the resolved list.
     // Countries from 'additional_countries' below are also included automatically.
     'checkout_countries' => [

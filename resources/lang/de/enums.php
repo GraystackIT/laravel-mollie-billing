@@ -37,6 +37,7 @@ return [
         'trial_extension' => 'Testverlängerung',
         'access_grant' => 'Zugangsgewährung',
         'period_extension' => 'Periodenverlängerung',
+        'plan_waiver' => 'Plan gratis (Perioden)',
     ],
     'discount_type' => [
         'percentage' => 'Prozentual',

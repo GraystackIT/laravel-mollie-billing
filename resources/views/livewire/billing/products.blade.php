@@ -299,7 +299,10 @@ new class extends Component {
             && method_exists($billable, 'usesReverseCharge')
             && $billable->usesReverseCharge();
         $vatService = app(VatCalculationService::class);
-        $country = (string) ($billable?->getBillingCountry() ?? 'AT');
+        // The country the order will be taxed in — the service's answer, not a literal. A
+        // billable without a billing country is charged at `checkout_country_fallback`;
+        // this page hardcoded AT and so showed 20 % where 19 % was collected.
+        $country = \GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout::taxCountry($billable);
 
         $buildProduct = function (string $code) use ($catalog, $reverseCharge, $vatService, $country, $billable): array {
             $netPrice = $catalog->productPriceNet($code);
@@ -407,8 +410,25 @@ new class extends Component {
             // with a −€20.00 discount for a 20 % coupon that actually takes €24.00 off, so
             // the arithmetic on screen did not add up to the amount charged.
             'couponDiscountsDisplay' => collect($this->couponDiscounts)
-                ->map(function (int $discountNet) use ($reverseCharge, $vatService, $country, $billable): int {
-                    if ($discountNet <= 0 || $reverseCharge || $billable === null) {
+                ->map(function (int $discountNet, string $productCode) use ($reverseCharge, $vatService, $country, $billable): int {
+                    if ($discountNet <= 0 || $billable === null) {
+                        return $discountNet;
+                    }
+
+                    // The difference between the price shown and the amount that will be
+                    // charged, from the service that charges it. Grossing the summed
+                    // discount is a cent off once two coupons are stacked: each is its own
+                    // invoice line and its VAT is rounded on its own.
+                    try {
+                        $quote = app(\GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout::class)
+                            ->quote($billable, $productCode, $this->appliedCouponCodes[$productCode] ?? []);
+
+                        return $quote['price_gross'] - $quote['gross'];
+                    } catch (\Throwable) {
+                        // fall through to the approximation below
+                    }
+
+                    if ($reverseCharge) {
                         return $discountNet;
                     }
 

@@ -255,6 +255,10 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
+        if ($this->couponCannotDiscountTrial($coupon) || $this->couponNeedsExistingSubscription($coupon)) {
+            return;
+        }
+
         $this->applied_coupon = [
             'code' => (string) $coupon->code,
             'name' => (string) $coupon->name,
@@ -415,9 +419,10 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'name' => $catalog->addonName($code) ?? $code,
                 'description' => $catalog->addonDescription($code),
                 'intervals' => [
-                    'monthly' => ['price_net' => $catalog->addonPriceNet($code, 'monthly')],
-                    'yearly' => ['price_net' => $catalog->addonPriceNet($code, 'yearly')],
+                    'monthly' => ['price_net' => $catalog->addonPriceNet($code, 'monthly'), 'seat_price_net' => $catalog->addonSeatPriceNet($code, 'monthly')],
+                    'yearly' => ['price_net' => $catalog->addonPriceNet($code, 'yearly'), 'seat_price_net' => $catalog->addonSeatPriceNet($code, 'yearly')],
                 ],
+                'included_seats' => $catalog->addonIncludedSeats($code),
             ];
         }
 
@@ -435,7 +440,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'name' => $catalog->featureName($key),
                 'description' => $catalog->featureDescription($key),
             ],
-            $catalog->planFeatures($planCode),
+            // Only what a customer should read; a hidden feature code still unlocks.
+            $catalog->visiblePlanFeatures($planCode),
         );
     }
 
@@ -478,6 +484,57 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return $billable === null || ! $billable->hasMollieMandate();
     }
 
+    /**
+     * The trial length this checkout announces: the plan's own days plus what an
+     * applied TrialExtension coupon adds. 0 when no trial will start.
+     */
+    public function announcedTrialDays(): int
+    {
+        if (! $this->trialApplies($this->plan_code, $this->interval)) {
+            return 0;
+        }
+
+        return $this->planTrialDays($this->plan_code, $this->interval)
+            + (int) ($this->applied_coupon['trial_days'] ?? 0);
+    }
+
+    /**
+     * The date money is first collected for a checkout that collects nothing now, or
+     * null when the first payment is due at once (or nothing is ever due).
+     *
+     * A trial defers it to the trial's end. A recurring coupon that covers the whole
+     * order defers it past the coupon — Mollie cannot hold an amount of 0, so the
+     * subscription keeps its full price and starts charging the day after the discount
+     * ends. With both, the later date applies. This is `CreateSubscription`'s own rule,
+     * asked of the same `CouponService::recurringMarkerValidUntil()` it reads its marker
+     * from: the confirm step used to print the trial end regardless, which for a
+     * three-month coupon on a 14-day trial named a date months before the real one.
+     */
+    public function firstChargeDate(): ?\Carbon\CarbonInterface
+    {
+        $now = \GraystackIT\MollieBilling\Support\BillingTime::nowUtc();
+        $trialDays = $this->announcedTrialDays();
+        $date = $trialDays > 0 ? $now->copy()->addDays($trialDays) : null;
+
+        $subtotal = $this->subtotalNet();
+        $code = (string) ($this->applied_coupon['code'] ?? '');
+
+        if ($code !== '' && $subtotal > 0 && (int) ($this->applied_coupon['discount_net'] ?? 0) >= $subtotal) {
+            $coupon = Coupon::query()->whereRaw('UPPER(code) = ?', [strtoupper($code)])->first();
+
+            if ($coupon !== null && $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
+                $until = MollieBilling::coupons()->recurringMarkerValidUntil($coupon, $this->interval, $now);
+
+                if ($until !== null) {
+                    $afterCoupon = \GraystackIT\MollieBilling\Support\BillingTime::toUtc($until)->addDay();
+                    $date = $date === null ? $afterCoupon : \GraystackIT\MollieBilling\Support\BillingTime::latest($date, $afterCoupon);
+                }
+            }
+        }
+
+        return $date;
+    }
+
     /** @return array<string, array{label: string, included: int, overage_price: int|null}> */
     public function planUsages(string $planCode, string $interval): array
     {
@@ -514,6 +571,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 'name' => $catalog->addonName($addonCode) ?? $addonCode,
                 'description' => $addon['description'] ?? null,
                 'price_net' => $catalog->addonPriceNet($addonCode, $interval),
+                'seat_price_net' => $catalog->addonSeatPriceNet($addonCode, $interval),
             ];
         }
 
@@ -691,9 +749,28 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 continue;
             }
             $net += (int) ($addons[$code]['intervals'][$this->interval]['price_net'] ?? 0);
+            $net += $this->addonSeatsNet((string) $code);
         }
 
         return $net;
+    }
+
+    /**
+     * The per-seat part of one selected addon for the seats being ordered — through
+     * SubscriptionAmount, so this screen cannot price it differently from the payment
+     * that follows. 0 for an addon without a per-seat price.
+     */
+    public function addonSeatsNet(string $addonCode): int
+    {
+        $catalog = app(SubscriptionCatalogInterface::class);
+
+        return \GraystackIT\MollieBilling\Support\SubscriptionAmount::addonSeatsNet(
+            $catalog,
+            $addonCode,
+            (string) $this->plan_code,
+            (string) $this->interval,
+            $catalog->includedSeats((string) $this->plan_code) + max(0, (int) $this->extra_seats),
+        );
     }
 
     public function totalNet(): int
@@ -735,6 +812,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 continue;
             }
             $lines[] = (int) ($addons[$code]['intervals'][$this->interval]['price_net'] ?? 0);
+
+            // Its own line, as on the invoice (`addon_seats`).
+            $addonSeatsNet = $this->addonSeatsNet((string) $code);
+            if ($addonSeatsNet > 0) {
+                $lines[] = $addonSeatsNet;
+            }
         }
 
         // Capped at the subtotal: a discount larger than the order would otherwise
@@ -866,7 +949,13 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // (InvoiceService::createForPayment), so `round(Σnet × rate)` shows — and
         // collects, via `amount_gross` in submit() — a different cent than the
         // document the customer receives. See BillingMoney::grossWithLineVat().
-        $gross = BillingMoney::grossWithLineVat($this->lineNets(), $rate);
+        //
+        // Except where nothing is owed. Per-line rounding does not cancel across lines: a
+        // 100 % coupon on Pro 29.50 + an addon 15.50 at 19 % is 5.61 + 2.95 of VAT against
+        // −8.55 on the one coupon line, i.e. a total of 0.01. That cent was shown, and it
+        // was sent to Mollie as a first payment — which also took the order off the
+        // zero-amount path it belongs on. A net of 0 is a gross of 0.
+        $gross = $net === 0 ? 0 : BillingMoney::grossWithLineVat($this->lineNets(), $rate);
 
         return [
             'net' => $net,
@@ -1053,6 +1142,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
+        if ($this->couponCannotDiscountTrial($coupon)) {
+            $this->couponError = __('billing::checkout.coupon_not_with_trial');
+
+            return;
+        }
+
+        if ($this->couponNeedsExistingSubscription($coupon)) {
+            $this->couponError = __('billing::checkout.coupon_requires_active_subscription');
+
+            return;
+        }
+
         $this->applied_coupon = [
             'code' => (string) $coupon->code,
             'name' => (string) $coupon->name,
@@ -1197,6 +1298,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return 'requires_trial';
         }
 
+        if ($this->couponCannotDiscountTrial($coupon)) {
+            $this->applied_coupon = null;
+
+            return 'not_with_trial';
+        }
+
+        if ($this->couponNeedsExistingSubscription($coupon)) {
+            $this->applied_coupon = null;
+
+            return 'requires_active_subscription';
+        }
+
         $this->applied_coupon['discount_net'] = $this->calculateCouponDiscount($coupon);
         $this->applied_coupon['trial_days'] = $this->couponTrialDays($coupon);
 
@@ -1213,6 +1326,40 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension
             ? max(0, (int) ($coupon->trial_extension_days ?? 0))
             : 0;
+    }
+
+    /**
+     * A SinglePayment coupon on a checkout that starts a trial.
+     *
+     * The trial wins over any coupon (StartSubscriptionCheckout decides it first), and a
+     * trial collects no first payment — Mollie's charge at the trial's end is the
+     * subscription's one recurring amount, which has nowhere to carry a one-charge
+     * discount (docs/coupons.md). Accepting the code here showed a reduced total next to
+     * a first-charge date on which the full price was then collected. Refused instead, so
+     * what the confirm step shows is what is charged; the code stays unspent.
+     *
+     * A Recurring coupon is different and stays allowed: its discount lives on the Mollie
+     * subscription itself, so the trial-end charge really is the discounted one.
+     */
+    private function couponCannotDiscountTrial(Coupon $coupon): bool
+    {
+        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment
+            && $this->trialApplies($this->plan_code, $this->interval);
+    }
+
+    /**
+     * An addon-only access grant: it adds addons to a subscription that already runs.
+     *
+     * The checkout only ever serves a billable WITHOUT one, so such a code can never be
+     * honoured here — `CouponService::validate()` refuses it for exactly that reason. The
+     * form validates without a billable and therefore accepted it, showed the addon as
+     * free next to a payable total, and the submit then failed inside the service with
+     * nothing better to tell the customer than "the payment could not be created".
+     */
+    private function couponNeedsExistingSubscription(Coupon $coupon): bool
+    {
+        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant
+            && empty($coupon->grant_plan_code);
     }
 
     private function calculateCouponDiscount(Coupon $coupon): int
@@ -1263,6 +1410,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 continue;
             }
             $discount += (int) ($this->addons()[$addonCode]['intervals'][$this->interval]['price_net'] ?? 0);
+            $discount += $this->addonSeatsNet((string) $addonCode);
         }
 
         return min($discount, $this->subtotalNet());
@@ -1284,6 +1432,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'requires_trial' => __('billing::checkout.coupon_requires_trial'),
+            'not_with_trial' => __('billing::checkout.coupon_not_with_trial'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
             'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
             'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
