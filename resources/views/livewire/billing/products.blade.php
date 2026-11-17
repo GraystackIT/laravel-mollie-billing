@@ -327,7 +327,18 @@ new class extends Component {
                 'image_url' => $catalog->productImageUrl($code),
                 'price_net' => $displayPrice,
                 'usage_type' => $catalog->productUsageType($code),
+                'usage_label' => $catalog->productUsageType($code) !== null
+                    ? $catalog->usageTypeName((string) $catalog->productUsageType($code))
+                    : null,
                 'quantity' => $catalog->productQuantity($code),
+                // Opt-in per product (`show_unit_price`): the price of one unit, divided
+                // from the total shown beside it — gross or net exactly as that total is.
+                'unit_price' => ($catalog->product($code)['show_unit_price'] ?? false) === true
+                    && $catalog->productUsageType($code) !== null
+                    && (int) $catalog->productQuantity($code) > 1
+                    && $displayPrice > 0
+                        ? BillingMoney::formatUnitPrice($displayPrice, (int) $catalog->productQuantity($code))
+                        : null,
                 'onetimeonly' => $catalog->productOneTimeOnly($code),
                 'group' => $catalog->productGroup($code),
             ];
@@ -508,7 +519,7 @@ new class extends Component {
                                         @if ($product['usage_type'] && $product['quantity'])
                                             <div class="flex items-center gap-1.5 text-sm text-zinc-500 dark:text-zinc-400">
                                                 <flux:icon.plus-circle class="size-3.5 text-emerald-500" />
-                                                <span>{{ number_format($product['quantity']) }} {{ $product['usage_type'] }}</span>
+                                                <span>{{ BillingMoney::count((int) $product['quantity']) }} {{ $product['usage_label'] ?? $product['usage_type'] }}</span>
                                             </div>
                                         @endif
                                     </div>
@@ -520,6 +531,9 @@ new class extends Component {
                                         <div class="flex items-baseline gap-1">
                                             <span class="text-2xl font-bold tabular-nums tracking-tight" dusk="product-price-{{ $product['code'] }}">{{ BillingMoney::format($product['price_net']) }}</span>
                                         </div>
+                                        @if ($product['unit_price'])
+                                            <flux:text class="text-xs tabular-nums text-zinc-500 dark:text-zinc-400" dusk="product-unit-price-{{ $product['code'] }}">{{ __('billing::portal.products.unit_price', ['price' => $product['unit_price'], 'unit' => $product['usage_label'] ?? $product['usage_type']]) }}</flux:text>
+                                        @endif
                                         <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                                     </div>
 

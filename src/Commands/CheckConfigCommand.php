@@ -852,8 +852,6 @@ class CheckConfigCommand extends Command
      */
     private function validateUsageTypes(string $scope, array $plans): void
     {
-        unset($plans);
-
         $rawConfig = config('mollie-billing-plans');
         $hasUsageTypes = is_array($rawConfig) && array_key_exists('usage_types', $rawConfig);
 
@@ -888,6 +886,42 @@ class CheckConfigCommand extends Command
                 $this->addError($scope, "{$where}.rollover is required (true or false).");
             } elseif (! is_bool($config['rollover'])) {
                 $this->addError($scope, "{$where}.rollover must be a boolean.");
+            }
+
+            // Same rule as features.*.visible: a non-boolean is almost always a string
+            // from an env() call, and `'false'` does not hide.
+            if (array_key_exists('visible', $config) && ! is_bool($config['visible'])) {
+                $this->addError($scope, "{$where}.visible must be a boolean (true or false), got ".get_debug_type($config['visible']).'.');
+            } elseif (($config['visible'] ?? true) === false) {
+                $this->warnAboutPricedHiddenUsageType($scope, $type, $plans);
+            }
+        }
+    }
+
+    /**
+     * A hidden usage type is left off the plan cards, but its overage is still charged.
+     * Priced, the customer pays per unit for something the card they chose from never
+     * mentioned. Valid — the operator may state it elsewhere — so a warning.
+     *
+     * @param  array<string, mixed>  $plans
+     */
+    private function warnAboutPricedHiddenUsageType(string $scope, string $type, array $plans): void
+    {
+        foreach ($plans as $planCode => $plan) {
+            $intervals = is_array($plan) ? (array) ($plan['intervals'] ?? []) : [];
+
+            foreach ($intervals as $intervalKey => $interval) {
+                $prices = is_array($interval) ? (array) ($interval['usage_overage_prices'] ?? []) : [];
+
+                foreach ($prices as $priceType => $price) {
+                    // `false` / `null` declare no overage, and a price of 0 charges nothing:
+                    // in neither case does the customer pay for what the card leaves out.
+                    if (strcasecmp((string) $priceType, $type) !== 0 || $price === false || $price === null || (is_numeric($price) && (int) $price <= 0)) {
+                        continue;
+                    }
+
+                    $this->addWarning($scope, "usage_types.{$type}.visible is false, but plans.{$planCode}.intervals.{$intervalKey}.usage_overage_prices.{$priceType} charges for it — the customer pays overage for a usage type the plan card does not show. Show the type, or set its overage price to `false`.");
+                }
             }
         }
     }
@@ -1364,6 +1398,14 @@ class CheckConfigCommand extends Command
 
             if (isset($product['onetimeonly']) && ! is_bool($product['onetimeonly'])) {
                 $this->addError($scope, "{$where}.onetimeonly must be a boolean.");
+            }
+
+            // Only a literal `true` shows the unit price; a string from env() would not.
+            if (array_key_exists('show_unit_price', $product) && ! is_bool($product['show_unit_price'])) {
+                $this->addError($scope, "{$where}.show_unit_price must be a boolean (true or false), got ".get_debug_type($product['show_unit_price']).'.');
+            } elseif (($product['show_unit_price'] ?? false) === true
+                && (empty($product['usage_type']) || (int) ($product['quantity'] ?? 0) <= 1)) {
+                $this->addWarning($scope, "{$where}.show_unit_price is true, but the product has no usage_type or a quantity of 1 or less — no unit price is shown.");
             }
         }
     }

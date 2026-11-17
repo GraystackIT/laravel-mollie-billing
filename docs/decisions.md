@@ -4460,3 +4460,55 @@ five real. Each of the five was seen red on the unfixed file first.
   been answered. The budget still bounds it.
 
 Open: nothing.
+
+---
+
+## Hidden usage types (17 November 2026)
+
+`usage_types.{type}.visible => false` leaves a usage type off the plan cards. The pattern is
+that of hidden features (`featureIsVisible()` / `visiblePlanFeatures()`): presentation only,
+one catalog method a custom catalog answers, the literal `false` as the only value that
+hides, `billing:check-config` rejecting anything else.
+
+### What is hidden, and what deliberately is not
+
+- **Hidden: the plan cards a customer chooses from.** The checkout's plan step
+  (`checkout::planUsages()`, rendered twice in `step-plan.blade.php`) and the plan cards of
+  the plan-change screen. Both read `visibleIncludedUsages()`. No other screen lists a
+  plan's quotas: the dashboard's plan card names no usage type, addons carry no quota, and
+  the products page names the type a top-up credits — that is what the customer buys, not a
+  plan entitlement, so it stays.
+- **Not hidden: wherever the customer reads what was used or what is billed.** The usage
+  meters (dashboard and usage page), the usage settlement and overage lines of the
+  plan-change preview, invoices and credit notes, the overage charge's line items, and the
+  admin panel. A hidden type is still consumed and can still cost money; a customer who is
+  charged for it has to be able to see it, and an operator has to be able to credit it.
+- **Not changed: billing.** `includedUsages()`, `includedUsage()` and `usageOveragePrice()`
+  ignore `visible`. Quota, credit on activation and renewal, rollover, the hard cap,
+  overage, the plan-change rebalance and past-due refusals behave exactly as for a visible
+  type. `HiddenUsageTypesTest` pins that, and was seen red against a deliberately
+  over-eager variant (hiding in `includedUsages()` / `usageOveragePrice()` and in the
+  dashboard's meter list).
+
+### Judgement calls
+
+- **A priced hidden type is a warning, not an error.** The customer pays per unit for
+  something the plan card did not state — almost always a mistake, but an app may state it
+  elsewhere (its own pricing page). Any overage price other than `false` or `null` counts,
+  `0` included, as written in the request; the warning names every plan and interval.
+- **`rollover` stays required in a `usage_types` entry**, also when the entry exists only to
+  hide the type. `billing:check-config` already required it; relaxing that is a separate
+  decision.
+- **No translation keys.** Nothing new is shown to the customer; the check-config messages
+  are English like all others.
+
+### Tests: red before, green after
+
+| Test | Without the change | With it |
+|---|---|---|
+| `Feature/Catalog/HiddenUsageTypesTest` (22 cases) | 16 red (catalog methods missing, check-config silent, plan cards name the type); the 6 that pin unchanged behaviour green | 22 green |
+| same, against the over-eager variant above | 5 red: dashboard meter, credit/cap/charge, activation, preview, `visibleIncludedUsages` vs `includedUsages` | — |
+| `Browser/HiddenUsageTypeTest` (3) | checkout cards and plan-change cards red ("Saw unexpected text [SMS]"); meters green | 3 green |
+| same, with the dashboard listing only visible types | meter test red (no `usage-meter-SMS`) | — |
+
+Open: nothing.

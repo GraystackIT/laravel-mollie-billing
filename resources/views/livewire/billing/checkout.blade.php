@@ -539,7 +539,9 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function planUsages(string $planCode, string $interval): array
     {
         $catalog = app(SubscriptionCatalogInterface::class);
-        $usages = $catalog->includedUsages($planCode, $interval);
+        // The plan card lists only what a customer should read; a hidden usage type
+        // is still credited and charged like any other.
+        $usages = $catalog->visibleIncludedUsages($planCode, $interval);
         $result = [];
 
         foreach ($usages as $type => $included) {

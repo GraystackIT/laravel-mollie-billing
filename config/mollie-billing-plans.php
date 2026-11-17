@@ -76,6 +76,9 @@ return [
     // `plans.*.intervals.*.included_usages` / `usage_overage_prices`
     // can opt in or out of rollover here. Types not listed fall back
     // to `mollie-billing.usage_rollover_fallback`.
+    // `'visible' => false` keeps a type off the plan cards (checkout, plan change)
+    // while it is still credited, metered and charged — and still shown on the
+    // usage meters, the plan-change preview and invoices.
     'usage_types' => [
         'Tokens' => ['rollover' => true],
         'SMS' => ['rollover' => false],
@@ -123,6 +126,7 @@ return [
         //     'usage_type' => 'Tokens',    // optional — links to wallet
         //     'quantity' => 500,            // optional — units to credit on purchase
         //     'group' => 'top-ups',         // optional — references key in product_groups
+        //     'show_unit_price' => true,    // optional — also show the price per unit (default: false)
         // ],
         // 'consulting-hour' => [
         //     'name' => '1h Consulting',

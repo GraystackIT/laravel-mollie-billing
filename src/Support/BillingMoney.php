@@ -53,6 +53,45 @@ class BillingMoney
         return $sign.self::symbol($currency).self::numberFromMinor(abs($amount), $currency);
     }
 
+    /**
+     * The price of one unit of a pack, with two decimals more than the currency has
+     * ("€0.0833" for 500 SMS at €41.65) — a unit of a pack usually costs less than the
+     * smallest coin. Divided from the total that is shown next to it, so the two cannot
+     * disagree about VAT: pass the gross total to a customer who sees gross, the net one
+     * under reverse charge. Display only; nothing is charged per unit.
+     */
+    public static function formatUnitPrice(int $totalMinor, int $quantity, ?string $currency = null): string
+    {
+        $quantity = max(1, $quantity);
+        $digits = self::fractionDigits($currency) + 2;
+        $value = $totalMinor / self::minorUnitFactor($currency) / $quantity;
+
+        if (! class_exists(\NumberFormatter::class)) {
+            return self::symbol($currency).number_format($value, $digits);
+        }
+
+        $formatter = new \NumberFormatter(app()->getLocale(), \NumberFormatter::DECIMAL);
+        $formatter->setAttribute(\NumberFormatter::FRACTION_DIGITS, $digits);
+
+        return self::symbol($currency).($formatter->format($value) ?: number_format($value, $digits));
+    }
+
+    /**
+     * A whole count in the active locale's grouping ("1.000" in German, "1,000" in
+     * English) — for quantities shown next to prices.
+     */
+    public static function count(int $value): string
+    {
+        if (! class_exists(\NumberFormatter::class)) {
+            return number_format($value);
+        }
+
+        $formatter = new \NumberFormatter(app()->getLocale(), \NumberFormatter::DECIMAL);
+        $formatter->setAttribute(\NumberFormatter::FRACTION_DIGITS, 0);
+
+        return $formatter->format($value) ?: number_format($value);
+    }
+
     public static function symbol(?string $currency = null): string
     {
         $configured = self::configuredCurrency();

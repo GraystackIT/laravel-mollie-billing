@@ -310,6 +310,7 @@ return [
         'none_available' => 'No products are available at this time.',
         'buy' => 'Buy now',
         'purchased' => 'Purchased',
+        'unit_price' => ':price per :unit',
         'purchased_count' => 'Purchased :count time|Purchased :count times',
         'last_purchased_at' => 'Last purchased on :date',
         'back_to_products' => 'Back to products',

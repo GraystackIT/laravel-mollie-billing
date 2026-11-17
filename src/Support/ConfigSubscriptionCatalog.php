@@ -286,6 +286,27 @@ class ConfigSubscriptionCatalog implements SubscriptionCatalogInterface
         return (bool) config('mollie-billing.usage_rollover_fallback', false);
     }
 
+    public function usageTypeIsVisible(string $usageType): bool
+    {
+        $entry = $this->lookupCaseInsensitive(
+            (array) config("{$this->configKey}.usage_types", []),
+            $usageType,
+        );
+
+        // Only an explicit `false` hides, as for features. Anything else — no entry,
+        // null, a string from an env() call — leaves the type on the plan card.
+        return ! (is_array($entry) && ($entry['visible'] ?? true) === false);
+    }
+
+    public function visibleIncludedUsages(string $planCode, ?string $interval): array
+    {
+        return array_filter(
+            $this->includedUsages($planCode, $interval),
+            fn (string|int $type): bool => $this->usageTypeIsVisible((string) $type),
+            ARRAY_FILTER_USE_KEY,
+        );
+    }
+
     public function yearlySavingsPercent(string $planCode): float
     {
         $plan = $this->plan($planCode);

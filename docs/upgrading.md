@@ -130,6 +130,19 @@ extending `ConfigSubscriptionCatalog`: the interface gained `addonSeatPriceNet()
 `addonIncludedSeats()`, `addonIsFree()`, `featureIsVisible()`, `visiblePlanFeatures()` and
 `visibleAddonFeatures()`. See [configuration.md](configuration.md).
 
+After 0.5.1 it gained two more, for hidden usage types:
+
+- `usageTypeIsVisible(string $usageType): bool` — `false` only for a type that is to be left
+  off the plan cards. Answer `true` for anything you do not know, and look the type up
+  case-insensitively, as every usage-type lookup does.
+- `visibleIncludedUsages(string $planCode, ?string $interval): array` — `includedUsages()`
+  without the hidden types, keys and order kept. The checkout and plan-change plan cards read
+  this one; everything that credits or charges keeps reading `includedUsages()`.
+
+A catalog without hidden usage types implements them as `return true;` and
+`return $this->includedUsages($planCode, $interval);`. Without them PHP refuses to load the
+class. See [configuration.md](configuration.md#hidden-usage-types).
+
 ## 2. Check — behaviour has changed
 
 ### 2.1 Past due no longer always means "no access"
@@ -484,6 +497,18 @@ the [changelog](../CHANGELOG.md) and are not repeated here.
 
 ## 3. Optional — new possibilities
 
+- **Hidden usage types** (after 0.5.1). `'visible' => false` on a usage type keeps it off the
+  plan cards of the checkout and the plan-change screen, while it is credited, metered and
+  charged like any other and stays on the usage meters, the plan-change preview and invoices:
+
+  ```php
+  'usage_types' => [
+      'SMS' => ['rollover' => false, 'visible' => false],
+  ],
+  ```
+
+  `billing:check-config` warns when such a type carries an overage price. See
+  [configuration.md](configuration.md#hidden-usage-types).
 - **Hidden features.** `'visible' => false` on a feature keeps a technical feature code off
   the plan and addon cards while it still unlocks like any other:
 
@@ -492,6 +517,11 @@ the [changelog](../CHANGELOG.md) and are not repeated here.
       'internal-beta' => ['name' => 'Internal beta', 'visible' => false],
   ],
   ```
+
+- **Unit price on product cards.** `'show_unit_price' => true` on a product with a
+  `usage_type` and a `quantity` above 1 shows "€0.0833 per SMS" under the price — gross or
+  net as the price beside it. New translation key `portal.products.unit_price` (`en`, `de`);
+  re-publish translations if you published them. See [configuration.md](configuration.md).
 
 - **Per-seat addons.** An addon interval can carry `seat_price_net` next to `price_net`, and
   an addon `included_seats`; billed addon seats are `max(0, seats − included_seats)`. The

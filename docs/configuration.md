@@ -453,13 +453,29 @@ Per-usage-type configuration. Each usage type referenced in `plans.*.intervals.*
 
 | Field | Description |
 |-------|-------------|
-| `rollover` | `true` → unused credits carry over to the next billing period. `false` → wallet is reset to the plan's included quota on each renewal. Purchased credits from one-time orders always survive both modes. |
+| `rollover` | `true` → unused credits carry over to the next billing period. `false` → wallet is reset to the plan's included quota on each renewal. Purchased credits from one-time orders always survive both modes. Required in every entry. |
+| `visible` | Optional. `false` keeps the type off the plan cards (see [Hidden usage types](#hidden-usage-types)). Absent or `true`: shown. |
 
 Resolution order for `SubscriptionCatalogInterface::usageRollover($type)`:
 
 1. `usage_types.<type>.rollover` (when boolean)
 2. `mollie-billing.usage_rollover_fallback`
 3. `false`
+
+#### Hidden usage types
+
+Set `'visible' => false` on a usage type to leave it off the plan cards a customer chooses from: the checkout's plan step and the plan cards of the plan-change screen.
+
+```php
+'usage_types' => [
+    'Tokens' => ['rollover' => true],
+    'SMS'    => ['rollover' => false, 'visible' => false],
+],
+```
+
+Only the plan cards change. A hidden type is credited, debited, capped and charged for overage exactly like a visible one, and it stays wherever the customer reads what was used or what is billed: the usage meters on the dashboard and the usage page, the usage settlement and the overage lines of the plan-change preview, invoices, and the admin panel. Use it for a quota your app meters but does not sell as a feature of the plan.
+
+The type is looked up case-insensitively, like every usage-type lookup, and only the literal `false` hides. `billing:check-config` rejects any other non-boolean `visible` (a `'false'` string from `env()` would otherwise leave the type on display) and warns when a hidden type has an overage price (anything but `false` or `null`) in any plan or interval: the customer would pay per unit for something the plan card they chose from does not mention. `rollover` stays required in the entry. A custom catalog implements `usageTypeIsVisible()` and `visibleIncludedUsages()`.
 
 ### `features`
 
@@ -488,6 +504,8 @@ Defines the features available in the system. Plans and addons reference these v
 ```
 
 A hidden feature works exactly like a visible one: `MollieBilling::features()`, `@planFeature` and the `billing.feature` middleware all resolve it. Use it for technical feature codes your app gates on that are not a selling point. The admin panel shows hidden features. Only the literal `false` hides; `billing:check-config` rejects any other non-boolean value. A custom catalog implements `featureIsVisible()`, `visiblePlanFeatures()` and `visibleAddonFeatures()`.
+
+A usage type can be hidden from the plan cards the same way, under `usage_types` — see [Hidden usage types](#hidden-usage-types).
 
 `name` / `description` are overridden by translations under `billing::features.<key>.{name,description}` when present. Used by:
 
@@ -587,6 +605,7 @@ One-off purchases (top-ups, consulting hours, etc.). Sold through the one-time-o
         'usage_type'  => 'Tokens',   // optional — links to a wallet
         'quantity'    => 500,        // optional — units credited on purchase
         'group'       => 'top-ups',  // optional — key from 'product_groups'
+        'show_unit_price' => true,   // optional — also show "€0.0980 per Tokens" (default: false)
     ],
     'consulting-hour' => [
         'name'        => '1h Consulting',
@@ -607,6 +626,7 @@ One-off purchases (top-ups, consulting hours, etc.). Sold through the one-time-o
 | `quantity` | — | See `usage_type`. |
 | `onetimeonly` | — | When `true`, the product can only be purchased once per billable. |
 | `group` | — | Reference into `product_groups`. |
+| `show_unit_price` | — | When `true`, the product card also shows the price of one unit (`billing::portal.products.unit_price`, e.g. "€0.0833 per SMS"), with two decimals more than the currency. It is the shown total divided by `quantity`, so it is gross for a customer who sees gross prices and net under reverse charge. Only for a product with a `usage_type` and a `quantity` above 1; `billing:check-config` warns otherwise and rejects a non-boolean. Display only — nothing is charged per unit. |
 
 > **Sidebar visibility.** The portal sidebar dynamically hides entries that
 > have nothing to manage:
@@ -682,6 +702,7 @@ It reports two classes of issues:
   - Plan / addon defining an unknown interval (only `monthly` and `yearly` are recognised)
   - Product `group` referencing an undefined product group
   - Product `quantity` invalid
+  - `features.<key>.visible` or `usage_types.<type>.visible` set to anything but a boolean
 
 - **Warnings** — likely misconfigurations that don't break runtime but degrade behavior. Exit status stays `0`.
   - `currency` not in uppercase ISO-4217 form (e.g. `eur` instead of `EUR`)
@@ -694,6 +715,7 @@ It reports two classes of issues:
   - Multiple plans sharing the same `tier` (ranking becomes ambiguous)
   - `included_usages` defines a quota without a matching `usage_overage_prices` entry — overages cannot be charged
   - `usage_overage_prices` defines a type without a matching `included_usages` entry — quota defaults to 0
+  - A usage type hidden with `usage_types.<type>.visible => false` has an overage price (not `false` / `null`) in some plan or interval — the customer pays for something the plan card does not show
   - Addon with empty `feature_keys` (unlocks no features)
   - Product `usage_type` not declared in any plan's `included_usages` / `usage_overage_prices`
   - Product declaring `usage_type` without `quantity` (or vice versa)

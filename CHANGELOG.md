@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Unit price on product cards.** `'show_unit_price' => true` on a product with a
+  `usage_type` and a `quantity` above 1 shows the price of one unit under the price
+  (e.g. "€0.0833 per SMS"), gross or net exactly as the price beside it.
+  `billing:check-config` rejects a non-boolean and warns where nothing would be shown.
+- **Hidden usage types.** `usage_types.{type}.visible => false` keeps a usage type off the plan
+  cards — the checkout's plan step and the plan-change screen — while it is still credited,
+  metered, capped and charged for overage like any other. The usage meters (dashboard, usage
+  page), the plan-change preview, invoices and the admin panel keep showing it. Looked up
+  case-insensitively; only a literal `false` hides. `billing:check-config` rejects a
+  non-boolean `visible` and warns when a hidden type has an overage price above 0 in any plan
+  or interval.
+
+### Changed
+
+- **`SubscriptionCatalogInterface` gained `usageTypeIsVisible()` and
+  `visibleIncludedUsages()`.** An application that implements the interface itself (instead
+  of extending `ConfigSubscriptionCatalog`) has to add both — see
+  [docs/upgrading.md](docs/upgrading.md) § 1.5.
+
+### Fixed
+
+- The products page grouped a pack's quantity in English ("1,000 SMS") in every locale and
+  showed the usage type's code instead of its translated name (`billing::usages.<type>`).
+
 ## [0.5.1] - 2026-11-17
 
 ### Documentation

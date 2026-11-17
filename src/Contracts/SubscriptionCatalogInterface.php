@@ -174,6 +174,28 @@ interface SubscriptionCatalogInterface
 
     public function usageRollover(string $usageType): bool;
 
+    /**
+     * Whether a usage type is shown where plans are presented to the customer
+     * (checkout plan cards, the plan-change screen's plan cards).
+     *
+     * Presentation only. A hidden type is credited, debited, capped and charged for
+     * overage exactly like a visible one, and it stays on every surface where the
+     * customer reads what was used or what is billed: the usage meters, the usage
+     * history, the plan-change preview, invoices and the admin panel.
+     *
+     * An unknown type is visible, like an unknown feature: only an explicit
+     * `false` hides. Looked up case-insensitively, like every usage-type lookup.
+     */
+    public function usageTypeIsVisible(string $usageType): bool;
+
+    /**
+     * The plan's included usages a customer is shown on a plan card, in the plan's
+     * order — {@see includedUsages()} without the hidden types.
+     *
+     * @return array<string, int>
+     */
+    public function visibleIncludedUsages(string $planCode, ?string $interval): array;
+
     public function yearlySavingsPercent(string $planCode): float;
 
     public function featureName(string $featureKey): ?string;

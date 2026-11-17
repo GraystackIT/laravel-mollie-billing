@@ -1219,7 +1219,9 @@ new class extends Component {
 
                 $price = $toDisplayCents($netPrice);
 
-                $includedUsages = $catalog->includedUsages($code, $selectedInterval);
+                // Only what a customer should read on a plan card; a hidden usage type
+                // is still credited, metered and charged, and stays in the preview below.
+                $includedUsages = $catalog->visibleIncludedUsages($code, $selectedInterval);
 
                 // Resolved up-front: `@php(...)` does not compile reliably inside
                 // a Blade component slot, which is where the card body lives.
