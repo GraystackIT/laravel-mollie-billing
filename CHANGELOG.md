@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-17
+
 ### Tests
 
 - Browser, feature and unit coverage for `show_unit_price`: gross for a consumer, net under
