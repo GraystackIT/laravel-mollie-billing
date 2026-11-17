@@ -95,10 +95,16 @@ it('does not apply a newer pending change on the strength of an older payment', 
 
     $billable->refresh();
 
+    // The newer change is untouched. The older payment is money for a change that no
+    // longer exists: it is booked as a payment that was not applied and returned
+    // automatically (UnwantedPaymentRefund) — never applied, never left lying.
     expect($billable->subscription_plan_code)->toBe('team')
         ->and($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? null)
         ->toBe('tr_change_b')
-        ->and(BillingInvoice::query()->count())->toBe(0);
+        ->and(BillingInvoice::query()->count())->toBe(1)
+        ->and(\GraystackIT\MollieBilling\Services\Webhook\UnwantedPaymentRefund::isUnwanted(
+            BillingInvoice::query()->where('mollie_payment_id', 'tr_change_a')->first(),
+        ))->toBeTrue();
 });
 
 it('does not discard a newer pending change when an older payment fails', function (): void {

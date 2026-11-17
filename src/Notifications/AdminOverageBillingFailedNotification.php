@@ -59,6 +59,7 @@ class AdminOverageBillingFailedNotification extends Notification implements Shou
             ->line(__('billing::notifications.admin_overage_billing_failed.body', [
                 'customer' => $customer,
                 'amount' => $amount,
+                'attempts' => \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::MAX_RENEWAL_RECOLLECTIONS,
             ]))
             ->line('Exception: '.$this->reason)
             ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());

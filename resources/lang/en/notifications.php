@@ -14,6 +14,41 @@ return [
         'body' => 'Your trial ended on :date and no payment method was added in time. Subscribe at any time to restore access — your previous configuration is remembered.',
         'body_with_mandate' => 'Your trial ended on :date, but the first payment for your subscription has not reached us. Please check your payment method and subscribe again to restore access — your previous configuration is remembered.',
     ],
+    'unwanted_payment_refunded' => [
+        'subject' => 'Your payment at :app is being refunded',
+        'refund' => 'The amount of :amount is being refunded to the payment method you used. Depending on your bank this can take a few days.',
+        'reasons' => [
+            'default' => 'We received a payment from you that could not be applied.',
+            'renewal_after_end' => 'We collected a renewal for your subscription although it has already ended. That was a mistake on our side; the subscription will not be charged again.',
+            'activation_failed' => 'We received your payment, but your subscription could not be set up despite several attempts.',
+            'change_cancelled' => 'We received the payment for a change to your subscription that you had cancelled in the meantime. The change was not carried out.',
+            'subscription_ended' => 'We received the payment for a change to your subscription, but the subscription had ended in the meantime. The change was not carried out.',
+        ],
+    ],
+    'scheduled_change_not_applied' => [
+        'subject' => 'Your scheduled change at :app was not carried out',
+        'body' => 'The change to :plan that you had scheduled could not be carried out. Your subscription continues unchanged.',
+        'next' => 'You can make the change again at any time.',
+        'payment_returned' => 'A payment for this change was already on its way and could not be stopped. We will refund it in full as soon as it arrives, and confirm that separately.',
+        'action' => 'Manage subscription',
+        'reasons' => [
+            'default' => 'The change is not possible with your subscription as it is now.',
+            'attempts_exhausted' => 'We tried several times and a technical problem prevented it each time.',
+            'seats_in_use' => 'More seats are in use than the selected plan allows. Please release seats first.',
+            'payment_outstanding' => 'There is an outstanding payment. Please settle it first.',
+            'not_available' => 'The selected plan or one of its options is no longer available for your subscription.',
+        ],
+    ],
+    'undercollection_charged' => [
+        'subject' => 'A balance for your :app subscription',
+        'charge' => 'We are collecting the difference of :amount from your payment method as a separate payment.',
+        'invoice' => 'You will receive a separate invoice for it.',
+        'reasons' => [
+            'default' => 'Your last regular payment did not cover everything your subscription included in that billing period.',
+            'renewal_created_before_change' => 'You added seats or an add-on shortly before your subscription renewed. The renewal had already been prepared at the previous amount, so it did not include them.',
+            'plan_change_spanned_renewal' => 'Your plan change took effect after your subscription had already renewed at the previous plan\'s price, so the renewal did not cover the new plan.',
+        ],
+    ],
     'grant_extras_purchase_refunded' => [
         'subject' => 'Your purchase at :app could not be completed',
         'body' => 'Your purchase of extras could not be carried out, because your free period has ended in the meantime.',
@@ -43,12 +78,14 @@ return [
         'overage_blocked' => 'No further :type usage will be allowed until the next period or your plan is upgraded.',
     ],
     'overage_billing_failed' => [
-        'subject' => 'Service paused: usage charge failed',
-        'body' => 'We tried three times to charge :amount for your overage usage but the payment failed. Service is paused until you update your payment method.',
+        'subject' => 'Usage charge failed',
+        'body' => 'We tried three times to charge :amount for your overage usage but the payment failed.',
+        'will_retry' => 'We will try again automatically with your next renewal. Please make sure your payment method is up to date. Until the amount is paid, nothing new can be booked on your subscription.',
+        'final' => 'We will not try to collect this amount again.',
     ],
     'admin_overage_billing_failed' => [
-        'subject' => '[Admin] Overage charge failed for :customer',
-        'body' => 'After 3 retries, the overage charge for :customer (:amount) could not be collected. The customer has been moved to past_due.',
+        'subject' => '[Admin] Overage written off for :customer',
+        'body' => 'The overage charge for :customer (:amount) could not be collected — neither in its own dunning cycle nor at the :attempts renewals that tried again. It has been written off; nothing is owed in the wallet any more. The lock on new bookings has been lifted; if a renewal is unpaid as well, the subscription stays past due for that.',
     ],
     'country_mismatch_self' => [
         'subject' => 'We need to verify your billing country',

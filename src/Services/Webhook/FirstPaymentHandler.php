@@ -13,6 +13,7 @@ use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\ActivationRetry;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
@@ -77,6 +78,20 @@ class FirstPaymentHandler
             // admin notification. CleanupOrphanedBillablesJob deliberately refuses to
             // touch a billable that holds an invoice, so nothing reconciled it.
             if (! $this->support->activationCompleted($billable)) {
+                // The retry job resumes exactly this state: invoice there, subscription
+                // not. It claims, then runs the same activation with the invoice it finds.
+                if (ActivationRetry::resuming()) {
+                    $this->support->claimForResume($billable, $paymentId);
+
+                    try {
+                        $this->activate($payment, $billable, $metadata);
+                    } finally {
+                        $this->support->releaseActivationClaim($billable, $paymentId);
+                    }
+
+                    return;
+                }
+
                 $this->support->reportIncompleteActivation($billable, $payment, 'first_payment');
             } else {
                 Log::info('Webhook re-delivery: invoice exists for first-payment, skipping', [
@@ -162,7 +177,12 @@ class FirstPaymentHandler
         );
         $recurringDiscountNet = $pricedCoupon['recurring_discount_net'] ?? 0;
 
-        $invoice = $this->firstPaymentArtifacts->persist(
+        // On a retry the invoice of this payment already exists; it is not written twice.
+        $invoice = ActivationRetry::resuming()
+            ? \GraystackIT\MollieBilling\Models\BillingInvoice::query()->where('mollie_payment_id', (string) ($payment->id ?? ''))->first()
+            : null;
+
+        $invoice ??= $this->firstPaymentArtifacts->persist(
             $payment,
             $billable,
             $planCode,
@@ -173,7 +193,7 @@ class FirstPaymentHandler
         );
 
         try {
-            $this->createSubscription->handle($billable, [
+            $this->support->createSubscription($this->createSubscription, $billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
@@ -191,9 +211,10 @@ class FirstPaymentHandler
                 'CreateSubscription during webhook failed',
                 $e,
             );
-            event(new PaymentSucceeded($billable, $invoice));
-            $this->support->notifyInvoiceAvailable($billable, $invoice);
 
+            // No PaymentSucceeded and no "your invoice is ready" yet: the activation is
+            // being retried, and both are sent by completeActivation() when it lands. If
+            // it never does, the customer gets the refund mail instead.
             return;
         }
 

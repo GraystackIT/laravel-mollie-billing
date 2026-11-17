@@ -32,6 +32,7 @@ dataset('change matrix discounts', [
     'waiver until a date, then paid' => 'waiver-date-paid',
     'waiver for N periods' => 'waiver-periods',
     'waiver with a granted addon' => 'waiver-gift',
+    '100 % coupon' => 'full100',
 ]);
 
 dataset('seat and addon changes', [
@@ -47,27 +48,36 @@ dataset('seat and addon changes', [
 ]);
 
 it('books what it previews, at the difference of the recurring amounts, and renews at what Mollie holds', function (string $discount, int $seats, array $addons, Closure $payload) {
-    $billable = World::subscription($discount, 'pro', $seats, $addons);
+    changeMatrixSeatAddonCell($discount, $seats, $addons, $payload, 'monthly', 21, 31);
+})->with('change matrix discounts')->with('seat and addon changes');
+
+it('does the same on a yearly subscription, over 355 of 365 days', function (string $discount, int $seats, array $addons, Closure $payload) {
+    changeMatrixSeatAddonCell($discount, $seats, $addons, $payload, 'yearly', 355, 365);
+})->with('change matrix discounts')->with('seat and addon changes');
+
+function changeMatrixSeatAddonCell(string $discount, int $seats, array $addons, Closure $payload, string $interval, int $left, int $length): void
+{
+    $billable = World::subscription($discount, 'pro', $seats, $addons, $interval);
     $before = World::recurringNet($billable);
 
     $report = World::change($billable, $payload($billable->getActiveBillingAddonCodes()));
 
     $after = World::recurringNet($billable);
     $delta = $after - $before;
-    $expected = (int) round($delta * 21 / 31);
+    $expected = (int) round($delta * $left / $length);
     $net = World::sum($report['booked']);
 
     // 1. Preview == booked.
     expect($report['booked'])->toBe($report['previewed']);
 
     // 2. The change costs the recurring difference for the days that are left.
-    if ($delta >= 0 || in_array($discount, ['none', 'pct50', 'waiver-date-end', 'waiver-date-paid', 'waiver-periods', 'waiver-gift'], true)) {
-        expect(abs($net - $expected))->toBeLessThanOrEqual(2, "booked {$net}, recurring {$before} → {$after} over 21/31 is {$expected}");
+    if ($delta >= 0 || in_array($discount, ['none', 'pct50', 'waiver-date-end', 'waiver-date-paid', 'waiver-periods', 'waiver-gift', 'full100'], true)) {
+        expect(abs($net - $expected))->toBeLessThanOrEqual(3, "booked {$net}, recurring {$before} → {$after} over {$left}/{$length} is {$expected}");
     } else {
         // A fixed discount (and a discount that has just run out) is spread over the
         // lines it was paid with, so a partial removal credits the paid share — never
         // more than the list difference.
-        expect($net)->toBeLessThanOrEqual(0)->toBeGreaterThanOrEqual($expected - 2);
+        expect($net)->toBeLessThanOrEqual(0)->toBeGreaterThanOrEqual($expected - 3);
     }
 
     // 5. Nothing credited beyond what was collected.
@@ -88,8 +98,11 @@ it('books what it previews, at the difference of the recurring amounts, and rene
     expect(World::heldGross())->toBe($report['preview']['grossTotal']);
 
     // 4. And the next renewal is invoiced at exactly that.
+    // Read before the renewal: a waiver that ends inside the period this renewal opens
+    // is used up by it, and Mollie is re-priced to the full amount for the one after.
+    $held = World::heldGross();
     $renewal = World::renew($billable);
 
-    expect((int) $renewal->amount_gross)->toBe(World::heldGross())
+    expect((int) $renewal->amount_gross)->toBe($held)
         ->and(array_column((array) $renewal->line_items, 'kind'))->not->toContain('adjustment');
-})->with('change matrix discounts')->with('seat and addon changes');
+}

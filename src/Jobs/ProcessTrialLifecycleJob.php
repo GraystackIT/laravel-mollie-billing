@@ -178,6 +178,10 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
             ->chunkById(200, function ($billables): void {
                 foreach ($billables as $billable) {
                     try {
+                        if ($this->convertUnderDeferredCharge($billable)) {
+                            continue;
+                        }
+
                         if (! $this->trialGenuinelyLapsed($billable)) {
                             continue;
                         }
@@ -211,6 +215,72 @@ class ProcessTrialLifecycleJob implements ShouldQueue, ShouldBeUnique
                     }
                 }
             });
+    }
+
+    /**
+     * A trial whose first charge a discount defers past the trial's end: the trial is
+     * over, the subscription is not.
+     *
+     * A fully covering recurring code (or free plan periods) on a trial signup moves
+     * Mollie's first charge N periods past the trial end. No charge, no webhook — and the
+     * webhook is what turns a trial into an active subscription. So the row stayed on
+     * `trial` for months after its trial had ended, its period still the one that began
+     * with the signup, and with nothing turning that period over it held the prorated
+     * trial quota for the whole free time.
+     *
+     * At the trial's end it becomes what a charged trial becomes: active, its period
+     * starting at the trial end and running on that day (`BillingAnchor`, recorded so the
+     * nightly pass turns the free periods over on it — `PrepareUsageOverageJob` case A0),
+     * the trial quota replaced by the period's full quota. `TrialConverted` is dispatched;
+     * the conversion mail (`TrialConvertedNotification`) belongs to the first charge and
+     * its invoice, and there is none yet. Mollie is not touched: it already holds the
+     * full price for the deferred date.
+     */
+    private function convertUnderDeferredCharge(Model $billable): bool
+    {
+        if ($billable->getBillingSubscriptionSource() !== \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie->value
+            || empty($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? null)
+            || ! $billable->hasMollieMandate()
+        ) {
+            return false;
+        }
+
+        $trialEndsAt = $billable->getBillingTrialEndsAt();
+        $deferredUntil = ChargeDeferral::until($billable);
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = $billable->getBillingSubscriptionInterval();
+
+        if ($trialEndsAt === null || $deferredUntil === null || $planCode === '' || $interval === null
+            || ! $deferredUntil->copy()->startOfDay()->greaterThan(\Carbon\Carbon::instance($trialEndsAt)->utc()->startOfDay())
+        ) {
+            return false;
+        }
+
+        $periodStart = \Carbon\Carbon::instance($trialEndsAt)->utc();
+        $support = app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class);
+
+        // What the trial used beyond its quota is the trial's to settle, as at a charged
+        // conversion — collected before the period is reset, outside any transaction.
+        $support->collectOutstandingOverage($billable);
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($periodStart): array {
+            $meta = \GraystackIT\MollieBilling\Support\BillingAnchor::record($meta, $periodStart->day, $periodStart);
+            $meta['trial_converted_at'] = $periodStart->toIso8601String();
+            unset($meta['trial_quota'], $meta['next_charge_date_override']);
+
+            return $meta;
+        }, [
+            'subscription_status' => SubscriptionStatus::Active,
+            'subscription_period_starts_at' => $periodStart,
+            'trial_ends_at' => null,
+        ]);
+
+        $billable->refresh();
+        $support->creditPeriodQuota($billable, $planCode, $interval, 'subscription_renewal');
+
+        event(new \GraystackIT\MollieBilling\Events\TrialConverted($billable, $planCode));
+
+        return true;
     }
 
     /**

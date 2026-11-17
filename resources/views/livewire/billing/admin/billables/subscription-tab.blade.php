@@ -538,6 +538,45 @@ new class extends Component {
             $currentOnExpiry = $waiver['on_expiry'] ?? ($b->getBillingSubscriptionMeta()['grant_on_expiry'] ?? null);
         @endphp
 
+        @php $balanceCharges = \GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::cases($b); @endphp
+        @if ($balanceCharges !== [])
+            <x-mollie-billing::admin.section :title="__('billing::admin.balance_charges.heading')" :description="__('billing::admin.balance_charges.description')" dusk="balance-charges">
+                <x-slot:actions>
+                    <x-mollie-billing::admin.info :text="__('billing::admin.balance_charges.info')" />
+                </x-slot:actions>
+
+                <flux:table>
+                    <flux:table.columns>
+                        <flux:table.column>{{ __('billing::admin.balance_charges.column.date') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.balance_charges.column.reason') }}</flux:table.column>
+                        <flux:table.column align="end">{{ __('billing::admin.balance_charges.column.amount') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.balance_charges.column.status') }}</flux:table.column>
+                        <flux:table.column>{{ __('billing::admin.balance_charges.column.payment') }}</flux:table.column>
+                    </flux:table.columns>
+                    <flux:table.rows>
+                        @foreach ($balanceCharges as $charge)
+                            @php
+                                $reasonKey = 'billing::admin.balance_charges.reason.'.$charge['reason'];
+                                $obstacleKey = 'billing::admin.balance_charges.obstacle.'.($charge['obstacle'] ?? '');
+                            @endphp
+                            <flux:table.row :key="$charge['key']" dusk="balance-charge-row-{{ $charge['status'] }}">
+                                <flux:table.cell class="tabular-nums">{{ $charge['at'] ? BillingTime::displayUtc(\Carbon\Carbon::parse($charge['at']))?->format('Y-m-d H:i') : '—' }}</flux:table.cell>
+                                <flux:table.cell>{{ \Illuminate\Support\Facades\Lang::has($reasonKey) ? __($reasonKey) : $charge['reason'] }}</flux:table.cell>
+                                <flux:table.cell align="end" class="tabular-nums">{{ \GraystackIT\MollieBilling\Support\BillingMoney::format($charge['amount_gross'], $charge['currency']) }}</flux:table.cell>
+                                <flux:table.cell>
+                                    <flux:badge size="sm" :color="['pending' => 'blue', 'paid' => 'green', 'failed' => 'red', 'closed' => 'zinc', 'not_possible' => 'zinc'][$charge['status']] ?? 'zinc'">{{ __('billing::admin.balance_charges.status.'.$charge['status']) }}</flux:badge>
+                                    @if ($charge['obstacle'])
+                                        <flux:text size="xs" class="mt-1 text-zinc-500">{{ \Illuminate\Support\Facades\Lang::has($obstacleKey) ? __($obstacleKey) : __('billing::admin.balance_charges.obstacle.default') }}</flux:text>
+                                    @endif
+                                </flux:table.cell>
+                                <flux:table.cell class="font-mono text-xs">{{ $charge['payment_id'] ?? '—' }}</flux:table.cell>
+                            </flux:table.row>
+                        @endforeach
+                    </flux:table.rows>
+                </flux:table>
+            </x-mollie-billing::admin.section>
+        @endif
+
         @if ($canExtendDays || $canFreePeriods || $canExtendGrant)
             <x-mollie-billing::admin.section
                 :title="__('billing::admin.billables.subscription.free_time.title')"
@@ -696,6 +735,15 @@ new class extends Component {
 
     <flux:modal wire:model.self="showCancelModal" name="cancel-subscription" class="md:w-[480px]">
         <form wire:submit="confirmCancel" class="space-y-5">
+            {{-- Said here as well as at the top of the page: the prompt is opened from
+                 wherever the operator has scrolled to, and a refusal that only appears
+                 above the fold looks like a button that does nothing. --}}
+            @if ($error)
+                <flux:callout variant="danger" icon="exclamation-triangle" inline data-modal-error>
+                    <flux:callout.text>{{ $error }}</flux:callout.text>
+                </flux:callout>
+            @endif
+
             <div>
                 <flux:heading size="lg">{{ __('billing::admin.billables.subscription.cancel_modal.title') }}</flux:heading>
                 <flux:text class="text-zinc-500 dark:text-zinc-400">
@@ -733,6 +781,15 @@ new class extends Component {
 
     <flux:modal wire:model.self="showRevokeModal" name="revoke-grant" class="md:w-[480px]">
         <form wire:submit="revokeGrant" class="space-y-5">
+            {{-- Said here as well as at the top of the page: the prompt is opened from
+                 wherever the operator has scrolled to, and a refusal that only appears
+                 above the fold looks like a button that does nothing. --}}
+            @if ($error)
+                <flux:callout variant="danger" icon="exclamation-triangle" inline data-modal-error>
+                    <flux:callout.text>{{ $error }}</flux:callout.text>
+                </flux:callout>
+            @endif
+
             <div>
                 <flux:heading size="lg">{{ __('billing::admin.billables.subscription.revoke_modal.title') }}</flux:heading>
                 <flux:text class="text-zinc-500 dark:text-zinc-400">

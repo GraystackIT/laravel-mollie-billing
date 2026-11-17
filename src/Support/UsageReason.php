@@ -45,6 +45,14 @@ final class UsageReason
             return self::translate('one_time_order', ['product' => $name]) ?? $name;
         }
 
+        // A sentence somebody typed — an operator's reason for a credit, an app's own
+        // wording — is shown as it was written. Only an identifier is turned into a
+        // heading; run through `headline()` as well, "Goodwill after the outage" came out
+        // as "Goodwill After The Outage".
+        if (preg_match('/\s/u', $reason) === 1) {
+            return $reason;
+        }
+
         return Str::headline($reason);
     }
 

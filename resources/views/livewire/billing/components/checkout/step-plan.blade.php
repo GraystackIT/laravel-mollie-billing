@@ -58,6 +58,11 @@
             {{-- Left: identity + price --}}
             <div class="flex flex-col justify-center gap-4 border-b border-zinc-200 pb-8 pr-0 md:border-b-0 md:border-r md:pb-0 md:pr-12 lg:pr-16 dark:border-white/10">
                 <div class="text-2xl font-semibold text-zinc-900 dark:text-white">{{ $plan['name'] }}</div>
+                {{-- `plans.*.description` — the catalog carried it to this view all along
+                     and no screen ever printed it. --}}
+                @if (! empty($plan['description']))
+                    <p class="text-sm text-zinc-600 dark:text-zinc-400" dusk="plan-description-{{ $code }}">{{ $plan['description'] }}</p>
+                @endif
 
                 <div class="flex flex-wrap items-baseline gap-x-3 gap-y-2">
                     <div class="flex items-baseline gap-1.5">
@@ -174,10 +179,14 @@
                         @endif
                     </div>
 
+                    @if (! empty($plan['description']))
+                        <p class="-mt-2 text-sm text-zinc-600 dark:text-zinc-400" dusk="plan-description-{{ $code }}">{{ $plan['description'] }}</p>
+                    @endif
+
                     {{-- Price + trial badge --}}
                     <div>
                         <div class="flex items-baseline gap-1">
-                            <span class="text-3xl font-bold tracking-tight tabular-nums">{{ $money($displayCents) }}</span>
+                            <span class="text-3xl font-bold tracking-tight tabular-nums" dusk="plan-price-{{ $code }}">{{ $money($displayCents) }}</span>
                             <span class="text-sm text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
                         </div>
                         @php($trialDays = $this->trialApplies($code, $interval) ? $this->planTrialDays($code, $interval) : 0)

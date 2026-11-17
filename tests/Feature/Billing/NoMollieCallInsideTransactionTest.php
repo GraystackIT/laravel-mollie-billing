@@ -392,3 +392,76 @@ it('posts a trial extension PATCH after the redemption commits', function (): vo
         ->and($billable->fresh()->trial_ends_at->diffInDays(BillingTime::nowUtc()->addDays(17), false))
         ->toBeBetween(-1, 1);
 });
+
+/*
+ * Reading a payment's refunds and chargebacks is a Mollie request like any other.
+ *
+ * The webhook handlers used to ask the SDK resource (`$payment->refunds()`,
+ * `$payment->chargebacks()`), which sends through the client the payment was hydrated
+ * with — past MollieCall, so the guard above never saw those reads. The payment here is a
+ * real SDK resource, hydrated from the SDK's own sample (src/Fake/Responses/payment.json)
+ * through MollieCall, and Mollie answers both the old route (`_links.refunds` /
+ * `_links.chargebacks`, a DynamicGetRequest) and the new one (the typed list requests):
+ * against the old code the read inside the transaction goes through unchecked.
+ */
+function txSdkPaymentWithCredits(): \Mollie\Api\Resources\Payment
+{
+    $sample = fn (string $name, string $id): array => json_decode(
+        str_replace('{{ RESOURCE_ID }}', $id, \Mollie\Api\Fake\FakeResponseLoader::load($name)),
+        true,
+        flags: JSON_THROW_ON_ERROR,
+    );
+
+    $payment = $sample('payment', 'tr_txlist');
+    $payment['status'] = 'paid';
+    $payment['amountRefunded'] = ['value' => '5.95', 'currency' => 'EUR'];
+    $payment['amountChargedBack'] = ['value' => '5.95', 'currency' => 'EUR'];
+    $payment['_links']['refunds'] = ['href' => 'https://api.mollie.com/v2/payments/tr_txlist/refunds', 'type' => 'application/hal+json'];
+    $payment['_links']['chargebacks'] = ['href' => 'https://api.mollie.com/v2/payments/tr_txlist/chargebacks', 'type' => 'application/hal+json'];
+
+    $list = fn (string $key, array $item): array => [
+        'count' => 1,
+        '_embedded' => [$key => [$item]],
+        '_links' => ['self' => ['href' => '...', 'type' => 'application/hal+json'], 'previous' => null, 'next' => null],
+    ];
+    $refunds = $list('refunds', $sample('refund', 're_txlist'));
+    $chargebacks = $list('chargebacks', $sample('chargeback', 'chb_txlist'));
+
+    Mollie::fake([
+        \Mollie\Api\Http\Requests\GetPaymentRequest::class => \Mollie\Api\Fake\MockResponse::ok($payment),
+        \Mollie\Api\Http\Requests\DynamicGetRequest::class => fn (\Mollie\Api\Http\PendingRequest $r): \Mollie\Api\Fake\MockResponse => \Mollie\Api\Fake\MockResponse::ok(
+            str_ends_with($r->getRequest()->resolveResourcePath(), '/chargebacks') ? $chargebacks : $refunds,
+        ),
+        \Mollie\Api\Http\Requests\GetPaginatedPaymentRefundsRequest::class => \Mollie\Api\Fake\MockResponse::ok($refunds),
+        \Mollie\Api\Http\Requests\GetPaginatedPaymentChargebacksRequest::class => \Mollie\Api\Fake\MockResponse::ok($chargebacks),
+    ]);
+
+    return MollieCall::send(new \Mollie\Api\Http\Requests\GetPaymentRequest('tr_txlist'));
+}
+
+it('reads a payment\'s refunds through the guard', function (): void {
+    $billable = txBillable();
+    $payment = txSdkPaymentWithCredits();
+
+    expect(fn () => DB::transaction(fn () => app(\GraystackIT\MollieBilling\Services\Webhook\RefundHandler::class)->handle($payment, $billable)))
+        ->toThrow(LogicException::class, 'GetPaginatedPaymentRefundsRequest was made inside a database transaction');
+});
+
+it('reads a payment\'s chargebacks through the guard', function (): void {
+    $billable = txBillable();
+    $payment = txSdkPaymentWithCredits();
+
+    expect(fn () => DB::transaction(fn () => app(\GraystackIT\MollieBilling\Services\Webhook\ChargebackHandler::class)->handle($payment, $billable)))
+        ->toThrow(LogicException::class, 'GetPaginatedPaymentChargebacksRequest was made inside a database transaction');
+});
+
+it('reads both lists at the ambient depth, as typed requests', function (): void {
+    $payment = txSdkPaymentWithCredits();
+    $credits = app(\GraystackIT\MollieBilling\Support\MolliePaymentCredits::class);
+
+    expect(collect($credits->refunds($payment))->pluck('id')->all())->toBe(['re_txlist'])
+        ->and(collect($credits->chargebacks($payment))->pluck('id')->all())->toBe(['chb_txlist']);
+
+    Mollie::assertSent(\Mollie\Api\Http\Requests\GetPaginatedPaymentRefundsRequest::class);
+    Mollie::assertSent(\Mollie\Api\Http\Requests\GetPaginatedPaymentChargebacksRequest::class);
+});

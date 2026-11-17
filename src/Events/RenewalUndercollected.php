@@ -22,9 +22,11 @@ use Illuminate\Queue\SerializesModels;
  *    pending when the period renewed. The renewal was collected for the old plan; the
  *    change then took effect in the middle of the period that renewal had paid for.
  *
- * Nothing is charged, no status changes and the invoice is left exactly as booked: taking
- * money from inside a webhook is a decision for a person. The event is written to the
- * audit trail and the admins are told the amount; listen for it to automate a follow-up.
+ * The difference is collected automatically, as a separate recurring payment with its own
+ * invoice, exactly once per case (`Services\Billing\UndercollectionCharge`); the customer
+ * is told the amount and the reason. `$chargePaymentId` is that payment. It is null when
+ * the balance could not be charged — the subscription is past due or has ended, there is
+ * no mandate, or Mollie refused the payment — and only then are the admins told.
  */
 class RenewalUndercollected
 {
@@ -48,6 +50,8 @@ class RenewalUndercollected
         public readonly int $collectedNet,
         public readonly int $shortfallNet,
         public readonly string $reason,
+        /** The payment created to collect the difference; null when it could not be charged automatically. */
+        public readonly ?string $chargePaymentId = null,
     ) {
     }
 }

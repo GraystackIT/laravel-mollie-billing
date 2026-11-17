@@ -15,6 +15,7 @@ use Mollie\Api\MollieApiClient;
 use Mpociot\VatCalculator\VatCalculator;
 use Workbench\App\FakeMollie\FakeMollieHttpAdapter;
 use Workbench\App\Models\AdminUser;
+use Workbench\App\Support\SharedClock;
 use Workbench\App\Support\WorkbenchSetting;
 
 /**
@@ -48,14 +49,125 @@ class WorkbenchServiceProvider extends ServiceProvider
         });
 
         // VIES without the SOAP service. Rates and reverse-charge rules stay real.
+        //
+        // mpociot's provider is deferred: it registers its own `VatCalculator` binding the
+        // first time the class is resolved — which silently replaced a closure bound here,
+        // so the browser suite was asking the real VIES service (slow, flaky, and it knew
+        // only the one real number among the three). Registering it now makes it run
+        // first (and merge its config), so the binding below is the one that stays.
+        $this->app->register(\Mpociot\VatCalculator\VatCalculatorServiceProvider::class);
+
         $this->app->singleton(VatCalculator::class, function (): VatCalculator {
             return new FakeVatCalculator($this->validVatNumbers, config('vat_calculator', []));
         });
+
+        $this->applyConfigOverrides();
+        $this->applySharedClock();
+
+        // Per-test switch: the booking services answer "past due" (see the class).
+        \Workbench\App\Support\PastDueBookingRace::bindIfSwitchedOn($this->app);
+    }
+
+    /**
+     * The browser suite's shared clock (`Workbench\App\Support\SharedClock`), on the server
+     * side: every request the Dusk server boots runs at the time the test travelled to.
+     *
+     * Only in the server (`php -S` is the `cli-server` SAPI). The test process sets its own
+     * clock when it travels, and must never pick up a row an earlier test left behind while
+     * its application boots — before `migrate:fresh` has cleared the table.
+     *
+     * With a travelled clock the session's own clock has to agree: the file session handler
+     * compares the session file's real modification time with `now() - lifetime`, so a clock
+     * months ahead read every session as expired and logged the browser out on each request;
+     * and a cookie stamped with an expiry in the travelled past would be dropped by the
+     * browser, which keeps the machine's time. A lifetime of ten years covers both.
+     */
+    private function applySharedClock(): void
+    {
+        if (PHP_SAPI !== 'cli-server') {
+            return;
+        }
+
+        try {
+            $travelled = SharedClock::applyFromSettings();
+        } catch (\Throwable) {
+            return; // no settings table yet (migrate:fresh is running)
+        }
+
+        if ($travelled) {
+            config(['session.lifetime' => 60 * 24 * 365 * 10]);
+        }
+    }
+
+    /**
+     * Per-test configuration, for both processes.
+     *
+     * A test that wants the SERVER to run with a different setting (a logo, a pinned admin
+     * locale, a lower usage threshold) cannot call `config()` — that only reaches its own
+     * process. It writes a `config.<dotted key>` row instead (JSON value, see
+     * `InteractsWithWorkbench`-style helpers in tests/Browser/Matrix), and every request
+     * the Dusk server boots picks it up here. In `register()`, not `boot()`: the package's
+     * own provider reads some keys while booting (route auto-loading, the schedule), and
+     * it boots before this one.
+     */
+    /**
+     * Opt-in: give the request a public client IP.
+     *
+     * A browser test reaches the server from 127.0.0.1, and IpGeolocationManager answers
+     * `null` for a private address before any driver is asked — so nothing that depends on
+     * the visitor's country (the country gate, the preselected checkout country) could be
+     * shown in a browser. A test sets `client_ip`; without it nothing changes.
+     */
+    private function applyClientIpOverride(): void
+    {
+        try {
+            $ip = WorkbenchSetting::get('client_ip');
+        } catch (\Throwable) {
+            return; // no settings table yet (migrate:fresh is running)
+        }
+
+        if (! is_string($ip) || $ip === '') {
+            return;
+        }
+
+        // The Dusk server boots the application before it captures the request, so the
+        // superglobal is what the request will be built from; a request that already
+        // exists is corrected as well.
+        $_SERVER['REMOTE_ADDR'] = $ip;
+
+        if ($this->app->bound('request')) {
+            $this->app['request']->server->set('REMOTE_ADDR', $ip);
+        }
+    }
+
+    private function applyConfigOverrides(): void
+    {
+        try {
+            $rows = \Illuminate\Support\Facades\DB::table('workbench_settings')
+                ->where('key', 'like', 'config.%')
+                ->get();
+        } catch (\Throwable) {
+            // No table yet (migrate:fresh is running) — nothing to override.
+            return;
+        }
+
+        foreach ($rows as $row) {
+            $key = substr((string) $row->key, 7);
+            $value = json_decode((string) $row->value, true);
+
+            // The one key the package reads as an enum instance, not a scalar.
+            if ($key === 'mollie-billing.plan_change_mode' && is_string($value)) {
+                $value = \GraystackIT\MollieBilling\Enums\PlanChangeMode::from($value);
+            }
+
+            config([$key => $value]);
+        }
     }
 
     public function boot(): void
     {
         $this->bindIpGeolocation();
+        $this->applyClientIpOverride();
 
         // The portal needs no Laravel auth — the billable comes from the session
         // the `/_wb/act-as/{billable}` route sets, and authorization is "you are
@@ -96,6 +208,35 @@ class WorkbenchServiceProvider extends ServiceProvider
         });
 
         $this->loadViewsFrom(dirname(__DIR__, 2).'/resources/views', 'wb');
+
+        // Checkout matrix: an app-provided checkout step, switched on per test through
+        // the shared settings table (`checkout_custom_step` = 1). Off by default, so no
+        // other scenario's checkout grows a step.
+        MollieBilling::checkoutStepsUsing(function (): array {
+            if (WorkbenchSetting::get('checkout_custom_step') !== '1') {
+                return [];
+            }
+
+            return [[
+                'key' => 'terms',
+                'label' => 'Terms',
+                'headline' => 'Accept the workbench terms',
+                'description' => 'An app-provided step, before the package steps.',
+                'view' => 'wb::checkout-terms',
+                'validate' => function ($component): void {
+                    if (! ($component->customData['terms'] ?? false)) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'customData.terms' => 'Please accept the workbench terms.',
+                        ]);
+                    }
+                },
+            ]];
+        });
+
+        // An app-provided header component, for `mollie-billing.header_components`.
+        if (class_exists(\GraystackIT\MollieBilling\Tests\Support\HeaderProbeComponent::class)) {
+            \Livewire\Livewire::component('wb-header-probe', \GraystackIT\MollieBilling\Tests\Support\HeaderProbeComponent::class);
+        }
 
         // Webhook outside the web group: no session, no CSRF — like production.
         MollieBilling::webhookRoutes();
@@ -269,6 +410,94 @@ class WorkbenchServiceProvider extends ServiceProvider
                         ],
                     ],
                 ],
+                // Operations matrix (tests/Browser/Matrix/Admin*): a plan that carries a
+                // per-seat addon, so an invoice can hold every kind of line at once. Hidden,
+                // so no plan list another scenario counts or clicks through grows by it.
+                'ops-team' => [
+                    'name' => 'Ops Team',
+                    'description' => 'Seats plus a per-seat addon.',
+                    'tier' => 4,
+                    'hidden' => true,
+                    'included_seats' => 2,
+                    'feature_keys' => ['dashboard'],
+                    'allowed_addons' => ['softdrinks', 'ops-crm'],
+                    'intervals' => [
+                        'monthly' => [
+                            'base_price_net' => 4900,
+                            'seat_price_net' => 700,
+                            'included_usages' => ['Tokens' => 100, 'SMS' => 50],
+                            'usage_overage_prices' => ['Tokens' => 10, 'SMS' => 15],
+                        ],
+                    ],
+                ],
+                // Change matrix (tests/Browser/Matrix/ChangeMatrixTest): a second plan that
+                // allows the per-seat addon, so a plan change can keep it — without one, no
+                // plan-change preview ever shows an `addon_seats` row. It includes more
+                // seats than ops-team, so the addon's seat count moves with the plan.
+                // Hidden like ops-team; a test shows both with
+                // `serverConfig('mollie-billing-plans.plans.<code>.hidden', false)`.
+                'ops-team-plus' => [
+                    'name' => 'Ops Team Plus',
+                    'description' => 'More seats, same per-seat addon.',
+                    'tier' => 5,
+                    'hidden' => true,
+                    'included_seats' => 6,
+                    'feature_keys' => ['dashboard'],
+                    'allowed_addons' => ['softdrinks', 'ops-crm'],
+                    'intervals' => [
+                        'monthly' => [
+                            'base_price_net' => 8900,
+                            'seat_price_net' => 600,
+                            'included_usages' => ['Tokens' => 100, 'SMS' => 50],
+                            'usage_overage_prices' => ['Tokens' => 10, 'SMS' => 15],
+                        ],
+                    ],
+                ],
+                // Coupon matrix (tests/Browser/Matrix/Coupon*): a plan that costs nothing, so
+                // "customer on the free plan" is a state a code can be typed in. Hidden for
+                // the same reason as ops-team.
+                'coupon-free' => [
+                    'name' => 'Free Forever',
+                    'description' => 'Costs nothing, never ends.',
+                    'tier' => 0,
+                    'hidden' => true,
+                    'included_seats' => 1,
+                    'feature_keys' => ['dashboard'],
+                    'allowed_addons' => [],
+                    'intervals' => [
+                        'monthly' => [
+                            'base_price_net' => 0,
+                            'seat_price_net' => null,
+                            'included_usages' => ['Tokens' => 10, 'SMS' => 0],
+                        ],
+                    ],
+                ],
+                // Change matrix (tests/Browser/Matrix/Change*): a free plan a paying customer
+                // can downgrade to on the plan screen. Listed as hidden so that no other
+                // matrix's plan cards, defaults or counts move; a test that wants it on the
+                // screen shows it with
+                // `serverConfig('mollie-billing-plans.plans.changes-free.hidden', false)`.
+                'changes-free' => [
+                    'name' => 'Free',
+                    'description' => 'Costs nothing. One seat, no add-ons.',
+                    'tier' => 0,
+                    'hidden' => true,
+                    'included_seats' => 1,
+                    'feature_keys' => ['dashboard'],
+                    'allowed_addons' => [],
+                    'intervals' => [
+                        'monthly' => [
+                            'base_price_net' => 0,
+                            'seat_price_net' => null,
+                            'included_usages' => ['Tokens' => 10, 'SMS' => 0],
+                        ],
+                        'yearly' => [
+                            'base_price_net' => 0,
+                            'seat_price_net' => null,
+                            'included_usages' => ['Tokens' => 120, 'SMS' => 0],
+                        ],
+                    ],
+                ],
             ],
 
             'usage_types' => [
@@ -299,6 +528,14 @@ class WorkbenchServiceProvider extends ServiceProvider
                     'intervals' => [
                         'monthly' => ['price_net' => 990],
                         'yearly' => ['price_net' => 9900],
+                    ],
+                ],
+                // Base price plus a price per seat, none of them free — see `ops-team`.
+                'ops-crm' => [
+                    'name' => 'Ops CRM',
+                    'feature_keys' => [],
+                    'intervals' => [
+                        'monthly' => ['price_net' => 1500, 'seat_price_net' => 300],
                     ],
                 ],
             ],

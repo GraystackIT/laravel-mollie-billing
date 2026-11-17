@@ -132,10 +132,11 @@ it('does not write off a retry payment because the dunning cycle around it is ol
         ->and($meta[ChargeUsageOverageDirectly::META_KEY]['payment_id'])->toBe('tr_cycle_3');
 });
 
-it('still writes off a payment that has itself been open past the hard limit', function (): void {
+it('still ends the cycle of a payment that has itself been open past the hard limit', function (): void {
     $billable = uncoveredPathsBillable();
 
-    Mollie::shouldReceive('send')->once()->andReturn((object) [
+    // The status poll, then the cancellation that makes it safe to free the slot.
+    Mollie::shouldReceive('send')->twice()->andReturn((object) [
         'id' => 'tr_cycle_3',
         'status' => 'open',
         'createdAt' => BillingTime::nowUtc()->subDays(15)->toIso8601String(),

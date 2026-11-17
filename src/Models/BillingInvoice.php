@@ -121,7 +121,13 @@ class BillingInvoice extends Model
 
     public function isFullyRefunded(): bool
     {
-        return $this->effectiveRefundedNet() >= $this->amount_net && $this->amount_net > 0;
+        // Against what this invoice holds, which for every invoice that collected its own
+        // payment is `amount_net`. A settled plan-switch document's header is zero, so read
+        // off the header it could never be "fully refunded" — the panel kept offering the
+        // refund of an invoice with nothing left.
+        $base = $this->refundableBaseNet();
+
+        return $base > 0 && $this->effectiveRefundedNet() >= $base;
     }
 
     public function remainingRefundableNet(): int

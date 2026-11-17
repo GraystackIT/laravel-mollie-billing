@@ -167,8 +167,12 @@ it('reports a re-delivery that finds an invoice but no subscription', function (
     // This used to be a Log::info and nothing else — a paying customer with no
     // subscription, and CleanupOrphanedBillablesJob refuses to touch a billable that
     // holds an invoice, so nothing ever reconciled it.
+    //
+    // It is announced once and then RETRIED by the package (RetrySubscriptionActivationJob,
+    // see ActivationRetryTest); an operator hears of it only when the retries are spent.
     Event::assertDispatched(SubscriptionActivationFailed::class);
-    Notification::assertSentTo($billable, AdminPlanChangeFailedNotification::class);
+    Notification::assertNothingSent();
+    expect($billable->refresh()->getBillingSubscriptionMeta()[GraystackIT\MollieBilling\Support\ActivationRetry::META_KEY] ?? [])->toHaveKey('tr_dur');
 
     MollieBilling::flushCallbacks();
 });

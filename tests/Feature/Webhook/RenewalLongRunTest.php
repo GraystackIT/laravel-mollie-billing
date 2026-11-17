@@ -67,9 +67,10 @@ it('runs a yearly subscription through four renewals, across a leap year', funct
 it('keeps a yearly subscription that started on 29 February aligned with its charges', function (): void {
     $world = longRunStart('yearly', '2028-02-29 12:00:00', '345.10');
 
-    // The start date the package sends is the end of the first period, 28 February 2029
-    // — so that is the day Mollie knows, and the cycle stays on it, 2032 included.
-    foreach (['2029-02-28', '2030-02-28', '2031-02-28', '2032-02-28'] as $cycle) {
+    // The start date the package sends is the end of the first period, 28 February 2029;
+    // the anchor is the 29th, so the leap year 2032 is charged on its 29 February — the
+    // package sends that date itself (BillingAnchor, pinNextChargeOnAnchor()).
+    foreach (['2029-02-28', '2030-02-28', '2031-02-28', '2032-02-29'] as $cycle) {
         $payment = longRunRenew($world);
 
         expect(substr($payment->createdAt, 0, 10))->toBe($cycle);
@@ -88,17 +89,17 @@ it('follows Mollie through the month ends when the signup fell on the 29th, 30th
 
         expect(substr($payment->createdAt, 0, 10))->toBe($cycle);
 
-        // Up to two days between "one month after the last charge" and Mollie's next
-        // charge, once, where February pulled the day down and the cadence returns to
-        // it. The period then follows the charge; nothing accumulates.
-        longRunAssertRenewal($world, $payment, '34.51', gapToleranceDays: 3);
+        // No gap under either cadence: the cycle keeps its anchor day through the short
+        // months, and the package sends Mollie that date wherever Mollie's own rule could
+        // differ (BillingAnchor, pinNextChargeOnAnchor()).
+        longRunAssertRenewal($world, $payment, '34.51');
     }
 
     Event::assertNotDispatched(PaymentAmountMismatch::class);
 })->with([
-    'signup 31 Jan → Mollie starts 28 Feb' => ['2027-01-31 10:00:00', 'clamp', ['2027-02-28', '2027-03-28', '2027-04-28', '2027-05-28', '2027-06-28', '2027-07-28', '2027-08-28', '2027-09-28', '2027-10-28', '2027-11-28', '2027-12-28', '2028-01-28', '2028-02-28', '2028-03-28']],
-    'signup 31 Mar → 30th, clamped cadence' => ['2027-03-31 10:00:00', 'clamp', ['2027-04-30', '2027-05-30', '2027-06-30', '2027-07-30', '2027-08-30', '2027-09-30', '2027-10-30', '2027-11-30', '2027-12-30', '2028-01-30', '2028-02-29', '2028-03-30', '2028-04-30']],
-    'signup 31 Mar → 30th, drifting cadence' => ['2027-03-31 10:00:00', 'drift', ['2027-04-30', '2027-05-30', '2027-06-30', '2027-07-30', '2027-08-30', '2027-09-30', '2027-10-30', '2027-11-30', '2027-12-30', '2028-01-30', '2028-02-29', '2028-03-29', '2028-04-29']],
+    'signup 31 Jan → Mollie starts 28 Feb, anchor 31' => ['2027-01-31 10:00:00', 'clamp', ['2027-02-28', '2027-03-31', '2027-04-30', '2027-05-31', '2027-06-30', '2027-07-31', '2027-08-31', '2027-09-30', '2027-10-31', '2027-11-30', '2027-12-31', '2028-01-31', '2028-02-29', '2028-03-31']],
+    'signup 31 Mar → 30 Apr, anchor 31, clamped cadence' => ['2027-03-31 10:00:00', 'clamp', ['2027-04-30', '2027-05-31', '2027-06-30', '2027-07-31', '2027-08-31', '2027-09-30', '2027-10-31', '2027-11-30', '2027-12-31', '2028-01-31', '2028-02-29', '2028-03-31', '2028-04-30']],
+    'signup 31 Mar → 30 Apr, anchor 31, drifting cadence' => ['2027-03-31 10:00:00', 'drift', ['2027-04-30', '2027-05-31', '2027-06-30', '2027-07-31', '2027-08-31', '2027-09-30', '2027-10-31', '2027-11-30', '2027-12-31', '2028-01-31', '2028-02-29', '2028-03-31', '2028-04-30']],
     'signup 29 Dec, through a common February' => ['2028-12-29 10:00:00', 'clamp', ['2029-01-29', '2029-02-28', '2029-03-29', '2029-04-29']],
-    'signup 30 Dec, drifting through February' => ['2028-12-30 10:00:00', 'drift', ['2029-01-30', '2029-02-28', '2029-03-28', '2029-04-28']],
+    'signup 30 Dec, drifting through February' => ['2028-12-30 10:00:00', 'drift', ['2029-01-30', '2029-02-28', '2029-03-30', '2029-04-30']],
 ]);

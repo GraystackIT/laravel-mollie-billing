@@ -175,6 +175,15 @@ new class extends Component {
                                         <flux:table.cell class="tabular-nums">{{ BillingTime::display($invoice->created_at, $billable)->translatedFormat('d. M Y') }}</flux:table.cell>
                                         <flux:table.cell>
                                             <flux:badge size="sm" :color="$invoice->invoice_kind?->color() ?? 'zinc'">{{ $invoice->invoice_kind?->label() ?? '—' }}</flux:badge>
+                                            @if (\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::isBalanceInvoice($invoice))
+                                                {{-- A balance collected after a renewal that was too low: named, and with the
+                                                     reason its lines carry (one line per seat/addon component, each with the
+                                                     same `reason_label`; the plan balance's single line states it as its label). --}}
+                                                <div class="mt-1" dusk="invoice-{{ $invoice->id }}-balance">
+                                                    <flux:text size="sm" class="font-medium">{{ __('billing::portal.balance_charge.invoice_label') }}</flux:text>
+                                                    <flux:text size="xs" class="text-zinc-500">{{ $invoice->line_items[0]['reason_label'] ?? $invoice->line_items[0]['label'] ?? '' }}</flux:text>
+                                                </div>
+                                            @endif
                                         </flux:table.cell>
                                         <flux:table.cell class="text-right tabular-nums"><span dusk="invoice-{{ $invoice->id }}-net">{{ BillingMoney::format($invoice->amount_net, $invoice->currency) }}</span></flux:table.cell>
                                         <flux:table.cell class="text-right tabular-nums text-zinc-400"><span dusk="invoice-{{ $invoice->id }}-vat">{{ BillingMoney::format($invoice->amount_vat, $invoice->currency) }}</span></flux:table.cell>

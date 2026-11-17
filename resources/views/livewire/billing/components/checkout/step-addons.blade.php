@@ -20,10 +20,13 @@
                                 <flux:checkbox wire:model="addon_codes" value="{{ $addonCode }}" />
                                 <div>
                                     <div class="text-sm font-medium">{{ $addon['name'] }}</div>
+                                    @if (filled($addon['description'] ?? null))
+                                        <div class="text-xs text-zinc-500 dark:text-zinc-400" dusk="addon-description-{{ $addonCode }}">{{ $addon['description'] }}</div>
+                                    @endif
                                 </div>
                             </div>
                             <div class="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
-                                {{ $addonPrice }}@if ($addonSeatPrice !== null && $addonSeatPrice > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $money($priceFormatter((int) $addonSeatPrice))]) }}@endif / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
+                                {{ $addonPrice }}@if ($addonSeatPrice !== null && $addonSeatPrice > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $money($priceFormatter((int) $addonSeatPrice))]) }}@if ((int) ($addon['included_seats'] ?? 0) > 0) ({{ trans_choice('billing::checkout.addon_included_seats', (int) $addon['included_seats'], ['count' => (int) $addon['included_seats']]) }})@endif @endif / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
                             </div>
                         </label>
                     @endif

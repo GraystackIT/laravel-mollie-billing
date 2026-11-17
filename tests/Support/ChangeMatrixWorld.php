@@ -67,6 +67,24 @@ final class ChangeMatrixWorld
 
     public static bool $cancelled = false;
 
+    /**
+     * Whether Mollie has charged the subscription it holds. From then on it refuses a new
+     * start date (422 "…already charged", measured 17 November 2026 — see
+     * tests/Sandbox/MollieChargedSubscriptionContractTest), so the package has to replace
+     * the subscription to move its next charge.
+     */
+    public static bool $charged = false;
+
+    /** The subscription Mollie holds; a replacement gets a new id. */
+    public static string $subscriptionId = 'sub_cm';
+
+    public static ?string $heldDescription = null;
+
+    public static mixed $heldInterval = null;
+
+    /** How many subscriptions were created (a replacement is one). */
+    public static int $subscriptionsCreated = 0;
+
     /** @var array<string, array{value: string, metadata: array<string, mixed>}> */
     public static array $payments = [];
 
@@ -80,8 +98,31 @@ final class ChangeMatrixWorld
 
     public static bool $failPatches = false;
 
+    /** Mollie refuses every refund while this is set. */
+    public static bool $failRefunds = false;
+
+    /** Mollie refuses to create a payment while this is set. */
+    public static bool $failPayments = false;
+
+    /** Billing country of the next subscription, and its VAT number (reverse charge). */
+    public static string $country = 'AT';
+
+    public static ?string $vatNumber = null;
+
     /** @var array<string, string> what Mollie answers when a payment is looked up */
     public static array $paymentStatus = [];
+
+    /** @var array<string, bool> payments Mollie still lets us cancel (a SEPA debit not yet submitted) */
+    public static array $cancelable = [];
+
+    /** Mollie creates the next payment and then the answer is lost (a timeout). */
+    public static bool $acceptThenTimeout = false;
+
+    /** Looking a single payment up fails while this is set. */
+    public static bool $failLookups = false;
+
+    /** Listing the customer's payments fails while this is set. */
+    public static bool $failPaymentLists = false;
 
     public static function boot(): void
     {
@@ -94,12 +135,25 @@ final class ChangeMatrixWorld
         self::$heldMetadata = [];
         self::$heldStartDate = null;
         self::$cancelled = false;
+        self::$charged = false;
+        self::$subscriptionId = 'sub_cm';
+        self::$heldDescription = null;
+        self::$heldInterval = null;
+        self::$subscriptionsCreated = 0;
         self::$payments = [];
         self::$refunds = [];
         self::$sent = [];
         self::$sequence = 0;
         self::$failPatches = false;
+        self::$failRefunds = false;
+        self::$failPayments = false;
+        self::$country = 'AT';
+        self::$vatNumber = null;
         self::$paymentStatus = [];
+        self::$cancelable = [];
+        self::$acceptThenTimeout = false;
+        self::$failLookups = false;
+        self::$failPaymentLists = false;
         ChangeMatrixWebhookController::$nextPayment = null;
 
         app()->bind(MollieWebhookController::class, ChangeMatrixWebhookController::class);
@@ -142,6 +196,16 @@ final class ChangeMatrixWorld
                 throw new \RuntimeException('Mollie is unreachable');
             }
 
+            if (self::$cancelled) {
+                throw self::refusal('The subscription has been cancelled.');
+            }
+
+            $requested = self::property($request, 'startDate');
+            if ($requested !== null && self::$charged
+                && (self::$heldStartDate === null || (string) $requested != (string) self::$heldStartDate)) {
+                throw self::refusal('The start date cannot be changed when the subscription is already charged.');
+            }
+
             $amount = self::property($request, 'amount');
             if ($amount !== null) {
                 self::$heldValue = (string) $amount->value;
@@ -154,27 +218,80 @@ final class ChangeMatrixWorld
             if ($startDate !== null) {
                 self::$heldStartDate = $startDate;
             }
+            $description = self::property($request, 'description');
+            if ($description !== null) {
+                self::$heldDescription = (string) $description;
+            }
+            $interval = self::property($request, 'interval');
+            if ($interval !== null) {
+                self::$heldInterval = (string) $interval;
+            }
 
-            return (object) ['id' => 'sub_cm'];
+            return (object) ['id' => self::$subscriptionId];
         }
 
         if ($request instanceof CancelSubscriptionRequest) {
+            if (self::$cancelled) {
+                throw self::refusal('The subscription has been cancelled.');
+            }
+
             self::$cancelled = true;
 
-            return (object) ['id' => 'sub_cm', 'status' => 'canceled'];
+            return (object) ['id' => self::$subscriptionId, 'status' => 'canceled'];
+        }
+
+        if ($request instanceof \Mollie\Api\Http\Requests\CreateSubscriptionRequest) {
+            if (! self::$cancelled && self::$heldDescription !== null
+                && self::$heldDescription === (string) self::property($request, 'description')) {
+                throw self::refusal('A subscription with the same description already exists for this customer.');
+            }
+
+            self::$subscriptionsCreated++;
+            self::$subscriptionId = 'sub_cm_'.(self::$subscriptionsCreated + 1);
+            self::$heldValue = (string) self::property($request, 'amount')->value;
+            self::$heldMetadata = (array) self::property($request, 'metadata');
+            self::$heldStartDate = self::property($request, 'startDate');
+            self::$heldDescription = (string) self::property($request, 'description');
+            self::$heldInterval = (string) self::property($request, 'interval');
+            self::$cancelled = false;
+            self::$charged = false;
+
+            return (object) ['id' => self::$subscriptionId, 'status' => 'active'];
+        }
+
+        if ($request instanceof \Mollie\Api\Http\Requests\GetSubscriptionRequest) {
+            return self::heldSubscription();
+        }
+
+        if ($request instanceof \Mollie\Api\Http\Requests\GetPaginatedSubscriptionsRequest) {
+            return self::$heldValue === null ? [] : [self::heldSubscription()];
         }
 
         if ($request instanceof CreatePaymentRequest) {
+            if (self::$failPayments) {
+                throw new \RuntimeException('Mollie refused the payment');
+            }
+
             $paymentId = 'tr_cm_'.$id;
             self::$payments[$paymentId] = [
                 'value' => (string) self::property($request, 'amount')->value,
                 'metadata' => (array) self::property($request, 'metadata'),
             ];
 
+            if (self::$acceptThenTimeout) {
+                self::$acceptThenTimeout = false;
+
+                throw new \RuntimeException('Mollie did not answer in time');
+            }
+
             return (object) ['id' => $paymentId, 'status' => 'open'];
         }
 
         if ($request instanceof CreatePaymentRefundRequest) {
+            if (self::$failRefunds) {
+                throw new \RuntimeException('Mollie refused the refund');
+            }
+
             $refund = (object) [
                 'id' => 're_cm_'.$id,
                 'status' => 'pending',
@@ -185,13 +302,72 @@ final class ChangeMatrixWorld
             return $refund;
         }
 
+        if ($request instanceof \Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest) {
+            if (self::$failPaymentLists) {
+                throw new \RuntimeException('Mollie is unreachable');
+            }
+
+            $list = [];
+            foreach (array_reverse(self::$payments, true) as $paymentId => $payment) {
+                $list[] = (object) [
+                    'id' => $paymentId,
+                    'status' => self::$paymentStatus[$paymentId] ?? 'pending',
+                    'isCancelable' => self::$cancelable[$paymentId] ?? false,
+                    'amount' => (object) ['value' => $payment['value'], 'currency' => 'EUR'],
+                    'metadata' => (object) $payment['metadata'],
+                ];
+            }
+
+            return (object) ['data' => $list];
+        }
+
         if ($request instanceof \Mollie\Api\Http\Requests\GetPaymentRequest) {
+            if (self::$failLookups) {
+                throw new \RuntimeException('Mollie is unreachable');
+            }
+
             $paymentId = (string) self::property($request, 'id');
 
-            return (object) ['id' => $paymentId, 'status' => self::$paymentStatus[$paymentId] ?? 'pending'];
+            return (object) [
+                'id' => $paymentId,
+                'status' => self::$paymentStatus[$paymentId] ?? 'pending',
+                'isCancelable' => self::$cancelable[$paymentId] ?? false,
+            ];
+        }
+
+        if ($request instanceof \Mollie\Api\Http\Requests\CancelPaymentRequest) {
+            $paymentId = (string) self::property($request, 'id');
+            self::$paymentStatus[$paymentId] = 'canceled';
+
+            return (object) ['id' => $paymentId, 'status' => 'canceled'];
         }
 
         return (object) ['id' => 'obj_cm_'.$id, 'status' => 'open'];
+    }
+
+    /** A 422 as Mollie words it — the detail is what the package reads. */
+    private static function refusal(string $detail): \Mollie\Api\Exceptions\ApiException
+    {
+        return MollieApiExceptionFactory::withStatus(422, 'Error executing API call (422: Unprocessable Entity): '.$detail);
+    }
+
+    /** The subscription Mollie holds, as a lookup answers it. */
+    private static function heldSubscription(): object
+    {
+        $start = self::$heldStartDate !== null ? Carbon::parse((string) self::$heldStartDate, 'UTC')->toDateString() : null;
+
+        return (object) [
+            'id' => self::$subscriptionId,
+            'status' => self::$cancelled ? 'canceled' : 'active',
+            'amount' => (object) ['value' => self::$heldValue, 'currency' => 'EUR'],
+            'interval' => self::$heldInterval ?? '1 month',
+            'description' => self::$heldDescription,
+            'metadata' => (object) self::$heldMetadata,
+            'mandateId' => 'mdt_cm',
+            'webhookUrl' => 'https://example.test/billing/webhook',
+            'startDate' => $start,
+            'nextPaymentDate' => self::$cancelled ? null : $start,
+        ];
     }
 
     private static function property(object $request, string $name): mixed
@@ -236,7 +412,7 @@ final class ChangeMatrixWorld
 
         test()->travelTo($previousStart->copy()->addMinutes(5));
 
-        if ($discount === 'waiver-gift' && ! in_array('sso', $addons, true)) {
+        if (str_starts_with($discount, 'waiver-gift') && ! in_array('sso', $addons, true)) {
             $addons[] = 'sso';
         }
 
@@ -244,8 +420,9 @@ final class ChangeMatrixWorld
         $billable = TestBillable::create([
             'name' => 'Change Matrix Co',
             'email' => uniqid('change-matrix-').'@x.test',
-            'billing_country' => 'AT',
-            'tax_country_user' => 'AT',
+            'billing_country' => self::$country,
+            'tax_country_user' => self::$country,
+            'vat_number' => self::$vatNumber,
         ]);
 
         $billable->forceFill([
@@ -263,6 +440,21 @@ final class ChangeMatrixWorld
             'subscription_meta' => ['mollie_subscription_id' => 'sub_cm', 'seat_count' => $seats, 'used_seats' => $used],
         ])->save();
         $billable = $billable->refresh();
+
+        if (self::$vatNumber !== null) {
+            // A VIES-validated VAT number: reverse charge wherever the country is not the
+            // seller's own.
+            $validation = new \GraystackIT\MollieBilling\Models\BillingVatValidation;
+            $validation->billable_type = $billable->getMorphClass();
+            $validation->billable_id = $billable->getKey();
+            $validation->vat_number = self::$vatNumber;
+            $validation->country_code = self::$country;
+            $validation->valid = true;
+            $validation->vies_response = [];
+            $validation->checked_at = now();
+            $validation->save();
+            $billable = $billable->refresh();
+        }
 
         self::applyDiscount($billable, $discount, $plan, $interval, $seats, $addons);
         $billable = $billable->refresh();
@@ -296,7 +488,8 @@ final class ChangeMatrixWorld
         $code = strtoupper('CM'.bin2hex(random_bytes(3)));
 
         if (str_starts_with($discount, 'waiver')) {
-            $granted = $discount === 'waiver-gift' ? ['sso'] : [];
+            // `waiver-gift`, `waiver-gift-paid`, `waiver-gift-periods`: the gift includes SSO.
+            $granted = str_starts_with($discount, 'waiver-gift') ? ['sso'] : [];
             $coupon = $coupons->accessGrantCoupon($code, $plan, $interval, $granted, 90);
 
             app(PlanWaiver::class)->grant(
@@ -305,9 +498,11 @@ final class ChangeMatrixWorld
                 $plan,
                 $interval,
                 $granted,
-                $discount === 'waiver-periods' ? null : Carbon::parse(self::PERIOD_START, 'UTC')->addDays(75),
-                $discount === 'waiver-periods' ? 4 : null,
-                $discount === 'waiver-date-paid' ? PlanWaiver::ON_EXPIRY_CONTINUE_PAID : PlanWaiver::ON_EXPIRY_END,
+                // Past the next renewal either way, so that renewal is still one under the
+                // waiver: 75 days on a monthly cycle, 440 on a yearly one.
+                str_ends_with($discount, '-periods') ? null : Carbon::parse(self::PERIOD_START, 'UTC')->addDays($interval === 'yearly' ? 440 : 75),
+                str_ends_with($discount, '-periods') ? 4 : null,
+                str_ends_with($discount, '-paid') ? PlanWaiver::ON_EXPIRY_CONTINUE_PAID : PlanWaiver::ON_EXPIRY_END,
             );
 
             return;
@@ -323,8 +518,11 @@ final class ChangeMatrixWorld
                 'full100' => 100,
                 default => 50,
             },
-            // `pct50-last`: the renewal that paid the running period was the last one.
-            'discount_periods' => $discount === 'pct50-last' ? 1 : 12,
+            // `pct50-last`: the renewal that paid the running period was the last one. The
+            // marker is written at the start of the previous period, and its periods are
+            // billing periods (since 17 November 2026): that one and the running one. (With
+            // 1 the 30-day window of before reached a day past the renewal.)
+            'discount_periods' => $discount === 'pct50-last' ? 2 : 12,
         ]);
 
         $coupons->applyRecurringMarker($coupon, $billable, $net, $interval);
@@ -343,7 +541,7 @@ final class ChangeMatrixWorld
      *
      * @param  array<int, string>  $addons
      */
-    public static function trial(string $plan = 'pro', int $seats = 2, array $addons = []): TestBillable
+    public static function trial(string $plan = 'pro', int $seats = 2, array $addons = [], string $discount = 'none'): TestBillable
     {
         $start = Carbon::parse(self::PERIOD_START, 'UTC');
         test()->travelTo($start->copy()->addMinutes(5));
@@ -352,8 +550,9 @@ final class ChangeMatrixWorld
         $billable = TestBillable::create([
             'name' => 'Change Matrix Trial Co',
             'email' => uniqid('change-matrix-trial-').'@x.test',
-            'billing_country' => 'AT',
-            'tax_country_user' => 'AT',
+            'billing_country' => self::$country,
+            'tax_country_user' => self::$country,
+            'vat_number' => self::$vatNumber,
         ]);
 
         $billable->forceFill([
@@ -369,6 +568,8 @@ final class ChangeMatrixWorld
             'subscription_meta' => ['mollie_subscription_id' => 'sub_cm', 'seat_count' => $seats],
         ])->save();
 
+        $billable = $billable->refresh();
+        self::applyDiscount($billable, $discount, $plan, 'monthly', $seats, $addons);
         $billable = $billable->refresh();
         self::syncMollie($billable);
 
@@ -388,6 +589,8 @@ final class ChangeMatrixWorld
         $meta = $billable->refresh()->getBillingSubscriptionMeta();
         $meta['past_due_since'] = '2026-02-01T09:00:00+00:00';
         $meta['payment_failure'] = ['payment_id' => 'tr_cm_failed', 'failed_at' => '2026-02-01T09:00:00+00:00'];
+        // The failed renewal was a charge Mollie created.
+        self::$charged = true;
 
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::PastDue,
@@ -443,8 +646,8 @@ final class ChangeMatrixWorld
             'status' => $status,
             'amount' => (object) ['value' => $value, 'currency' => 'EUR'],
             'paidAt' => $status === 'paid' ? ($paidAt ?? now('UTC')->toIso8601String()) : null,
-            'subscriptionId' => $recurring ? 'sub_cm' : null,
-            'countryCode' => 'AT',
+            'subscriptionId' => $recurring ? self::$subscriptionId : null,
+            'countryCode' => (string) ($billable->getBillingCountry() ?? 'AT'),
             'details' => $status === 'paid' ? null : (object) ['failureReason' => 'insufficient_funds'],
             'metadata' => $metadata + [
                 'billable_type' => $billable->getMorphClass(),
@@ -469,6 +672,7 @@ final class ChangeMatrixWorld
         }
 
         $paymentId = 'tr_cm_renewal_'.(++self::$sequence);
+        self::$charged = true;
 
         self::deliver($billable, $paymentId, 'paid', (string) self::$heldValue, self::$heldMetadata, $paidAt, recurring: true);
 

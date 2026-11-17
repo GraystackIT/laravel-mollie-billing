@@ -314,6 +314,9 @@ it('moves a paying subscription by exactly N days, and by 2N when given twice', 
     expect($billable->fresh()->nextBillingDate()->toIso8601String())->toBe($before->copy()->addDays(14)->toIso8601String())
         ->and(ExtMatrixMollie::startDate(ExtMatrixMollie::lastPatch()))->toBe($before->copy()->addDays(14)->toDateString());
 
+    // A deliberate second gift — past the few seconds in which an identical action is
+    // taken for a double click.
+    $this->travel(AdminExtensionService::REPEAT_GUARD_SECONDS + 1)->seconds();
     $service->extendByDays($billable->fresh(), 14);
     $billable->refresh();
 
@@ -410,6 +413,7 @@ it('extends a Local grant and a cancelled Local grant by exactly N days', functi
     $before = Carbon::instance($billable->getBillingSubscriptionEndsAt());
 
     app(AdminExtensionService::class)->extendByDays($billable, 14);
+    $this->travel(AdminExtensionService::REPEAT_GUARD_SECONDS + 1)->seconds();
     app(AdminExtensionService::class)->extendByDays($billable->fresh(), 14);
 
     expect($billable->fresh()->getBillingSubscriptionEndsAt()->toIso8601String())

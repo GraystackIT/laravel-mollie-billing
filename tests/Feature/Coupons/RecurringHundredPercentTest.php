@@ -23,7 +23,12 @@ beforeEach(function (): void {
     ]);
 });
 
-it('marker valid_until = now + max_redemptions × intervalDays + 1d (monthly)', function (): void {
+afterEach(fn () => Carbon::setTestNow());
+
+it('marker valid_until = the day before the charge N months on, on the billing day (monthly)', function (): void {
+    // Since 17 November 2026 the periods are calendar months on the signup's day — they
+    // were `N × 30 + 1` days. Signed up on 31 January: charges 28 Feb, 31 Mar, 30 Apr.
+    Carbon::setTestNow(Carbon::parse('2027-01-31 10:00:00', 'UTC'));
     $service = app(CouponService::class);
     $coupon = $service->create([
         'code' => 'FREE100M',
@@ -46,12 +51,15 @@ it('marker valid_until = now + max_redemptions × intervalDays + 1d (monthly)', 
 
     $marker = $billable->fresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
 
-    // 3 × 30 + 1 = 91 days lifetime.
-    $expected = BillingTime::nowUtc()->copy()->addDays(91);
-    expect(Carbon::parse($marker['valid_until'])->diffInSeconds($expected, true))->toBeLessThan(5);
+    // Three periods: 31 Jan, 28 Feb, 31 Mar. The first charge not covered is 30 April.
+    expect($marker['valid_until'])->toBe('2027-04-29T10:00:00+00:00')
+        ->and($marker['charge_resumes_at'])->toBe('2027-04-30T10:00:00+00:00');
+    Carbon::setTestNow();
 });
 
-it('marker valid_until = now + max_redemptions × 365 + 1d (yearly)', function (): void {
+it('marker valid_until = the day before the charge N years on, on the billing day (yearly)', function (): void {
+    // Signed up on 29 February 2028; one year is 28 February 2029 — not 366 days.
+    Carbon::setTestNow(Carbon::parse('2028-02-29 10:00:00', 'UTC'));
     $service = app(CouponService::class);
     $coupon = $service->create([
         'code' => 'FREE100Y',
@@ -74,9 +82,9 @@ it('marker valid_until = now + max_redemptions × 365 + 1d (yearly)', function (
 
     $marker = $billable->fresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
 
-    // 1 × 365 + 1 = 366 days lifetime.
-    $expected = BillingTime::nowUtc()->copy()->addDays(366);
-    expect(Carbon::parse($marker['valid_until'])->diffInSeconds($expected, true))->toBeLessThan(5);
+    expect($marker['valid_until'])->toBe('2029-02-27T10:00:00+00:00')
+        ->and($marker['charge_resumes_at'])->toBe('2029-02-28T10:00:00+00:00');
+    Carbon::setTestNow();
 });
 
 it('marker valid_until is the earlier of coupon.valid_until and duration', function (): void {

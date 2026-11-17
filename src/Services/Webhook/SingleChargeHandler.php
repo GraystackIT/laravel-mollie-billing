@@ -157,6 +157,10 @@ class SingleChargeHandler
                 return $meta;
             });
 
+            // A subscription that was past due because this debt stood is released —
+            // unless a renewal is unpaid as well (see releasePastDueForDebt()).
+            app(\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::class)->releasePastDueForDebt($billable);
+
             event(new OverageCharged($billable, $invoice, $lineItems));
         }
 

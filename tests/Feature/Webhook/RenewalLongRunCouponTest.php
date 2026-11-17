@@ -132,8 +132,9 @@ it('charges nothing for three fully covered periods, keeps the periods turning, 
 
     expect($world->billable->remainingBillingQuota('Tokens'))->toBe(100, 'quota after signup');
 
+    // Three periods — 10 Jan, 10 Feb, 10 Mar — and Mollie collects again on 10 April.
     $firstCharge = $world->nextChargeAt();
-    expect($firstCharge->toDateString())->toBeGreaterThanOrEqual('2027-04-10');
+    expect($firstCharge->toDateString())->toBe('2027-04-10');
 
     // No charge, so no webhook: the nightly pass turns the periods over and refills.
     $anchors = [];
@@ -145,24 +146,25 @@ it('charges nothing for three fully covered periods, keeps the periods turning, 
         longRunNight($world, $day->toDateTimeString());
         $anchors[$world->billable->getBillingPeriodStartsAt()->toDateString()] = true;
 
-        // The two days between the third period's end (10 April) and the returning
-        // charge (12 April) are not a period of their own — that charge brings the quota.
+        // Each free period is refilled when it begins.
         if ($day->day === 11 && $day->month < 4) {
             expect($world->billable->remainingBillingQuota('Tokens'))->toBe(100, 'quota not refilled for the period starting '.$day->toDateString());
         }
     }
 
-    expect(array_keys($anchors))->toBe(['2027-01-10', '2027-02-10', '2027-03-10', '2027-04-10'])
+    // The period the returning charge opens is the charge's own.
+    expect(array_keys($anchors))->toBe(['2027-01-10', '2027-02-10', '2027-03-10'])
         ->and(longRunInvoices($world))->toHaveCount(1);
 
     // From here on it is an ordinary paying subscription.
     $world->lastInvoice = null;
 
-    foreach (['2027-04-12', '2027-05-12', '2027-06-12', '2027-07-12', '2027-08-12', '2027-09-12'] as $cycle) {
+    foreach (['2027-04-10', '2027-05-10', '2027-06-10', '2027-07-10', '2027-08-10', '2027-09-10'] as $cycle) {
         $payment = longRunRenew($world);
 
-        // The charge that ends the free time sets the cadence, at whatever hour of that
-        // day Mollie creates it: a month paid on the 12th runs to the 12th.
+        // The charge that ends the free time is on the billing day, and the cadence stays
+        // there, at whatever hour of that day Mollie creates it. (Until 17 November 2026
+        // the 12th: 3 × 30 + 2 days.)
         expect(substr($payment->createdAt, 0, 10))->toBe($cycle);
 
         $invoice = longRunAssertRenewal($world, $payment, '34.51');

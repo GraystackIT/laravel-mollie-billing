@@ -73,11 +73,16 @@ class UpgradeLocalToMollie
             throw new SeatDowngradeRequiredException($billable, $included + $extraSeats, $included);
         }
 
+        $amountGross = (int) $request['amount_gross'];
+        $urlParams = MollieBilling::resolveUrlParameters($billable);
+
+        if ($amountGross <= 0) {
+            return $this->startFullCoverageUpgrade($billable, $request, $extraSeats, $urlParams);
+        }
+
         $customerId = $this->customerResolver->resolve($billable);
 
         $currency = (string) config('mollie-billing.currency', 'EUR');
-        $amountGross = (int) $request['amount_gross'];
-        $urlParams = MollieBilling::resolveUrlParameters($billable);
 
         $payment = MollieCall::send(new CreatePaymentRequest(
             description: "Upgrade to {$request['plan_code']}",
@@ -105,6 +110,57 @@ class UpgradeLocalToMollie
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,
             'payment_id' => $payment->id,
         ];
+    }
+
+    /**
+     * An upgrade nothing is owed for today: a code covers the whole price.
+     *
+     * A paid plan still needs a mandate, and a mandate needs a first payment — so this is
+     * the checkout's own answer to the same order: a €0 authorisation (`mandate_only`),
+     * with the order riding in the metadata. `MandateOnlyPaymentHandler` activates it,
+     * exactly as it does for a checkout; the `upgrade_from_local` flag only tells it that
+     * the free plan it finds is the one being replaced, not a duplicate.
+     *
+     * Refused before anything is sent to Mollie when there is no code, or the code does
+     * not cover the order in full: the handler would capture the mandate and then decline
+     * to activate, which is a customer left with nothing and no explanation.
+     *
+     * @param  array<string, mixed>  $request
+     * @param  array<string, mixed>  $urlParams
+     * @return array{checkout_url:?string,payment_id:string}
+     *
+     * @throws \InvalidArgumentException
+     */
+    private function startFullCoverageUpgrade(Billable $billable, array $request, int $extraSeats, array $urlParams): array
+    {
+        $planCode = (string) $request['plan_code'];
+        $interval = (string) $request['interval'];
+        $addonCodes = array_values((array) ($request['addon_codes'] ?? []));
+        $couponCode = trim((string) ($request['coupon_code'] ?? ''));
+
+        if ($couponCode === '') {
+            throw new \InvalidArgumentException('Nothing in this upgrade has to be paid for, and no code explains why — it cannot be started.');
+        }
+
+        $priced = app(\GraystackIT\MollieBilling\Services\Webhook\FirstPaymentCouponPricing::class)
+            ->price($billable, $couponCode, $planCode, $interval, $addonCodes, $extraSeats);
+
+        if ($priced === null || $priced['order_amount_net'] <= 0 || $priced['discount_net'] !== $priced['order_amount_net']) {
+            throw new \InvalidArgumentException("Code [{$couponCode}] does not cover this upgrade in full — it has to be paid for.");
+        }
+
+        return app(StartMandateCheckout::class)->handle(
+            $billable,
+            redirectUrl: route(BillingRoute::name('return'), $urlParams),
+            subscriptionSpec: [
+                'plan_code' => $planCode,
+                'interval' => $interval,
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'coupon_code' => $couponCode,
+                'upgrade_from_local' => true,
+            ],
+        );
     }
 
     /**

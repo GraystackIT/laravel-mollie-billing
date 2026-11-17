@@ -437,3 +437,83 @@ it('refunds the purchase instead of booking it when the gift has ended before th
         ->and($billable->fresh()->getBillingSubscriptionSource())->toBe('local')
         ->and($billable->fresh()->getActiveBillingAddonCodes())->toBe([]);
 });
+
+it('has Mollie hold the full price at once when a gift given to continue as paid ends before the first renewal', function (): void {
+    // Twenty days of gift left, the first renewal a month away: that renewal is the
+    // first charge AFTER the gift. The subscription was created at the extras-only
+    // amount and nothing corrected it, so the renewal collected 18.00 for a period
+    // that costs 78.00 — a plan period given away after the gift had ended.
+    $billable = giftedTenant(days: 20, onExpiry: PlanWaiver::ON_EXPIRY_CONTINUE_PAID);
+    ['request' => $payment] = startExtrasPurchase($billable, ['sso'], 2);
+
+    GrantExtrasFakeWebhookController::$sent = [];
+    settleExtrasPurchase($billable, $payment);
+
+    $billable->refresh();
+    $patches = array_values(array_filter(GrantExtrasFakeWebhookController::$sent, fn ($r) => $r instanceof UpdateSubscriptionRequest));
+
+    // Not cancelled — the plan becomes chargeable — and Mollie already holds Pro 50.00 +
+    // SSO 15.00, plus 20 %, for the charge that follows.
+    expect($billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Active)
+        ->and($patches)->not->toBe([])
+        ->and(requestProperty(end($patches), 'amount')->value)->toBe('78.00')
+        ->and(requestProperty(end($patches), 'startDate'))->toBeNull();
+
+    // The renewal then books exactly what was collected.
+    Carbon::setTestNow(BillingTime::nowUtc()->addMonthNoOverflow());
+
+    try {
+        deliverGiftRenewal($billable->fresh(), 'tr_gift_after', '78.00');
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $renewal = \GraystackIT\MollieBilling\Models\BillingInvoice::query()->latest('id')->first();
+
+    expect((int) $renewal->amount_net)->toBe(6500)
+        ->and(collect($renewal->line_items)->firstWhere('kind', 'adjustment'))->toBeNull()
+        ->and(collect($renewal->line_items)->firstWhere('kind', 'coupon'))->toBeNull();
+});
+
+it('leaves no gift to extend once the plan became chargeable at carry-over, and free time can be given anew', function (): void {
+    // The gift ended before the first renewal, so the carry-over made the plan
+    // chargeable and cleared the waiver. "Extend the gift" has nothing left to extend —
+    // what the operator does instead is give free time again, which is a new grant.
+    $billable = giftedTenant(days: 20, onExpiry: PlanWaiver::ON_EXPIRY_CONTINUE_PAID);
+    ['request' => $payment] = startExtrasPurchase($billable, ['sso'], 2);
+    settleExtrasPurchase($billable, $payment);
+
+    $billable->refresh();
+    $service = app(\GraystackIT\MollieBilling\Services\Billing\AdminExtensionService::class);
+
+    expect(app(PlanWaiver::class)->marker($billable))->toBeNull();
+    expect(fn () => $service->extendGrant($billable, 30))
+        ->toThrow(\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException::class);
+
+    GrantExtrasFakeWebhookController::$sent = [];
+    $service->freePlanPeriods($billable->fresh(), 1);
+
+    $billable->refresh();
+    $marker = app(PlanWaiver::class)->marker($billable);
+    $patches = array_values(array_filter(GrantExtrasFakeWebhookController::$sent, fn ($r) => $r instanceof UpdateSubscriptionRequest));
+
+    // One free plan period: Mollie holds the extras only, SSO 15.00 + 20 %.
+    expect($marker)->not->toBeNull()
+        ->and($marker['max_applications'] ?? null)->toBe(1)
+        ->and($patches)->not->toBe([])
+        ->and(requestProperty(end($patches), 'amount')->value)->toBe('18.00');
+
+    // …and so does the renewal that follows: the plan line is waived, SSO is charged.
+    Carbon::setTestNow(BillingTime::nowUtc()->addMonthNoOverflow());
+
+    try {
+        deliverGiftRenewal($billable->fresh(), 'tr_after_regift', '18.00');
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $renewal = BillingInvoice::query()->latest('id')->first();
+
+    expect((int) $renewal->amount_net)->toBe(1500)
+        ->and(collect($renewal->line_items)->firstWhere('kind', 'adjustment'))->toBeNull();
+});

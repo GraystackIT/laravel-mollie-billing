@@ -25,7 +25,10 @@ class RequireActiveSubscription
 
         $urlParams = MollieBilling::resolveUrlParameters($billable);
 
-        if ($billable->isBillingPastDue()) {
+        // An unpaid renewal sends the customer to the portal to settle it. A customer who
+        // paid the plan and owes only overage is let through — see
+        // HasBilling::hasAccessibleBillingSubscription().
+        if ($billable->isBillingPastDue() && ! $billable->hasAccessibleBillingSubscription()) {
             return redirect()->route(BillingRoute::name('index'), $urlParams);
         }
 

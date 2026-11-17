@@ -86,6 +86,19 @@ class LocalToMollieUpgradeHandler
             // See FirstPaymentHandler: an invoice without a finished activation means the
             // run died between the two, which is worth telling someone about.
             if (! $this->support->activationCompleted($billable)) {
+                // See FirstPaymentHandler: the retry job resumes this state.
+                if (\GraystackIT\MollieBilling\Support\ActivationRetry::resuming()) {
+                    $this->support->claimForResume($billable, $paymentId);
+
+                    try {
+                        $this->activate($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $metadata);
+                    } finally {
+                        $this->support->releaseActivationClaim($billable, $paymentId);
+                    }
+
+                    return;
+                }
+
                 $this->support->reportIncompleteActivation($billable, $payment, 'local_upgrade');
             } else {
                 Log::info('Webhook re-delivery: invoice exists for local-to-Mollie upgrade, skipping', [
@@ -225,7 +238,12 @@ class LocalToMollieUpgradeHandler
             ? $waiver['discount_net']
             : ($pricedCoupon['recurring_discount_net'] ?? 0);
 
-        $invoice = $this->firstPaymentArtifacts->persist(
+        // On a retry the invoice of this payment already exists; it is not written twice.
+        $invoice = \GraystackIT\MollieBilling\Support\ActivationRetry::resuming()
+            ? \GraystackIT\MollieBilling\Models\BillingInvoice::query()->where('mollie_payment_id', (string) ($payment->id ?? ''))->first()
+            : null;
+
+        $invoice ??= $this->firstPaymentArtifacts->persist(
             $payment,
             $billable,
             $planCode,
@@ -238,7 +256,7 @@ class LocalToMollieUpgradeHandler
         );
 
         try {
-            $this->createSubscription->handle($billable, [
+            $this->support->createSubscription($this->createSubscription, $billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
@@ -256,9 +274,8 @@ class LocalToMollieUpgradeHandler
                 'CreateSubscription during local upgrade failed',
                 $e,
             );
-            event(new PaymentSucceeded($billable, $invoice));
-            $this->support->notifyInvoiceAvailable($billable, $invoice);
 
+            // Announced when the retry lands — see FirstPaymentHandler.
             return;
         }
 
@@ -481,6 +498,19 @@ class LocalToMollieUpgradeHandler
 
                 if ($nextCharge !== null && $this->planWaiver->endsSubscription($billable, $nextCharge)) {
                     app(CancelSubscription::class)->handle($billable, false, 'grant_expired');
+
+                    return;
+                }
+
+                // Given to continue as a paid plan, and over before the first renewal:
+                // that renewal is the first charge AFTER the gift. The subscription was
+                // just created at the extras-only amount, and the renewal handler only
+                // returns Mollie to the full price one renewal too late — the plan was
+                // collected a period short. Same step that handler takes when a waiver
+                // will not cover the next charge: full price, marker cleared.
+                if ($nextCharge !== null && $this->couponService->markerExpired($billable, $nextCharge)) {
+                    $this->planWaiver->remove($billable);
+                    $this->planWaiver->syncMollieOrQueue($billable->refresh());
                 }
             },
             'local_upgrade.waiver_expiry',

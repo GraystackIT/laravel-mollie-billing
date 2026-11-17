@@ -41,6 +41,106 @@ class ScheduleSubscriptionChange
      */
     public const WAIT_FOR_RENEWAL_DAYS = 7;
 
+    /**
+     * How many nightly runs try to apply a due change before it is given up. The first
+     * failure is attempt one.
+     */
+    public const MAX_APPLY_ATTEMPTS = 3;
+
+    /**
+     * On a stored change: the prorata payment one of its attempts created before failing.
+     * See {@see rememberPaymentOfFailedAttempt()}.
+     */
+    public const OWN_PAYMENT_KEY = 'charge_payment_id';
+
+    /**
+     * On a stored change: the token of a prorata payment one of its attempts asked Mollie
+     * for without learning the answer (`InvoiceService::CHARGE_IN_CREATION_KEY`).
+     */
+    public const OWN_CHARGE_TOKEN_KEY = 'charge_token';
+
+    /** The payment {@see withdrawOwnChargeInCreation()} found and withdrew, for the drop notice. */
+    private ?string $withdrawnPaymentId = null;
+
+    /** Where the last dropped change is kept so the screens can say what became of it. */
+    public const DROPPED_KEY = 'scheduled_change_dropped';
+
+    /** How long the screens keep saying it. */
+    public const DROPPED_NOTICE_DAYS = 14;
+
+    /**
+     * A scheduled change that has failed to apply and is waiting for its next attempt:
+     * which attempt comes next, out of how many, and what went wrong last time. Null while
+     * nothing has failed.
+     *
+     * `payment_id` names the prorata payment an attempt created before it failed — the
+     * change is then waiting for a payment that is in flight, and no further one is made.
+     *
+     * @return array{attempts: int, next_attempt: int, max: int, last_error: ?string, payment_id: ?string}|null
+     */
+    public static function retryState(Billable $billable): ?array
+    {
+        $change = $billable->getBillingSubscriptionMeta()['scheduled_change'] ?? null;
+        $attempts = is_array($change) ? (int) ($change['apply_attempts'] ?? 0) : 0;
+
+        if ($attempts < 1) {
+            return null;
+        }
+
+        return [
+            'attempts' => $attempts,
+            'next_attempt' => min(self::MAX_APPLY_ATTEMPTS, $attempts + 1),
+            'max' => self::MAX_APPLY_ATTEMPTS,
+            'last_error' => isset($change['last_apply_error']) ? (string) $change['last_apply_error'] : null,
+            'payment_id' => ! empty($change[self::OWN_PAYMENT_KEY]) ? (string) $change[self::OWN_PAYMENT_KEY] : null,
+        ];
+    }
+
+    /**
+     * The scheduled change that was dropped most recently, for as long as the customer
+     * should still be told: not once a new change is scheduled or DROPPED_NOTICE_DAYS
+     * have passed. `plan_code` is empty for a change that was about seats or addons only.
+     *
+     * `payment_on_its_way` is true while a payment the dropped change had created can still
+     * arrive: it is returned in full when it does, and the screen says so until then.
+     *
+     * @return array{plan_code: string, interval: ?string, reason: string, dropped_at: string, attempts: int, payment_on_its_way: bool}|null
+     */
+    public static function droppedNotice(Billable $billable): ?array
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+        $dropped = $meta[self::DROPPED_KEY] ?? null;
+
+        if (! is_array($dropped) || ! empty($meta['scheduled_change']) || empty($dropped['dropped_at'])) {
+            return null;
+        }
+
+        if (BillingTime::toUtc((string) $dropped['dropped_at'])->lt(BillingTime::nowUtc()->subDays(self::DROPPED_NOTICE_DAYS))) {
+            return null;
+        }
+
+        return [
+            'plan_code' => (string) ($dropped['plan_code'] ?? ''),
+            'interval' => isset($dropped['interval']) ? (string) $dropped['interval'] : null,
+            'reason' => (string) ($dropped['reason'] ?? 'default'),
+            'dropped_at' => (string) $dropped['dropped_at'],
+            'attempts' => (int) ($dropped['attempts'] ?? 0),
+            'payment_on_its_way' => self::paymentStillExpected($meta, (string) ($dropped['payment_id'] ?? '')),
+        ];
+    }
+
+    /**
+     * Whether the payment a withdrawn change had created may still settle — the marker
+     * `UpdateSubscription` leaves for it is consumed when the payment is returned.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    private static function paymentStillExpected(array $meta, string $paymentId): bool
+    {
+        return $paymentId !== ''
+            && (string) ($meta['orphaned_prorata_payment']['payment_id'] ?? '') === $paymentId;
+    }
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly ValidateSubscriptionChange $validator,
@@ -165,6 +265,14 @@ class ScheduleSubscriptionChange
                 $newSeats,
                 $addonPayload === null ? [] : array_values(array_diff(array_map('strval', array_keys($addonPayload)), $currentAddons)),
                 $newInterval,
+            );
+
+            $this->assertNoPlanExpansionWhilePastDue(
+                $billable,
+                $newPlan,
+                $newInterval,
+                $newSeats,
+                $addonPayload === null ? $currentAddons : array_map('strval', array_keys($addonPayload)),
             );
 
             $scheduledAt = $this->periodEndFor($billable);
@@ -498,7 +606,161 @@ class ScheduleSubscriptionChange
             DB::afterCommit(fn () => $this->restoreRecurringAmount($billable, $previous));
         }
 
+        // One of its attempts got as far as creating the prorata payment. The change that
+        // waits for that payment goes with it — otherwise the payment settles days later
+        // and carries out a change the customer was told is off.
+        $ownPayment = is_array($previous) ? (string) ($previous[self::OWN_PAYMENT_KEY] ?? '') : '';
+        $ownToken = is_array($previous) ? (string) ($previous[self::OWN_CHARGE_TOKEN_KEY] ?? '') : '';
+
+        if ($ownPayment !== '') {
+            DB::afterCommit(fn () => $this->withdrawOwnPendingChange($billable, $ownPayment));
+        } elseif ($ownToken !== '') {
+            DB::afterCommit(fn () => $this->withdrawOwnChargeInCreation($billable, $ownToken));
+        }
+
         event(new SubscriptionChangeCancelled($billable, (array) $previous));
+    }
+
+    /**
+     * Take back the change that is waiting for a payment this scheduled change created.
+     *
+     * Only ever its own: the id was recorded by {@see rememberPaymentOfFailedAttempt()},
+     * and `withdrawPendingChangeForPayment()` leaves a waiting change alone that names a
+     * different payment — an immediate seat change the customer made in the meantime is
+     * not this change's to withdraw.
+     *
+     * Never throws: this runs while a change is being given up, which must complete.
+     */
+    private function withdrawOwnPendingChange(Billable $billable, string $paymentId): void
+    {
+        try {
+            app(UpdateSubscription::class)->withdrawPendingChangeForPayment($billable, $paymentId);
+        } catch (\Throwable $e) {
+            Log::warning('Could not withdraw the change waiting for a dropped scheduled change\'s payment', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'payment_id' => $paymentId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * The counterpart of {@see withdrawOwnPendingChange()} for a payment whose creation
+     * went unanswered: Mollie is asked for it by its token. Found → it is taken over and
+     * withdrawn like any waiting change (cancelled where possible, otherwise returned when
+     * it settles). Not found → the note goes. Mollie cannot be asked → the note goes as
+     * well: with nothing claiming it, a payment that settles later is returned in full by
+     * the webhook. What it may not do is stay, or the webhook would carry the dropped
+     * change out.
+     */
+    private function withdrawOwnChargeInCreation(Billable $billable, string $token): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $invoices = app(InvoiceService::class);
+
+        try {
+            $marker = $billable->refresh()->getBillingSubscriptionMeta()[InvoiceService::CHARGE_IN_CREATION_KEY] ?? null;
+
+            if (! is_array($marker) || (string) ($marker['token'] ?? '') !== $token) {
+                return;
+            }
+
+            $payment = $invoices->resolveChargeInCreation($billable, $marker);
+
+            if ($payment !== null && $invoices->adoptChargeInCreation($billable, $token, (string) $payment->id)) {
+                if (app(UpdateSubscription::class)->withdrawPendingChangeForPayment($billable, (string) $payment->id)) {
+                    $this->withdrawnPaymentId = (string) $payment->id;
+                }
+
+                return;
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Could not ask Mollie about the unanswered payment of a dropped scheduled change — it is returned if it settles', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $invoices->forgetChargeInCreation($billable, $token);
+    }
+
+    /** The payment a change is currently waiting for, or '' when none is. */
+    private function pendingChargePaymentId(Billable $billable): string
+    {
+        return (string) ($billable->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'] ?? '');
+    }
+
+    /**
+     * Note on the stored change the token of a payment the failed attempt asked Mollie for
+     * without learning the answer — so that dropping the change can find and withdraw it.
+     */
+    private function rememberChargeInCreation(Billable $billable, string $tokenBefore): void
+    {
+        $token = (string) ($billable->getBillingSubscriptionMeta()[InvoiceService::CHARGE_IN_CREATION_KEY]['token'] ?? '');
+
+        if ($token === '' || $token === $tokenBefore || ! ($billable instanceof Model)) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($token): ?array {
+            if (! is_array($meta['scheduled_change'] ?? null)) {
+                return null;
+            }
+
+            $meta['scheduled_change'][self::OWN_CHARGE_TOKEN_KEY] = $token;
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Note on the stored change that the attempt which just failed had already created its
+     * prorata payment.
+     *
+     * `update()` can throw after `InvoiceService::createCharge()` returned — an app
+     * listener on `PlanChangePending`, a failed write. The payment is then in flight and
+     * `pending_prorata_change` names it, while the stored change is still here and is
+     * tried again. The following attempts create no second payment (the validator refuses
+     * a change while another waits for its payment); what was missing is the link between
+     * the two, so that giving the stored change up also gives up what waits for its
+     * payment. Compared against the id seen before the attempt, so a payment that belongs
+     * to a different change is never claimed.
+     */
+    private function rememberPaymentOfFailedAttempt(Billable $billable, string $paymentBefore, string $tokenBefore = ''): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        try {
+            $billable->refresh();
+            $paymentAfter = $this->pendingChargePaymentId($billable);
+
+            if ($paymentAfter === '' || $paymentAfter === $paymentBefore) {
+                // No id came back — but Mollie may have taken the payment all the same.
+                $this->rememberChargeInCreation($billable, $tokenBefore);
+
+                return;
+            }
+
+            $this->mutateBillingMeta($billable, function (array $meta) use ($paymentAfter): ?array {
+                if (! is_array($meta['scheduled_change'] ?? null)) {
+                    return null;
+                }
+
+                $meta['scheduled_change'][self::OWN_PAYMENT_KEY] = $paymentAfter;
+
+                return $meta;
+            });
+        } catch (\Throwable $e) {
+            Log::warning('Could not note the payment a failed scheduled change created', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -623,7 +885,7 @@ class ScheduleSubscriptionChange
         ])->save();
     }
 
-    public function apply(Billable $billable): void
+    public function apply(Billable $billable, bool $onRequest = false): void
     {
         /** @var Model&Billable $billable */
         if ($billable instanceof Model) {
@@ -656,53 +918,249 @@ class ScheduleSubscriptionChange
         }
 
         $dto = $this->replayRequest((array) $scheduledChange);
+        $paymentBefore = $this->pendingChargePaymentId($billable);
+        $tokenBefore = (string) ($billable->getBillingSubscriptionMeta()[InvoiceService::CHARGE_IN_CREATION_KEY]['token'] ?? '');
 
         try {
+            // A change that was scheduled while everything was fine and meets a past-due
+            // subscription tonight: a dearer plan or interval is refused like any
+            // expansion — not carried out as the past-due reset, which would charge a
+            // full period of a plan the customer chose before they stopped paying.
+            $this->assertNoPlanExpansionWhilePastDue(
+                $billable,
+                (string) ($scheduledChange['plan_code'] ?? $billable->getBillingSubscriptionPlanCode()),
+                (string) ($scheduledChange['interval'] ?? $billable->getBillingSubscriptionInterval()),
+                (int) ($scheduledChange['seats'] ?? $billable->getBillingSeatCount()),
+                is_array($scheduledChange['addons'] ?? null)
+                    ? array_map('strval', array_is_list($scheduledChange['addons']) ? $scheduledChange['addons'] : array_keys($scheduledChange['addons']))
+                    : $billable->getActiveBillingAddonCodes(),
+            );
+
             app(UpdateSubscription::class)->update($billable, $dto);
 
             // Clear scheduled change on success.
             $this->clearAppliedChange($billable);
         } catch (\Throwable $e) {
-            event(new SubscriptionChangeApplyFailed($billable, (array) $scheduledChange, $e));
+            // Whoever gives this change up later has to know that a payment is on its way.
+            $this->rememberPaymentOfFailedAttempt($billable, $paymentBefore, $tokenBefore);
 
-            $this->notifyAdminsOfApplyFailure($billable, (array) $scheduledChange, $e);
+            // The customer asked for it now and is looking at the screen: they are told
+            // there, and the change stays booked for its date. Dropping it — or counting
+            // an attempt against it — is for the unattended run, where nobody is.
+            if ($onRequest) {
+                throw $e;
+            }
 
-            // Seats are the one refusal here that the customer can still resolve: removing
-            // team members — or dropping extra seats — makes this very stored change
-            // applicable tomorrow. So it is neither dropped nor re-thrown. Re-throwing
-            // failed the job every night for as long as the customer kept the members
-            // (ApplyScheduledChangesJob allows a single attempt, so each night left
-            // another entry in failed_jobs), while the customer kept paying the old price
-            // with nothing but an event to tell anyone.
-            if ($e instanceof SeatDowngradeRequiredException) {
-                Log::warning('Keeping a scheduled change the current seat usage blocks', [
-                    'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                    'reason' => $e->getMessage(),
-                ]);
+            $this->resolveApplyFailure($billable, (array) $scheduledChange, $e);
+        }
+    }
+
+    /**
+     * While past due, no plan or interval change that costs more than what the customer
+     * has now — neither stored for the period end nor carried out on its night.
+     *
+     * `ValidateSubscriptionChange::assertNoPastDueExpansion()` already refuses added seats
+     * and paid addons, and every plan or interval change under a pure overage debt. What
+     * it lets through is a plan or interval change after a failed renewal, because
+     * *immediately* that is the past-due reset — the customer's way out, charged at once.
+     * Scheduled, it is not a way out of anything: the debt stays open until the period
+     * end, and then the dearer plan would be charged in full. A cheaper one stays
+     * possible; the screen says the open payment remains due.
+     *
+     * @param  array<int, string>  $newAddons
+     *
+     * @throws \GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException
+     */
+    private function assertNoPlanExpansionWhilePastDue(Billable $billable, string $newPlan, string $newInterval, int $newSeats, array $newAddons): void
+    {
+        if (! $billable->isBillingPastDue()) {
+            return;
+        }
+
+        $currentPlan = (string) $billable->getBillingSubscriptionPlanCode();
+        $currentInterval = (string) $billable->getBillingSubscriptionInterval();
+
+        if ($newPlan === $currentPlan && $newInterval === $currentInterval) {
+            return;
+        }
+
+        $current = SubscriptionAmount::net($this->catalog, $billable, $currentPlan, $currentInterval, $billable->getBillingSeatCount(), $billable->getActiveBillingAddonCodes());
+        $new = SubscriptionAmount::net($this->catalog, $billable, $newPlan, $newInterval, $newSeats, array_values($newAddons));
+
+        if ($new > $current) {
+            throw new \GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException($billable);
+        }
+    }
+
+    /**
+     * A stored change did not apply — deal with it without anybody having to.
+     *
+     * This used to mail the admins on every failure and then either keep the change
+     * (seat usage), drop it (three "permanent" exceptions) or re-throw, which failed the
+     * nightly job. An operator got a mail per night and could do nothing with it that the
+     * package could not do itself:
+     *
+     * - **Refused by the rules** ({@see refusalReason()}): it will be refused again
+     *   tomorrow. Dropped at once, and the customer is told why — they are the one who
+     *   can change it (release seats, settle a payment, pick another plan). No admin.
+     * - **Anything else** is taken to be transient: Mollie unreachable, a lock held, a
+     *   payment that could not be created. The change stays, `apply_attempts` counts up
+     *   and the dispatcher brings it back the following night — it selects on
+     *   `scheduled_change_at <= now`, which still holds. Nobody is told while that runs.
+     * - **After MAX_APPLY_ATTEMPTS** it is dropped, the customer is told, and now — when
+     *   the automatic way is exhausted — the admins are.
+     *
+     * Dropping goes through `cancel()`, so an amount announced to Mollie is taken back.
+     * `SubscriptionChangeApplyFailed` is dispatched once, when the change is given up —
+     * one audit entry per change, not one per night.
+     *
+     * Never re-throws: the job allows a single attempt, and the retry is the next night's
+     * dispatch, not the queue's.
+     *
+     * @param  array<string, mixed>  $scheduledChange
+     */
+    private function resolveApplyFailure(Billable $billable, array $scheduledChange, \Throwable $e): void
+    {
+        $attempts = (int) ($scheduledChange['apply_attempts'] ?? 0) + 1;
+        $refusal = $this->refusalReason($e);
+
+        if ($refusal === null && $attempts < self::MAX_APPLY_ATTEMPTS) {
+            Log::warning('Scheduled change could not be applied — it is tried again on the next run', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'attempt' => $attempts,
+                'of' => self::MAX_APPLY_ATTEMPTS,
+                'error' => $e->getMessage(),
+            ]);
+
+            if ($billable instanceof Model) {
+                $this->mutateBillingMeta($billable, function (array $meta) use ($attempts, $e): ?array {
+                    if (! is_array($meta['scheduled_change'] ?? null)) {
+                        return null;
+                    }
+
+                    $meta['scheduled_change']['apply_attempts'] = $attempts;
+                    $meta['scheduled_change']['last_apply_error'] = mb_substr($e->getMessage(), 0, 500);
+
+                    return $meta;
+                });
+            }
+
+            return;
+        }
+
+        $reason = $refusal ?? 'attempts_exhausted';
+
+        Log::warning('Dropping a scheduled change that cannot be applied', [
+            'billable' => $billable instanceof Model ? $billable->getKey() : null,
+            'reason' => $reason,
+            'attempts' => $attempts,
+            'error' => $e->getMessage(),
+        ]);
+
+        try {
+            event(new SubscriptionChangeApplyFailed($billable, $scheduledChange, $e));
+        } catch (\Throwable) {
+            // A listener must not keep the change from being resolved.
+        }
+
+        // Read before cancel() removes it: which payment, if any, this change had created.
+        $previous = $billable instanceof Model
+            ? (array) ($billable->refresh()->getBillingSubscriptionMeta()['scheduled_change'] ?? [])
+            : [];
+
+        $this->withdrawnPaymentId = null;
+        $this->cancel($billable);
+
+        // A payment the change had created and Mollie would not cancel: it is returned
+        // when it arrives, and the customer is told that now rather than left to wonder
+        // about a debit for a change that was called off.
+        $ownPayment = '';
+        $paymentOnItsWay = false;
+
+        // Kept for the screens: the mail may go unread, and "my scheduled change is gone"
+        // without a word is a support ticket.
+        if ($billable instanceof Model) {
+            $billable->refresh();
+            $ownPayment = (string) ($previous[self::OWN_PAYMENT_KEY] ?? '') ?: (string) $this->withdrawnPaymentId;
+            $paymentOnItsWay = self::paymentStillExpected($billable->getBillingSubscriptionMeta(), $ownPayment);
+
+            $this->mutateBillingMeta($billable, function (array $meta) use ($scheduledChange, $reason, $attempts, $refusal, $ownPayment, $paymentOnItsWay): array {
+                $meta[self::DROPPED_KEY] = [
+                    'plan_code' => (string) ($scheduledChange['plan_code'] ?? ''),
+                    'interval' => $scheduledChange['interval'] ?? null,
+                    'reason' => $reason,
+                    'attempts' => $refusal === null ? $attempts : 0,
+                    'dropped_at' => BillingTime::nowUtc()->toIso8601String(),
+                    ...($paymentOnItsWay ? ['payment_id' => $ownPayment] : []),
+                ];
+
+                return $meta;
+            });
+        }
+
+        $this->notifyCustomerOfDroppedChange($billable, $scheduledChange, $reason, $paymentOnItsWay);
+
+        if ($refusal === null) {
+            $this->notifyAdminsOfApplyFailure($billable, $scheduledChange, $e, $attempts);
+        }
+    }
+
+    /**
+     * Why the rules refuse this change — the key of the sentence the customer is sent —
+     * or null when the failure is not a refusal and may not recur.
+     *
+     * A whitelist of *domain* refusals, on purpose: a stored change is real customer
+     * intent, and treating an unknown exception as "refused" would drop it for a fault
+     * that is gone tomorrow. `InvalidSubscriptionStateException` is deliberately absent —
+     * its most common cause here is another change still waiting for its payment, which
+     * resolves itself.
+     */
+    private function refusalReason(\Throwable $e): ?string
+    {
+        return match (true) {
+            $e instanceof SeatDowngradeRequiredException => 'seats_in_use',
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException => 'payment_outstanding',
+            $e instanceof LocalSubscriptionUpgradeRequiresMolliePathException,
+            $e instanceof HiddenPlanNotSelectableException,
+            $e instanceof IntervalNotOfferedException,
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\AddonNotAllowedException,
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\SeatCountExceedsMaximumException,
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\LocalSubscriptionDoesNotSupportPaidExtrasException,
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException => 'not_available',
+            default => null,
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $scheduledChange
+     */
+    private function notifyCustomerOfDroppedChange(Billable $billable, array $scheduledChange, string $reason, bool $paymentOnItsWay = false): void
+    {
+        try {
+            $notification = MollieBilling::resolveNotification(
+                \GraystackIT\MollieBilling\Notifications\ScheduledChangeNotAppliedNotification::class,
+                $billable,
+                (string) ($scheduledChange['plan_code'] ?? $billable->getBillingSubscriptionPlanCode() ?? ''),
+                $reason,
+                $paymentOnItsWay,
+            );
+
+            $recipients = MollieBilling::notifyBillingAdmins($billable);
+            $recipients = is_array($recipients) ? $recipients : iterator_to_array($recipients);
+
+            if ($recipients !== []) {
+                Notification::send($recipients, $notification);
 
                 return;
             }
 
-            // A change the validator will refuse for the same reason tomorrow is dropped
-            // rather than retried. `isApplicable()` above only screens on status, so a
-            // change that survived a downgrade to free passed it (a Local free plan is
-            // Active) and then threw LocalSubscriptionUpgradeRequiresMolliePathException
-            // — and re-throwing without clearing `scheduled_change_at` made the daily
-            // dispatcher fail on that billable every night, indefinitely.
-            //
-            // Transient failures still propagate, so the queue's own retry can have them.
-            if ($this->isPermanentApplyFailure($e)) {
-                Log::warning('Dropping a scheduled change its own validation permanently refuses', [
-                    'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                    'reason' => $e->getMessage(),
-                ]);
+            $email = $billable->getBillingEmail();
 
-                $this->cancel($billable);
-
-                return;
+            if (is_string($email) && $email !== '') {
+                Notification::route('mail', $email)->notify($notification);
             }
-
-            throw $e;
+        } catch (\Throwable) {
+            // Announcing must never be what fails the run.
         }
     }
 
@@ -766,7 +1224,7 @@ class ScheduleSubscriptionChange
      *
      * @param  array<string, mixed>  $scheduledChange
      */
-    private function notifyAdminsOfApplyFailure(Billable $billable, array $scheduledChange, \Throwable $e): void
+    private function notifyAdminsOfApplyFailure(Billable $billable, array $scheduledChange, \Throwable $e, int $attempts = 1): void
     {
         try {
             $admins = MollieBilling::notifyAdmin();
@@ -778,34 +1236,20 @@ class ScheduleSubscriptionChange
 
             Notification::send($admins, MollieBilling::resolveNotification(
                 AdminPlanChangeFailedNotification::class,
-                'A scheduled subscription change could not be applied',
+                'A scheduled subscription change could not be applied after '.$attempts.' attempts and was dropped — the customer has been informed',
                 [
                     'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
                     'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
                     'plan_code' => $scheduledChange['plan_code'] ?? null,
                     'interval' => $scheduledChange['interval'] ?? null,
                     'scheduled_at' => $scheduledChange['scheduled_at'] ?? null,
+                    'attempts' => $attempts,
                     'error' => $e->getMessage(),
                 ],
             ));
         } catch (\Throwable) {
             // Announcing a failure must never be what fails the run.
         }
-    }
-
-    /**
-     * Whether this failure will recur identically on the next run.
-     *
-     * Deliberately a whitelist of *domain* refusals rather than "anything that is not a
-     * network error": a stored change is real customer intent, and dropping it because
-     * of a transient fault would lose it silently. Everything not listed here is
-     * re-thrown so the queue can retry.
-     */
-    private function isPermanentApplyFailure(\Throwable $e): bool
-    {
-        return $e instanceof LocalSubscriptionUpgradeRequiresMolliePathException
-            || $e instanceof HiddenPlanNotSelectableException
-            || $e instanceof IntervalNotOfferedException;
     }
 
     /**

@@ -64,8 +64,44 @@ final class ChargeDeferral
     }
 
     /**
+     * {@see until()}, also on the day the deferred charge is due.
+     *
+     * `until()` drops a deferral the moment its stored hour has passed, which is right for
+     * every decision about Mollie (a start date of today is a charge today). It is wrong
+     * for telling the customer when money is collected: Mollie creates the charge at some
+     * hour of that day and its webhook may come hours later, and in between the screen fell
+     * back to the trial end of weeks ago, or to the end of a period the deferral was not
+     * aligned with. Until the charge has arrived — the renewal handler then forgets the
+     * deferral — its day is today.
+     */
+    public static function pending(Billable $billable): ?Carbon
+    {
+        if ($billable->getBillingSubscriptionSource() !== SubscriptionSource::Mollie->value) {
+            return null;
+        }
+
+        $stored = $billable->getBillingSubscriptionMeta()[self::META_KEY] ?? null;
+
+        if (is_string($stored) && $stored !== '') {
+            try {
+                $parsed = Carbon::parse($stored)->setTimezone('UTC');
+
+                if (! $parsed->copy()->startOfDay()->lessThan(BillingTime::nowUtc()->startOfDay())) {
+                    return $parsed;
+                }
+            } catch (\Throwable) {
+                // fall through
+            }
+        }
+
+        return self::until($billable);
+    }
+
+    /**
      * Subscriptions deferred before the value was stored: the date is `valid_until + 1
-     * day` of a recurring coupon that still covers the whole recurring amount.
+     * day` of a recurring coupon that still covers the whole recurring amount — or the
+     * marker's own `charge_resumes_at`, where it carries one and that lies past the regular
+     * next charge.
      */
     private static function derivedFromCoupon(Billable $billable): ?Carbon
     {
@@ -82,8 +118,21 @@ final class ChargeDeferral
             return null;
         }
 
+        // A coupon marker written since 17 November 2026 names the charge it resumes on — on
+        // the cycle. That is a deferral only when it lies past the regular next charge; a code
+        // that covers no more than the running period defers nothing.
+        $resumesAt = CouponService::markerChargeResumesAt($marker);
+
+        if ($resumesAt !== null) {
+            $regular = $billable->nextBillingDate();
+
+            if ($regular !== null && $resumesAt->copy()->startOfDay()->lessThanOrEqualTo(Carbon::instance($regular)->setTimezone('UTC')->startOfDay())) {
+                return null;
+            }
+        }
+
         try {
-            $deferred = Carbon::parse((string) $marker['valid_until'])->setTimezone('UTC')->addDay();
+            $deferred = $resumesAt ?? Carbon::parse((string) $marker['valid_until'])->setTimezone('UTC')->addDay();
         } catch (\Throwable) {
             return null;
         }
@@ -143,7 +192,12 @@ final class ChargeDeferral
 
         $next = $billable->nextBillingDate();
 
-        if ($next !== null && $next->isFuture()) {
+        // After today, by day — not merely later than now. Inside the webhook of a renewal
+        // the anchor has not moved yet, so `nextBillingDate()` is the cycle Mollie charged
+        // a few hours ago (created 06:00, period boundary 10:00): sent as the start date,
+        // Mollie charged the customer a second time that day. A start date of today is a
+        // charge today.
+        if ($next !== null && self::afterToday($next)) {
             return Carbon::instance($next)->setTimezone('UTC');
         }
 
@@ -167,14 +221,20 @@ final class ChargeDeferral
             return null;
         }
 
-        $now = BillingTime::nowUtc();
-        $next = BillingTime::addInterval($start, $interval);
+        $day = BillingAnchor::day($billable);
+        $next = BillingAnchor::next($start, $interval, $day);
 
-        // Bounded: a monthly anchor ten years stale is 120 steps.
-        for ($i = 0; $i < 600 && $next->lessThanOrEqualTo($now); $i++) {
-            $next = BillingTime::addInterval($next, $interval);
+        // Bounded: a monthly anchor ten years stale is 120 steps. Past today by day, for the
+        // reason given in undeferredNextChargeDate().
+        for ($i = 0; $i < 600 && ! self::afterToday($next); $i++) {
+            $next = BillingAnchor::next($next, $interval, $day);
         }
 
         return Carbon::instance($next)->setTimezone('UTC');
+    }
+
+    private static function afterToday(CarbonInterface $date): bool
+    {
+        return Carbon::instance($date)->utc()->startOfDay()->greaterThan(BillingTime::nowUtc()->startOfDay());
     }
 }

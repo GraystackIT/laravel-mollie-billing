@@ -84,7 +84,7 @@ Key properties:
 - **Wallet hydration is aliquot** to the trial length (`Support\TrialQuota`). For a 14-day trial on a monthly plan with 10 included Tokens: `ceil(10 * 14 / 30) = 5` tokens. For a 60-day trial: `ceil(10 * 60 / 30) = 20` tokens (2× full quota). Always rounded up so a positive included quota credits at least 1. What was granted is recorded under `subscription_meta.trial_quota` and served by `grantedBillingQuota($type)`, because everything that measures the wallet has to measure against the grant and not against the plan's period quota — otherwise the units that were never credited read as consumption on a subscription minutes old.
 - **Seats and addons are free during the trial.** Everything the current plan allows is part of what is being tried: no prorata charge, no credit when it is removed again, and the trial keeps running. Mollie is PATCHed to the new amount, so the first real charge collects it. See [plan-changes.md](plan-changes.md#nothing-is-prorated-during-a-trial).
 - **A plan or interval change mid-trial ends the trial**, and the wallets then get the full period quota that charge paid for — the same refill the first recurring payment does. See [usage-billing.md](usage-billing.md#a-trial-is-credited-a-prorated-quota); a plan change that leaves the trial running rebalances against the recorded grant instead.
-- **The date the checkout names is the date Mollie charges on.** The confirm step prints `firstChargeDate()` of the checkout component: the trial's end, or — when a `recurring` coupon covers the whole order — the day after that coupon ends if that is later (`CouponService::recurringMarkerValidUntil()`, the same value `CreateSubscription` defers the start date by). It used to print the trial's end regardless.
+- **The date the checkout names is the date Mollie charges on.** The confirm step prints `firstChargeDate()` of the checkout component: the trial's end, or — when a `recurring` coupon covers the whole order — the first regular charge that coupon no longer covers, counted in billing periods from the trial end where there is one (`CouponService::recurringChargeResumesAt()`, the same value `CreateSubscription` sends as the start date). It used to print the trial's end regardless.
 - **Mollie's first real charge** fires at `startDate = now + trial_days`. When that webhook arrives, `handleSubscriptionPaymentPaid` flips status from `trial` to `active`, consumes any parked SinglePayment coupon (discounts the line items + creates a redemption), and lets the recurring marker apply for the first time.
 - **Trials never repeat for a returning customer**. Once `mollie_mandate_id` is set, the trial branch is skipped — even on a fresh checkout — and the customer pays the full first period.
 
@@ -96,7 +96,7 @@ The stamp is what keeps the row moving: `PrepareUsageOverageJob`'s auto-cancel p
 
 A trial that *does* hold a mandate is left alone by that job at first: Mollie's first charge is scheduled for `trial_ends_at`, and the webhook owns both outcomes (`paid` → `active`, `failed` → `past_due`). That only holds if a webhook arrives. Mollie calls it for payments and nothing else, so a subscription cancelled or suspended at Mollie, a revoked mandate, or a `failed` delivery lost past the retry window leaves the row on `trial` — which grants access unconditionally. After `ProcessTrialLifecycleJob::FIRST_CHARGE_GRACE_DAYS` (14, the same figure as the stuck country-correction and overage sweeps) without either outcome, the job applies the same transition as for a mandate-less trial: `past_due`, `past_due_since` stamped, `TrialExpired` dispatched. A payment that still arrives afterwards is honoured — the renewal handler activates from `past_due`.
 
-If a mandate exists but Mollie's first charge has simply not fallen due yet (`startDate` in the future) at the moment the local trial expires, the billable can sit in `past_due` while Mollie still shows the subscription as `active`. The `MollieSubscriptionGate` (called from `BillingPortalController::checkout`) detects this and redirects to the dashboard instead of opening the checkout — re-entering `CreateSubscriptionRequest` would 422 with "same description already exists". The dashboard surfaces the scheduled charge date and offers a "Charge now" button that PATCHes Mollie's subscription `startDate` to today. Stale `mollie_subscription_id` entries (Mollie reports `canceled`/`completed`/`suspended` or 404) are removed from `subscription_meta` so the next checkout cleanly creates a new subscription. Lookups are cached for 60 seconds.
+If a mandate exists but Mollie's first charge has simply not fallen due yet (`startDate` in the future) at the moment the local trial expires, the billable can sit in `past_due` while Mollie still shows the subscription as `active`. The `MollieSubscriptionGate` (called from `BillingPortalController::checkout`) detects this and redirects to the dashboard instead of opening the checkout — re-entering `CreateSubscriptionRequest` would 422 with "same description already exists". The dashboard surfaces the scheduled charge date and offers a "Charge now" button that PATCHes Mollie's subscription `startDate` to today — only offered while that start date lies ahead, i.e. on a subscription Mollie has not charged yet; a charged one refuses any new start date, and the button never replaces a subscription (a replacement never starts today). Stale `mollie_subscription_id` entries (Mollie reports `canceled`/`completed`/`suspended` or 404) are removed from `subscription_meta` so the next checkout cleanly creates a new subscription. Lookups are cached for 60 seconds.
 
 Ahead of expiry, the same daily job sends a single `TrialEndingSoonNotification` when `trial_ends_at` falls on the calendar day exactly `trial_ending_soon_notice_days` ahead (default: `1`, i.e. tomorrow). The notification branches on `hasMollieMandate()` to pick the wording — "first charge will be made automatically" with a mandate, "please add a payment method" without. Configurable via [`trial_ending_soon_notice_days`](configuration.md#core) / `BILLING_TRIAL_ENDING_SOON_NOTICE_DAYS`. Missed windows are not backfilled when the value is increased.
 
@@ -121,9 +121,23 @@ Local subscriptions never have a Mollie mandate. Paid add-ons and paid extra sea
 
 ### Plan Change
 
-See [Plan Changes](plan-changes.md) for the full deferred upgrade flow, the Local→Mollie upgrade path, and the Mollie→Free downgrade.
+```
+User -> UpdateSubscription::update()
+  -> ValidateSubscriptionChange, ProrataComposer (charge and refund lines)
+  -> Charge due: ProrataExecutor creates one Mollie payment (type = prorata_charge),
+     pending_prorata_change stored, PlanChangePending event — plan NOT switched yet
+    -> Webhook: ProrataChargeHandler::paid()
+       -> BillingInvoice, plan/interval/seats/addons switched, wallets rebalanced
+       -> In-place PATCH of the Mollie subscription (MollieSubscriptionPatcher)
+       -> PaymentSucceeded + PlanChanged events
+    -> Webhook: ProrataChargeHandler::failed()
+       -> pending state cleared, PlanChangeFailed event, plan unchanged
+  -> No charge (sidegrade, downgrade): applied at once, Mollie PATCHed, credit refunded
+```
 
-**Service:** `UpdateSubscription`, `ValidateSubscriptionChange`, `ScheduleSubscriptionChange`, `WalletPlanChangeAdjuster`, `UpgradeLocalToMollie`
+See [Plan Changes](plan-changes.md) for the full deferred upgrade flow, the Local→Mollie upgrade path, and the Mollie→Free downgrade, and [flows.md](flows.md#8-plan-and-interval-change) for the sequence diagram.
+
+**Service:** `UpdateSubscription`, `ValidateSubscriptionChange`, `ProrataComposer`, `ProrataExecutor`, `ProrataChargeHandler`, `MollieSubscriptionPatcher`, `ScheduleSubscriptionChange`, `WalletPlanChangeAdjuster`, `UpgradeLocalToMollie`
 
 ### Recurring Payment
 
@@ -208,7 +222,7 @@ App -> WalletUsageService::debit()
   -> If balance < 0: overage
     -> PrepareUsageOverageJob -> ChargeUsageOverageDirectly
       -> Create Mollie payment
-      -> Webhook: handleSingleChargePaid() -> BillingInvoice + OverageCharged event
+      -> Webhook (type = overage): SingleChargeHandler::paid() -> BillingInvoice + OverageCharged event
 ```
 
 **Service:** `WalletUsageService`, `ChargeUsageOverageDirectly`

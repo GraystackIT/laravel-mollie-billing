@@ -56,7 +56,7 @@ return [
     'payment_succeeded' => 'Zahlung eingegangen',
     'payment_failed' => 'Zahlung fehlgeschlagen: :reason',
     'renewal_collected_for_ended_subscription' => 'Eine Verlängerung wurde für ein nicht mehr laufendes Abo eingezogen (:status) — muss erstattet werden',
-    'renewal_undercollected' => 'Eine Abrechnungsperiode wurde unter dem Preis ihrer Konfiguration eingezogen — nicht automatisch nachbelastet',
+    'renewal_undercollected' => 'Eine Abrechnungsperiode wurde unter dem Preis ihrer Konfiguration eingezogen — die Differenz wird gesondert nachbelastet',
     'payment_amount_mismatch' => 'Gezahlter Betrag weicht vom erwarteten Betrag ab',
     'duplicate_payment_received' => 'Doppelte Zahlung erhalten und ignoriert',
     'checkout_started' => 'Checkout begonnen',
@@ -65,6 +65,7 @@ return [
     'one_time_order_failed' => 'Einmalkauf :product fehlgeschlagen: :reason',
     'overage_charged' => 'Mehrverbrauch abgerechnet',
     'overage_charge_failed' => 'Abrechnung des Mehrverbrauchs fehlgeschlagen (Versuch :attempt)',
+    'overage_written_off' => 'Unbezahlter Mehrverbrauch nach :attempts weiteren Einzugsversuchen abgeschrieben',
 
     // Rechnungen
     'invoice_created' => 'Rechnung :serial erstellt',
@@ -72,15 +73,18 @@ return [
     'credit_note_issued' => 'Gutschrift :serial erstellt',
     'refund_reversed' => 'Erstattung nicht angekommen – Gutschrift mit :serial storniert',
     'grant_extras_purchase_refunded' => 'Kauf von Extras nicht ausgeführt — der Gratiszeitraum war beendet; Zahlung :serial erstattet',
+    'unwanted_payment_refunded' => 'Eine nicht mehr gewünschte Zahlung (:serial) wurde automatisch erstattet',
     'chargeback_reversed' => 'Rückbuchung zu Rechnung :serial zurückgenommen',
     'invoice_pdf_regenerated' => 'PDF der Rechnung :serial neu erzeugt',
 
     // Zahlungsmethode
     'mandate_updated' => 'Zahlungsmethode geändert',
     'mollie_subscription_reference_cleared' => 'Abonnement bei Mollie nicht mehr vorhanden — Referenz entfernt',
+    'mollie_subscription_replaced' => 'Abonnement bei Mollie ersetzt, um die nächste Abbuchung zu verschieben',
 
     // Gutscheincodes / Freischaltungen
     'coupon_redeemed' => 'Gutscheincode :code eingelöst',
+    'coupon_redemption_record_missing' => 'Gutscheincode :code wurde bei der Zahlung berücksichtigt, die Einlösung konnte aber nicht verbucht werden',
     'grant_revoked' => 'Über Gutscheincode :code gewährter Zugang widerrufen',
 
     // Testphase

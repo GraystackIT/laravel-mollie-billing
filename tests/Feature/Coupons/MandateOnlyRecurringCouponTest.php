@@ -226,7 +226,7 @@ it('creates the Mollie subscription outside the gate transaction and spends the 
         ->not->toHaveKey(WebhookSupport::ACTIVATION_CLAIM_META_KEY);
 });
 
-it('self-heals and reports when the coupon redemption fails after the subscription was created', function (): void {
+it('self-heals and records it when the coupon redemption fails after the subscription was created', function (): void {
     Notification::fake();
 
     $coupon = app(CouponService::class)->create([
@@ -268,7 +268,7 @@ it('self-heals and reports when the coupon redemption fails after the subscripti
     // No audit row could be written…
     expect(CouponRedemption::query()->where('coupon_id', $coupon->id)->count())->toBe(0);
 
-    // …but local pricing now matches what Mollie charges, and admins know.
+    // …but local pricing now matches what Mollie charges.
     $marker = $billable->fresh()->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
     expect($marker)->not->toBeNull()
         ->and($marker['code'])->toBe('REC50')
@@ -276,7 +276,13 @@ it('self-heals and reports when the coupon redemption fails after the subscripti
 
     expect(app(CouponService::class)->computeMarkerDiscount($billable->fresh(), 1000))->toBe(500);
 
-    Notification::assertSentTo($billable, AdminPlanChangeFailedNotification::class);
+    // Nothing is left for an operator to do, so nobody is mailed: the missing row is an
+    // audit entry. (The mail remains for the case where the marker cannot be written
+    // either — tests/Feature/Coupons/FailedRedemptionAfterPaymentTest.php.)
+    Notification::assertNothingSent();
+
+    expect(\GraystackIT\MollieBilling\Support\BillingAuditEntry::model()::query()
+        ->where('event', 'coupon_redemption_record_missing')->count())->toBe(1);
 });
 
 it('reports a mandate-only signup whose coupon stopped covering the full price', function (): void {
@@ -308,5 +314,17 @@ it('reports a mandate-only signup whose coupon stopped covering the full price',
     expect($billable->refresh()->subscription_status)->not->toBe(SubscriptionStatus::Active);
 
     Event::assertDispatched(\GraystackIT\MollieBilling\Events\SubscriptionActivationFailed::class);
-    Notification::assertSentTo(new \Illuminate\Notifications\AnonymousNotifiable, AdminPlanChangeFailedNotification::class);
+
+    // No operator mail yet: the activation is retried first (an operator may switch the
+    // coupon back on in the meantime), and the marker is what the retry works from.
+    Notification::assertNothingSent();
+    expect($billable->getBillingSubscriptionMeta()[\GraystackIT\MollieBilling\Support\ActivationRetry::META_KEY] ?? [])->toHaveKey('tr_halfoff');
+
+    // The retries are spent and nothing changed: a €0 mandate checkout has nothing to
+    // refund, so now — and only now — an operator is told.
+    (new \GraystackIT\MollieBilling\Jobs\RetrySubscriptionActivationJob('tr_halfoff', $billable::class, $billable->getKey()))
+        ->failed(new RuntimeException('still incomplete'));
+
+    Notification::assertSentToTimes(new \Illuminate\Notifications\AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+    expect($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey(\GraystackIT\MollieBilling\Support\ActivationRetry::META_KEY);
 });

@@ -37,7 +37,8 @@ use GraystackIT\MollieBilling\Support\MollieCall;
  * `tries` budget; either way the marker is dropped and the admins are told, because a
  * lingering marker would make SweepPendingRetriesJob restart the ladder hourly.
  *
- * A 404/410 from Mollie counts as success: the subscription is already gone.
+ * A 404/410 from Mollie counts as success: the subscription is already gone. So does a
+ * 422 "The subscription has been cancelled." — Mollie refuses a second cancel.
  */
 class RetrySubscriptionCancelJob implements ShouldQueue, ShouldBeUnique
 {
@@ -100,8 +101,26 @@ class RetrySubscriptionCancelJob implements ShouldQueue, ShouldBeUnique
 
         try {
             MollieCall::send(new CancelSubscriptionRequest($this->mollieCustomerId, $this->mollieSubscriptionId));
-        } catch (ApiException $e) {
-            if (! in_array($e->getCode(), [404, 410], true)) {
+        } catch (Throwable $e) {
+            // 404/410, or Mollie's 422 "The subscription has been cancelled." — measured
+            // 17 November 2026: cancelling a cancelled subscription is refused, not a no-op.
+            $gone = \GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer::cancelledAlready($e);
+
+            if (! $gone) {
+                // On `sync` a throw is final: `failed()` would drop the marker on the first
+                // Mollie error while the subscription may still be charging. The marker
+                // stays, and SweepPendingRetriesJob tries again every hour until the
+                // 24-hour window above gives up.
+                if (\GraystackIT\MollieBilling\Support\BillingQueue::isSyncRun($this->job)) {
+                    Log::warning('RetrySubscriptionCancelJob: cancel failed again — left for the hourly sweep (sync queue)', [
+                        'billable_id' => $this->billableId,
+                        'mollie_subscription_id' => $this->mollieSubscriptionId,
+                        'error' => $e->getMessage(),
+                    ]);
+
+                    return;
+                }
+
                 throw $e;
             }
             // Already gone at Mollie — nothing left to cancel.

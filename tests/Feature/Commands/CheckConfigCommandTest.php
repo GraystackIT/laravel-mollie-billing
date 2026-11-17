@@ -89,6 +89,12 @@ beforeEach(function (): void {
 });
 
 it('passes on a valid configuration', function (): void {
+    // A production shape: a real queue, and lock-capable shared stores for the wallet and
+    // the cache. A sync queue is valid too, but it is reported (CheckConfigQueueTest).
+    config()->set('queue.default', 'database');
+    config()->set('wallet.lock.driver', 'redis');
+    config()->set('cache.default', 'file');
+
     $this->artisan('billing:check-config')
         ->expectsOutputToContain('Billing configuration is valid')
         ->assertExitCode(0);

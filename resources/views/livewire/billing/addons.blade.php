@@ -264,6 +264,11 @@ new class extends Component {
         if ($purchase->eligible($billable) && $purchase->needsPayment($billable, $addonsAfter, $billable->getBillingSeatCount())) {
             try {
                 $url = $purchase->handle($billable, $addonsAfter, $billable->getBillingSeatCount());
+            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
+                // Not an error to report: the customer is told what to do first.
+                $this->toast($e->getMessage(), 'danger');
+
+                return;
             } catch (\GraystackIT\MollieBilling\Exceptions\BillingCountryRequiredException) {
                 // A gifted tenant without billing details: say what is missing and where
                 // to add it, instead of "something went wrong".
@@ -308,7 +313,7 @@ new class extends Component {
                 $this->couponErrors[$addonCode],
                 $this->couponDiscounts[$addonCode],
             );
-        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
             // Not an error to report: the customer is told what to do first.
             $this->toast($e->getMessage(), 'danger');
         } catch (\Throwable $e) {
@@ -378,6 +383,44 @@ new class extends Component {
         $this->pendingAction = null;
     }
 
+    /**
+     * Gross amount that toggling one addon charges (positive) or credits (negative) right
+     * now, from the same preview the change is priced with. 0 when nothing moves, when
+     * there is no billable, or when the change would be refused.
+     */
+    private function dueNowFor(?\GraystackIT\MollieBilling\Contracts\Billable $billable, string $addonCode, bool $isActive): int
+    {
+        if ($billable === null) {
+            return 0;
+        }
+
+        $active = $billable->getActiveBillingAddonCodes();
+        $codes = $isActive
+            ? array_values(array_diff($active, [$addonCode]))
+            : array_values(array_unique([...$active, $addonCode]));
+
+        // A code => quantity map, at the quantity each addon is billed at — the rule
+        // `UpdateSubscription::addonQuantities()` prices the change with. A list of codes
+        // is read as one unit each, so an addon the app bills three times over was quoted
+        // as dropping to one: switching another addon on showed a credit for a change
+        // that then charged.
+        $next = [];
+        foreach ($codes as $code) {
+            $next[(string) $code] = $billable->getBillingAddonQuantity((string) $code) ?: 1;
+        }
+
+        try {
+            $preview = app(PreviewService::class)->previewUpdate($billable, [
+                'addons' => $next,
+                'coupon_codes' => $isActive ? [] : ($this->appliedCouponCodes[$addonCode] ?? []),
+            ]);
+
+            return ($preview['errors'] ?? []) === [] ? (int) ($preview['prorataTotalGross'] ?? 0) : 0;
+        } catch (\Throwable) {
+            return 0;
+        }
+    }
+
     public function with(): array
     {
         $billable = $this->readableBillable();
@@ -427,6 +470,10 @@ new class extends Component {
                 'includedSeats' => $catalog->addonIncludedSeats($code),
                 // Base AND per-seat price — an addon with base 0 and a seat price is not free.
                 'isFree' => $catalog->addonIsFree($code, $interval),
+                // What switching this addon on (positive) or off (negative) moves NOW, gross
+                // — the pro-rata charge or credit, as the change will book it. The card
+                // shows the recurring price; the confirm dialog shows this.
+                'dueNowGross' => $this->dueNowFor($billable, $code, in_array($code, $activeAddons, true)),
                 // Only what a customer should read; a hidden feature code still unlocks.
                 'features' => $catalog->visibleAddonFeatures($code),
                 'isActive' => in_array($code, $activeAddons, true),
@@ -489,7 +536,7 @@ new class extends Component {
         @if ($isAccessGrant)
             {{-- A gift is not a dead end: paid addons can be bought on top of it. --}}
             <flux:callout icon="gift" color="teal">
-                <span>{{ __('billing::portal.access_grant_extras_available', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::display($billable->getBillingSubscriptionEndsAt(), $billable)?->translatedFormat('d. M Y')]) }}</span>
+                <span>{{ __('billing::portal.access_grant_extras_available', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::billingDay($billable->getBillingSubscriptionEndsAt())?->translatedFormat('d. M Y')]) }}</span>
             </flux:callout>
         @else
             <flux:callout icon="information-circle" color="blue">
@@ -605,6 +652,12 @@ new class extends Component {
                             <div class="space-y-2">
                                 <flux:heading size="lg">{{ __('billing::portal.addons_enable_confirm.title') }}</flux:heading>
                                 <flux:text>{{ __('billing::portal.addons_enable_confirm.body', ['addon' => $addon['name'], 'price' => BillingMoney::format($addon['price']), 'interval' => $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year')]) }}</flux:text>
+                                @if ($addon['dueNowGross'] > 0)
+                                    <div class="flex items-baseline justify-between text-sm">
+                                        <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_due_now') }}</span>
+                                        <span dusk="addon-due-now-{{ $addon['code'] }}" class="tabular-nums font-medium text-zinc-800 dark:text-zinc-100">{{ BillingMoney::format($addon['dueNowGross']) }}</span>
+                                    </div>
+                                @endif
                             </div>
 
                             <div class="space-y-2">
@@ -670,6 +723,12 @@ new class extends Component {
                             <div class="space-y-2">
                                 <flux:heading size="lg">{{ __('billing::portal.addons_disable_confirm.title') }}</flux:heading>
                                 <flux:text>{{ __('billing::portal.addons_disable_confirm.body', ['addon' => $addon['name']]) }}</flux:text>
+                                @if ($addon['dueNowGross'] < 0)
+                                    <div class="flex items-baseline justify-between text-sm">
+                                        <span class="text-zinc-600 dark:text-zinc-300">{{ __('billing::portal.preview_credit_now') }}</span>
+                                        <span dusk="addon-credit-{{ $addon['code'] }}" class="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">{{ BillingMoney::format(abs($addon['dueNowGross'])) }}</span>
+                                    </div>
+                                @endif
                             </div>
                             <div class="flex justify-end gap-2">
                                 <flux:modal.close>

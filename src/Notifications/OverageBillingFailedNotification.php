@@ -23,6 +23,12 @@ class OverageBillingFailedNotification extends Notification implements ShouldQue
 
     public readonly ?string $currency;
 
+    /**
+     * Whether a later renewal will try to collect this amount again. False for the
+     * message that goes out when the debt is written off for good.
+     */
+    public bool $willRetry = true;
+
     public function __construct(public readonly Billable $billable)
     {
         [$this->amountGross, $this->currency] = $this->pendingOverageAmount($billable);
@@ -48,6 +54,7 @@ class OverageBillingFailedNotification extends Notification implements ShouldQue
             ->subject(__('billing::notifications.overage_billing_failed.subject'))
             ->greeting(__('billing::emails.greeting', ['name' => $this->billable->getBillingName()]))
             ->line(__('billing::notifications.overage_billing_failed.body', ['amount' => $amount]))
+            ->line(__('billing::notifications.overage_billing_failed.'.($this->willRetry ? 'will_retry' : 'final')))
             ->action(__('billing::emails.update_payment_method'), $this->billable->billingPortalUrl());
     }
 
@@ -58,6 +65,7 @@ class OverageBillingFailedNotification extends Notification implements ShouldQue
     {
         return [
             'type' => 'overage_billing_failed',
+            'will_retry' => $this->willRetry,
             'amount_gross' => $this->amountGross,
             'currency' => $this->currency,
         ];

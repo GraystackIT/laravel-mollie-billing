@@ -160,6 +160,9 @@ it('takes a chargeback back out of the books when it is reversed, and ends the d
     expect($invoice->fresh()->isFullyRefunded())->toBeTrue()
         ->and($billable->fresh()->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::PastDue);
 
+    $reversed = new \ArrayObject;
+    \Illuminate\Support\Facades\Event::listen(\GraystackIT\MollieBilling\Events\ChargebackReversed::class, fn ($e) => $reversed->append($e));
+
     // The dispute is won: the chargeback is reversed.
     ChargebackReversalFakeWebhookController::$nextPayment = chargebackReversalPayment($billable, $chargedBackAfterReversal, '2026-11-20T10:00:00+00:00');
     $this->postJson(route('billing.webhook'), ['id' => 'tr_cbr'])->assertStatus(200);
@@ -180,9 +183,19 @@ it('takes a chargeback back out of the books when it is reversed, and ends the d
         ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey('past_due_since')
         ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey('payment_failure');
 
+    // The reversal is announced once, with its documents, and audited.
+    expect($reversed)->toHaveCount(1)
+        ->and($reversed[0]->mollieChargebackId)->toBe('chb_disputed')
+        ->and($reversed[0]->original->getKey())->toBe($invoice->getKey())
+        ->and($reversed[0]->reversal->getKey())->toBe($documents[1]->getKey());
+
+    $audit = \GraystackIT\MollieBilling\Support\BillingAuditEntry::model()::query()->where('event', 'chargeback_reversed')->sole();
+    expect($audit->description)->toBe('audit.chargeback_reversed');
+
     // Delivered again: nothing more happens.
     $this->postJson(route('billing.webhook'), ['id' => 'tr_cbr'])->assertStatus(200);
-    expect(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(2);
+    expect(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(2)
+        ->and($reversed)->toHaveCount(1);
 })->with([
     'Mollie still reports the charged-back amount' => ['23.80'],
     'Mollie reports no charged-back amount any more' => [null],
@@ -218,4 +231,29 @@ it('leaves a customer past due whose dunning has another cause than the reversed
     // The books are corrected, the status is not touched.
     expect($invoice->fresh()->isFullyRefunded())->toBeFalse()
         ->and($billable->fresh()->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::PastDue);
+});
+
+it('ends the chargeback\'s dunning but keeps the lock of an overage debt that still stands', function (): void {
+    $billable = chargebackReversalBillable();
+    chargebackReversalInvoice($billable);
+
+    ChargebackReversalFakeWebhookController::$nextPayment = chargebackReversalPayment($billable, '23.80', null);
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_cbr'])->assertStatus(200);
+
+    // Besides the chargeback, an overage charge has given up: the customer owes that too.
+    $key = \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::PAST_DUE_KEY;
+    $meta = $billable->fresh()->getBillingSubscriptionMeta();
+    $meta[$key] = '2026-11-18T01:00:00+00:00';
+    $billable->fresh()->forceFill(['subscription_meta' => $meta])->save();
+
+    ChargebackReversalFakeWebhookController::$nextPayment = chargebackReversalPayment($billable, null, '2026-11-20T10:00:00+00:00');
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_cbr'])->assertStatus(200);
+
+    $billable = $billable->fresh();
+
+    // The chargeback's episode is over; the debt's is not.
+    expect($billable->getBillingSubscriptionMeta())->not->toHaveKey('past_due_since')
+        ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey('payment_failure')
+        ->and($billable->getBillingSubscriptionMeta())->toHaveKey($key)
+        ->and($billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::PastDue);
 });

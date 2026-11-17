@@ -113,6 +113,12 @@ class StartOneTimeOrderCheckout
             throw new \InvalidArgumentException("Unknown product code: {$productCode}");
         }
 
+        // Past due — an unpaid renewal or an overage charge that could not be collected —
+        // books nothing new until it is settled: the same refusal seats and addons get.
+        if ($billable->isBillingPastDue()) {
+            throw \GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException::booking($billable);
+        }
+
         if ($billable->isLocalBillingSubscription()
             && ! (bool) config('mollie-billing.local_subscription.allow_one_time_orders', false)
         ) {

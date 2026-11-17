@@ -54,7 +54,7 @@ new class extends Component {
 
         $billable = $this->authorizedBillable();
 
-        if ($billable?->hasAccessibleBillingSubscription()) {
+        if ($billable !== null && $this->checkoutHasLanded($billable)) {
             $this->activated = true;
         }
     }
@@ -123,6 +123,34 @@ new class extends Component {
         return $subject;
     }
 
+    /**
+     * Whether the checkout this page reports on has arrived.
+     *
+     * "Has an accessible subscription" is the answer for a new customer — and the wrong
+     * one for a customer upgrading away from a free plan, who has had one all along:
+     * abandoning the payment at Mollie was answered with "Payment received". While a
+     * first payment is on record as pending for a LOCAL subscription, the upgrade is
+     * still in flight, and the page asks Mollie about that payment instead.
+     */
+    private function checkoutHasLanded(Billable $billable): bool
+    {
+        if (! $billable->hasAccessibleBillingSubscription()) {
+            return false;
+        }
+
+        if (! $billable->isLocalBillingSubscription()) {
+            return true;
+        }
+
+        // Pending at Mollie, or paid and not yet activated: the webhook drops the pending
+        // marker once its handlers have run — finished or not — so an activation that is
+        // waiting for its retry is asked about separately. Otherwise a customer whose
+        // authorisation went through while Mollie refused the subscription was told
+        // "Payment received, continue to your dashboard" on the free plan.
+        return $billable->getPendingFirstPaymentId() === null
+            && app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class)->activationCompleted($billable);
+    }
+
     public function checkStatus(): void
     {
         if ($this->activated || $this->failed || $this->unresolved) {
@@ -154,7 +182,7 @@ new class extends Component {
             /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
             $billable->refresh();
 
-            if ($billable->hasAccessibleBillingSubscription()) {
+            if ($this->checkoutHasLanded($billable)) {
                 $this->activated = true;
                 $this->timedOut = false;
                 return;

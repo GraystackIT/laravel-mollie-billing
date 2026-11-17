@@ -95,6 +95,11 @@ class NextChargeSummary
             'vat_rate' => 0.0,
             'deferred' => false,
             'has_scheduled_change' => false,
+            // A standing overage debt the renewal on `date` collects with it, or null.
+            // `gross` stays the subscription's own charge (what Mollie holds for the
+            // subscription); `total_gross` is everything that leaves the account then.
+            'overage_debt' => null,
+            'total_gross' => 0,
             'ends_at' => $endsAt !== null ? BillingTime::toUtc($endsAt) : null,
         ];
 
@@ -110,11 +115,20 @@ class NextChargeSummary
             return ['state' => self::STATE_FREE] + $empty;
         }
 
-        if ($status === SubscriptionStatus::PastDue) {
+        // Past due for an unpaid renewal: there is no "next" charge, the last one is open.
+        // Past due only for an overage debt is different — the period is paid, the
+        // renewal runs on its date, and it is what collects the debt: that customer is
+        // shown the charge, with the debt as a line of its own.
+        $overage = app(\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::class);
+        $debtOnly = \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebtOnly($billable);
+
+        if ($status === SubscriptionStatus::PastDue && ! $debtOnly) {
             return ['state' => self::STATE_PAST_DUE] + $empty;
         }
 
-        $deferredUntil = ChargeDeferral::until($billable);
+        // `pending()`, not `until()`: on the day of a deferred charge, before Mollie's
+        // charge has arrived, the charge is today — not the trial end or a period end.
+        $deferredUntil = ChargeDeferral::pending($billable);
         $date = $this->chargeDate($billable, $status, $deferredUntil);
 
         $addons = $billable->getActiveBillingAddonCodes();
@@ -171,9 +185,20 @@ class NextChargeSummary
             }
         }
 
+        // Only a debt that is standing (not one whose payment is already on its way) and
+        // that will have rested long enough by that day: exactly the condition under
+        // which the renewal starts a collection for it. A standing debt always has
+        // attempts left — once they are spent it is written off and gone from here.
+        $debt = $date !== null && $overage->deferredDebtIsDue($billable, $date)
+            ? $overage->deferredDebtAmount($billable)
+            : null;
+        $debt = $debt !== null ? ['net' => (int) $debt['net'], 'gross' => (int) $debt['gross']] : null;
+
         return [
             'state' => self::STATE_SCHEDULED,
             'date' => $date,
+            'overage_debt' => $debt,
+            'total_gross' => $gross + ($debt['gross'] ?? 0),
             'lines' => $lines,
             'discount_net' => $discount,
             'discount_code' => $discount > 0 && is_array($marker) && $planFreeUntil === null

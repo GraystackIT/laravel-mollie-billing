@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminRefundFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Support\MolliePaymentCredits;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -63,9 +64,11 @@ class RefundHandler
         // export. Nothing reconciles dashboard refunds afterwards. Both handlers here are
         // idempotent (dedup on the refund/chargeback id), so a 503 and a re-delivery are
         // strictly better than a lie.
+        //
+        // Every page, through MollieCall — not `$payment->refunds()`, which went past the
+        // one door and read the first page only.
         try {
-            /** @phpstan-ignore-next-line — SDK magic. */
-            $refunds = $payment->refunds();
+            $refunds = app(MolliePaymentCredits::class)->refunds($payment);
         } catch (\Throwable $e) {
             Log::error('Could not load refunds for a payment that reports some', [
                 'payment_id' => $payment->id ?? null,

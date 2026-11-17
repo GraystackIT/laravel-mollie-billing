@@ -17,7 +17,7 @@ A batteries-included Mollie billing layer for Laravel that wraps `mollie/laravel
 - VAT calculation, VIES validation and OSS export (`mpociot/vat-calculator`)
 - Country-mismatch reconciliation: three-way reconciliation of user-declared, payment-derived, and IP-derived country at every recurring payment. If the user country matches none of the other signals, the subscription is set to cancel-at-period-end, the billable is notified by email, and the user can self-correct via a dashboard modal (refund + reissue at the corrected VAT rate). B2B billables with a VIES-validated VAT number bypass the check (reverse-charge makes the bank country fiscally irrelevant). An admin can override the decision with any ISO-2 code, against a required written justification that lands in the audit trail. See [docs/vat-handling.md](docs/vat-handling.md).
 - Wallet-based metered billing with included quotas and overage prices (`bavix/laravel-wallet`), with case-insensitive usage-type lookups
-- Direct overage charging with retry and `past_due` state
+- Direct overage charging with retry; an unpaid overage is collected again with the next renewals
 - Five coupon types — `SinglePayment`, `Recurring`, `Credits`, `TrialExtension`, `AccessGrant`
 - Access Grants for full-plan or addon-only complimentary access
 - Scheduled plan changes, prorata, end-of-period downgrades
@@ -999,6 +999,7 @@ Run it after editing either config file or as part of CI to catch typos before d
 
 Detailed technical documentation is available in the [`docs/`](docs/) directory:
 
+- [Booking Flows](docs/flows.md) — the whole package on one page: a state map and one diagram per flow (checkout, coupons, renewal, dunning, plan changes, overage, refunds, scheduled jobs)
 - [Configuration](docs/configuration.md) — `mollie-billing.php` and `mollie-billing-plans.php` reference
 - [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
@@ -1009,6 +1010,8 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Audit Trail](docs/audit.md) — per-billable timeline, localizable storage format, categories, retention, adding new events
 - [Testing Lifecycle Flows](docs/testing-flows.md) — `billing:simulate` and `billing:webhook-replay` for reproducing every lifecycle transition on staging
 - [Browser Testing](docs/browser-testing.md) — the Chrome end-to-end suite: workbench app, fake Mollie, writing scenarios, screenshot gallery
+- [Upgrading](docs/upgrading.md) — what an application has to change when updating: required steps, changed behaviour to check, new options
+- [Sandbox Testing](docs/sandbox-testing.md) — the suites that talk to the real Mollie test system, including the long-lived subscription canary
 - [Decisions](docs/decisions.md) — behaviour that looks like a defect and is not: enforced invariants, deliberate choices, and findings that were investigated and refuted
 
 ### Testing against Mollie for real

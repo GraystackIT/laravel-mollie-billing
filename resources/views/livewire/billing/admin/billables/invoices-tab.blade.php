@@ -3,6 +3,7 @@
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
+use GraystackIT\MollieBilling\Exceptions\RefundExceedsLineAmountException;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
@@ -25,6 +26,12 @@ new class extends Component {
     public ?string $refundAmount = null;
     public string $refundReason = 'goodwill';
     public ?string $refundText = null;
+    /**
+     * Which line the refund is booked against: the original line's index, or empty for
+     * the whole invoice (spread over its lines). Checked against the lines the invoice
+     * offers on submit — a value the modal never showed is refused.
+     */
+    public ?string $refundLine = null;
     public ?string $flash = null;
     public ?string $error = null;
 
@@ -39,7 +46,7 @@ new class extends Component {
 
     public function openRefund(int $invoiceId): void
     {
-        $this->reset(['refundAmount', 'refundText', 'error']);
+        $this->reset(['refundAmount', 'refundText', 'refundLine', 'error']);
         $this->refundReason = 'goodwill';
         $this->refundInvoiceId = $invoiceId;
         $this->showRefundModal = true;
@@ -52,8 +59,48 @@ new class extends Component {
     public function updatedShowRefundModal(bool $value): void
     {
         if (! $value) {
-            $this->reset(['refundInvoiceId', 'refundAmount', 'refundText', 'error']);
+            $this->reset(['refundInvoiceId', 'refundAmount', 'refundText', 'refundLine', 'error']);
         }
+    }
+
+    /**
+     * Choosing a line fills in what is left of it; the operator can lower it. Going back
+     * to the whole invoice leaves the amount as it is.
+     */
+    public function updatedRefundLine(?string $value): void
+    {
+        $this->error = null;
+
+        if ($value === null || $value === '') {
+            return;
+        }
+
+        $invoice = $this->refundTarget();
+        $line = $invoice ? $this->offeredLine($invoice, $value) : null;
+
+        if ($line !== null) {
+            $this->refundAmount = BillingMoney::numberFromMinor($line['remaining_net'], $invoice->currency);
+        }
+    }
+
+    /**
+     * The line the modal offers under `$value`, or null.
+     *
+     * @return array{index: int, label: ?string, net: int, rate: float, remaining_net: int, remaining_vat: int}|null
+     */
+    private function offeredLine(mixed $invoice, string $value, bool $withExhausted = false): ?array
+    {
+        if (preg_match('/^\d+$/', $value) !== 1) {
+            return null;
+        }
+
+        foreach (app(InvoiceService::class)->refundableLines($invoice, $withExhausted) as $line) {
+            if ($line['index'] === (int) $value) {
+                return $line;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -173,6 +220,16 @@ new class extends Component {
         $reason = RefundReasonCode::tryFrom($this->refundReason);
         if ($reason === null) {
             $this->error = __('billing::admin.billables.invoices.flash.invalid_reason');
+
+            return null;
+        }
+
+        // Said here, in the operator's language. The service refuses the same thing, but
+        // with an English developer message that was shown as it came.
+        if ($reason === RefundReasonCode::Other && trim((string) $this->refundText) === '') {
+            $this->error = __('billing::admin.billables.invoices.flash.reason_text_required');
+
+            return null;
         }
 
         return $reason;
@@ -216,6 +273,30 @@ new class extends Component {
             return;
         }
 
+        $line = null;
+        if ($this->refundLine !== null && $this->refundLine !== '') {
+            // Read again now, not from what the modal showed: a colleague may have refunded
+            // the same line since it was opened.
+            $line = $this->offeredLine($invoice, $this->refundLine, withExhausted: true);
+
+            if ($line === null) {
+                $this->error = __('billing::admin.billables.invoices.flash.invalid_line');
+                return;
+            }
+
+            if ($line['remaining_net'] <= 0) {
+                $this->error = __('billing::admin.billables.invoices.flash.line_already_refunded');
+                return;
+            }
+
+            if ($amountCents > $line['remaining_net']) {
+                $this->error = __('billing::admin.billables.invoices.flash.exceeds_line', [
+                    'amount' => BillingMoney::format($line['remaining_net'], $invoice->currency),
+                ]);
+                return;
+            }
+        }
+
         $remaining = $invoice->remainingRefundableNet();
         if ($amountCents > $remaining) {
             $this->error = __('billing::admin.billables.invoices.flash.exceeds_remaining', [
@@ -224,7 +305,9 @@ new class extends Component {
             return;
         }
 
-        $this->runRefund($invoice, fn () => $service->refundPartially($invoice, $amountCents, $reason, $this->refundText));
+        $this->runRefund($invoice, fn () => $line !== null
+            ? $service->refundLine($invoice, $line['index'], $amountCents, $reason, $this->refundText)
+            : $service->refundPartially($invoice, $amountCents, $reason, $this->refundText));
     }
 
     /** Refund the whole remaining net — a deliberate, separately confirmed action. */
@@ -251,7 +334,16 @@ new class extends Component {
             $refund();
             $this->flash = __('billing::admin.billables.invoices.flash.refund_processed');
             $this->showRefundModal = false;
-            $this->reset(['refundInvoiceId', 'refundAmount', 'refundText']);
+            $this->reset(['refundInvoiceId', 'refundAmount', 'refundText', 'refundLine']);
+        } catch (RefundExceedsLineAmountException $e) {
+            // Somebody refunded the line between the check above and the refund's lock.
+            // Said about the LINE: the invoice-level branch below would name the invoice's
+            // remainder, which is larger than what this line can still give back.
+            $this->error = $e->remainingNet > 0
+                ? __('billing::admin.billables.invoices.flash.exceeds_line', [
+                    'amount' => BillingMoney::format($e->remainingNet, $invoice->currency),
+                ])
+                : __('billing::admin.billables.invoices.flash.line_already_refunded');
         } catch (RefundExceedsInvoiceAmountException $e) {
             $remaining = $invoice->fresh()->remainingRefundableNet();
             $this->error = $remaining > 0
@@ -456,7 +548,30 @@ new class extends Component {
 
                 <x-mollie-billing::admin.flash :error="$error" />
 
+                @php
+                    $refundableLines = app(InvoiceService::class)->refundableLines($refundInvoice);
+                    $chosenLine = null;
+                    foreach ($refundableLines as $offered) {
+                        if ((string) $offered['index'] === (string) $refundLine) {
+                            $chosenLine = $offered;
+                        }
+                    }
+                @endphp
+
                 <form wire:submit="refund" class="space-y-4">
+                    @if ($refundableLines !== [])
+                        {{-- A refund by line: the credit note reverses that line, at its
+                             rate, and the amount is capped at what is left of it. --}}
+                        <flux:select wire:model.live="refundLine" :label="__('billing::admin.billables.invoices.modal.line_label')">
+                            <flux:select.option value="">{{ __('billing::admin.billables.invoices.modal.line_whole') }}</flux:select.option>
+                            @foreach ($refundableLines as $offered)
+                                <flux:select.option value="{{ $offered['index'] }}">{{ __('billing::admin.billables.invoices.modal.line_option', [
+                                    'label' => $offered['label'] ?? __('billing::admin.billables.invoices.modal.line_unnamed', ['number' => $offered['index'] + 1]),
+                                    'amount' => $moneyFormat($offered['remaining_net']),
+                                ]) }}</flux:select.option>
+                            @endforeach
+                        </flux:select>
+                    @endif
                     <div class="grid grid-cols-1 gap-4 md:grid-cols-3 md:items-start">
                         {{-- Free text, not type="number": the hint shows a locale-formatted
                              example ("10,50" under de) and a number input's sanitizer would
@@ -487,6 +602,9 @@ new class extends Component {
                             'example' => BillingMoney::number(10.5),
                             'remaining' => $moneyFormat($remainingNet),
                         ]) }}
+                        @if ($chosenLine !== null)
+                            {{ __('billing::admin.billables.invoices.modal.line_hint', ['amount' => $moneyFormat($chosenLine['remaining_net'])]) }}
+                        @endif
                     </flux:text>
                     <div class="flex flex-wrap justify-end gap-2 pt-2">
                         <flux:modal.close>

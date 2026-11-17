@@ -112,8 +112,7 @@ class ProrataComposer
             // historical invoices — those can include stale leftovers from
             // mid-cycle adjustments that no longer reflect what the user
             // actually has access to today.
-            $refundLine = $this->planRefundLine($intent, $periodStart, $periodEnd);
-            if ($refundLine !== null) {
+            foreach ($this->planRefundLines($intent, $periodStart, $periodEnd) as $refundLine) {
                 $refunds[] = $refundLine;
             }
 
@@ -187,7 +186,7 @@ class ProrataComposer
                 }
             }
 
-            $refunds = $this->applyRemainingRefundablePool($refunds);
+            $refunds = $this->applyRemainingRefundablePool($this->capAtCurrentDiscountShare($intent, $refunds));
 
             ['factor' => $chargeFactor] = $this->periodMath($chargeStart, $chargeEnd);
             $charges = $this->withMarkerDiscount($intent, $charges, $chargeFactor, wholeConfiguration: true);
@@ -252,7 +251,7 @@ class ProrataComposer
             }
         }
 
-        $refunds = $this->applyRemainingRefundablePool($refunds);
+        $refunds = $this->applyRemainingRefundablePool($this->capAtCurrentDiscountShare($intent, $refunds));
 
         ['factor' => $chargeFactor] = $this->periodMath($periodStart, $periodEnd);
         $charges = $this->withMarkerDiscount($intent, $charges, $chargeFactor, wholeConfiguration: false);
@@ -467,9 +466,121 @@ class ProrataComposer
         return $out;
     }
 
-    private function planRefundLine(PlanChangeIntent $intent, CarbonInterface $periodStart, CarbonInterface $periodEnd): ?ProrataLine
+    /**
+     * The credit for the plan the customer is leaving: one line per invoice line that paid
+     * for it in this period.
+     *
+     * Normally that is one line naming the current plan. It is not when the plan was
+     * reached by a change whose payment settled *after* the period had already been
+     * renewed for the previous plan:
+     *
+     * - a downgrade — the renewal says the old, dearer plan and the difference was
+     *   returned against it as one amount. No line names the current plan at all;
+     * - an upgrade — the renewal says the old, cheaper plan and the rest was collected as
+     *   a balance (`UndercollectionCharge`), whose line names the current plan but carries
+     *   only the difference.
+     *
+     * In both the customer has paid exactly one period of the current plan, in two
+     * documents. Reading only "the line that names the current plan" credited nothing in
+     * the first case and nothing or only the difference in the second, so a further change
+     * in that period cost the customer the plan they were leaving (Enterprise → Pro across
+     * a renewal, then Pro → Starter with 19 of 28 days left: 33.93 net never credited).
+     *
+     * The rule: such a period is settled as if it had been paid on the current plan from
+     * its first day. What the lines naming the plan do not cover of that plan's price is
+     * credited against the renewal's plan line — at the share that line was actually paid
+     * at (a discount on it is a discount here), and never beyond what it paid or what is
+     * left to refund on its invoice.
+     *
+     * @return list<ProrataLine>
+     */
+    private function planRefundLines(PlanChangeIntent $intent, CarbonInterface $periodStart, CarbonInterface $periodEnd): array
     {
-        $candidates = BillingInvoice::currentPeriodLines($intent->billable, 'plan', $intent->currentPlan);
+        $own = BillingInvoice::currentPeriodLines($intent->billable, 'plan', $intent->currentPlan);
+
+        $ownIsBalanceOnly = $own !== [];
+        foreach ($own as $candidate) {
+            $line = $candidate['invoice']->lineItem($candidate['line_index']) ?? [];
+            $ownIsBalanceOnly = $ownIsBalanceOnly && (($line['undercollection'] ?? false) === true);
+        }
+
+        $out = [];
+
+        // Lines that name the plan: balance lines each count, anything else is the one
+        // line there has always been.
+        foreach ($ownIsBalanceOnly ? $own : array_slice($own, 0, 1) as $candidate) {
+            $line = $this->planRefundLine($intent, $periodStart, $periodEnd, $candidate, null);
+            if ($line !== null) {
+                $out[] = $line;
+            }
+        }
+
+        if ($own !== [] && ! $ownIsBalanceOnly) {
+            return $out;
+        }
+
+        // The renewal that opened the period, booked for the plan the customer had then.
+        foreach (BillingInvoice::currentPeriodLines($intent->billable, 'plan', null) as $candidate) {
+            $invoice = $candidate['invoice'];
+            $line = $invoice->lineItem($candidate['line_index']) ?? [];
+
+            if ((string) ($line['code'] ?? '') === $intent->currentPlan || (($line['undercollection'] ?? false) === true)) {
+                continue;
+            }
+
+            $lineNet = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+            $linePaid = $this->paidLineNet($invoice, $line);
+
+            if ($lineNet <= 0) {
+                continue;
+            }
+
+            $planPrice = (int) $this->catalog->basePriceNet($intent->currentPlan, $intent->currentInterval);
+            // Two readings of "what the plan cost in this period", and the lower one holds:
+            // the share the renewal's line was paid at (a waiver or a percentage on it is
+            // one here), and the share the discount in force leaves of the current
+            // configuration — a fixed amount weighs more on a cheaper plan than it did on
+            // the dearer one the renewal was booked for.
+            $currentNet = SubscriptionAmount::net(
+                $this->catalog,
+                $intent->billable,
+                $intent->currentPlan,
+                $intent->currentInterval,
+                $intent->currentSeats,
+                array_map('strval', array_keys($intent->currentAddons)),
+            );
+            $currentDiscount = $currentNet > 0
+                ? min($currentNet, app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->computeMarkerDiscount($intent->billable, $currentNet))
+                : 0;
+            $expected = (int) round(min(
+                $planPrice * $linePaid / $lineNet,
+                $currentNet > 0 ? $planPrice * ($currentNet - $currentDiscount) / $currentNet : $planPrice,
+            ));
+            // The renewal's own line, at no more than the current plan costs: under a
+            // downgrade that is the plan's price (the rest was returned), under an upgrade
+            // all of it (the balance line carries what the plan costs beyond it).
+            $missing = min($expected, $linePaid, max(0, $invoice->remainingRefundableNet()));
+
+            if ($missing > 0) {
+                $refund = $this->planRefundLine($intent, $periodStart, $periodEnd, $candidate, $missing);
+                if ($refund !== null) {
+                    $out[] = $refund;
+                }
+            }
+
+            break;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array{invoice: BillingInvoice, line_index: int}  $first  the line being credited
+     * @param  int|null  $cashNetOverride  what of that line counts as paid for the current plan; null = all it was paid at
+     */
+    private function planRefundLine(PlanChangeIntent $intent, CarbonInterface $periodStart, CarbonInterface $periodEnd, array $first, ?int $cashNetOverride): ?ProrataLine
+    {
+        $candidates = [$first];
         if (empty($candidates)) {
             // No open plan line in the current period — e.g. when the original
             // subscription invoice was fully refunded as a goodwill credit. In that
@@ -489,7 +600,7 @@ class ProrataComposer
 
         [$lineStart, $lineEnd] = $this->resolveLinePeriod($line, $invoice, $periodStart, $periodEnd);
 
-        $cashNet = $this->paidLineNet($invoice, $line);
+        $cashNet = $cashNetOverride ?? $this->paidLineNet($invoice, $line);
         $vatRate = (float) ($line['vat_rate'] ?? 0);
 
         ['days' => $days, 'factor' => $factor] = $this->periodMath($lineStart, $lineEnd);
@@ -604,6 +715,8 @@ class ProrataComposer
         $chargeByKey = [];
         /** @var list<array{amount: int, targets: list<string>}> $targeted */
         $targeted = [];
+        /** @var list<array{amount: int, by: array<string, int|float|string>}> $exactReductions */
+        $exactReductions = [];
 
         foreach ((array) ($invoice->line_items ?? []) as $other) {
             if (! is_array($other) || ($other['parent_invoice_id'] ?? null) !== null) {
@@ -624,6 +737,17 @@ class ProrataComposer
                 continue;
             }
 
+            // A reduction that says to the cent what it takes off which line: the
+            // `adjustment` of a renewal that was created before seats or addons were
+            // added ({@see SupersededRenewalRefund::nameWhatTheAdjustmentReduces()}).
+            $exact = array_filter((array) ($other['reduces'] ?? []), 'is_numeric');
+
+            if ($exact !== []) {
+                $exactReductions[] = ['amount' => -$net, 'by' => $exact];
+
+                continue;
+            }
+
             $targets = array_values(array_filter(array_map('strval', (array) ($other['applies_to'] ?? []))));
 
             if ($targets !== []) {
@@ -631,6 +755,29 @@ class ProrataComposer
             } else {
                 $reductions += -$net;
             }
+        }
+
+        foreach ($exactReductions as $reduction) {
+            $left = $reduction['amount'];
+
+            foreach ($reduction['by'] as $key => $amount) {
+                $base = $chargeByKey[(string) $key] ?? 0;
+                $placed = min((int) $amount, $base, $left);
+
+                if ($placed <= 0) {
+                    continue;
+                }
+
+                $left -= $placed;
+                $charges -= $placed;
+
+                if ((string) $key === $own) {
+                    $ownAfterTargeted -= (int) round($placed * $lineNet / $base);
+                }
+            }
+
+            // Whatever it does not place is an ordinary reduction.
+            $reductions += $left;
         }
 
         foreach ($targeted as $reduction) {
@@ -881,6 +1028,11 @@ class ProrataComposer
             /** @var BillingInvoice $invoice */
             $invoice = $candidate['invoice'];
             $idx = $candidate['line_index'];
+
+            if ($this->isBalanceLine($invoice, $idx)) {
+                continue;
+            }
+
             $availableQty = (int) $candidate['remaining_quantity'];
             $takeQty = min($remaining, $availableQty);
 
@@ -889,9 +1041,10 @@ class ProrataComposer
             // anyway meant the next candidate — the invoice that does hold the money — was
             // never asked for those units.
             $line = $this->buildRefundLine($invoice, $idx, 'seats', null, $takeQty);
-            if ($line !== null) {
+            $balance = $this->balanceRefundLines($invoice, $idx, 'seats', null, $takeQty);
+            if ($line !== null || $balance !== []) {
                 $remaining -= $takeQty;
-                $lines[] = $line;
+                $lines = [...$lines, ...$this->withBalance($line, $balance)];
             }
         }
 
@@ -964,14 +1117,20 @@ class ProrataComposer
             /** @var BillingInvoice $invoice */
             $invoice = $candidate['invoice'];
             $idx = $candidate['line_index'];
+
+            if ($this->isBalanceLine($invoice, $idx)) {
+                continue;
+            }
+
             $availableQty = (int) $candidate['remaining_quantity'];
             $takeQty = min($remaining, $availableQty);
 
             // See seatsRefundLines(): the quantity is consumed only once a line exists.
             $line = $this->buildRefundLine($invoice, $idx, 'addon', $code, $takeQty);
-            if ($line !== null) {
+            $balance = $this->balanceRefundLines($invoice, $idx, 'addon', $code, $takeQty);
+            if ($line !== null || $balance !== []) {
                 $remaining -= $takeQty;
-                $lines[] = $line;
+                $lines = [...$lines, ...$this->withBalance($line, $balance)];
             }
         }
 
@@ -1056,13 +1215,18 @@ class ProrataComposer
                 break;
             }
 
+            if ($this->isBalanceLine($candidate['invoice'], $candidate['line_index'])) {
+                continue;
+            }
+
             $takeQty = min($remaining, (int) $candidate['remaining_quantity']);
 
             // See seatsRefundLines(): the quantity is consumed only once a line exists.
             $line = $this->buildRefundLine($candidate['invoice'], $candidate['line_index'], 'addon_seats', $code, $takeQty);
-            if ($line !== null) {
+            $balance = $this->balanceRefundLines($candidate['invoice'], $candidate['line_index'], 'addon_seats', $code, $takeQty);
+            if ($line !== null || $balance !== []) {
                 $remaining -= $takeQty;
-                $lines[] = $line;
+                $lines = [...$lines, ...$this->withBalance($line, $balance)];
             }
         }
 
@@ -1118,19 +1282,195 @@ class ProrataComposer
     }
 
     /**
+     * The credit lines for one renewal line: its own and those out of its balance. A
+     * renewal line the payment did not cover at all (the seat was added after the debit
+     * was created) is not "covered by a coupon" when its balance paid for it — the zero
+     * line is left out and the balance line says what comes back.
+     *
+     * @param  list<ProrataLine>  $balance
+     * @return list<ProrataLine>
+     */
+    private function withBalance(?ProrataLine $line, array $balance): array
+    {
+        if ($line === null || ($line->isCouponCovered && $balance !== [])) {
+            return $balance;
+        }
+
+        return [$line, ...$balance];
+    }
+
+    /**
+     * Under a fixed-amount coupon, a seat or addon is credited at no more than the share
+     * the discount leaves of the configuration the customer is on.
+     *
+     * A fixed amount is spread over an invoice's lines in proportion
+     * ({@see paidLineNet()}), so the share a line was paid at depends on what else was on
+     * the invoice. After a downgrade whose payment settled across a renewal, the renewal
+     * is booked for the dearer plan: 10.00 off Enterprise with a seat and Storage (214.00)
+     * leaves every line at 204/214, while on Pro (64.00) — which is what the customer has
+     * paid for the period once the difference was returned — it leaves 54/64. The plan
+     * line is already settled at the lower of the two ({@see planRefundLines()}); the
+     * seat and the addon kept the renewal's share and were credited up to
+     * (5.00 + 9.00) × 19/28 × (204/214 − 54/64) = 1.04 too much.
+     *
+     * Only for lines of a renewal booked for another plan than the current one: wherever
+     * the invoice states the configuration the customer is on, its own shares are exact.
+     *
+     * @param  list<ProrataLine>  $refunds
+     * @return list<ProrataLine>
+     */
+    private function capAtCurrentDiscountShare(PlanChangeIntent $intent, array $refunds): array
+    {
+        if ($refunds === []) {
+            return $refunds;
+        }
+
+        $coupons = app(CouponService::class);
+        $marker = $coupons->getActiveRecurringCouponMarker($intent->billable);
+
+        if (! is_array($marker)
+            || PlanWaiver::isWaiver($marker)
+            || (string) ($marker['discount_type'] ?? '') !== \GraystackIT\MollieBilling\Enums\DiscountType::Fixed->value
+        ) {
+            return $refunds;
+        }
+
+        $currentNet = SubscriptionAmount::net(
+            $this->catalog,
+            $intent->billable,
+            $intent->currentPlan,
+            $intent->currentInterval,
+            $intent->currentSeats,
+            array_map('strval', array_keys(array_filter($intent->currentAddons, fn ($q): bool => (int) $q > 0))),
+        );
+
+        if ($currentNet <= 0) {
+            return $refunds;
+        }
+
+        $share = ($currentNet - min($currentNet, $coupons->computeMarkerDiscount($intent->billable, $currentNet))) / $currentNet;
+
+        foreach ($refunds as $i => $refund) {
+            $invoice = $refund->originalInvoice;
+
+            if ($invoice === null
+                || $refund->originalLineItemIndex === null
+                || $refund->isCouponCovered
+                || ! in_array($refund->kind, ['seats', 'addon', 'addon_seats'], true)
+                || $this->isBalanceLine($invoice, $refund->originalLineItemIndex)
+                || in_array($this->resolveOriginalPlanCode($invoice), [null, $intent->currentPlan], true)
+            ) {
+                continue;
+            }
+
+            $line = $invoice->lineItem($refund->originalLineItemIndex) ?? [];
+            $list = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0) * $refund->quantity / max(1, (int) ($line['quantity'] ?? 1));
+            ['factor' => $factor] = $this->periodMath($refund->periodStart, $refund->periodEnd);
+            $cap = (int) round($list * $share * min(1.0, $factor));
+
+            if (abs($refund->amountNet) <= $cap) {
+                continue;
+            }
+
+            $vat = (int) round($cap * $refund->vatRate / 100);
+
+            $refunds[$i] = new ProrataLine(
+                originalInvoice: $invoice,
+                originalLineItemIndex: $refund->originalLineItemIndex,
+                kind: $refund->kind,
+                code: $refund->code,
+                label: $refund->label,
+                quantity: $refund->quantity,
+                amountNet: -$cap,
+                vatRate: $refund->vatRate,
+                amountVat: -$vat,
+                amountGross: -($cap + $vat),
+                periodStart: $refund->periodStart,
+                periodEnd: $refund->periodEnd,
+                daysActive: $refund->daysActive,
+                daysRemaining: $refund->daysRemaining,
+                isCouponCovered: $cap === 0,
+                direction: 'refund',
+            );
+        }
+
+        return $refunds;
+    }
+
+    /** Whether the line is the balance of a component ({@see UndercollectionCharge}), not a charge of its own. */
+    private function isBalanceLine(BillingInvoice $invoice, int $idx): bool
+    {
+        return (($invoice->lineItem($idx) ?? [])['undercollection'] ?? false) === true;
+    }
+
+    /**
+     * The credit for `$quantity` units of a renewal line out of the balance that completed it.
+     *
+     * A renewal that Mollie created before a seat or an addon was added is short of it;
+     * the rest is collected as a balance with a line per component
+     * ({@see UndercollectionCharge::lines()}). The component was then paid in two
+     * documents — on the renewal's line (less what its `adjustment` takes off it) and on
+     * the balance line — and a credit has to come out of both, in the same share: the
+     * units given back over the units the renewal line states. Credited from the renewal
+     * alone, a seat paid 5.00 came back at 5.00 × 50/55 × 19/28 = 3.08 instead of 3.39.
+     *
+     * @return list<ProrataLine>
+     */
+    private function balanceRefundLines(BillingInvoice $renewal, int $idx, string $kind, ?string $code, int $quantity): array
+    {
+        $renewalLine = $renewal->lineItem($idx) ?? [];
+        $ofQuantity = max(1, (int) ($renewalLine['quantity'] ?? 1));
+        $key = self::lineKey(['kind' => $kind, 'code' => $code]);
+        $out = [];
+
+        $balances = BillingInvoice::query()
+            ->where('billable_type', $renewal->billable_type)
+            ->where('billable_id', $renewal->billable_id)
+            ->where('status', \GraystackIT\MollieBilling\Enums\InvoiceStatus::Paid)
+            ->whereNotNull('mollie_payment_id')
+            ->where('id', '>', $renewal->getKey())
+            ->orderBy('id')
+            ->get();
+
+        foreach ($balances as $balance) {
+            foreach ((array) ($balance->line_items ?? []) as $balanceIdx => $line) {
+                if (! is_array($line)
+                    || ($line['undercollection'] ?? false) !== true
+                    || (int) ($line['completes_invoice_id'] ?? 0) !== (int) $renewal->getKey()
+                    || self::lineKey($line) !== $key
+                    || (int) ($line['amount_net'] ?? 0) <= 0
+                ) {
+                    continue;
+                }
+
+                $refund = $this->buildRefundLine($balance, (int) $balanceIdx, $kind, $code, $quantity, $ofQuantity);
+
+                if ($refund !== null && ! $refund->isCouponCovered) {
+                    $out[] = $refund;
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Builds a refund line for a specific original line with a given quantity reduction.
      *
      * Returns null if nothing is left open on the original invoice (e.g. after a
      * previous goodwill full refund). Callers filter null.
      */
-    private function buildRefundLine(BillingInvoice $invoice, int $idx, string $kind, ?string $code, int $quantity): ?ProrataLine
+    private function buildRefundLine(BillingInvoice $invoice, int $idx, string $kind, ?string $code, int $quantity, ?int $ofQuantity = null): ?ProrataLine
     {
         $line = $invoice->lineItem($idx);
         if ($line === null) {
             throw new \RuntimeException("Original-Line-Item $idx nicht gefunden in Invoice {$invoice->id}.");
         }
 
-        $originalQty = max(1, (int) ($line['quantity'] ?? 1));
+        // `$ofQuantity`: the units the line's amount stands for when that is not its own
+        // quantity — a balance line is one position for the units of the renewal line it
+        // completes ({@see balanceRefundLines()}).
+        $originalQty = max(1, $ofQuantity ?? (int) ($line['quantity'] ?? 1));
         $originalCashNet = $this->paidLineNet($invoice, $line);
         $vatRate = (float) ($line['vat_rate'] ?? 0);
 

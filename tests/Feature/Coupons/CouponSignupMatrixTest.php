@@ -639,16 +639,19 @@ it('auto-applied Recurring at 100% on a trial signup: waits for the later of the
     expect(SignupMollieRecorder::lastPayment()['metadata']['pending_subscription_coupon_code'])->toBe('TRYFREE3M')
         ->and(SignupMollieRecorder::lastPayment()['metadata']['pending_subscription_trial_days'])->toBe(14);
 
-    // A 14-day trial ends long before three free months do: charging at trial end
-    // would collect full price during months the coupon promised free, and charging
-    // only at the coupon's end would be right here but wrong the other way round
-    // (a 90-day trial with a one-month coupon).
+    // Charging at trial end would collect full price during months the coupon promised
+    // free. The three free periods are the subscription's own and start where its first
+    // charge would be, at the trial's end: three calendar months on that day (shortened
+    // where a month does not have it). Until 17 November 2026 they were counted from the
+    // signup in 30-day blocks, `now + 92` days, and the trial ate two weeks of them.
+    $firstCharge = BillingTime::nowUtc()->addDays(14)->addMonthsNoOverflow(3);
+
     expect(SignupMollieRecorder::lastSubscription()['amount'])->toBe('23.80')
         ->and(SignupMollieRecorder::lastSubscription()['start_date'])
-        ->toBe(BillingTime::nowUtc()->addDays(92)->toDateString())
+        ->toBe($firstCharge->toDateString())
         ->and($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Trial);
 
-    $this->travel(93)->days();
+    $this->travelTo($firstCharge->copy()->setTime(7, 0));
     $charge = renewSignup($billable, 'tr_signup_trial_free_end', '23.80');
 
     expect((int) $charge->amount_net)->toBe(2000)

@@ -249,7 +249,12 @@ new class extends Component {
         // forceImmediateCharge() looks at neither status nor start date, so the click
         // PATCHed startDate to today on an Active subscription and collected a second full
         // period for one already paid. Same shape as the admin past-due list's retry().
-        if (! $billable->isBillingPastDue()) {
+        // Nor for a subscription that is past due only because an overage debt stands:
+        // its period is paid, and bringing the next charge forward would collect the
+        // following one today.
+        if (! $billable->isBillingPastDue()
+            || \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebtOnly($billable)
+        ) {
             $this->flash = __('billing::portal.flash.force_charge_no_longer_needed');
             $this->flashError = true;
 
@@ -344,7 +349,7 @@ new class extends Component {
         }
 
         return [
-            'until' => (string) BillingTime::display($until, $b)?->translatedFormat('d. M Y'),
+            'until' => (string) BillingTime::billingDay($until)?->translatedFormat('d. M Y'),
             'on_expiry' => \GraystackIT\MollieBilling\Services\Billing\PlanWaiver::normalizeOnExpiry($marker['on_expiry'] ?? null),
         ];
     }
@@ -408,15 +413,29 @@ new class extends Component {
         // before the first charge fell due). Surface the scheduled charge date
         // and offer a "charge now" button instead of the generic past-due
         // banner — the user has nothing to fix; the money is on its way.
+        // Not for an overage debt: there the scheduled charge is the ordinary next renewal
+        // of a period that is paid, and the banner below says what is actually owed.
+        $overageDebt = null;
+        if (\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebt($b)) {
+            // Read off the snapshot, not deferredDebtAmount(): the debt is just as open
+            // while one of the renewals' attempts is on its way to the bank.
+            $debt = (array) ($b->getBillingSubscriptionMeta()[\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::META_KEY] ?? []);
+            $overageDebt = \GraystackIT\MollieBilling\Support\BillingMoney::format(
+                (int) ($debt['amount_gross'] ?? 0),
+                (string) ($debt['currency'] ?? config('mollie-billing.currency', 'EUR')),
+            );
+        }
+        $overageDebtOnly = \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebtOnly($b);
+
         $pendingMollieCharge = null;
-        if ($status === SubscriptionStatus::PastDue) {
+        if ($status === SubscriptionStatus::PastDue && ! $overageDebtOnly) {
             $snapshot = app(MollieSubscriptionGate::class)->snapshot($b);
             if ($snapshot !== null
                 && $snapshot->startDate !== null
                 && $snapshot->startDate->isFuture()
             ) {
                 $pendingMollieCharge = [
-                    'date' => BillingTime::display($snapshot->startDate, $b)?->translatedFormat('d. M Y') ?? '—',
+                    'date' => BillingTime::billingDay($snapshot->startDate)?->translatedFormat('d. M Y') ?? '—',
                 ];
             }
         }
@@ -494,22 +513,23 @@ new class extends Component {
             'hasSubscription' => $planCode !== null,
             'planName' => $b->getCurrentBillingPlanName() ?? __('billing::portal.no_subscription'),
             'interval' => $interval,
-            'nextBilling' => BillingTime::display(
+            // Billing days, not instants — see BillingTime::billingDay().
+            'nextBilling' => BillingTime::billingDay(
                 $status === SubscriptionStatus::Trial ? $b->getBillingTrialEndsAt() : $b->nextBillingDate(),
-                $b,
             )?->translatedFormat('d. M Y') ?? '—',
-            'periodStart' => BillingTime::display($b->getBillingPeriodStartsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
+            'periodStart' => BillingTime::billingDay($b->getBillingPeriodStartsAt())?->translatedFormat('d. M Y') ?? '—',
             'seatCount' => $b->getBillingSeatCount(),
             'includedSeats' => $b->getIncludedBillingSeats(),
             'addonCount' => count($addonCodes),
             'addonLabels' => $addonLabels,
             'isTrial' => $status === SubscriptionStatus::Trial,
             'isPastDue' => $status === SubscriptionStatus::PastDue,
+            'overageDebt' => $overageDebt,
             'pendingMollieCharge' => $pendingMollieCharge,
             'isActive' => $status === SubscriptionStatus::Active,
             'isCancelled' => $status === SubscriptionStatus::Cancelled,
-            'trialEnds' => BillingTime::display($b->getBillingTrialEndsAt(), $b)?->translatedFormat('d. M Y') ?? '—',
-            'subscriptionEnds' => BillingTime::display($b->getBillingSubscriptionEndsAt(), $b)?->translatedFormat('d. M Y'),
+            'trialEnds' => BillingTime::billingDay($b->getBillingTrialEndsAt())?->translatedFormat('d. M Y') ?? '—',
+            'subscriptionEnds' => BillingTime::billingDay($b->getBillingSubscriptionEndsAt())?->translatedFormat('d. M Y'),
             'subscriptionEndsFuture' => $b->getBillingSubscriptionEndsAt()?->isFuture() ?? false,
             // AccessGrant: a Local subscription with a finite end date that is
             // still in the future and not (yet) cancelled. Free Local plans have
@@ -543,7 +563,7 @@ new class extends Component {
             'planName' => $planCode ? ($catalog->planName($planCode) ?? $planCode) : null,
             'interval' => $sc['interval'] ?? null,
             'scheduledAt' => isset($sc['scheduled_at'])
-                ? BillingTime::display(\Carbon\Carbon::parse((string) $sc['scheduled_at'])->setTimezone('UTC'), $b)->translatedFormat('d. M Y')
+                ? BillingTime::billingDay(\Carbon\Carbon::parse((string) $sc['scheduled_at']))->translatedFormat('d. M Y')
                 : null,
         ];
     }
@@ -584,6 +604,10 @@ new class extends Component {
             <flux:callout icon="clock" color="amber" inline>
                 {{ __('billing::portal.trial_banner', ['date' => $d['trialEnds']]) }}
             </flux:callout>
+        @elseif ($d['isPastDue'] && $d['overageDebt'] !== null)
+            <flux:callout icon="exclamation-triangle" color="red" inline dusk="overage-debt-banner">
+                {{ __('billing::portal.overage_debt_banner', ['amount' => $d['overageDebt']]) }}
+            </flux:callout>
         @elseif ($d['isPastDue'] && $d['pendingMollieCharge'])
             <flux:callout icon="clock" color="amber" inline>
                 <div class="flex items-center justify-between gap-4 w-full">
@@ -617,6 +641,8 @@ new class extends Component {
                 </div>
             </flux:callout>
         @endif
+
+        <x-mollie-billing::change-notices :billable="$billable" />
 
         {{-- Country mismatch: Pending --}}
         @if ($d['mismatch'])

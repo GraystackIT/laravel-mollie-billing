@@ -72,6 +72,19 @@ class ProrataChargeHandler
             return;
         }
 
+        // The separate payment for an undercollected period is not a plan change.
+        if (\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::owns($metadata)) {
+            app(\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::class)->paid($payment, $billable, $metadata);
+
+            return;
+        }
+
+        // A payment this handler already returned as unwanted: pick the refund up again if
+        // it is not through, announce nothing twice.
+        if (app(UnwantedPaymentRefund::class)->resume($payment, $billable)) {
+            return;
+        }
+
         if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
             Log::info('Webhook re-delivery: invoice exists for prorata charge, skipping', [
                 'payment_id' => $payment->id ?? null,
@@ -79,6 +92,12 @@ class ProrataChargeHandler
             ]);
             return;
         }
+
+        // A payment whose creation went unanswered (a timeout, a failed write): nothing
+        // points at it yet, but the note written before Mollie was asked names its token.
+        // Taken over here, it carries its change out like any other — instead of being
+        // returned and charged a second time by the next attempt.
+        $this->adoptChargeInCreation($payment, $billable, $metadata);
 
         $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
         if (empty($pending) || ! $this->paymentOwnsPending($payment, $pending)) {
@@ -316,8 +335,17 @@ class ProrataChargeHandler
         // `$wasTrial` was resolved before the period decision above — same status, one
         // source of truth for both the anchor and the Mollie cadence.
         $wasPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
+        $changeEvents = [];
+
         if ($intentData !== null) {
             $meta = $billable->getBillingSubscriptionMeta();
+
+            // What the billable looked like before the switch — the change is announced
+            // from the difference, further down.
+            $seatsBefore = $billable->getBillingSeatCount();
+            $addonsBefore = array_values($billable->getActiveBillingAddonCodes());
+            $planBefore = $billable->getBillingSubscriptionPlanCode();
+            $intervalBefore = $billable->getBillingSubscriptionInterval();
 
             // The intent first: it is the change that was validated, and what the PATCH
             // below prices Mollie from. The charge invoice only *suggests* a count —
@@ -356,11 +384,71 @@ class ProrataChargeHandler
                 'subscription_meta' => $meta,
                 ...($startsNewPeriod ? ['subscription_period_starts_at' => $newPeriodStart] : []),
                 ...($wasPastDue || $wasTrial ? [
-                    'subscription_status' => SubscriptionStatus::Active,
+                    // Not `Active` outright: an overage debt that stands keeps its lock.
+                    'subscription_status' => \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::statusAfterRecovery($meta, SubscriptionStatus::Active),
                     'subscription_ends_at' => null,
                 ] : []),
                 ...($wasTrial ? ['trial_ends_at' => null] : []),
             ])->save();
+
+            // The change is in force from here, so this is where it is announced. It was
+            // not: `update()` dispatches PlanChanged & co. for a change it applies itself,
+            // and a change that waits for its charge was applied by this handler in
+            // silence — no event for the app's listeners (the documented extension seam),
+            // no `plan_changed` row in the audit trail, for every paid upgrade.
+            $seatsAfter = (int) $meta['seat_count'];
+            $addonsAfter = array_values($billable->getActiveBillingAddonCodes());
+            $addonsAdded = array_values(array_diff($addonsAfter, $addonsBefore));
+            $addonsRemoved = array_values(array_diff($addonsBefore, $addonsAfter));
+            $planMoved = (string) $planBefore !== $newPlanCode;
+            $intervalMoved = (string) $intervalBefore !== $newIntervalCode;
+
+            if ($planMoved || $intervalMoved) {
+                $changeEvents[] = new \GraystackIT\MollieBilling\Events\PlanChanged($billable, $planBefore ?: null, $newPlanCode, $newIntervalCode);
+
+                // A balance still open for the configuration that has just been left is
+                // owed only for the days it ran; a declined one is closed.
+                app(\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::class)->configurationLeft($billable, (string) $planBefore);
+            }
+
+            if ($seatsAfter !== $seatsBefore) {
+                $changeEvents[] = new \GraystackIT\MollieBilling\Events\SeatsChanged($billable, $seatsBefore, $seatsAfter);
+            }
+
+            foreach ($addonsAdded as $code) {
+                $changeEvents[] = new \GraystackIT\MollieBilling\Events\AddonEnabled($billable, (string) $code);
+            }
+
+            foreach ($addonsRemoved as $code) {
+                $changeEvents[] = new \GraystackIT\MollieBilling\Events\AddonDisabled($billable, (string) $code);
+            }
+
+            $changeEvents[] = new \GraystackIT\MollieBilling\Events\SubscriptionUpdated(
+                $billable,
+                [
+                    'plan_code' => $newPlanCode,
+                    'interval' => $newIntervalCode,
+                    'seats' => $seatsAfter,
+                    'addons' => $addonsAfter,
+                ],
+                [
+                    'planChanged' => $planMoved,
+                    'intervalChanged' => $intervalMoved,
+                    'seatsChanged' => $seatsAfter !== $seatsBefore,
+                    'addonsAdded' => $addonsAdded,
+                    'addonsRemoved' => $addonsRemoved,
+                ],
+            );
+        }
+
+        // Each one isolated: a listener that throws must not stop the PATCH below.
+        foreach ($changeEvents as $changeEvent) {
+            $this->support->safely(
+                fn () => event($changeEvent),
+                'prorata_charge.change_event',
+                $billable,
+                ['payment_id' => (string) ($payment->id ?? ''), 'event' => $changeEvent::class],
+            );
         }
 
         // Redeem AFTER the local switch (the recurring marker's lifetime is
@@ -460,9 +548,9 @@ class ProrataChargeHandler
      * billable still describes the old plan: the new configuration for the days that are
      * left, less the unused share of what the renewal collected.
      *
-     * - **More** than was collected (an upgrade): nothing is charged. A second prorata
-     *   payment from inside a webhook is a new money flow, and one the customer never
-     *   saw a price for. It is reported — {@see UndercollectionReporter}.
+     * - **More** than was collected (an upgrade): the difference is collected as its own
+     *   payment with its own invoice, exactly once, and the customer is told the amount
+     *   and the reason — {@see \GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge}.
      * - **Less** (a downgrade): the difference is given back against the renewal, the
      *   same way a renewal collected at a superseded price is.
      *
@@ -484,12 +572,13 @@ class ProrataChargeHandler
         if ($net > 0) {
             $collected = (int) ($renewal?->amount_net ?? 0);
 
-            app(\GraystackIT\MollieBilling\Services\Billing\UndercollectionReporter::class)->report(
+            app(\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::class)->settle(
                 $billable,
                 $renewal,
                 $collected + $net,
                 $collected,
                 \GraystackIT\MollieBilling\Events\RenewalUndercollected::REASON_PLAN_CHANGE_SPANNED_RENEWAL,
+                (string) ($pending['intent']['new_plan'] ?? '') ?: null,
             );
 
             return;
@@ -713,6 +802,34 @@ class ProrataChargeHandler
         return $expected === '' || $expected === (string) ($payment->id ?? '');
     }
 
+    /**
+     * Take a payment over whose creation went unanswered — see
+     * `InvoiceService::CHARGE_IN_CREATION_KEY`. Only when its token is the one noted and
+     * no other change holds the slot; a note withdrawn with its change is gone, so a late
+     * payment for it is returned instead.
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function adoptChargeInCreation(object $payment, Billable $billable, array $metadata): void
+    {
+        $token = (string) ($metadata['charge_token'] ?? '');
+
+        if ($token === '' || ! ($billable instanceof Model)) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $marker = $meta[\GraystackIT\MollieBilling\Services\Billing\InvoiceService::CHARGE_IN_CREATION_KEY] ?? null;
+
+        if (! is_array($marker) || (string) ($marker['token'] ?? '') !== $token || ! empty($meta['pending_prorata_change'])) {
+            return;
+        }
+
+        app(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class)
+            ->adoptChargeInCreation($billable, $token, (string) ($payment->id ?? ''));
+        $billable->refresh();
+    }
+
     protected function reportOrphanedCharge(object $payment, Billable $billable): void
     {
         $paymentId = (string) ($payment->id ?? '');
@@ -737,7 +854,10 @@ class ProrataChargeHandler
             }
         }
 
-        Log::error('Paid prorata charge without pending plan change — money collected for a cancelled plan change', [
+        // The customer cancelled this change; the money for it arrived anyway. It is not
+        // applied — and it is not left for someone to refund by hand either: booked,
+        // credited and returned in full, the customer told. See UnwantedPaymentRefund.
+        Log::info('Prorata payment settled for a cancelled plan change — returning it', [
             'payment_id' => $paymentId,
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             'amount_cents' => $amountCents,
@@ -745,29 +865,13 @@ class ProrataChargeHandler
             'cancelled_at' => $orphan['cancelled_at'] ?? null,
         ]);
 
-        $admins = MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+        $intended = (string) ($orphan['pending_plan_change']['plan_code'] ?? '');
 
-        if ($admins === []) {
-            return;
-        }
-
-        Notification::send(
-            $admins,
-            MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                'Prorata charge was paid after the pending plan change had been cancelled — the amount needs to be refunded manually',
-                [
-                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                    'payment_id' => $paymentId,
-                    'amount_cents' => $amountCents,
-                    'currency' => isset($payment->amount->currency) ? (string) $payment->amount->currency : null,
-                    'cancel_reason' => $orphan['reason'] ?? null,
-                    'cancelled_at' => $orphan['cancelled_at'] ?? null,
-                    'intended_plan_change' => $orphan['pending_plan_change'] ?? null,
-                    'charge_lines' => $orphan['prorata_charge_lines'] ?? null,
-                ],
-            ),
+        app(UnwantedPaymentRefund::class)->settle(
+            $payment,
+            $billable,
+            UnwantedPaymentRefund::REASON_CHANGE_CANCELLED,
+            'Subscription change'.($intended !== '' ? ' to '.$intended : '').' — cancelled before the payment arrived, not carried out',
         );
     }
 
@@ -891,7 +995,7 @@ class ProrataChargeHandler
             $billable->forceFill(['subscription_meta' => $meta])->save();
         }
 
-        Log::error('Prorata charge settled for a subscription that no longer runs — not applied, needs a manual refund', [
+        Log::info('Prorata charge settled for a subscription that no longer runs — not applied, returning it', [
             'payment_id' => $paymentId,
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             'amount_cents' => $amountCents,
@@ -905,28 +1009,66 @@ class ProrataChargeHandler
             'Subscription no longer runs ('.$status->value.') — prorata charge not applied',
         ));
 
-        $admins = MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+        // The money is returned automatically rather than reported for a manual refund.
+        $intended = (string) ($pending['intent']['new_plan'] ?? '');
 
-        if ($admins === []) {
+        app(UnwantedPaymentRefund::class)->settle(
+            $payment,
+            $billable,
+            UnwantedPaymentRefund::REASON_SUBSCRIPTION_ENDED,
+            'Subscription change'.($intended !== '' ? ' to '.$intended : '').' — the subscription had ended before the payment arrived, not carried out',
+        );
+    }
+
+    /**
+     * Put back what a change committed before it was paid for — locally and at Mollie.
+     *
+     * A plan or interval switch defers its local write until its charge clears, but a
+     * seat or addon change does not: `UpdateSubscription`'s phase 3 writes `seat_count`
+     * and `active_addon_codes` straight away and reports success. When the charge is
+     * then declined — with SEPA, days later — nothing undid it: the customer kept
+     * three seats they had not paid for, `FeatureAccess` kept granting the add-on's
+     * features, and the next renewal rebuilt its lines from the inflated count.
+     *
+     * The pre-change state is exactly what the stored intent holds. The validator
+     * refuses a second change while one is pending, so nothing legitimate can have
+     * moved these in between.
+     *
+     * Mollie is put back with it. A seat or addon change PATCHes the recurring amount in
+     * the same call that writes the local state (UpdateSubscription, phase 2c), so that
+     * the two never disagree across a renewal. Restoring only the local half would leave
+     * Mollie collecting for seats the customer no longer has. A plan or interval change
+     * never patched before its charge cleared — there is nothing to take back.
+     *
+     * Called for a declined charge ({@see failed()}) and for a waiting change that is
+     * withdrawn with its scheduled change
+     * (`UpdateSubscription::withdrawPendingChangeForPayment()`). Reaches Mollie.
+     *
+     * @param  array<string, mixed>  $intent  the stored `pending_prorata_change.intent`
+     */
+    public function restoreUnpaidChange(Billable $billable, array $intent): void
+    {
+        if (! ($billable instanceof Model)) {
             return;
         }
 
-        Notification::send(
-            $admins,
-            MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                'Prorata charge was paid after the subscription ended — the plan change was not applied and the amount needs to be refunded manually',
-                [
-                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                    'payment_id' => $paymentId,
-                    'amount_cents' => $amountCents,
-                    'currency' => isset($payment->amount->currency) ? (string) $payment->amount->currency : null,
-                    'subscription_status' => $status->value,
-                    'intended_plan_change' => $pending['intent'] ?? null,
-                ],
-            ),
-        );
+        $attributes = [];
+
+        if (array_key_exists('current_seats', $intent)) {
+            $meta = $billable->getBillingSubscriptionMeta();
+            $meta['seat_count'] = (int) $intent['current_seats'];
+            $attributes['subscription_meta'] = $meta;
+        }
+
+        if (array_key_exists('current_addons', $intent)) {
+            $attributes['active_addon_codes'] = array_values(array_keys((array) $intent['current_addons']));
+        }
+
+        if ($attributes !== []) {
+            $billable->forceFill($attributes)->save();
+        }
+
+        $this->revertRecurringAmount($billable, $intent);
     }
 
     /**
@@ -938,6 +1080,21 @@ class ProrataChargeHandler
     {
         if (! ($billable instanceof Model)) {
             return;
+        }
+
+        // The separate payment for an undercollected period: an unpaid recurring amount,
+        // handled by the ordinary dunning.
+        if (\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::owns($metadata)) {
+            app(\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::class)->failed($payment, $billable, $metadata);
+
+            return;
+        }
+
+        // A payment whose creation went unanswered and that failed: nothing to take over.
+        $token = (string) ($metadata['charge_token'] ?? '');
+        if ($token !== '') {
+            app(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class)->forgetChargeInCreation($billable, $token);
+            $billable->refresh();
         }
 
         $meta = $billable->getBillingSubscriptionMeta();
@@ -969,41 +1126,11 @@ class ProrataChargeHandler
         $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
         $meta['plan_change_failed_reason'] = $reason;
 
-        $attributes = ['subscription_meta' => $meta];
+        $billable->forceFill(['subscription_meta' => $meta])->save();
 
-        // Put back what the change committed before it was paid for.
-        //
-        // A plan or interval switch defers its local write until this charge clears, but a
-        // seat or addon change does not: `UpdateSubscription`'s phase 3 writes `seat_count`
-        // and `active_addon_codes` straight away and reports success. When the charge is
-        // then declined — with SEPA, days later — nothing here undid it: the customer kept
-        // three seats they had not paid for, `FeatureAccess` kept granting the add-on's
-        // features, and the next renewal rebuilt its lines from the inflated count while
-        // Mollie was still billing the old amount (no PATCH runs on the deferred path).
-        //
-        // The pre-change state is exactly what the stored intent holds. The validator
-        // refuses a second change while one is pending, so nothing legitimate can have
-        // moved these in between.
         $intent = (array) ($pending['intent'] ?? []);
 
-        if (array_key_exists('current_seats', $intent)) {
-            $meta['seat_count'] = (int) $intent['current_seats'];
-            $attributes['subscription_meta'] = $meta;
-        }
-
-        if (array_key_exists('current_addons', $intent)) {
-            $attributes['active_addon_codes'] = array_values(array_keys((array) $intent['current_addons']));
-        }
-
-        $billable->forceFill($attributes)->save();
-
-        // ...and put Mollie back with it. A seat or addon change PATCHes the recurring
-        // amount in the same call that writes the local state (UpdateSubscription, phase
-        // 2c), so that the two never disagree across a renewal. Restoring only the local
-        // half here would leave Mollie collecting for seats the customer no longer has.
-        // A plan or interval change never patched before its charge cleared — there is
-        // nothing to take back.
-        $this->revertRecurringAmount($billable, $intent);
+        $this->restoreUnpaidChange($billable, $intent);
         app(\GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange::class)->realignScheduled($billable);
 
         event(new PlanChangeFailed($billable, $pending, (string) $payment->id, $reason));

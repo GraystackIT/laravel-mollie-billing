@@ -67,8 +67,7 @@ final class MollieCall
      */
     public static function send(object $request, ?string $idempotencyKey = null): mixed
     {
-        self::assertNoOpenTransaction($request);
-        self::assertAmountsAreScaled($request);
+        self::assertSendable($request);
 
         if ($idempotencyKey === null) {
             return Mollie::send($request);
@@ -93,6 +92,20 @@ final class MollieCall
             // rejected with a 400 for reusing a key with different parameters.
             self::forgetIdempotencyKey();
         }
+    }
+
+    /**
+     * The checks `send()` makes before anything goes out — no open transaction, every
+     * amount at its currency's scale.
+     *
+     * Public for a test double that answers a request itself instead of sending it (see
+     * `MolliePaymentCredits`): the request it answers is then held to the same rules as
+     * one that goes over the wire, so the guard stays live in a test that stubs the reply.
+     */
+    public static function assertSendable(object $request): void
+    {
+        self::assertNoOpenTransaction($request);
+        self::assertAmountsAreScaled($request);
     }
 
     /**

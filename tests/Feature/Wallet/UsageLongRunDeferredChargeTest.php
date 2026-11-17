@@ -24,6 +24,22 @@ afterEach(function (): void {
     \Carbon\CarbonImmutable::setTestNow();
 });
 
+/**
+ * The marker as the release before 17 November 2026 wrote it: its window `N × 30 (or 365)
+ * + 1` days, no `charge_resumes_at`, so the charge is deferred to the day after — a day or
+ * two past a period boundary. Such markers keep their date (docs/decisions.md, "A recurring
+ * code's window counts billing periods"), and the hand-over from a deferral that does not
+ * end on a boundary is what these tests are about; a period extension produces the same.
+ */
+function usageLongRunLegacyMarker(UsageLongRunHarness $run, string $validUntil): void
+{
+    $billable = $run->fresh();
+    $meta = $billable->getBillingSubscriptionMeta();
+    unset($meta['active_recurring_coupon']['charge_resumes_at']);
+    $meta['active_recurring_coupon']['valid_until'] = $validUntil;
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+}
+
 function usageLongRunDeferredBillable(UsageLongRunHarness $run, Carbon $start): void
 {
     UsageLongRunHarness::definePlan();
@@ -48,9 +64,11 @@ it('credits each period of a 100 % coupon once, and the first paid period once',
         'max_redemptions_per_billable' => 3,
     ]);
     $coupons->applyRecurringMarker($coupon, $run->fresh(), 1000, 'monthly');
+    // 10 January 09:00 + 3 × 30 + 1 days.
+    usageLongRunLegacyMarker($run, '2026-04-11T09:00:00+00:00');
 
-    // What CreateSubscription stores for a fully covered subscription: the charge is
-    // deferred to the day after the marker's own end (now + 3 × 30 + 1 days).
+    // What CreateSubscription stored for such a marker: the charge is deferred to the day
+    // after the marker's own end.
     $billable = $run->fresh();
     $meta = $billable->getBillingSubscriptionMeta();
     $deferredUntil = Carbon::parse($meta['active_recurring_coupon']['valid_until'])->addDay();
@@ -229,4 +247,142 @@ it('ends a gift that was given to end: cancelled by the nightly pass, expired af
         ->and($run->units('SMS', 'subscription_renewal_rollover'))->toBe(2 * 50)
         ->and(in_array(CancelSubscriptionRequest::class, $run->requests, true))->toBeTrue()
         ->and($run->paymentRequests)->toBe(0);
+});
+
+it('keeps turning the period over when an extension is appended to a deferred charge', function (): void {
+    $run = UsageLongRunHarness::boot();
+    $start = Carbon::parse('2026-01-10T09:00:00Z');
+    usageLongRunDeferredBillable($run, $start);
+
+    $coupons = app(CouponService::class);
+    $coupon = $coupons->create([
+        'code' => 'FREE3MEXT',
+        'name' => 'Free for three periods',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+        'max_redemptions_per_billable' => 3,
+    ]);
+    $coupons->applyRecurringMarker($coupon, $run->fresh(), 1000, 'monthly');
+    usageLongRunLegacyMarker($run, '2026-04-11T09:00:00+00:00');
+
+    $billable = $run->fresh();
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta[ChargeDeferral::META_KEY] = Carbon::parse($meta['active_recurring_coupon']['valid_until'])->addDay()->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    // The nightly pass up to the second covered period …
+    for ($day = $start->copy()->addDay()->startOfDay(); $day->lessThan(Carbon::parse('2026-02-20')); $day->addDay()) {
+        $run->travelTo($day->copy()->setTime(1, 0));
+        $run->night();
+    }
+
+    // … in which an operator adds twenty days.
+    $run->travelTo('2026-02-20T10:00:00Z');
+    app(AdminExtensionService::class)->extendByDays($run->fresh(), 20);
+
+    $deferredUntil = ChargeDeferral::until($run->fresh());
+
+    // Appended to the deferral (12 April + 20 days), and the period left alone.
+    expect($deferredUntil?->toDateString())->toBe('2026-05-02')
+        ->and($run->fresh()->nextBillingDate()->toIso8601String())->toBe('2026-03-10T09:00:00+00:00');
+
+    $firstCharge = $deferredUntil->copy()->setTime(9, 0);
+    $anchors = [];
+
+    for ($day = Carbon::parse('2026-02-20'); $day->lessThan(Carbon::parse('2026-05-10')); $day->addDay()) {
+        $run->travelTo($day->copy()->setTime(1, 0));
+        $run->night();
+        $run->settleOpenOverage();
+
+        if ($day->isSameDay($firstCharge)) {
+            $run->travelTo($firstCharge->copy()->addMinutes(2));
+            $run->renew($firstCharge);
+        }
+
+        $anchor = $run->fresh()->subscription_period_starts_at->toDateString();
+        if (end($anchors) !== $anchor) {
+            $anchors[] = $anchor;
+        }
+    }
+
+    // 10 Feb (already running), 10 Mar, 10 Apr — the 22 days from 10 April to 2 May are
+    // more than half a period, so they are one — and then the paid period from 2 May.
+    expect($anchors)->toBe(['2026-02-10', '2026-03-10', '2026-04-10', '2026-05-02']);
+
+    // One quota per period: Feb, Mar, Apr from the nightly pass, May from the webhook.
+    expect($run->count('Tokens', 'period_credit'))->toBe(4)
+        ->and($run->units('SMS', 'subscription_renewal_rollover'))->toBe(4 * 50)
+        ->and($run->invoiceCount('subscription'))->toBe(1);
+});
+
+it('turns a yearly period over under a deferred charge, and hands back to the renewal once', function (): void {
+    $run = UsageLongRunHarness::boot();
+    $start = Carbon::parse('2026-03-15T09:00:00Z');
+
+    UsageLongRunHarness::definePlan();
+    $run->travelTo($start);
+    $run->createBillable([
+        'subscription_period_starts_at' => $start,
+        'subscription_interval' => \GraystackIT\MollieBilling\Enums\SubscriptionInterval::Yearly,
+    ]);
+    $run->credit('Tokens', 1200);
+    $run->credit('SMS', 600);
+
+    $coupons = app(CouponService::class);
+    $coupon = $coupons->create([
+        'code' => 'FREE2Y',
+        'name' => 'Free for two years',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+        'max_redemptions_per_billable' => 2,
+    ]);
+    $coupons->applyRecurringMarker($coupon, $run->fresh(), 10000, 'yearly');
+    // 15 March 2026 09:00 + 2 × 365 + 1 days (across 29 February 2028).
+    usageLongRunLegacyMarker($run, '2028-03-15T09:00:00+00:00');
+
+    $billable = $run->fresh();
+    $meta = $billable->getBillingSubscriptionMeta();
+    $deferredUntil = Carbon::parse($meta['active_recurring_coupon']['valid_until'])->addDay();
+    $meta[ChargeDeferral::META_KEY] = $deferredUntil->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    // Two years of 365 days plus two: 16 March 2028, a day after the second boundary.
+    expect($deferredUntil->toDateString())->toBe('2028-03-16');
+
+    $firstCharge = $deferredUntil->copy()->setTime(9, 0);
+    $credits = [];
+
+    for ($day = $start->copy()->addDay()->startOfDay(); $day->lessThan(Carbon::parse('2028-03-25')); $day->addDay()) {
+        $run->travelTo($day->copy()->setTime(1, 0));
+        $run->night();
+        $run->settleOpenOverage();
+
+        // 1 300 of 1 200 Tokens used in the first year.
+        if ($day->toDateString() === '2026-11-01') {
+            $run->travelTo($day->copy()->setTime(12, 0));
+            $run->use('Tokens', 1300);
+        }
+
+        if ($day->isSameDay($firstCharge)) {
+            $run->travelTo($firstCharge->copy()->addMinutes(2));
+            $run->renew($firstCharge, '119.00');
+            $run->settleOpenOverage();
+        }
+
+        if ($run->count('Tokens', 'period_credit') !== count($credits)) {
+            $credits[] = $day->toDateString();
+        }
+    }
+
+    // The second year begins with the nightly pass (the night before 15 March 2027); the
+    // boundary of 15 March 2028 is one day ahead of the returning charge and credits
+    // nothing; the charge of the 16th does.
+    expect($credits)->toBe(['2027-03-14', '2028-03-16'])
+        ->and($run->units('SMS', 'subscription_renewal_rollover'))->toBe(2 * 600)
+        ->and($run->balance('Tokens'))->toBe(1200)
+        // The first year's 100 units of overage were collected at its boundary.
+        ->and($run->billedUnits())->toBe(['Tokens@10' => 100])
+        ->and($run->paymentRequests)->toBe(1);
 });

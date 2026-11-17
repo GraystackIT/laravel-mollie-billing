@@ -188,6 +188,7 @@ it('moves the deferred charge on retry when appended free periods could not be P
     $service->freePlanPeriods($billable, 1);
     $firstDeferral = ChargeDeferral::until($billable->fresh());
 
+    $this->travel(AdminExtensionService::REPEAT_GUARD_SECONDS + 1)->seconds();
     WaiverAuditMollie::$failNext = 1;
     $service->freePlanPeriods($billable->fresh(), 1);
 
@@ -480,8 +481,15 @@ it('ends the subscription exactly when the gift no longer reaches the next charg
     $end = Carbon::parse((string) app(PlanWaiver::class)->marker($billable)['valid_until']);
     $waiver = app(PlanWaiver::class);
 
-    // "A renewal is plan-free when it falls before the gift's end."
-    expect($waiver->endsSubscription($billable, $end->copy()->subSecond()))->toBeFalse()
+    // "A renewal is plan-free when it falls before the gift's end" — before the gift's end
+    // DAY. A gift has no partial days: a charge on the last day, at whatever hour (Mollie
+    // creates its charges early in the morning, the gift may have been given at noon), is
+    // the first one the gift does not cover. See PlanWaiver::endDay().
+    $endDay = $end->copy()->utc()->startOfDay();
+
+    expect($waiver->endsSubscription($billable, $endDay->copy()->subSecond()))->toBeFalse()
+        ->and($waiver->endsSubscription($billable, $endDay->copy()))->toBeTrue()
+        ->and($waiver->endsSubscription($billable, $end->copy()->subSecond()))->toBeTrue()
         ->and($waiver->endsSubscription($billable, $end->copy()))->toBeTrue()
         ->and($waiver->endsSubscription($billable, $end->copy()->addSecond()))->toBeTrue();
 });

@@ -22,8 +22,11 @@ dataset('scheduling discounts', [
     'no discount' => 'none',
     '50 % coupon' => 'pct50',
     'fixed coupon' => 'fixed',
-    'waiver for N periods' => 'waiver-periods',
+    '50 % coupon, last period' => 'pct50-last',
+    'waiver until a date, then ends' => 'waiver-date-end',
     'waiver until a date, then paid' => 'waiver-date-paid',
+    'waiver for N periods' => 'waiver-periods',
+    'waiver with a granted addon' => 'waiver-gift',
 ]);
 
 /** Gross Mollie should hold for the billable on a target configuration. */

@@ -101,18 +101,23 @@ class SupersededRenewalRefund
 
         // The other direction. The payment was created for a configuration that cost
         // LESS than the one the billable is on now — a seat or addon booked after Mollie
-        // had already created this debit. Nothing is taken from here; it is recorded and
-        // the admins are told the amount ({@see UndercollectionReporter}). Only when the
+        // had already created this debit. The difference is collected as its own payment,
+        // exactly once ({@see UndercollectionCharge}). Only when the
         // payment itself says it was priced for something else: a shortfall with matching
         // metadata is a discount or a PATCH that did not land, and stays with
         // `PaymentAmountMismatch`.
         if ($surplusNet < 0 && $supersededConfiguration) {
-            app(UndercollectionReporter::class)->report(
+            $components = $this->componentsAddedSince($billable, $invoice, $metadata, $plan, $interval);
+
+            $this->nameWhatTheAdjustmentReduces($invoice, $components, -$surplusNet);
+
+            app(UndercollectionCharge::class)->settle(
                 $billable,
                 $invoice,
                 $componentsNet,
                 $componentsNet + $surplusNet,
                 \GraystackIT\MollieBilling\Events\RenewalUndercollected::REASON_RENEWAL_CREATED_BEFORE_CHANGE,
+                components: $components,
             );
 
             return false;
@@ -128,6 +133,123 @@ class SupersededRenewalRefund
         ));
 
         return false;
+    }
+
+    /**
+     * What the billable holds beyond what the payment was created for, at the list
+     * amounts the renewal's own lines state: the seats and addons that were booked after
+     * Mollie had prepared this debit. This is what the debit is short of.
+     *
+     * @param  array<string, mixed>  $metadata
+     * @return list<array{kind: string, code: ?string, quantity: int, net: int, label: string}>
+     */
+    private function componentsAddedSince(Billable $billable, BillingInvoice $invoice, array $metadata, string $plan, string $interval): array
+    {
+        $catalog = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class);
+
+        $extraNow = (int) $billable->getExtraBillingSeats();
+        $extraThen = array_key_exists('extra_seats', $metadata) ? (int) $metadata['extra_seats'] : $extraNow;
+        $addonsNow = array_values(array_map('strval', $billable->getActiveBillingAddonCodes()));
+        $addonsThen = array_key_exists('addon_codes', $metadata)
+            ? array_values(array_map('strval', (array) $metadata['addon_codes']))
+            : $addonsNow;
+        $seatsThen = $catalog->includedSeats($plan) + $extraThen;
+
+        $components = [];
+
+        foreach ((array) ($invoice->line_items ?? []) as $line) {
+            if (! is_array($line)) {
+                continue;
+            }
+
+            $kind = (string) ($line['kind'] ?? '');
+            $kind = $kind === 'seat' ? 'seats' : $kind;
+            $code = isset($line['code']) ? (string) $line['code'] : null;
+            $net = (int) ($line['amount_net'] ?? $line['total_net'] ?? 0);
+            $quantity = max(1, (int) ($line['quantity'] ?? 1));
+
+            if ($net <= 0) {
+                continue;
+            }
+
+            // How many of the line's units the payment did not know about.
+            $added = match (true) {
+                $kind === 'seats' => $extraNow - $extraThen,
+                $kind === 'addon' && $code !== null => in_array($code, $addonsThen, true) ? 0 : $quantity,
+                $kind === 'addon_seats' && $code !== null => in_array($code, $addonsThen, true)
+                    ? $quantity - \GraystackIT\MollieBilling\Support\SubscriptionAmount::addonChargedSeats($catalog, $code, $plan, $interval, $seatsThen)
+                    : $quantity,
+                default => 0,
+            };
+
+            $added = min($quantity, $added);
+
+            if ($added <= 0) {
+                continue;
+            }
+
+            $components[] = [
+                'kind' => $kind,
+                'code' => $code,
+                'quantity' => $added,
+                'net' => (int) round($net * $added / $quantity),
+                'label' => (string) ($line['label'] ?? $kind),
+            ];
+        }
+
+        return $components;
+    }
+
+    /**
+     * Say on the renewal which of its lines the `adjustment` takes its amount off.
+     *
+     * The renewal is booked with the lines of the configuration the billable is on and
+     * one `adjustment` down to what Mollie collected. Read without more, that reduction
+     * spreads over every line — the plan counts as partly unpaid and the added seat as
+     * mostly paid — although the truth is the opposite: the payment covered the plan in
+     * full and the added seat not at all. `reduces` (line key => net) puts each cent
+     * where it belongs; `ProrataComposer::paidLineNet()` reads it. The amounts are the
+     * same split the balance is invoiced in ({@see UndercollectionCharge::split()}), so
+     * a renewal line and its balance line add up to the component's price.
+     *
+     * Document metadata only: no amount, total or printed line changes.
+     *
+     * @param  list<array{kind: string, code: ?string, quantity: int, net: int, label: string}>  $components
+     */
+    private function nameWhatTheAdjustmentReduces(BillingInvoice $invoice, array $components, int $shortfall): void
+    {
+        if ($components === [] || $shortfall <= 0) {
+            return;
+        }
+
+        $lines = (array) ($invoice->line_items ?? []);
+
+        foreach ($lines as $index => $line) {
+            if (! is_array($line)
+                || ($line['kind'] ?? null) !== 'adjustment'
+                || (int) ($line['amount_net'] ?? $line['total_net'] ?? 0) >= 0
+            ) {
+                continue;
+            }
+
+            if (isset($line['reduces'])) {
+                return;
+            }
+
+            $reduces = [];
+
+            foreach (UndercollectionCharge::split($shortfall, $components) as $i => $net) {
+                if ($net > 0) {
+                    $key = ProrataComposer::lineKey($components[$i]);
+                    $reduces[$key] = ($reduces[$key] ?? 0) + $net;
+                }
+            }
+
+            $lines[$index]['reduces'] = $reduces;
+            $invoice->forceFill(['line_items' => $lines])->save();
+
+            return;
+        }
     }
 
     /**

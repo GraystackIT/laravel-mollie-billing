@@ -60,6 +60,27 @@ class BillingTime
     }
 
     /**
+     * A billing DAY for the portal: a charge date, a period boundary, the end of a
+     * subscription, a trial or a gift. Shown as the calendar day the package computes it
+     * on — in UTC — whatever the billable's timezone, and never as an instant converted
+     * into it.
+     *
+     * Mollie charges a subscription on a date (`nextPaymentDate`), at an hour nobody
+     * chooses (measured: 00:28 UTC), and the package compares these values as days. The
+     * instant behind them carries an hour that is incidental — the hour the first payment
+     * was made, or the hour Mollie's scheduler happened to run. Converted, the same charge
+     * read "10 Feb" before the first renewal (anchored on a payment at 10:00 UTC) and
+     * "9 Mar" after it (anchored on Mollie's 00:28) for a customer in New York; next to
+     * "plan free until 10 Apr" the portal showed a full-price charge on 9 April. A day is
+     * not an instant: events that happened at a moment (an invoice, a usage booking, a
+     * purchase) keep {@see display()}.
+     */
+    public static function billingDay(?CarbonInterface $dt): ?CarbonInterface
+    {
+        return $dt?->copy()->setTimezone('UTC');
+    }
+
+    /**
      * One billing interval after `$at`, clamped to the end of a shorter month.
      *
      * `addMonth()` overflows: 31 January plus one month is 3 March, not 28 February. That is

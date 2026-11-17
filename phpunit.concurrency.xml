@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true">
+    <!-- Concurrency suite only: each case starts two PHP worker processes against one
+         SQLite file and one cache, and holds them in a slowed fake-Mollie call for a few
+         seconds. phpunit.xml.dist deliberately does not list tests/Concurrency — the
+         feature suite stays single-process and fast. Run via `composer test:concurrency`;
+         see docs/concurrency-testing.md. -->
+    <testsuites>
+        <testsuite name="Concurrency">
+            <directory>tests/Concurrency</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+    </php>
+</phpunit>

@@ -47,12 +47,14 @@
         "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license."
     },
     "require-dev": {
+        "league/flysystem-aws-s3-v3": "^3.35",
         "livewire/flux-pro": "^2.0",
         "mockery/mockery": "^1.6",
         "orchestra/testbench": "^10.0|^11.0",
         "orchestra/testbench-dusk": "^10.0|^11.0",
         "pestphp/pest": "^3.0|^4.0",
-        "pestphp/pest-plugin-laravel": "^3.0|^4.0"
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0",
+        "smalot/pdfparser": "^2.13"
     },
     "autoload": {
         "psr-4": {
@@ -68,7 +70,24 @@
     "scripts": {
         "test": "pest --compact",
         "test:browser": "@php vendor/bin/pest --compact --configuration=phpunit.dusk.xml",
+        "test:browser:quick": "@php vendor/bin/pest --compact --configuration=phpunit.dusk.quick.xml",
+        "test:coverage-claims": "@php vendor/bin/pest --compact tests/Feature/Coverage",
+        "test:concurrency": "@php vendor/bin/pest --compact --configuration=phpunit.concurrency.xml",
+        "test:concurrency:pgsql": [
+            "@putenv BILLING_CONCURRENCY_DB=pgsql",
+            "@php vendor/bin/pest --compact --configuration=phpunit.concurrency.xml"
+        ],
+        "test:concurrency:redis": [
+            "@putenv BILLING_CONCURRENCY_CACHE=redis",
+            "@php vendor/bin/pest --compact --configuration=phpunit.concurrency.xml"
+        ],
+        "test:s3": [
+            "@putenv BILLING_S3_ENDPOINT=http://127.0.0.1:9000",
+            "@php vendor/bin/pest --compact tests/Feature/Config/RemoteDiskLiveS3Test.php"
+        ],
         "test:sandbox": "@php vendor/bin/pest --configuration=phpunit.sandbox.xml",
+        "test:sandbox:browser": "@php vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --exclude-filter=SubscriptionCanaryTest",
+        "test:sandbox:canary": "@php vendor/bin/pest --configuration=phpunit.sandbox-browser.xml tests/SandboxBrowser/SubscriptionCanaryTest.php",
         "browser:assets": "npm run build",
         "browser:driver": "@php vendor/bin/dusk-updater detect --auto-update",
         "browser:gallery": "@php tests/Browser/gallery.php"

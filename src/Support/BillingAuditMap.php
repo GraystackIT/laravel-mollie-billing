@@ -123,6 +123,8 @@ final class BillingAuditMap
                     'actual_cents' => $e->collectedNet,
                     'amount_cents' => $e->shortfallNet,
                     'reason' => $e->reason,
+                    'mollie_payment_id' => $e->chargePaymentId,
+                    'charged' => $e->chargePaymentId !== null,
                 ]),
 
             Events\PlanChanged::class => self::make('plan_changed', AuditCategory::Subscription,
@@ -238,6 +240,14 @@ final class BillingAuditMap
                     ...self::exception($e->exception),
                 ]),
 
+            Events\OverageWrittenOff::class => self::make('overage_written_off', AuditCategory::Payment,
+                fn (Events\OverageWrittenOff $e): array => [
+                    'amount_net_cents' => $e->amountNet,
+                    'amount_gross_cents' => $e->amountGross,
+                    'attempts' => $e->attempts,
+                    'line_count' => count($e->lineItems),
+                ]),
+
             // ---------------------------------------------------------------
             // Invoices
             // ---------------------------------------------------------------
@@ -265,6 +275,16 @@ final class BillingAuditMap
                     'amount_cents' => (int) abs((int) $e->reversal->amount_gross),
                     'mollie_refund_id' => $e->mollieRefundId,
                     'status' => $e->status,
+                ]),
+
+            Events\UnwantedPaymentRefunded::class => self::make('unwanted_payment_refunded', AuditCategory::Invoice,
+                fn (Events\UnwantedPaymentRefunded $e): array => [
+                    'serial' => $e->invoice->serial_number,
+                    'credit_note_serial' => $e->creditNote?->serial_number,
+                    'amount_cents' => (int) abs((int) $e->invoice->amount_gross),
+                    'mollie_payment_id' => $e->paymentId,
+                    'reason' => $e->reason,
+                    'refund_queued' => $e->creditNote === null,
                 ]),
 
             Events\GrantExtrasPurchaseRefunded::class => self::make('grant_extras_purchase_refunded', AuditCategory::Invoice,
@@ -305,6 +325,14 @@ final class BillingAuditMap
                     'reason' => $e->reason,
                 ]),
 
+            Events\MollieSubscriptionReplaced::class => self::make('mollie_subscription_replaced', AuditCategory::PaymentMethod,
+                fn (Events\MollieSubscriptionReplaced $e): array => [
+                    'previous_subscription_id' => $e->previousSubscriptionId,
+                    'mollie_subscription_id' => $e->subscriptionId,
+                    'start_date' => $e->startDate->toDateString(),
+                    'reason' => $e->reason,
+                ]),
+
             // ---------------------------------------------------------------
             // Coupons / grants
             // ---------------------------------------------------------------
@@ -313,6 +341,14 @@ final class BillingAuditMap
                     'code' => $e->coupon->code,
                     'coupon_type' => self::enumValue($e->coupon->type),
                     'redemption_id' => $e->redemption->getKey(),
+                ]),
+
+            Events\CouponRedemptionRecordMissing::class => self::make('coupon_redemption_record_missing', AuditCategory::Coupon,
+                fn (Events\CouponRedemptionRecordMissing $e): array => [
+                    'code' => $e->coupon->code,
+                    'coupon_type' => self::enumValue($e->coupon->type),
+                    'discount_cents' => $e->discountNet,
+                    'error' => $e->error,
                 ]),
 
             Events\GrantRevoked::class => self::make('grant_revoked', AuditCategory::Coupon,

@@ -16,14 +16,21 @@ use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\InvoiceAvailableNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Jobs\RetrySubscriptionActivationJob;
+use GraystackIT\MollieBilling\Support\ActivationRetry;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+use GraystackIT\MollieBilling\Support\MollieCall;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 
 class WebhookSupport
 {
+    use MutatesBillingMeta;
+
     /**
      * subscription_meta key under which an in-flight activation parks its claim.
      */
@@ -134,14 +141,10 @@ class WebhookSupport
                 $billable->syncOriginalAttribute('subscription_meta');
             }
 
-            // A cycle that gave up was written off with its past-due transition (see
-            // hasUnsettledOverageFor()). Re-charging it here would be a fourth attempt on
-            // a payment method that failed three times yesterday; the next period-end
-            // sweep is where a new cycle starts, as before.
-            if (($billable->getBillingSubscriptionMeta()['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_FAILED) {
-                return;
-            }
-
+            // A debt left standing by a cycle that gave up is collected again from here:
+            // `handle()` starts one fresh cycle for it per renewal, once it has rested
+            // (ChargeUsageOverageDirectly::RECOLLECT_AFTER_DAYS), until the renewals'
+            // attempts are spent and it is written off.
             app(ChargeUsageOverageDirectly::class)->handle($billable);
         } catch (\Throwable $e) {
             // `charge()` has already recorded what it knows: a snapshot, and the
@@ -181,10 +184,8 @@ class WebhookSupport
             return false;
         }
 
-        if (($billable->getBillingSubscriptionMeta()['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_FAILED) {
-            return false;
-        }
-
+        // No exception for a failed cycle any more: its debt has left the wallet (it
+        // stands in the snapshot instead), so a negative balance here is new overage.
         $wallet = $billable->getWallet($usageType);
 
         if ($wallet === null || (int) $wallet->balanceInt >= 0) {
@@ -206,8 +207,8 @@ class WebhookSupport
      * Read off the snapshot `ChargeUsageOverageDirectly` persists, which lists exactly
      * the line items it charged for — so a type the charge did not cover still gets its
      * ordinary reset. A snapshot whose cycle already gave up (`STATUS_FAILED`) is not
-     * "in flight": that debt was written off with a past-due transition, and preserving
-     * it forever would keep the customer at a negative balance no settlement will clear.
+     * "in flight": its debt has been taken off the wallet to stand as a receivable (see
+     * `ChargeUsageOverageDirectly::deferFailedCycle()`), so there is nothing to preserve.
      *
      * A charge for the units being re-credited may still be settling — with SEPA it
      * usually is, since Mollie creates the renewal about two days ahead while the overage
@@ -226,6 +227,12 @@ class WebhookSupport
         $lines = (array) ($meta[ChargeUsageOverageDirectly::META_KEY]['line_items'] ?? []);
 
         foreach ($lines as $line) {
+            // A line that does not settle the wallet has no units on it to preserve: a
+            // plan-change remainder, or a standing debt being collected again.
+            if (($line['settles_wallet'] ?? true) === false) {
+                continue;
+            }
+
             $type = (string) ($line['type'] ?? $line['code'] ?? '');
 
             if (strcasecmp($type, $usageType) === 0 && (int) ($line['quantity'] ?? 0) > 0) {
@@ -788,6 +795,18 @@ class WebhookSupport
     public function activationCompleted(Billable $billable): bool
     {
         if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value) {
+            // A free plan is "active" before, during and after a failed upgrade to a paid
+            // one. While an upgrade away from it is on record as unfinished — a retry
+            // marker, or the origin a full-coverage upgrade remembers — that accessible
+            // local plan is the starting point, not the result: calling it complete made
+            // the retry job clear its marker and leave the customer on the free plan with
+            // a mandate, an invoice and no subscription.
+            $meta = $billable->getBillingSubscriptionMeta();
+
+            if (! empty($meta[\GraystackIT\MollieBilling\Support\ActivationRetry::META_KEY]) || isset($meta['upgrade_from_local_origin'])) {
+                return false;
+            }
+
             return $billable->hasAccessibleBillingSubscription();
         }
 
@@ -797,174 +816,278 @@ class WebhookSupport
     }
 
     /**
-     * Report a recurring charge that arrived for a subscription which no longer runs.
+     * A recurring charge arrived for a subscription which no longer runs — settle it.
      *
-     * The invoice has been written — the money did arrive and the customer is entitled to
-     * a document, and an operator needs something to refund against — but nothing that
-     * treats the charge as a live renewal has run. Mollie keeps charging a subscription
-     * whose local cancel never landed, and until this existed every period was booked as
-     * an ordinary renewal: anchor advanced, wallets recharged, invoice mailed to somebody
-     * who cancelled.
+     * Mollie keeps charging a subscription whose local cancel never reached it. The
+     * invoice has been written by the caller: the money did arrive, and it is what the
+     * refund is credited against. Nothing that treats the charge as a live renewal has run.
+     *
+     * This used to stop at a mail asking an operator to refund the payment and cancel the
+     * Mollie subscription by hand. Both are done here now: the Mollie subscription is
+     * cancelled first (so no further period is collected while the refund is under way),
+     * then the payment goes back in full through `UnwantedPaymentRefund` — credit note,
+     * net zero — and the customer is told. An operator hears about it only when one of
+     * the two cannot be done: a refund Mollie would not take is queued under
+     * `pending_refund_retries` and reported by `UnwantedPaymentRefund`, a cancel that
+     * keeps failing by `RetrySubscriptionCancelJob`.
+     *
+     * Idempotent by the caller's invoice guard: a re-delivery never gets here.
      */
     public function reportRenewalForEndedSubscription(Billable $billable, object $payment, BillingInvoice $invoice): void
     {
         $paymentId = (string) ($payment->id ?? '');
         $status = $billable->getBillingSubscriptionStatus()->value;
-        $reason = 'A recurring charge was collected for a subscription that no longer runs (status '.$status.')';
 
-        Log::error('Recurring charge collected for an ended subscription', [
+        Log::warning('Recurring charge collected for an ended subscription — refunding it and cancelling at Mollie', [
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             'payment_id' => $paymentId,
             'invoice_id' => $invoice->getKey(),
             'status' => $status,
         ]);
 
-        event(new RenewalCollectedForEndedSubscription(
+        $this->safely(fn () => event(new RenewalCollectedForEndedSubscription(
             $billable,
             $paymentId,
             (int) $invoice->getKey(),
             (int) $invoice->amount_gross,
             $status,
-        ));
+        )), 'ended_renewal.event', $billable);
 
-        $admins = MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+        $this->cancelMollieSubscriptionOfEndedBillable($billable, $payment);
 
-        if ($admins === []) {
-            return;
-        }
-
-        Notification::send(
-            $admins,
-            MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                'Mollie collected a renewal for a subscription that no longer runs — it needs refunding and the Mollie subscription needs cancelling',
-                [
-                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                    'payment_id' => $paymentId,
-                    'invoice_id' => $invoice->getKey(),
-                    'invoice_serial' => $invoice->serial_number,
-                    'amount_gross' => (int) $invoice->amount_gross,
-                    'status' => $status,
-                    'error' => $reason,
-                ],
-            ),
+        app(UnwantedPaymentRefund::class)->settle(
+            $payment,
+            $billable,
+            UnwantedPaymentRefund::REASON_RENEWAL_AFTER_END,
+            'Renewal collected after the subscription had ended',
         );
     }
 
     /**
-     * Report an activation the handler refused because the subscription is not in a state
-     * it may activate.
+     * Stop Mollie from collecting again. A failure is parked under
+     * `pending_subscription_cancel`, the marker `SweepPendingRetriesJob` turns into a
+     * `RetrySubscriptionCancelJob` — the same ladder a failed customer cancel takes.
+     */
+    protected function cancelMollieSubscriptionOfEndedBillable(Billable $billable, object $payment): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $subscriptionId = (string) ($payment->subscriptionId ?? '');
+        $customerId = (string) ($payment->customerId ?? $billable->getMollieCustomerId() ?? '');
+
+        $this->cancelMollieSubscriptionById($billable, $customerId, $subscriptionId);
+    }
+
+    /**
+     * Cancel one Mollie subscription of the billable, by id. A subscription that is gone
+     * already — 404, 410, or Mollie's 422 "The subscription has been cancelled." for one
+     * cancelled before (a subscription replaced to move its charge date is such a one:
+     * see `MollieSubscriptionReplacer`) — is the outcome wanted. Any other failure is
+     * parked under `pending_subscription_cancel` for `RetrySubscriptionCancelJob`.
+     */
+    public function cancelMollieSubscriptionById(Billable $billable, string $customerId, string $subscriptionId): void
+    {
+        if (! ($billable instanceof Model) || $subscriptionId === '' || $customerId === '') {
+            return;
+        }
+
+        try {
+            MollieCall::send(new \Mollie\Api\Http\Requests\CancelSubscriptionRequest($customerId, $subscriptionId));
+
+            return;
+        } catch (\Throwable $e) {
+            if (\GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer::cancelledAlready($e)) {
+                return;
+            }
+
+            $error = $e->getMessage();
+        }
+
+        Log::error('Could not cancel the Mollie subscription of an ended subscription — queued for retry', [
+            'billable_id' => $billable->getKey(),
+            'mollie_subscription_id' => $subscriptionId,
+            'error' => $error,
+        ]);
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($customerId, $subscriptionId, $error): array {
+            $meta['pending_subscription_cancel'] ??= [
+                'mollie_customer_id' => $customerId,
+                'mollie_subscription_id' => $subscriptionId,
+                'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                'last_error' => $error,
+            ];
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Create the Mollie subscription of an activation — or, on a retry, adopt the one
+     * the first attempt already created.
+     *
+     * `CreateSubscription` can fail AFTER Mollie created the subscription: the answer is
+     * lost, or the local write behind it throws. A blind second create is the defect the
+     * two-phase activation exists to prevent — two subscriptions charging one customer
+     * every period, one of them with nothing local pointing at it. So a retry asks Mollie
+     * first, and an existing subscription for this billable and configuration is taken
+     * over: `CreateSubscription` then writes the local state and skips the call.
+     *
+     * A lookup that fails is not treated as "none": it throws, and the retry comes back.
+     *
+     * @param  array<string, mixed>  $spec
+     */
+    public function createSubscription(\GraystackIT\MollieBilling\Services\Billing\CreateSubscription $service, Billable $billable, array $spec): void
+    {
+        if (ActivationRetry::resuming()) {
+            $existing = $this->existingMollieSubscription($billable, $spec);
+
+            if ($existing !== null) {
+                Log::warning('Activation retry found the Mollie subscription the first attempt created — adopting it', [
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'mollie_subscription_id' => $existing->id ?? null,
+                ]);
+
+                $spec['adopt_subscription'] = $existing;
+            }
+        }
+
+        $service->handle($billable, $spec);
+    }
+
+    /**
+     * @param  array<string, mixed>  $spec
+     */
+    protected function existingMollieSubscription(Billable $billable, array $spec): ?object
+    {
+        $customerId = (string) ($billable->getMollieCustomerId() ?? '');
+
+        if ($customerId === '' || ! ($billable instanceof Model)) {
+            return null;
+        }
+
+        $subscriptions = MollieCall::send(new \Mollie\Api\Http\Requests\GetPaginatedSubscriptionsRequest($customerId));
+
+        foreach ($subscriptions as $subscription) {
+            if (! in_array((string) ($subscription->status ?? ''), ['active', 'pending'], true)) {
+                continue;
+            }
+
+            $metadata = is_object($subscription->metadata ?? null)
+                ? (json_decode((string) json_encode($subscription->metadata), true) ?: [])
+                : (array) ($subscription->metadata ?? []);
+
+            if ((string) ($metadata['billable_id'] ?? '') === (string) $billable->getKey()
+                && (string) ($metadata['plan_code'] ?? '') === (string) ($spec['plan_code'] ?? '')
+                && (string) ($metadata['interval'] ?? '') === (string) ($spec['interval'] ?? '')
+            ) {
+                return $subscription;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Take the activation claim for a retry that resumes a booked payment.
+     *
+     * The gate answered `AlreadyBooked`, which claims nothing — so the resumed activation
+     * claims here, under the same row lock, before it runs outside any transaction.
+     * Throws ActivationClaimHeldException while a different payment's activation is in
+     * flight; the retry job comes back.
+     */
+    public function claimForResume(Billable $billable, string $paymentId): void
+    {
+        DB::transaction(function () use ($billable, $paymentId): void {
+            $this->lockBillableRow($billable);
+            $this->claimActivation($billable, $paymentId);
+        });
+    }
+
+    /**
+     * Hand an unfinished activation to `RetrySubscriptionActivationJob`.
+     *
+     * Returns true when this call started the retry ladder — the caller announces the
+     * failure then, once. False when the ladder is already running (a re-delivery), when
+     * this very call IS the retry, or when the payment has already been given back.
+     */
+    public function scheduleActivationRetry(Billable $billable, object $payment, string $context, string $reason): bool
+    {
+        $paymentId = (string) ($payment->id ?? '');
+
+        if (! ($billable instanceof Model) || $paymentId === '' || ActivationRetry::resuming()) {
+            return false;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (array_key_exists($paymentId, (array) ($meta[UnwantedPaymentRefund::META_KEY] ?? []))) {
+            return false;
+        }
+
+        $started = false;
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $context, $reason, &$started): array {
+            $pending = (array) ($meta[ActivationRetry::META_KEY] ?? []);
+
+            if (! array_key_exists($paymentId, $pending)) {
+                $started = true;
+                $pending[$paymentId] = [
+                    'context' => $context,
+                    'reason' => mb_substr($reason, 0, 500),
+                    'first_failed_at' => BillingTime::nowUtc()->toIso8601String(),
+                ];
+                $meta[ActivationRetry::META_KEY] = $pending;
+            }
+
+            return $meta;
+        });
+
+        $billable->refresh();
+
+        if ($started && ! RetrySubscriptionActivationJob::runsInline()) {
+            // Never what fails the delivery: the marker is written, and
+            // SweepPendingRetriesJob picks up a marker whose job never ran.
+            $this->safely(function () use ($paymentId, $billable): void {
+                // The configured FQCN, not getMorphClass(): the job resolves by class name.
+                RetrySubscriptionActivationJob::dispatch($paymentId, $billable::class, $billable->getKey())
+                    ->delay(BillingTime::nowUtc()->addSeconds(RetrySubscriptionActivationJob::FIRST_RETRY_SECONDS));
+            }, 'activation_retry.dispatch', $billable, ['payment_id' => $paymentId]);
+        }
+
+        return $started;
+    }
+
+    /**
+     * An activation was refused because the subscription is not in a state it may be
+     * activated from, or its coupon no longer covers what the checkout promised.
      *
      * By the time this is reachable the mandate has been saved, so the customer has
-     * handed over a payment method and received nothing for it. That was a `Log::info`
-     * and a return: no event, no alert, and a return page that span to a timeout. The
-     * cheapest fix for the customer is an operator who knows within seconds.
+     * handed over a payment method and received nothing for it. The activation is tried
+     * again on its own; an operator is told when those attempts are spent.
      */
     public function reportSkippedActivation(Billable $billable, object $payment, string $context, ?string $reason = null): void
     {
-        $paymentId = (string) ($payment->id ?? '');
-        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
-        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
         $status = $billable->getBillingSubscriptionStatus()->value;
         $reason ??= 'Mandate captured but the subscription was not activated: status '.$status.' is not activatable';
 
-        Log::error('Mandate-only activation skipped', [
-            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-            'payment_id' => $paymentId,
-            'context' => $context,
-            'status' => $status,
-        ]);
-
-        event(new SubscriptionActivationFailed(
-            $billable,
-            $planCode,
-            $interval,
-            $paymentId,
-            null,
-            $reason,
-        ));
-
-        $admins = MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
-
-        if ($admins === []) {
-            return;
-        }
-
-        Notification::send(
-            $admins,
-            MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                'A mandate was captured but the subscription was not activated — the customer is left with nothing',
-                [
-                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                    'payment_id' => $paymentId,
-                    'context' => $context,
-                    'plan_code' => $planCode,
-                    'interval' => $interval,
-                    'status' => $status,
-                    'error' => $reason,
-                ],
-            ),
-        );
+        $this->announceActivationFailure($billable, $payment, $context, $reason, null);
     }
 
     /**
-     * Report a re-delivery that found this payment's invoice but no finished
-     * activation.
-     *
-     * Nothing here retries: the invoice guard makes re-running the activation unsafe
-     * without more surgery than a webhook should do, and a mandate plus a paid invoice
-     * is a state an operator can resolve in seconds once they know about it. What
-     * mattered was that they were never told — this path logged at info level and
-     * returned, so a paying customer sat with no subscription indefinitely.
+     * A payment has its invoice but no finished activation: the run died between the
+     * two, or the Mollie subscription could not be created. Retried on its own — see
+     * `RetrySubscriptionActivationJob`, which resumes exactly here.
      */
-    public function reportIncompleteActivation(Billable $billable, object $payment, string $context): void
+    public function reportIncompleteActivation(Billable $billable, object $payment, string $context, ?string $reason = null): void
     {
-        $paymentId = (string) ($payment->id ?? '');
-        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
-        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
-        $reason = 'Activation never completed: this payment has an invoice but the subscription was not created';
-
-        Log::error('Webhook re-delivery found an incomplete activation', [
-            'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-            'payment_id' => $paymentId,
-            'context' => $context,
-            'status' => $billable->getBillingSubscriptionStatus()->value,
-        ]);
-
-        event(new SubscriptionActivationFailed(
+        $this->announceActivationFailure(
             $billable,
-            $planCode,
-            $interval,
-            $paymentId,
+            $payment,
+            $context,
+            $reason ?? 'Activation never completed: this payment has an invoice but the subscription was not created',
             null,
-            $reason,
-        ));
-
-        $admins = MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
-
-        if ($admins === []) {
-            return;
-        }
-
-        Notification::send(
-            $admins,
-            MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                'A paid payment has an invoice but its subscription was never created — the customer is paying for nothing',
-                [
-                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                    'payment_id' => $paymentId,
-                    'context' => $context,
-                    'plan_code' => $planCode,
-                    'interval' => $interval,
-                    'status' => $billable->getBillingSubscriptionStatus()->value,
-                    'error' => $reason,
-                ],
-            ),
         );
     }
 
@@ -977,44 +1100,46 @@ class WebhookSupport
         string $logMessage,
         \Throwable $error,
     ): void {
+        $this->announceActivationFailure($billable, $payment, $logMessage, $error->getMessage(), $invoice, $planCode, $interval);
+    }
+
+    /**
+     * Log, queue the retry, and dispatch `SubscriptionActivationFailed` — the event once
+     * per payment, when the retry ladder starts. No operator mail: that is the job's to
+     * send, at the end.
+     */
+    protected function announceActivationFailure(
+        Billable $billable,
+        object $payment,
+        string $context,
+        string $reason,
+        ?BillingInvoice $invoice,
+        ?string $planCode = null,
+        ?string $interval = null,
+    ): void {
         $paymentId = (string) ($payment->id ?? '');
 
-        Log::warning($logMessage, [
+        Log::warning('Subscription activation did not finish — it will be retried', [
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-            'plan_code' => $planCode,
-            'interval' => $interval,
             'payment_id' => $paymentId,
-            'invoice_id' => (int) $invoice->id,
-            'error' => $error->getMessage(),
+            'context' => $context,
+            'status' => $billable->getBillingSubscriptionStatus()->value,
+            'invoice_id' => $invoice?->getKey(),
+            'retrying' => ActivationRetry::resuming(),
+            'error' => $reason,
         ]);
 
-        event(new SubscriptionActivationFailed(
-            $billable,
-            $planCode,
-            $interval,
-            $paymentId,
-            (int) $invoice->id,
-            $error->getMessage(),
-        ));
-
-        $admins = MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
-        if ($admins !== []) {
-            Notification::send(
-                $admins,
-                MollieBilling::resolveNotification(
-                    AdminPlanChangeFailedNotification::class,
-                    'Subscription activation after first payment failed — Mollie subscription was not created',
-                    [
-                        'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                        'plan_code' => $planCode,
-                        'interval' => $interval,
-                        'payment_id' => $paymentId,
-                        'invoice_id' => (int) $invoice->id,
-                        'error' => $error->getMessage(),
-                    ],
-                ),
-            );
+        if (! $this->scheduleActivationRetry($billable, $payment, $context, $reason)) {
+            return;
         }
+
+        $this->safely(fn () => event(new SubscriptionActivationFailed(
+            $billable,
+            $planCode ?? (string) ($billable->getBillingSubscriptionPlanCode() ?? ''),
+            $interval ?? (string) ($billable->getBillingSubscriptionInterval() ?? ''),
+            $paymentId,
+            $invoice !== null ? (int) $invoice->id : null,
+            $reason,
+        )), 'activation_failure.event', $billable);
     }
 }

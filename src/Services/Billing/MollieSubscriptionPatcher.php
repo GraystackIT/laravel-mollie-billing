@@ -20,23 +20,52 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
+use Mollie\Api\Http\Requests\GetSubscriptionRequest;
+use GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer;
 use Mollie\Api\Http\Requests\UpdateSubscriptionRequest as MollieUpdateSubscriptionRequest;
 use GraystackIT\MollieBilling\Support\MollieCall;
 
 /**
  * Responsible for Mollie subscription changes for future periods.
  *
- * Logic was extracted from UpdateSubscription:
- * - cancelAndRecreateMollieSubscription → updateRecurringAmount() (internally: cancel + create)
- * - cancelMollieSubscriptionForFreeDowngrade → cancelForFreeDowngrade()
- * - updateMollieSubscription → in-place PATCH (runs in the phase-2 path)
+ * Every change to a running subscription is first an in-place PATCH
+ * (`UpdateSubscriptionRequest`), sent by `sendUpdate()`: the subscription id, its mandate
+ * and its cycle stay, only amount, interval, description, metadata and — where asked
+ * for — the start date move.
+ *
+ * The start date is the exception Mollie makes. Once a subscription has been charged it
+ * refuses any new `startDate` (422 "…already charged", measured 17 November 2026), while
+ * amount, interval, description and metadata are still taken. So a change that has to
+ * move the next charge of a charged subscription replaces it: `MollieSubscriptionReplacer`
+ * cancels it and creates it again with the same amount, interval, description, metadata,
+ * mandate and webhook (or the ones the change asks for), first charged on the new date —
+ * never today or earlier. The PATCH is always tried first, so a subscription Mollie has not
+ * charged yet (a trial, a deferred start) keeps its id.
+ *
+ * The other cancel in this class is `cancelForFreeDowngrade()`: a target that bills
+ * nothing has no Mollie subscription.
+ *
+ * - updateForIntent()        → free target: cancelForFreeDowngrade(); otherwise updateRecurringAmount()
+ * - updateRecurringAmount()  → PATCH of the recurring amount for a plan/seat/addon configuration
+ * - deferNextChargeDate() / pushNextChargeDate() / setNextChargeDate() → PATCH of the start date
+ * - pinNextChargeDate()      → the anchor day, only where Mollie's own next date differs
+ * - cancelForFreeDowngrade() → CancelSubscriptionRequest
  */
 class MollieSubscriptionPatcher
 {
     use \GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+
+    /**
+     * The recurring-coupon marker a change is about to write, for the duration of one
+     * updateForIntent() call — see PlanChangeIntent::$couponMarker.
+     *
+     * @var ?array<string, mixed>
+     */
+    private ?array $upcomingCouponMarker = null;
 
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
@@ -57,6 +86,18 @@ class MollieSubscriptionPatcher
      */
     public function updateForIntent(Billable $billable, PlanChangeIntent $intent): bool
     {
+        // A cancelled or expired subscription has no Mollie subscription left to re-price:
+        // it was cancelled there when the customer cancelled, and collects nothing more.
+        // A seat or an addon given back in the days that are left is credited and that is
+        // all — a PATCH would be refused by Mollie and parked for a retry that can never
+        // succeed.
+        if (in_array($billable->getBillingSubscriptionStatus(), [
+            \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled,
+            \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Expired,
+        ], true)) {
+            return false;
+        }
+
         $extraSeats = max(0, $intent->newSeats - $this->catalog->includedSeats($intent->newPlan));
         $totalSeats = $this->catalog->includedSeats($intent->newPlan) + $extraSeats;
         $newAddons = array_keys($intent->newAddons);
@@ -91,43 +132,84 @@ class MollieSubscriptionPatcher
         // discounted amount for at least one more period, the invoice reconciled down to
         // it, and PaymentAmountMismatch fired on a payment nobody had asked to discount.
         $couponDiscountNet = 0;
-        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+        // A code entered with this very change has not been redeemed yet — its marker is
+        // written after this PATCH — so the intent carries the marker it will write.
+        $marker = $intent->couponMarker ?? ($billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null);
 
         if (is_array($marker)) {
-            $couponDiscountNet = app(CouponService::class)->computeMarkerDiscount($billable, $targetNet, [
+            $couponDiscountNet = app(CouponService::class)->computeDiscountOfMarkerOn($billable, $marker, $targetNet, [
                 // The configuration being moved TO: a plan waiver's ceiling follows the
                 // plan line, and the billable may still carry the old plan here.
                 'plan_code' => $intent->newPlan,
                 'interval' => $intent->newInterval,
                 'addon_codes' => $newAddons,
                 'seats' => $totalSeats,
-            ]);
+            ], $this->chargeDayForIntent($billable, $intent, $marker));
         }
 
-        $this->updateRecurringAmount(
-            billable: $billable,
-            planCode: $intent->newPlan,
-            interval: $intent->newInterval,
-            addons: $newAddons,
-            extraSeats: $extraSeats,
-            intervalChanged: $intent->currentInterval !== $intent->newInterval,
-            couponDiscountNet: $couponDiscountNet,
-            forceResetStartDate: $intent->forceResetStartDate,
-        );
+        // Read by fullCoverageStartDate() for this one call. A property rather than a
+        // parameter: updateRecurringAmount() is public and apps (and the test doubles)
+        // override it with its existing signature.
+        $previousMarker = $this->upcomingCouponMarker;
+        $this->upcomingCouponMarker = $intent->couponMarker;
+
+        try {
+            $this->updateRecurringAmount(
+                billable: $billable,
+                planCode: $intent->newPlan,
+                interval: $intent->newInterval,
+                addons: $newAddons,
+                extraSeats: $extraSeats,
+                intervalChanged: $intent->currentInterval !== $intent->newInterval,
+                couponDiscountNet: $couponDiscountNet,
+                forceResetStartDate: $intent->forceResetStartDate,
+            );
+        } finally {
+            $this->upcomingCouponMarker = $previousMarker;
+        }
 
         // `updateRecurringAmount()` throws on failure, so reaching here means Mollie took it.
         return true;
     }
 
     /**
+     * The day the amount this PATCH sets is next collected on — the day the discount is
+     * judged for, as the renewal will judge it (`SubscriptionPaymentHandler` asks on the
+     * charge's day). Judged for today, a code whose window ends before the next charge
+     * (one period, counted from the running period whose prorata it discounted) was sent
+     * to Mollie discounted, and Mollie collected the discount for a period the books
+     * charged in full.
+     *
+     * Null — judged for now, as before — for a plan waiver, whose end and expiry are the
+     * renewal handler's to settle (`on_expiry`).
+     *
+     * @param  array<string, mixed>  $marker
+     */
+    private function chargeDayForIntent(Billable $billable, PlanChangeIntent $intent, array $marker): ?CarbonInterface
+    {
+        if (PlanWaiver::isWaiver($marker)) {
+            return null;
+        }
+
+        $next = $intent->currentInterval !== $intent->newInterval || $intent->forceResetStartDate
+            ? BillingTime::addInterval(BillingTime::nowUtc(), $intent->newInterval)
+            : ChargeDeferral::undeferredNextChargeDate($billable);
+
+        return $next !== null ? Carbon::instance($next)->setTimezone('UTC')->startOfDay() : null;
+    }
+
+    /**
      * For a 100%-coverage recurring discount, return the Mollie startDate that
-     * skips the entire discount lifetime: marker.valid_until + 1 day. Falls
+     * skips the entire discount lifetime: the first charge on the subscription's cycle
+     * the discount no longer covers (`charge_resumes_at`, written with the marker); for
+     * a marker written before that was kept, `valid_until + 1 day` as before. Falls
      * back to one period from now if the marker has no valid_until (shouldn't
      * happen — the validator enforces a lifetime gate — but defensive).
      */
     private function fullCoverageStartDate(Billable $billable, string $interval): Carbon
     {
-        $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+        // The marker about to be written, when the discount comes with this very change.
+        $marker = $this->upcomingCouponMarker ?? ($billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null);
         $validUntil = is_array($marker) && isset($marker['valid_until']) && $marker['valid_until'] !== null
             ? Carbon::parse((string) $marker['valid_until'])
             : null;
@@ -136,13 +218,18 @@ class MollieSubscriptionPatcher
             ? $validUntil->copy()->setTimezone('UTC')->addDay()
             : Carbon::instance(BillingTime::addInterval(BillingTime::nowUtc(), $interval))->setTimezone('UTC');
 
+        // On the cycle — written with the marker since 17 November 2026.
+        if (is_array($marker) && ($resumesAt = CouponService::markerChargeResumesAt($marker)) !== null) {
+            $coverageEnd = $resumesAt;
+        }
+
         // A plan waiver resumes on a renewal, not on the day after it ends — see
         // PlanWaiver::chargeResumesAt().
         if (is_array($marker) && PlanWaiver::isWaiver($marker)) {
             $regular = ChargeDeferral::undeferredNextChargeDate($billable)
                 ?? Carbon::instance(BillingTime::addInterval(BillingTime::nowUtc(), $interval));
 
-            $coverageEnd = PlanWaiver::chargeResumesAt($marker, $regular, $interval) ?? $coverageEnd;
+            $coverageEnd = PlanWaiver::chargeResumesAt($marker, $regular, $interval, app(CouponService::class)->recurringAnchorDay($billable, $interval, $regular)) ?? $coverageEnd;
         }
 
         // A deferral already stored later than the coupon's own end is a period
@@ -335,6 +422,45 @@ class MollieSubscriptionPatcher
      *
      * @param  array<string,mixed>  $marker
      */
+    /** Set while updateRecurringAmountAfterCharge() runs. */
+    private bool $chargeJustCollected = false;
+
+    /**
+     * `updateRecurringAmount()` from the renewal of a charge Mollie has just made: the
+     * amount, never a start date.
+     *
+     * Inside that webhook the period anchor has not moved yet, so the "regular" next
+     * charge a deferral would return to is the cycle just charged — a coupon that covered
+     * the whole price for one period and ended with this renewal sent today as the start
+     * date, and Mollie charged the customer a second time that day.
+     *
+     * @param  array<int, string>  $addons
+     */
+    public function updateRecurringAmountAfterCharge(
+        Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        int $couponDiscountNet = 0,
+    ): void {
+        $this->chargeJustCollected = true;
+
+        try {
+            $this->updateRecurringAmount(
+                billable: $billable,
+                planCode: $planCode,
+                interval: $interval,
+                addons: $addons,
+                extraSeats: $extraSeats,
+                intervalChanged: false,
+                couponDiscountNet: $couponDiscountNet,
+            );
+        } finally {
+            $this->chargeJustCollected = false;
+        }
+    }
+
     /**
      * PATCH the Mollie subscription with the new aggregated recurring amount.
      *
@@ -342,9 +468,12 @@ class MollieSubscriptionPatcher
      * it does not trigger an immediate charge. This is exactly the desired behavior: the current
      * period stays untouched, and the new amount applies from the next billing onwards.
      *
-     * NO cancel+recreate fallback on PATCH failures: `CreateSubscriptionRequest` would cause Mollie
-     * to immediately issue a first charge → double debit. Failures are logged and picked up by the
-     * RetrySubscriptionPatchJob when needed.
+     * NO cancel+recreate fallback on PATCH failures in general: a create without a future start
+     * date would cause Mollie to issue a charge at once → double debit. Failures are logged and
+     * picked up by the RetrySubscriptionPatchJob when needed. The one refusal that does lead to a
+     * replacement is Mollie's "start date cannot be changed when the subscription is already
+     * charged", and only with a start date in the future — see sendUpdate() and
+     * MollieSubscriptionReplacer.
      *
      * @param  array<int, string>  $addons
      *
@@ -430,7 +559,12 @@ class MollieSubscriptionPatcher
         //     without this the deferred date stayed and whatever the customer had just
         //     added was free until the coupon ended.
         //  4. amount-only change → leave cadence untouched (null)
-        $wasDeferred = $this->chargeWasDeferred($billable);
+        //
+        // Not for the renewal of a charge Mollie has just made
+        // (updateRecurringAmountAfterCharge()): whatever deferred it is spent and Mollie
+        // counts on from that charge, so a start date sent now could only move the cadence
+        // — and inside that webhook the period anchor still names the cycle just charged.
+        $wasDeferred = ! $this->chargeJustCollected && $this->chargeWasDeferred($billable);
 
         $startAt = match (true) {
             $isFullCoverage => $this->fullCoverageStartDate($billable, $interval),
@@ -441,15 +575,14 @@ class MollieSubscriptionPatcher
             default => null,
         };
 
-        MollieCall::send(new MollieUpdateSubscriptionRequest(
-            customerId: $customerId,
-            subscriptionId: $subscriptionId,
-            amount: new Money($currency, $value),
-            description: "{$planCode} subscription",
-            interval: $mollieInterval,
-            startDate: $startAt !== null ? new Date($startAt) : null,
-            metadata: $metadata,
-        ));
+        // A charged subscription refuses the start date; sendUpdate() then replaces it with
+        // one that holds all of this (MollieSubscriptionReplacer).
+        $this->sendUpdate($billable, [
+            'amount' => new Money($currency, $value),
+            'description' => "{$planCode} subscription",
+            'interval' => $mollieInterval,
+            'metadata' => $metadata,
+        ], $startAt, 'amount_update');
 
         // Recorded only once Mollie has taken it: the stored deferral is a statement
         // about what Mollie holds. Nothing to write when neither side of it moved.
@@ -508,6 +641,14 @@ class MollieSubscriptionPatcher
 
         if ($catalogNet === $chargedNet) {
             return $lineNets;
+        }
+
+        // Nothing charged is nothing taxed. One discount line over several catalog lines
+        // rounds its VAT once where they round theirs each: 29.50 + 11.10 + 15.50 fully
+        // covered left a cent of VAT at 19 % — a preview of 0.01 for an order that costs
+        // nothing, and a customer sent to pay it.
+        if ($chargedNet === 0) {
+            return [0];
         }
 
         if ($catalogNet > $chargedNet) {
@@ -608,6 +749,102 @@ class MollieSubscriptionPatcher
         });
     }
 
+    /**
+     * Tell Mollie the date of the next charge, and nothing else.
+     *
+     * For the day the package's own period already ends on — no override is written,
+     * because `nextBillingDate()` names this date by itself. Used by the renewal to keep a
+     * cycle on its anchor day through the short months
+     * (SubscriptionPaymentHandler::pinNextChargeOnAnchor(), BillingAnchor): Mollie's rule
+     * for the charge after a month end is not something the package relies on.
+     */
+    public function pinNextChargeDate(Billable $billable, \Carbon\CarbonInterface $date): void
+    {
+        $customerId = $billable->getMollieCustomerId();
+        $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
+
+        if (! $billable instanceof Model || $customerId === null || $subscriptionId === '') {
+            return;
+        }
+
+        $target = Carbon::instance($date)->utc()->startOfDay();
+
+        // Asked first, because the answer decides whether anything has to happen at all.
+        // The renewal that calls this has just been charged, and Mollie refuses a new start
+        // date on a charged subscription: moving the date means replacing the subscription.
+        // If Mollie's own next date already is the anchor day — under "clamp" it is, from
+        // the second short month on — there is nothing to replace. Under either cadence the
+        // subscription is replaced only where Mollie would otherwise charge on another day:
+        // under "clamp" once (its start date was itself a shortened day), under "drift"
+        // after every month shorter than the anchor day.
+        try {
+            $held = MollieCall::send(new GetSubscriptionRequest($customerId, $subscriptionId));
+            $next = (string) ($held->nextPaymentDate ?? '');
+
+            if ($next !== '' && $next === $target->toDateString() && ! MollieSubscriptionReplacer::pending($billable)) {
+                return;
+            }
+        } catch (\Throwable $e) {
+            // Not knowing what Mollie holds is no reason to leave the anchor: the date is
+            // sent, and a failure of that is the caller's to retry.
+            Log::info('Could not read Mollie\'s next charge date before pinning it — sending it', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $this->sendUpdate($billable, [], $target, 'anchor_pin');
+    }
+
+    /**
+     * The one door for every PATCH of the billable's Mollie subscription.
+     *
+     * Holds the billable's subscription lock (`MollieSubscriptionReplacer::withLock()`),
+     * finishes a replacement left unfinished before it (its old id is cancelled), and
+     * sends the PATCH to the id the row carries now. When Mollie refuses the start date
+     * because the subscription has been charged, the subscription is replaced instead,
+     * with every field of this PATCH — see `MollieSubscriptionReplacer`.
+     *
+     * @param  array{amount?: Money, description?: string, interval?: string, metadata?: array<string, mixed>}  $fields
+     */
+    protected function sendUpdate(Model&Billable $billable, array $fields, ?CarbonInterface $startDate, string $reason): void
+    {
+        MollieSubscriptionReplacer::withLock($billable, function () use ($billable, $fields, $startDate, $reason): void {
+            $replacer = app(MollieSubscriptionReplacer::class);
+            $replacer->resume($billable);
+
+            $customerId = (string) ($billable->getMollieCustomerId() ?? '');
+            $subscriptionId = MollieSubscriptionReplacer::storedSubscriptionId($billable);
+
+            if ($customerId === '' || $subscriptionId === '') {
+                Log::warning('Mollie subscription update skipped — missing Mollie customer or subscription id', [
+                    'billable' => $billable->getKey(),
+                    'reason' => $reason,
+                ]);
+
+                return;
+            }
+
+            try {
+                MollieCall::send(new MollieUpdateSubscriptionRequest(
+                    customerId: $customerId,
+                    subscriptionId: $subscriptionId,
+                    amount: $fields['amount'] ?? null,
+                    description: $fields['description'] ?? null,
+                    interval: $fields['interval'] ?? null,
+                    startDate: $startDate !== null ? new Date(Carbon::instance($startDate)) : null,
+                    metadata: $fields['metadata'] ?? null,
+                ));
+            } catch (\Throwable $e) {
+                if ($startDate === null || ! MollieSubscriptionAnswer::refusesStartDateAfterCharge($e)) {
+                    throw $e;
+                }
+
+                $replacer->replace($billable, $startDate, $fields, $reason);
+            }
+        });
+    }
+
     public function pushNextChargeDate(Billable $billable, int $days): void
     {
         if (! ($billable instanceof Model) || $days <= 0) {
@@ -628,11 +865,7 @@ class MollieSubscriptionPatcher
         $current = $billable->nextBillingDate() ?? BillingTime::nowUtc();
         $newDate = $current->copy()->addDays($days);
 
-        MollieCall::send(new MollieUpdateSubscriptionRequest(
-            customerId: $customerId,
-            subscriptionId: $subscriptionId,
-            startDate: new Date($newDate),
-        ));
+        $this->sendUpdate($billable, [], $newDate, 'next_charge_date');
 
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['next_charge_date_override'] = $newDate->toIso8601String();
@@ -668,11 +901,7 @@ class MollieSubscriptionPatcher
 
         $newDate = $target->copy();
 
-        MollieCall::send(new MollieUpdateSubscriptionRequest(
-            customerId: $customerId,
-            subscriptionId: $subscriptionId,
-            startDate: new Date($newDate),
-        ));
+        $this->sendUpdate($billable, [], $newDate, 'next_charge_date');
 
         $meta = $billable->getBillingSubscriptionMeta();
 
@@ -722,7 +951,7 @@ class MollieSubscriptionPatcher
             return true;
         } catch (ApiException $e) {
             // Already gone is the outcome we wanted.
-            if (in_array($e->getCode(), [404, 410], true)) {
+            if (\GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer::cancelledAlready($e)) {
                 return true;
             }
 

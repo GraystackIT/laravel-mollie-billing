@@ -25,6 +25,17 @@ new class extends Component {
     /** Whether we are still waiting for the Mollie webhook to swap the mandate. */
     public bool $awaitingMandateUpdate = false;
 
+    /**
+     * Ticks before the page stops waiting for the new mandate: 45 × 2 s, a minute and a
+     * half — the same patience the return page has for a payment.
+     */
+    private const MANDATE_POLL_TICKS = 45;
+
+    public int $mandatePollCount = 0;
+
+    /** The wait ran out; the page says so and offers to check again instead of polling on. */
+    public bool $mandateUpdateTimedOut = false;
+
     // Billing details (form-bound, persisted on save())
     public string $company_name = '';
     public string $billing_street = '';
@@ -46,8 +57,18 @@ new class extends Component {
         $billable = $this->readableBillable();
 
         if (request()->boolean('payment_method_updated')) {
-            $this->initialMandateId = $billable?->getMollieMandateId();
-            $this->awaitingMandateUpdate = true;
+            // The mandate to wait to change is the one the customer LEFT with, remembered
+            // by changePaymentMethod(). Mollie's webhook is regularly here before the
+            // customer is: taking "the mandate I see now" as the starting point then
+            // waited for a change that had already happened — the notice never went away
+            // and the page polled every two seconds for good.
+            $current = $billable?->getMollieMandateId();
+            $before = $billable instanceof \Illuminate\Database\Eloquent\Model
+                ? session('billing.mandate_change.'.$billable->getKey())
+                : null;
+
+            $this->initialMandateId = is_string($before) ? ($before === '' ? null : $before) : $current;
+            $this->awaitingMandateUpdate = $current === null || $current === $this->initialMandateId;
         }
 
         $default = MollieBilling::ipGeolocation()->defaultCountryFor(request()->ip());
@@ -219,18 +240,47 @@ new class extends Component {
         }
 
         $billable = $this->resolveBillable();
-        if ($billable === null) {
+
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $billable->refresh();
+        }
+
+        // No billable to look at (the session ended, the tenant was switched) is a tick
+        // like any other: returning before the budget below left the page polling for as
+        // long as it stayed open.
+        $current = $billable?->getMollieMandateId();
+        if ($current !== null && $current !== $this->initialMandateId) {
+            $this->awaitingMandateUpdate = false;
+            $this->mandateUpdateTimedOut = false;
+            $this->toast(__('billing::portal.payment_method.updated_flash'), 'success');
+
             return;
         }
 
-        /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
-        $billable->refresh();
-
-        $current = $billable->getMollieMandateId();
-        if ($current !== null && $current !== $this->initialMandateId) {
+        // A change that is never confirmed — abandoned or failed at Mollie after the
+        // redirect back — kept the page polling every two seconds for as long as it
+        // stayed open. Stop, say so, and leave the next look to the customer.
+        if (++$this->mandatePollCount >= self::MANDATE_POLL_TICKS) {
             $this->awaitingMandateUpdate = false;
-            $this->toast(__('billing::portal.payment_method.updated_flash'), 'success');
+            $this->mandateUpdateTimedOut = true;
         }
+    }
+
+    /** "Check again" after the wait ran out: one look now, and a fresh budget if nothing changed. */
+    public function recheckMandateUpdate(): void
+    {
+        if (! $this->mandateUpdateTimedOut) {
+            return;
+        }
+
+        $this->mandateUpdateTimedOut = false;
+        $this->mandatePollCount = 0;
+        $this->awaitingMandateUpdate = true;
+
+        $this->checkForMandateUpdate();
+
+        // The look just taken is the customer's, not one of the budget's.
+        $this->mandatePollCount = 0;
     }
 
     private function resolveBillable(): ?Billable
@@ -371,6 +421,10 @@ new class extends Component {
             BillingRoute::name('billing-data'),
             array_merge(MollieBilling::resolveUrlParameters($billable), ['payment_method_updated' => 1]),
         );
+
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            session(['billing.mandate_change.'.$billable->getKey() => (string) $billable->getMollieMandateId()]);
+        }
 
         try {
             $result = $checkout->handle($billable, $returnUrl);
@@ -567,6 +621,19 @@ new class extends Component {
                 <div class="mt-5">
                     <flux:callout icon="arrow-path" color="blue" inline>
                         {{ __('billing::portal.payment_method.awaiting_update') }}
+                    </flux:callout>
+                </div>
+            @endif
+
+            @if ($mandateUpdateTimedOut)
+                <div class="mt-5">
+                    <flux:callout icon="exclamation-triangle" color="amber" inline>
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <span>{{ __('billing::portal.payment_method.update_timeout') }}</span>
+                            <flux:button size="sm" icon="arrow-path" wire:click="recheckMandateUpdate">
+                                {{ __('billing::portal.payment_method.check_again') }}
+                            </flux:button>
+                        </div>
                     </flux:callout>
                 </div>
             @endif

@@ -216,7 +216,8 @@ it('renews a yearly subscription once a year for three years', function (): void
 });
 
 /**
- * A subscription whose February overage payment fails three times in a row.
+ * A subscription whose overage payment, charged the night before the February renewal,
+ * fails three times in a row.
  *
  * @return array{0: UsageLongRunHarness, 1: Carbon}
  */
@@ -248,59 +249,21 @@ function usageLongRunIntoPastDue(): array
         $run->resolveOverage($id, 'failed');
     }
 
+    // The cycle gave up. The debt stands for the renewals, and until it is settled the
+    // subscription is past due — for the debt, without the clock of a failed renewal.
     expect($run->paymentRequests)->toBe(3)
         ->and($run->fresh()->subscription_status)->toBe(SubscriptionStatus::PastDue)
-        ->and($run->fresh()->getBillingSubscriptionMeta()['past_due_since'] ?? null)->not->toBeNull();
+        ->and($run->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('past_due_since')
+        ->and($run->fresh()->getBillingSubscriptionMeta()['usage_overage_status'] ?? null)->toBe('failed');
 
     return [$run, $start];
 }
 
-it('recovers from a dunning episode with the next renewal and bills the periods after it normally', function (): void {
+it('cancels and expires a subscription whose renewal fails, and credits it nothing more', function (): void {
     [$run] = usageLongRunIntoPastDue();
 
-    $renewals = ['2026-02-10', '2026-03-10', '2026-04-10'];
-
-    for ($day = Carbon::parse('2026-02-10'); $day->lessThan(Carbon::parse('2026-04-15')); $day->addDay()) {
-        $run->travelTo($day->copy()->setTime(1, 0));
-        $run->night(sweepJob: true);
-        $run->settleOpenOverage();
-
-        if ($day->toDateString() === '2026-03-01') {
-            $run->travelTo($day->copy()->setTime(12, 0));
-            $run->use('Tokens', 120);
-        }
-
-        if (in_array($day->toDateString(), $renewals, true)) {
-            $run->travelTo($day->copy()->setTime(9, 2));
-            $run->renew($day->copy()->setTime(9, 0));
-            $run->settleOpenOverage();
-        }
-
-        if ($day->toDateString() === '2026-02-10') {
-            // The renewal recovered the subscription and closed the episode. The debt the
-            // dunning gave up on is written off with it — documented, and not re-charged.
-            $meta = $run->fresh()->getBillingSubscriptionMeta();
-
-            expect($run->fresh()->subscription_status)->toBe(SubscriptionStatus::Active)
-                ->and($meta)->not->toHaveKey('past_due_since')
-                ->and($run->balance('Tokens'))->toBe(100)
-                ->and($run->paymentRequests)->toBe(3);
-        }
-    }
-
-    // March's 20 units are an ordinary new cycle: one payment, paid.
-    expect($run->fresh()->subscription_status)->toBe(SubscriptionStatus::Active)
-        ->and($run->count('Tokens', 'period_credit'))->toBe(3)
-        ->and($run->paymentRequests)->toBe(4)
-        ->and($run->billedUnits())->toBe(['Tokens@10' => 20])
-        ->and($run->overageInvoicedNet())->toBe(200)
-        ->and($run->balance('Tokens'))->toBe(100);
-});
-
-it('cancels and expires a subscription that stays past due, and credits it nothing more', function (): void {
-    [$run] = usageLongRunIntoPastDue();
-
-    // The renewal fails too.
+    // The renewal fails too — and that, not the overage, is what starts the clock that
+    // ends in a cancellation.
     $run->travelTo('2026-02-10T09:02:00Z');
     $run->renew('2026-02-10T09:00:00Z', status: 'failed');
 
@@ -326,12 +289,12 @@ it('cancels and expires a subscription that stays past due, and credits it nothi
         }
     }
 
-    // 30 days of dunning from the first failure (9 Feb), then cancelled at once and
+    // 30 days of dunning from the failed renewal (10 Feb), then cancelled at once and
     // expired the night after.
     expect($statuses)->toBe([
         '2026-02-11' => 'past_due',
-        '2026-03-12' => 'cancelled',
-        '2026-03-13' => 'expired',
+        '2026-03-13' => 'cancelled',
+        '2026-03-14' => 'expired',
     ]);
 
     $billable = $run->fresh();
@@ -344,8 +307,9 @@ it('cancels and expires a subscription that stays past due, and credits it nothi
         // Nothing was collected and nothing invoiced.
         ->and($run->overageInvoicedNet())->toBe(0);
 
-    // The immediate cancellation makes one last attempt at the debt and gives up on it
-    // the same way. Six requests in all, none of them after the subscription expired.
+    // The immediate cancellation makes one more attempt at the standing debt — its last
+    // chance, there is no renewal coming — and that cycle fails the same way. Six requests
+    // in all, none of them after the subscription expired.
     expect($requestsAtCancel)->toBe(4)
         ->and($run->paymentRequests)->toBe(6);
 });

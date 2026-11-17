@@ -70,6 +70,13 @@ new class extends Component {
         $remainingIncluded = max(0, $included - $planUsed);
         $remainingPurchased = $purchasedRemaining;
 
+        // A rollover type keeps what was not used, so its plan balance can exceed one
+        // period's quota. Those units are the customer's, and "50 of 50 remaining" hid
+        // them: with 30 carried over the wallet holds 80 and the page said 50.
+        $carriedOver = app(\GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface::class)->usageRollover($this->type)
+            ? max(0, $planOnlyBalance - $included)
+            : 0;
+
         // Total capacity = included + all purchased.
         $totalCapacity = $included + $purchasedBalance;
 
@@ -95,7 +102,7 @@ new class extends Component {
 
         return compact(
             'included', 'overage', 'purchasedBalance', 'isTrial',
-            'planUsed', 'purchasedUsed', 'remainingIncluded', 'remainingPurchased',
+            'planUsed', 'purchasedUsed', 'remainingIncluded', 'remainingPurchased', 'carriedOver',
             'planUsedWidth', 'remainingIncludedWidth', 'purchasedUsedWidth', 'remainingPurchasedWidth',
             'usedPercent', 'isWarning', 'isDanger', 'planUsedColor',
         );
@@ -106,7 +113,12 @@ new class extends Component {
 
 @php $m = $this->data(); @endphp
 
-<div class="rounded-lg border border-zinc-200/80 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/2">
+<div
+    class="rounded-lg border border-zinc-200/80 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/2"
+    dusk="usage-meter-{{ $type }}"
+    data-used-percent="{{ $m['usedPercent'] }}"
+    data-state="{{ $m['isDanger'] ? 'danger' : ($m['isWarning'] ? 'warning' : 'ok') }}"
+>
     {{-- Header --}}
     <div class="flex items-center justify-between mb-3">
         <span class="text-sm font-medium text-zinc-900 dark:text-zinc-100">{{ $label }}</span>
@@ -119,7 +131,7 @@ new class extends Component {
     <div class="h-2.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800 flex">
         {{-- Plan consumed --}}
         @if ($m['planUsedWidth'] > 0)
-            <div class="h-full transition-all duration-500 {{ $m['planUsedColor'] }} rounded-l-full"
+            <div dusk="usage-meter-{{ $type }}-used" class="h-full transition-all duration-500 {{ $m['planUsedColor'] }} rounded-l-full"
                  style="width: {{ $m['planUsedWidth'] }}%"></div>
         @endif
         {{-- Remaining included (background/empty) --}}
@@ -143,7 +155,7 @@ new class extends Component {
     <div class="mt-2 flex items-center justify-between text-xs tabular-nums">
         {{-- Labelled "Trial" while the quota shown is the prorated trial grant, so the
              number is not read as the plan's full monthly allowance gone missing. --}}
-        <span class="text-zinc-400">{{ __($m['isTrial'] ? 'billing::portal.usage_trial_remaining' : 'billing::portal.usage_plan_remaining', ['remaining' => number_format($m['remainingIncluded']), 'total' => number_format($m['included'])]) }}</span>
+        <span class="text-zinc-400">{{ __($m['isTrial'] ? 'billing::portal.usage_trial_remaining' : 'billing::portal.usage_plan_remaining', ['remaining' => number_format($m['remainingIncluded']), 'total' => number_format($m['included'])]) }}@if ($m['carriedOver'] > 0) <span dusk="usage-meter-{{ $type }}-carried-over">{{ __('billing::portal.usage_carried_over', ['count' => number_format($m['carriedOver'])]) }}</span>@endif</span>
         @if ($m['purchasedBalance'] > 0)
             <span class="text-sky-500">{{ __('billing::portal.usage_purchased_remaining', ['remaining' => number_format($m['remainingPurchased']), 'total' => number_format($m['purchasedBalance'])]) }}</span>
         @endif

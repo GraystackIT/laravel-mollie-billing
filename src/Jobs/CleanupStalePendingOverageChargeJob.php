@@ -243,9 +243,29 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
         // that was written off settles after all: the customer has paid twice.
         $paymentCreatedAt = $this->paymentCreatedAt($payment) ?? $createdAt;
 
-        if ($paymentCreatedAt->diffInDays(BillingTime::nowUtc()) >= self::HARD_LIMIT_DAYS) {
-            $this->writeOff($billable, $paymentId, "the charge has been {$status} at Mollie for over ".self::HARD_LIMIT_DAYS.' days');
+        if ($paymentCreatedAt->diffInDays(BillingTime::nowUtc()) < self::HARD_LIMIT_DAYS) {
+            return;
         }
+
+        // Still not terminal after a fortnight. The slot may only be freed for a payment
+        // that can no longer settle — otherwise the next renewal collects the same debt
+        // again and this one pays out afterwards as well. So it is cancelled at Mollie
+        // first, and if Mollie will not cancel it (a direct debit already on its way to
+        // the bank) it keeps the slot and the next pass looks again.
+        try {
+            MollieCall::send(new \Mollie\Api\Http\Requests\CancelPaymentRequest($paymentId));
+        } catch (\Throwable $e) {
+            Log::warning('CleanupStalePendingOverageChargeJob: a stale overage payment could not be cancelled — it keeps its slot', [
+                'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                'payment_id' => $paymentId,
+                'status' => $status,
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        $this->writeOff($billable, $paymentId, "the charge had been {$status} at Mollie for over ".self::HARD_LIMIT_DAYS.' days and was cancelled');
     }
 
     /**
@@ -453,21 +473,28 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
     }
 
     /**
-     * Mark the cycle spent without collecting: the debt stays on the wallet, but the next
-     * period may charge for it again instead of being silenced.
+     * This cycle is over without having collected. The debt is not: it is left standing
+     * for the next renewals to collect ({@see ChargeUsageOverageDirectly::deferFailedCycle()}),
+     * and nobody is told — there is nothing for an operator to do. Only when the renewals
+     * have spent their attempts as well is it written off, and that is reported.
      */
     private function writeOff(Billable $billable, string $paymentId, string $reason): void
     {
-        $this->mutateBillingMeta($billable, fn (array $meta): array => [
-            ...$meta,
-            'usage_overage_status' => ChargeUsageOverageDirectly::STATUS_FAILED,
-        ]);
+        // Read before the snapshot may go: the report names the amount.
+        $snapshot = (array) ($billable->getBillingSubscriptionMeta()[ChargeUsageOverageDirectly::META_KEY] ?? []);
 
-        Log::error('CleanupStalePendingOverageChargeJob: writing off a stale overage charge', [
+        $outcome = $this->overageService()->deferFailedCycle($billable);
+
+        Log::warning('CleanupStalePendingOverageChargeJob: an overage cycle ended without collecting', [
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
             'payment_id' => $paymentId,
             'reason' => $reason,
+            'outcome' => $outcome,
         ]);
+
+        if ($outcome !== 'written_off') {
+            return;
+        }
 
         $admins = MollieBilling::notifyAdmin();
         $admins = is_array($admins) ? $admins : iterator_to_array($admins);
@@ -478,10 +505,11 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
 
         Notification::send($admins, MollieBilling::resolveNotification(
             AdminPlanChangeFailedNotification::class,
-            'An overage charge never settled and has been written off — the wallet debt is still outstanding',
+            'An overage charge could not be collected at any of the renewals that tried again, and has been written off',
             [
                 'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
                 'payment_id' => $paymentId,
+                'amount_gross' => $snapshot['amount_gross'] ?? null,
                 'error' => $reason,
             ],
         ));
@@ -502,10 +530,14 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
                 $meta['usage_overage_status'],
                 $meta['usage_overage_attempts'],
                 $meta[ChargeUsageOverageDirectly::COUNTED_PAYMENTS_KEY],
+                $meta[ChargeUsageOverageDirectly::RECOLLECTIONS_KEY],
             );
 
             return $meta;
         });
+
+        // No debt, no lock.
+        app(ChargeUsageOverageDirectly::class)->releasePastDueForDebt($billable);
 
         Log::info('CleanupStalePendingOverageChargeJob: cleared a spent overage snapshot', [
             'billable_id' => $billable instanceof Model ? $billable->getKey() : null,

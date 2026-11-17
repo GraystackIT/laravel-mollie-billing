@@ -60,6 +60,11 @@ class StartMandateCheckout
             if (isset($subscriptionSpec['trial_days'])) {
                 $metadata['pending_subscription_trial_days'] = (int) $subscriptionSpec['trial_days'];
             }
+            // The free plan the webhook will find is the one being replaced, not a
+            // duplicate subscription — see MandateOnlyPaymentHandler::replacesLocalPlan().
+            if (! empty($subscriptionSpec['upgrade_from_local'])) {
+                $metadata['pending_subscription_upgrade_from_local'] = true;
+            }
         }
 
         $payment = MollieCall::send(new CreatePaymentRequest(
@@ -75,6 +80,12 @@ class StartMandateCheckout
             sequenceType: 'first',
             customerId: $customerId,
         ));
+
+        // A mandate payment that carries a subscription is a checkout (trial, fully
+        // covered first period). One without is a change of payment method.
+        if ($subscriptionSpec !== null) {
+            event(new \GraystackIT\MollieBilling\Events\CheckoutStarted($billable));
+        }
 
         return [
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,

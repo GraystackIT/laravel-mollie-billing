@@ -629,6 +629,23 @@ class CheckConfigCommand extends Command
         if ($queue !== null && $queue !== '' && ! is_string($queue)) {
             $this->addError($scope, 'queue.name must be a string queue name, or null to use the framework default; got ['.var_export($queue, true).'].');
         }
+
+        // A warning, not an error: a sync install works, and the retry jobs are written to
+        // survive it. But every job then runs inside the request that dispatched it, and a
+        // job that throws has failed for good — so a retry is never retried by the queue,
+        // and the package's coarser scheduled passes are all there is.
+        if (\GraystackIT\MollieBilling\Support\BillingQueue::runsInline()) {
+            $this->addWarning($scope, sprintf(
+                'The billing jobs run on the [%s] connection, which uses the sync driver: each job runs '
+                .'inside the request that dispatches it, delays are ignored, and a job that throws has '
+                .'failed for good at its first error — the queue never retries it. The retry jobs '
+                .'(refund lines, overage charges, Mollie subscription PATCH and cancel, activation) then '
+                .'fall back to the scheduled passes: the hourly billing sweep and the nightly overage pass '
+                .'instead of a backoff of minutes. Run a real queue (database, redis, sqs) with a worker, '
+                .'via BILLING_QUEUE_CONNECTION or QUEUE_CONNECTION.',
+                \GraystackIT\MollieBilling\Support\BillingQueue::connection(),
+            ));
+        }
     }
 
     /**

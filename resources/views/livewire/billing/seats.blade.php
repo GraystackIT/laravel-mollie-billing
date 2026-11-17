@@ -298,6 +298,12 @@ new class extends Component {
         ) {
             try {
                 $url = $purchase->handle($billable, $billable->getActiveBillingAddonCodes(), (int) $this->seatCount);
+            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
+                // Not an error to report: the customer is told what to do first.
+                $this->flash = $e->getMessage();
+                $this->flashSuccess = false;
+
+                return;
             } catch (\GraystackIT\MollieBilling\Exceptions\BillingCountryRequiredException) {
                 // A gifted tenant without billing details: say what is missing and where
                 // to add it, instead of "something went wrong".
@@ -351,7 +357,7 @@ new class extends Component {
             // number the form would accept.
             $this->flash = __('billing::portal.seats_flash.too_many', ['max' => $e->maximum]);
             $this->flashSuccess = false;
-        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
             // Not an error to report: the customer is told what to do first.
             $this->flash = $e->getMessage();
             $this->flashSuccess = false;
@@ -359,6 +365,28 @@ new class extends Component {
             report($e);
             $this->flash = __('billing::portal.flash.error');
             $this->flashSuccess = false;
+        }
+    }
+
+    /**
+     * Gross amount that syncing to the selected seat count charges (positive) or credits
+     * (negative) now, from the same preview the change is priced with.
+     */
+    private function dueNow(?\GraystackIT\MollieBilling\Contracts\Billable $billable): int
+    {
+        if ($billable === null || $this->seatCount === null || (int) $this->seatCount === $billable->getBillingSeatCount()) {
+            return 0;
+        }
+
+        try {
+            $preview = app(PreviewService::class)->previewUpdate($billable, [
+                'seats' => (int) $this->seatCount,
+                'coupon_codes' => $this->appliedCouponCodes,
+            ]);
+
+            return ($preview['errors'] ?? []) === [] ? (int) ($preview['prorataTotalGross'] ?? 0) : 0;
+        } catch (\Throwable) {
+            return 0;
         }
     }
 
@@ -425,6 +453,10 @@ new class extends Component {
             // included quota cannot be changed by the user — show the
             // "not available" callout instead of an inert adjust form.
             'hasSeats' => $seatPriceNet !== null,
+            // What the selected count charges (positive) or credits (negative) right now,
+            // gross — the pro-rata amount the change will book. The rows above it are the
+            // recurring price.
+            'dueNowGross' => $this->dueNow($billable),
             'reverseCharge' => $reverseCharge,
         ];
     }
@@ -490,7 +522,7 @@ new class extends Component {
         @endphp
         @if ($isAccessGrant)
             <flux:callout icon="gift" color="teal">
-                <span>{{ __('billing::portal.access_grant_extras_available', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::display($billable->getBillingSubscriptionEndsAt(), $billable)?->translatedFormat('d. M Y')]) }}</span>
+                <span>{{ __('billing::portal.access_grant_extras_available', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::billingDay($billable->getBillingSubscriptionEndsAt())?->translatedFormat('d. M Y')]) }}</span>
             </flux:callout>
         @else
             <flux:callout icon="information-circle" color="blue">
@@ -651,6 +683,12 @@ new class extends Component {
                                     <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.seats_total_cost') }}</span>
                                     <span dusk="seats-total" class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ BillingMoney::format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0))) }}</span>
                                 </div>
+                                @if ($dueNowGross !== 0)
+                                    <div class="flex items-center justify-between text-sm">
+                                        <span class="text-zinc-600 dark:text-zinc-300">{{ $dueNowGross > 0 ? __('billing::portal.preview_due_now') : __('billing::portal.preview_credit_now') }}</span>
+                                        <span dusk="{{ $dueNowGross > 0 ? 'seats-due-now' : 'seats-credit' }}" class="tabular-nums font-medium {{ $dueNowGross > 0 ? 'text-zinc-800 dark:text-zinc-100' : 'text-emerald-600 dark:text-emerald-400' }}">{{ BillingMoney::format(abs($dueNowGross)) }}</span>
+                                    </div>
+                                @endif
                                 <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
 
                                 <flux:separator class="my-3!" />

@@ -65,7 +65,11 @@ new class extends Component {
         }
 
         try {
-            $service->apply($b);
+            // `onRequest`: an operator is looking at the result. A change that cannot be
+            // applied must say so here and stay booked — the unattended path drops it and
+            // tells the customer instead, after which this screen flashed "Applied" for a
+            // change that had just been thrown away.
+            $service->apply($b, true);
         } catch (\Throwable $e) {
             report($e);
             $this->error = __('billing::admin.scheduled_changes.apply_failed');
@@ -79,7 +83,13 @@ new class extends Component {
             return;
         }
 
-        $this->flash = __('billing::admin.scheduled_changes.applied');
+        // A change that costs money is only started here: its charge is at Mollie and the
+        // plan moves when that payment settles. Saying "applied" for it was premature.
+        $pendingCharge = ($b->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null) !== null;
+
+        $this->flash = __($pendingCharge
+            ? 'billing::admin.scheduled_changes.applied_pending_payment'
+            : 'billing::admin.scheduled_changes.applied');
     }
 
     private function hasScheduledChange(mixed $billable): bool
@@ -239,6 +249,21 @@ new class extends Component {
                                                         </span>
                                                     @endif
                                                 </div>
+                                            @endif
+                                        </div>
+                                    @endif
+                                    @php $retry = \GraystackIT\MollieBilling\Services\Billing\ScheduleSubscriptionChange::retryState($b); @endphp
+                                    @if ($retry)
+                                        <div class="mt-2 space-y-1" dusk="scheduled-change-attempts-{{ $b->getKey() }}">
+                                            <div class="flex items-center gap-1">
+                                                <flux:badge size="sm" color="amber" icon="arrow-path">{{ __('billing::admin.scheduled_changes.attempts', ['attempts' => $retry['attempts'], 'max' => $retry['max']]) }}</flux:badge>
+                                                <x-mollie-billing::admin.info :text="__('billing::admin.scheduled_changes.attempts_info')" />
+                                            </div>
+                                            @if ($retry['last_error'])
+                                                <flux:text size="xs" class="text-zinc-500"><span class="font-medium">{{ __('billing::admin.scheduled_changes.last_error') }}:</span> {{ $retry['last_error'] }}</flux:text>
+                                            @endif
+                                            @if ($retry['payment_id'])
+                                                <flux:text size="xs" class="text-zinc-500" dusk="scheduled-change-payment-{{ $b->getKey() }}">{{ __('billing::admin.scheduled_changes.payment_in_flight', ['payment' => $retry['payment_id']]) }}</flux:text>
                                             @endif
                                         </div>
                                     @endif

@@ -16,6 +16,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\MolliePaymentCredits;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
@@ -61,8 +62,8 @@ class ChargebackHandler
         $chargebacks = [];
 
         try {
-            /** @phpstan-ignore-next-line — SDK magic. */
-            $chargebacks = $payment->chargebacks();
+            // Every page, through MollieCall — see MolliePaymentCredits.
+            $chargebacks = app(MolliePaymentCredits::class)->chargebacks($payment);
         } catch (\Throwable $e) {
             // Rethrown — see RefundHandler. Returning here made `__invoke()` answer 200
             // for a delivery that booked nothing, and a chargeback that goes unnoticed
@@ -121,8 +122,12 @@ class ChargebackHandler
                 $chargeback->amount->currency ?? $original->currency,
             );
 
-            // Mollie reports a chargeback's amount as a NEGATIVE gross (it is money
-            // leaving), while the credit-note machinery works in positive magnitudes.
+            // `amount` is what the customer's payment lost, in the payment's currency —
+            // positive in the SDK's own sample (src/Fake/Responses/chargeback.json). Not
+            // `settlementAmount`: that is the merchant's settlement debit, negative and in
+            // the settlement currency. The magnitude is taken either way, because the
+            // credit-note machinery works in positive amounts and older readings of the
+            // API had the sign the other way round. Pinned by ChargebackSdkContractTest.
             $grossCents = abs($grossCents);
 
             // Same net/VAT resolution as a refund: against the invoice's own line
@@ -282,9 +287,12 @@ class ChargebackHandler
                 && ($failure['reason'] ?? null) === 'chargeback'
                 && (int) ($failure['invoice_id'] ?? 0) === (int) $original->id
             ) {
+                $recovered = SubscriptionMetaHygiene::withoutDunningEpisode($billable->getBillingSubscriptionMeta());
+
                 $billable->forceFill([
-                    'subscription_status' => SubscriptionStatus::Active,
-                    'subscription_meta' => SubscriptionMetaHygiene::withoutDunningEpisode($billable->getBillingSubscriptionMeta()),
+                    // Not `Active` outright: an overage debt that stands keeps its lock.
+                    'subscription_status' => \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::statusAfterRecovery($recovered, SubscriptionStatus::Active),
+                    'subscription_meta' => $recovered,
                 ])->save();
 
                 $restored = true;

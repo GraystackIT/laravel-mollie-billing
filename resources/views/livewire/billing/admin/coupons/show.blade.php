@@ -176,6 +176,12 @@ new class extends Component {
                     </x-mollie-billing::admin.detail>
                 @endif
 
+                @if ($type === CouponType::PlanWaiver)
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.waiver_periods')" mono>
+                        {{ $coupon->waiver_periods }} {{ __('billing::admin.billables.subscription.free_time.periods') }}
+                    </x-mollie-billing::admin.detail>
+                @endif
+
                 @if ($type === CouponType::AccessGrant)
                     <x-mollie-billing::admin.detail :label="__('billing::admin.common.plan')" mono>
                         {{ $coupon->grant_plan_code ?? __('billing::admin.coupons.show.plan_addon_only') }}
@@ -197,6 +203,12 @@ new class extends Component {
                     @endif
                 @endif
 
+                @if ($type === CouponType::AccessGrant && ! empty($coupon->grant_plan_code))
+                    <x-mollie-billing::admin.detail :label="__('billing::admin.grants.on_expiry_label')">
+                        {{ __('billing::admin.grants.on_expiry.'.\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::normalizeOnExpiry($coupon->grant_on_expiry)) }}
+                    </x-mollie-billing::admin.detail>
+                @endif
+
                 @if ($type === CouponType::Credits && ! empty($coupon->credits_payload))
                     <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.credits')" mono>
                         @foreach ($coupon->credits_payload as $usage => $units)
@@ -204,6 +216,14 @@ new class extends Component {
                         @endforeach
                     </x-mollie-billing::admin.detail>
                 @endif
+
+                @foreach (['applicable_plans', 'applicable_intervals', 'applicable_usages'] as $restriction)
+                    @if (! empty($coupon->{$restriction}))
+                        <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.'.$restriction)" mono>
+                            {{ implode(', ', (array) $coupon->{$restriction}) }}
+                        </x-mollie-billing::admin.detail>
+                    @endif
+                @endforeach
 
                 @if (! empty($coupon->applicable_addons))
                     <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.applicable_addons')" mono>

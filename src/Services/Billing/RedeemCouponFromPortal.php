@@ -228,8 +228,15 @@ class RedeemCouponFromPortal
         // The discount's first charge is the next one, so its lifetime is counted from
         // there — not from today, which would end a "3 periods" code typed in on the
         // first day of a period one day before its third charge.
+        // Counted in the subscription's own periods, on its billing day — which the next
+        // charge may only show shortened (28 February of a cycle on the 31st).
         $firstCharge = ChargeDeferral::undeferredNextChargeDate($billable) ?? BillingTime::nowUtc();
-        $until = $this->coupons->recurringMarkerValidUntil($coupon, $context['interval'], $firstCharge);
+        $until = $this->coupons->recurringMarkerValidUntilOnCycle(
+            $coupon,
+            $context['interval'],
+            $firstCharge,
+            $this->coupons->recurringAnchorDay($billable, $context['interval'], $firstCharge),
+        );
 
         if ($until !== null && $until->lessThanOrEqualTo($firstCharge)) {
             return PortalCouponOutcome::refused(
@@ -323,6 +330,12 @@ class RedeemCouponFromPortal
 
         if (! $coupon->hasGlobalRedemptionsLeft()) {
             return PortalCouponOutcome::refused(self::reasonText('globally_exhausted'), 'globally_exhausted', $coupon);
+        }
+
+        // Already used as often as this customer may use it: telling them where to
+        // enter it would send them to a refusal.
+        if (! $this->coupons->hasPerBillableRedemptionLeft($coupon, $billable)) {
+            return PortalCouponOutcome::refused(self::reasonText('per_billable_limit_reached'), 'per_billable_limit_reached', $coupon);
         }
 
         $products = array_values(array_filter(array_map(

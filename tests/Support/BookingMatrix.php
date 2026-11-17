@@ -76,6 +76,11 @@ final class BookingMatrix
         config()->set('mollie-billing.vat.seller_country', 'AT');
         config()->set('mollie-billing.additional_countries', []);
 
+        // The wallet's balance cache expires after a day and, inside RefreshDatabase's
+        // never-committing transaction, is the only place a balance lives: renewing a
+        // month later would silently zero every wallet. In production it is in the DB.
+        config()->set('wallet.cache.ttl', null);
+
         Notification::fake();
         Event::fake([PaymentAmountMismatch::class]);
 

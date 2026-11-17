@@ -54,12 +54,24 @@ Route::get('/_wb/whoami', function (Request $request) {
     ]);
 })->name('wb.whoami');
 
+// What time the SERVER thinks it is — the shared clock (`SharedClock`) as the Dusk server
+// applies it, and the suite's check that a test left it on the machine's time.
+Route::get('/_wb/clock', fn () => response()->json([
+    'now' => now('UTC')->toIso8601String(),
+    'travelled' => \Illuminate\Support\Carbon::hasTestNow(),
+]))->name('wb.clock');
+
 Route::get('/_wb/logout', function (Request $request) {
     Auth::logout();
     $request->session()->flush();
 
     return redirect()->route('wb.home');
 })->name('wb.logout');
+
+// A page of "the application" behind the package's subscription gate — what a consuming
+// app protects with `billing.active`. The portal is exempt from that middleware, so
+// without this the suite had nothing to prove the gate against.
+Route::get('/_wb/app', fn () => response('APP-AREA-OK'))->middleware('billing.active')->name('wb.app');
 
 // ── Fake Mollie hosted checkout ─────────────────────────────────────────────
 

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Jobs;
 
-use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\OverageChargeFailed;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
@@ -13,7 +12,6 @@ use GraystackIT\MollieBilling\Notifications\AdminOverageBillingFailedNotificatio
 use GraystackIT\MollieBilling\Notifications\OverageBillingFailedNotification;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\UsageOverageChargeOutcome;
-use GraystackIT\MollieBilling\Support\BillingTime;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -22,6 +20,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use RuntimeException;
 use Throwable;
@@ -30,7 +29,8 @@ use Throwable;
  * Re-attempts an overage charge whose payment failed or whose creation call failed.
  *
  * `usage_overage_attempts` counts payments that did NOT settle — reaching
- * MAX_PAYMENT_ATTEMPTS marks the billable past_due and duns the customer. Failures
+ * MAX_PAYMENT_ATTEMPTS ends the cycle: the billable is past_due, the customer is told, and
+ * the debt is left standing for the next renewals (see {@see giveUp()}). Failures
  * to even create the payment are a different thing: they never touch the customer's
  * payment method, so they only consume the queue's `tries` budget and never dun.
  *
@@ -50,7 +50,7 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
     use SerializesModels;
     use UsesBillingQueue;
 
-    /** Terminal marker: the dunning budget is spent, the billable is past_due. */
+    /** Terminal marker of one cycle: its dunning budget is spent. */
     /** @deprecated Use ChargeUsageOverageDirectly::STATUS_FAILED — kept for app listeners. */
     public const OVERAGE_FAILED = ChargeUsageOverageDirectly::STATUS_FAILED;
 
@@ -58,6 +58,9 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
     private const COUNTED_PAYMENTS_KEY = ChargeUsageOverageDirectly::COUNTED_PAYMENTS_KEY;
 
     private const MAX_PAYMENT_ATTEMPTS = 3;
+
+    /** Create-payment failures in a row on a `sync` queue, where no worker counts them. */
+    public const INLINE_FAILURES_KEY = 'usage_overage_inline_failures';
 
     public int $uniqueFor = 3600;
 
@@ -176,8 +179,18 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
             // dunning budget — marking a customer past_due over three transient network
             // errors dunned a card that was never touched. The queue's own backoff and
             // tomorrow's PrepareUsageOverageJob pass own the retry.
-            $this->mutateBillingMeta($billable, static function (array $meta): array {
+            $inline = \GraystackIT\MollieBilling\Support\BillingQueue::isSyncRun($this->job);
+            $budget = $this->tries;
+
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($inline, $budget): array {
                 $meta['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_PENDING;
+
+                // On `sync` there is no queue ladder: count the failed attempts here, so
+                // the operator is told after as many of them as a worker would make.
+                if ($inline) {
+                    $failures = (int) ($meta[self::INLINE_FAILURES_KEY] ?? 0) + 1;
+                    $meta[self::INLINE_FAILURES_KEY] = $failures >= $budget ? 0 : $failures;
+                }
 
                 return $meta;
             });
@@ -188,8 +201,32 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
                 $e,
             ));
 
+            // On `sync` a throw is final: `failed()` would mail the admins on the first
+            // Mollie error, with no retry at all. Until the budget of failed attempts is
+            // spent the snapshot stays `pending` instead, and the nightly
+            // PrepareUsageOverageJob pass dispatches the retry again — once a night where
+            // a worker would have tried three times within the quarter hour.
+            if ($inline && (int) ($billable->refresh()->getBillingSubscriptionMeta()[self::INLINE_FAILURES_KEY] ?? 0) > 0) {
+                Log::warning('RetryUsageOverageChargeJob: overage charge could not be created — left for the nightly pass (sync queue)', [
+                    'billable_id' => $billable->getKey(),
+                    'error' => $e->getMessage(),
+                ]);
+
+                return;
+            }
+
             throw $e;
         }
+
+        $this->mutateBillingMeta($billable, static function (array $meta): ?array {
+            if (! array_key_exists(self::INLINE_FAILURES_KEY, $meta)) {
+                return null;
+            }
+
+            unset($meta[self::INLINE_FAILURES_KEY]);
+
+            return $meta;
+        });
 
         // Nothing owed, or the previous payment turned out to be settled after all:
         // no charge is outstanding, so the markers go away.
@@ -200,10 +237,14 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
                     $meta['usage_overage_status'],
                     $meta['usage_overage_attempts'],
                     $meta[self::COUNTED_PAYMENTS_KEY],
+                    $meta[ChargeUsageOverageDirectly::RECOLLECTIONS_KEY],
                 );
 
                 return $meta;
             });
+
+            // No debt, no lock.
+            $service->releasePastDueForDebt($billable);
         }
 
         // Charged: a payment exists and the webhook owns its outcome. The attempt
@@ -306,63 +347,55 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
+     * The dunning budget of this cycle is spent. What becomes of the debt is decided by
+     * {@see ChargeUsageOverageDirectly::deferFailedCycle()}:
+     *
+     *  - while renewals still have attempts left it **stands**, and the next renewal
+     *    collects it again on its own. The customer is told (and asked to look at their
+     *    payment method); nobody in operations is, because there is nothing for them to do;
+     *  - once those attempts are spent as well it is written off, and that is the one
+     *    moment an operator hears about it.
+     *
+     * While the debt stands the subscription is **past due** — the maintainer's rule: a
+     * customer who owes money that most likely cannot be collected any more books
+     * nothing new (`PastDueExpansionNotAllowedException`). `deferFailedCycle()` sets that
+     * state and takes it away again; it records it under its own key and never starts
+     * the `past_due_since` clock, because that one ends in a cancellation after
+     * `past_due_max_days` — long before a later renewal could collect, and for a
+     * customer whose renewals are all paid.
+     *
      * @param  array<string, mixed>  $meta
      */
     private function giveUp(Model $billable, array $meta, Throwable $reason): void
     {
         /** @var Model&\GraystackIT\MollieBilling\Contracts\Billable $billable */
-        // Only a subscription that is still running can be dunned — the same guard
-        // ChargebackHandler and SubscriptionPaymentHandler::failed() apply, and for the
-        // same reason. Forcing PastDue onto a Cancelled row still inside its grace period
-        // undoes the cancellation: `subscription_ends_at` stops meaning what it did,
-        // ResubscribeSubscription refuses because the status is no longer Cancelled, and
-        // the auto-cancel pass later re-cancels and recomputes the grace boundary — handing
-        // back access the customer had already given up. The debt itself is recorded either
-        // way, because it is owed either way.
-        $isDunnable = in_array(
-            $billable->getBillingSubscriptionStatus(),
-            [SubscriptionStatus::Active, SubscriptionStatus::Trial, SubscriptionStatus::PastDue],
-            true,
-        );
+        // Built first: both mails read the amount off the snapshot, and a write-off
+        // removes it.
+        $customerMail = MollieBilling::resolveNotification(OverageBillingFailedNotification::class, $billable);
+        $adminMail = MollieBilling::resolveNotification(AdminOverageBillingFailedNotification::class, $billable, $reason);
 
-        // Key-scoped, like every other write in this job. `$meta` was read before the Mollie
-        // attempts that led here, so persisting the whole blob reverted anything another
-        // process committed in between — `pending_refund_retries` above all, whose only reader
-        // is the hourly sweep. `mutateBillingMeta()` re-reads under the row lock and writes the
-        // status column in the same save.
-        $this->mutateBillingMeta(
-            $billable,
-            function (array $current) use ($isDunnable): array {
-                $current['usage_overage_status'] = ChargeUsageOverageDirectly::STATUS_FAILED;
-
-                if ($isDunnable) {
-                    $current['past_due_since'] = $current['past_due_since']
-                        ?? BillingTime::nowUtc()->toIso8601String();
-                }
-
-                return $current;
-            },
-            $isDunnable ? ['subscription_status' => SubscriptionStatus::PastDue] : [],
-        );
+        $outcome = app(ChargeUsageOverageDirectly::class)->deferFailedCycle($billable);
 
         event(new OverageChargeFailed($billable, (int) ($meta['usage_overage_attempts'] ?? 0), $reason));
+
+        if (property_exists($customerMail, 'willRetry')) {
+            $customerMail->willRetry = $outcome === 'deferred';
+        }
 
         $billingAdmins = MollieBilling::notifyBillingAdmins($billable);
         $billingAdmins = is_array($billingAdmins) ? $billingAdmins : iterator_to_array($billingAdmins);
         if ($billingAdmins !== []) {
-            Notification::send(
-                $billingAdmins,
-                MollieBilling::resolveNotification(OverageBillingFailedNotification::class, $billable),
-            );
+            Notification::send($billingAdmins, $customerMail);
+        }
+
+        if ($outcome !== 'written_off') {
+            return;
         }
 
         $admins = MollieBilling::notifyAdmin();
         $admins = is_array($admins) ? $admins : iterator_to_array($admins);
         if ($admins !== []) {
-            Notification::send(
-                $admins,
-                MollieBilling::resolveNotification(AdminOverageBillingFailedNotification::class, $billable, $reason),
-            );
+            Notification::send($admins, $adminMail);
         }
     }
 }

@@ -436,7 +436,12 @@ trait HasBilling
             SubscriptionStatus::Active => ! $this->hasExpiredBillingSubscription(),
             SubscriptionStatus::Trial => true,
             SubscriptionStatus::Cancelled => $this->subscription_ends_at?->isFuture() ?? false,
-            SubscriptionStatus::PastDue, SubscriptionStatus::Expired => false,
+            // Past due is no access — except for the customer who has paid the plan and
+            // owes only overage: they keep what they paid for. What is locked for them
+            // is booking and further overage, not the application.
+            SubscriptionStatus::PastDue => \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebtOnly($this)
+                && ! $this->hasExpiredBillingSubscription(),
+            SubscriptionStatus::Expired => false,
             default => false,
         };
     }
@@ -582,7 +587,13 @@ trait HasBilling
      */
     public function canChargeBillingOverage(string $type): bool
     {
-        return ! $this->isLocalBillingSubscription()
+        // Past due — for an overage debt or for an unpaid renewal — is the fifth
+        // condition: a customer who owes runs up nothing further. The included quota
+        // stays usable; beyond it the answer is the one a billable that does not allow
+        // overage gets (same exception, same `UsageLimitReached`), so an app handles one
+        // case. Back on Active, the ordinary setting applies again.
+        return ! $this->isBillingPastDue()
+            && ! $this->isLocalBillingSubscription()
             && $this->hasMollieMandate()
             && $this->allowsBillingOverage()
             && ($this->billingOveragePrice($type) ?? 0) > 0;
@@ -749,7 +760,11 @@ trait HasBilling
                 : null;
 
             $this->forceFill(array_merge(
-                ['subscription_status' => SubscriptionStatus::Trial],
+                // Not `Trial` outright: an overage debt that stands keeps its lock.
+                ['subscription_status' => \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::statusAfterRecovery(
+                    $meta ?? $this->getBillingSubscriptionMeta(),
+                    SubscriptionStatus::Trial,
+                )],
                 $meta !== null ? ['subscription_meta' => $meta] : [],
             ))->save();
         }
@@ -816,10 +831,13 @@ trait HasBilling
         // Clamped, not overflowing — see BillingTime::addInterval(). This value drives the
         // dashboard's "next billing", the overage pass's trigger day and every prorata
         // window, and for a period starting on the 31st it used to land three days after
-        // Mollie's actual charge.
-        return BillingTime::addInterval(
+        // Mollie's actual charge. On the subscription's anchor day where one is recorded:
+        // a period that began on 28 February because the cycle is the 31st ends on
+        // 31 March, the day Mollie charges (BillingAnchor).
+        return \GraystackIT\MollieBilling\Support\BillingAnchor::next(
             $this->subscription_period_starts_at,
             $this->subscription_interval === SubscriptionInterval::Yearly ? 'yearly' : 'monthly',
+            \GraystackIT\MollieBilling\Support\BillingAnchor::day($this),
         );
     }
 

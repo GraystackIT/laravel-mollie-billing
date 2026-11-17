@@ -107,7 +107,7 @@ it('does not spend the dunning budget on repeated API errors for the same paymen
     Notification::assertNothingSent();
 });
 
-it('still duns once three distinct payments have failed to settle', function (): void {
+it('gives the cycle up once three distinct payments have failed, tells the customer and leaves the debt standing', function (): void {
     Notification::fake();
 
     $b = dunningBillable('tr_one');
@@ -125,12 +125,19 @@ it('still duns once three distinct payments have failed to settle', function ():
         expect($b->fresh()->getBillingSubscriptionMeta()['usage_overage_attempts'])->toBe($index + 1);
     }
 
+    // Past due — for the debt: nothing new is booked until it is settled. Under its own
+    // key, not on the clock of a failed renewal (asserted below), so the renewals that
+    // go on to collect it are not cut short by `past_due_max_days`.
     expect($b->fresh()->subscription_status)->toBe(SubscriptionStatus::PastDue);
+    expect($b->fresh()->getBillingSubscriptionMeta())->toHaveKey(ChargeUsageOverageDirectly::PAST_DUE_KEY);
     expect($b->fresh()->getBillingSubscriptionMeta()['usage_overage_status'])
         ->toBe(RetryUsageOverageChargeJob::OVERAGE_FAILED);
+    expect($b->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('past_due_since');
 
+    // The customer hears about it; operations do not — there is nothing for them to do
+    // until the renewals have had their attempts as well.
     Notification::assertSentTo($b, OverageBillingFailedNotification::class);
-    Notification::assertSentTo(new AnonymousNotifiable, AdminOverageBillingFailedNotification::class);
+    Notification::assertNotSentTo(new AnonymousNotifiable, AdminOverageBillingFailedNotification::class);
 });
 
 it('starts a fresh budget for the next dunning cycle', function (): void {

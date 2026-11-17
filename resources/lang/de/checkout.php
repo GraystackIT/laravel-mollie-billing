@@ -64,6 +64,7 @@ return [
     'available_addons' => 'Add-ons',
     'addon_price' => '+:currency:price/:interval',
     'addon_seat_price' => '+ :price / Sitz',
+    'addon_included_seats' => '{1} :count Sitz inklusive|[2,*] :count Sitze inklusive',
 
     // Step 3: addons + seats
     'addons_heading' => 'Add-ons',
@@ -93,6 +94,7 @@ return [
     'trial_summary_heading' => ':days Tage kostenlose Testphase',
     'trial_summary_body' => 'Sie haben :days Tage Zeit, den Plan zu testen, bevor die erste Zahlung erfolgt. Sie können die Testphase jederzeit beenden.',
     'trial_redirect_notice' => 'Nach der Bestätigung werden Sie zu Mollie weitergeleitet, um Ihre Zahlungsmethode zu hinterlegen. Während der Testphase erfolgt keine Abbuchung — die erste Zahlung wird am :date durchgeführt.',
+    'full_coverage_redirect_notice' => 'Nach der Bestätigung werden Sie zu Mollie weitergeleitet, um Ihre Zahlungsmethode zu hinterlegen. Heute wird nichts abgebucht — Ihr Gutschein deckt die ersten Perioden, die erste Zahlung wird am :date durchgeführt.',
     'confirm_and_pay' => 'Bestätigen und bezahlen',
     'processing' => 'Wird verarbeitet…',
     'continue' => 'Weiter',
@@ -119,6 +121,7 @@ return [
     'coupon_requires_billable' => 'Dieser Gutschein kann beim Checkout nicht angewendet werden.',
     'coupon_requires_trial' => 'Dieser Gutschein verlängert eine Testphase; der gewählte Plan bietet keine an.',
     'coupon_not_with_trial' => 'Dieser Gutschein rabattiert eine erste Zahlung, der gewählte Plan beginnt aber mit einer kostenlosen Testphase – es gibt keine erste Zahlung, die rabattiert werden könnte. Der Code bleibt für einen Kauf ohne Testphase gültig.',
+    'coupon_ends_before_first_charge' => 'Dieser Gutschein läuft ab, bevor deine kostenlose Testphase endet – er würde deine erste Zahlung nicht reduzieren.',
     'coupon_recurring_conflict' => 'Auf diesem Abonnement ist bereits ein anderer wiederkehrender Gutschein aktiv.',
     'coupon_requires_active_subscription' => 'Zum Einlösen dieses Gutscheins ist ein aktives Abonnement erforderlich.',
     'coupon_too_close_to_charge' => 'Die nächste Abrechnung steht zu kurz bevor, um diesen Gutschein noch sicher anzuwenden. Bitte versuchen Sie es nach der nächsten Abrechnung erneut.',

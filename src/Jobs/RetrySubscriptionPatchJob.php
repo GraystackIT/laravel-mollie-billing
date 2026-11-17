@@ -153,10 +153,35 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
+        try {
+            $this->attempt($patcher, $coupons);
+        } catch (Throwable $e) {
+            // On `sync` a throw is final: `failed()` would drop the marker on the first
+            // Mollie error and mail the admins, leaving Mollie on the old amount. The
+            // marker stays instead, and SweepPendingRetriesJob runs the PATCH again every
+            // hour until the 24-hour window above gives up.
+            if (! \GraystackIT\MollieBilling\Support\BillingQueue::isSyncRun($this->job)) {
+                throw $e;
+            }
+
+            $this->keepMarkerForSweep($e);
+
+            Log::warning('RetrySubscriptionPatchJob: PATCH failed again — left for the hourly sweep (sync queue)', [
+                'billable_id' => $this->intentData['billable_id'] ?? null,
+                'first_attempt_at' => $this->firstAttemptAt,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function attempt(MollieSubscriptionPatcher $patcher, ?CouponService $coupons): void
+    {
         if (($this->intentData['reason'] ?? null) === 'recurring_coupon_expiry_reset') {
             $this->resetRecurringAmount($patcher, $coupons);
         } elseif (($this->intentData['reason'] ?? null) === 'next_charge_date') {
             $this->applyNextChargeDate($patcher);
+        } elseif (($this->intentData['reason'] ?? null) === 'anchor_pin') {
+            $this->applyAnchorPin($patcher);
         } elseif (($this->intentData['reason'] ?? null) === 'plan_waiver_sync') {
             $this->syncPlanWaiver();
         } else {
@@ -327,6 +352,30 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
+     * The renewal could not keep the next charge on the anchor day
+     * (SubscriptionPaymentHandler::pinNextChargeOnAnchor()). Sent again until the day has
+     * come; after that Mollie has charged on its own date and the renewal of that charge
+     * sets the anchor anew, so there is nothing left to pin.
+     */
+    private function applyAnchorPin(MollieSubscriptionPatcher $patcher): void
+    {
+        $billable = $this->resolveBillable();
+        $target = (string) ($this->intentData['target'] ?? '');
+
+        if ($billable === null || $target === '') {
+            return;
+        }
+
+        $day = \Carbon\Carbon::parse($target)->setTimezone('UTC')->startOfDay();
+
+        if (! $day->greaterThan(BillingTime::nowUtc()->setTimezone('UTC')->startOfDay())) {
+            return;
+        }
+
+        $patcher->pinNextChargeDate($billable, $day);
+    }
+
+    /**
      * A plan waiver was given, extended or taken away and the PATCH that follows did not
      * land. Nothing is carried in the payload: the billable is priced as it stands now —
      * waiver or none — so a retry can neither undo a gift nor resurrect a revoked one.
@@ -346,6 +395,45 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
     {
         $this->clearMarker();
         $this->notifyAdminOfDeadLetter();
+    }
+
+    /**
+     * The marker the hourly sweep reads, kept for this intent with the first failure's
+     * time — so the 24-hour window counts from there, not from each new attempt. A marker
+     * that already describes a newer intent is that intent's chain, and left alone.
+     */
+    private function keepMarkerForSweep(Throwable $e): void
+    {
+        $billable = $this->resolveBillable();
+
+        if (! $billable instanceof \Illuminate\Database\Eloquent\Model) {
+            return;
+        }
+
+        $signature = self::intentSignature($this->intentData);
+        $firstAttemptAt = $this->firstAttemptAt;
+        $intentData = $this->intentData;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($signature, $firstAttemptAt, $intentData, $e): ?array {
+            $marker = $meta['pending_subscription_patch'] ?? null;
+
+            if (is_array($marker) && $marker !== []) {
+                $payload = is_array($marker['intent'] ?? null) ? $marker['intent'] : $marker;
+
+                if (self::intentSignature($payload) !== $signature) {
+                    return null;
+                }
+            } else {
+                // Cleared under this chain's feet: written again, in the shape it came in.
+                $marker = isset($intentData['reason']) ? $intentData : ['intent' => $intentData];
+            }
+
+            $marker['first_attempt_at'] = $firstAttemptAt;
+            $marker['last_error'] = $e->getMessage();
+            $meta['pending_subscription_patch'] = $marker;
+
+            return $meta;
+        });
     }
 
     private function clearMarker(): void

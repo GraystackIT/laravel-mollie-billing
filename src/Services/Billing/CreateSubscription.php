@@ -170,7 +170,10 @@ class CreateSubscription
         // working payment method.
         $mandateId = (string) ($spec['mandate_id'] ?? $billable->getMollieMandateId() ?? '');
 
-        $subscription = MollieCall::send(new CreateSubscriptionRequest(
+        // `adopt_subscription`: an activation retry found the subscription its first
+        // attempt created at Mollie (the answer was lost). The local state below is
+        // written for that one; creating another would charge the customer twice.
+        $subscription = is_object($spec['adopt_subscription'] ?? null) ? $spec['adopt_subscription'] : MollieCall::send(new CreateSubscriptionRequest(
             customerId: $billable->getMollieCustomerId(),
             amount: new Money($currency, BillingMoney::mollieAmount($amountGross, $currency)),
             interval: $interval === 'yearly' ? '12 months' : '1 month',
@@ -236,8 +239,11 @@ class CreateSubscription
 
     /**
      * For a 100%-coverage recurring discount, return the Mollie startDate that
-     * skips the entire discount lifetime: marker.valid_until + 1 day. Falls
-     * back to one period from now if the marker has no valid_until.
+     * skips the entire discount lifetime: the first charge on the subscription's cycle
+     * the discount no longer covers (`charge_resumes_at`, written with the marker —
+     * CouponService::recurringMarkerFor()). A marker written before that date was kept
+     * defers to `valid_until + 1 day`, as it always did. Falls back to one period from
+     * now if the marker has no end at all.
      */
     private function fullCoverageStartDate(
         Billable $billable,
@@ -248,11 +254,17 @@ class CreateSubscription
 
         // A plan waiver resumes on a renewal, not on the day after it ends.
         if (is_array($marker) && $regularCharge !== null) {
-            $resumesAt = PlanWaiver::chargeResumesAt($marker, $regularCharge, $interval);
+            $resumesAt = PlanWaiver::chargeResumesAt($marker, $regularCharge, $interval, app(CouponService::class)->recurringAnchorDay($billable, $interval, $regularCharge));
 
             if ($resumesAt !== null) {
                 return $resumesAt;
             }
+        }
+
+        $resumesAt = is_array($marker) ? CouponService::markerChargeResumesAt($marker) : null;
+
+        if ($resumesAt !== null) {
+            return $resumesAt;
         }
 
         $validUntil = is_array($marker) && isset($marker['valid_until']) && $marker['valid_until'] !== null

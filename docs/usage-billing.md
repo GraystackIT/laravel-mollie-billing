@@ -166,7 +166,7 @@ A negative balance is unpaid debt, and the reset does **not** forgive it while t
 | Month 2 start | Reset **keeps the debt**, credits 100 | 63 |
 | Month 2, day 2 | Overage payment settles, credits 37 | 100 |
 
-A cycle that already gave up (status `failed`) is not "in flight" — that debt was written off with the past-due transition, so preserving it would strand the wallet negative forever.
+A cycle that already gave up (status `failed`) is not "in flight", and its debt is no longer on the wallet at all — see [A debt nobody could collect stands, and the renewals try again](#a-debt-nobody-could-collect-stands-and-the-renewals-try-again).
 
 ### A renewal never zeroes a debt that is still owed
 
@@ -589,16 +589,130 @@ balance into the new period, and every future overage for that billable was sile
 - **`paid`** — replays the delivery through the webhook controller, so the invoice, the
   wallet settlement and the events are exactly what the webhook would have produced. The
   invoice guard makes a duplicate a no-op.
-- **`failed` / `canceled` / `expired`** — writes the snapshot off as `failed` and notifies
-  the admins. The wallet debt stays outstanding, but the next cycle may charge for it again
-  instead of being silenced.
-- **still `open`/`pending` past `HARD_LIMIT_DAYS` (14)** — the same write-off. A payment
-  stuck that long is not going to settle. The 14 days are the **payment's own** age (Mollie's
-  `createdAt`), not the snapshot's: the snapshot's `created_at` is the dunning cycle's start
-  and is inherited from payment to payment. Measured against the cycle, the third SEPA
-  attempt of a cycle — created on day 12 or 13 — was written off two days later, the slot
-  was free for a new charge, and the written-off payment then settled as well.
+- **`failed` / `canceled` / `expired`** — the cycle is over. The debt is left standing for
+  the next renewals (see below); nobody is notified.
+- **still `open`/`pending` past `HARD_LIMIT_DAYS` (14)** — the payment is **cancelled at
+  Mollie first**, and only then treated like a failed one. A payment Mollie will not cancel
+  (a direct debit already on its way to the bank) keeps its slot and is looked at again on
+  the next pass: freeing the slot for a payment that can still settle is how one debt gets
+  collected twice. The 14 days are the **payment's own** age (Mollie's `createdAt`), not
+  the snapshot's — the snapshot's `created_at` is the dunning cycle's start and is
+  inherited from payment to payment, so the third SEPA attempt of a cycle is routinely
+  created when the cycle is already twelve or thirteen days old.
 - **an invoice already exists** — the webhook did run and only the snapshot was left behind:
   the snapshot and the dunning budget are cleared.
 
 Mollie being unreachable is not a verdict; the next pass asks again.
+
+### A debt nobody could collect stands, and the renewals try again
+
+A dunning cycle is three payments. When all three fail, that used to be the end of the
+debt: the operators were mailed, the subscription went past due, and the next renewal's
+reset wrote the units off. Most failed overage payments are a card limit or an expired
+card, though, and the customer fixes those within a period or two — so this is now settled
+without anybody in operations:
+
+1. **The debt leaves the wallet and stands as a receivable.**
+   `ChargeUsageOverageDirectly::deferFailedCycle()` credits the unpaid units back (reason
+   `overage_debt_deferred`), keeps the lines in `subscription_meta.usage_overage` with
+   `settles_wallet: false`, and sets `usage_overage_status = failed` plus `failed_at`. Off
+   the wallet, because a negative balance is netted against the next period's quota by the
+   reset that preserves it — the customer would pay in units for something that is then
+   collected in money as well.
+2. **Each of the next renewals starts one fresh cycle for it.** The sweep the night before
+   a renewal, the renewal itself (`WebhookSupport::collectOutstandingOverage()`) and the
+   last sweep before a subscription ends all go through
+   `ChargeUsageOverageDirectly::handle()`, which charges the standing lines together with
+   whatever the wallets owe now. Not before the debt has rested `RECOLLECT_AFTER_DAYS` (3):
+   the sweep's cycle fails hours before its own renewal, and trying again the next morning
+   is a fourth attempt on a payment method that has just refused three.
+3. **After `MAX_RENEWAL_RECOLLECTIONS` (3) such cycles it is written off.** The snapshot is
+   removed, `OverageWrittenOff` is dispatched (audit entry `overage_written_off`, with the
+   amount and the number of attempts), and *now* the operators are told.
+
+| When | What happens | Customer | Operator |
+|---|---|---|---|
+| Cycle fails (3 payments) | Units credited back, debt stands | Mail: "we will try again with your next renewal" | — |
+| Each of the next 3 renewals | One new cycle for the standing debt | Mail again if it fails | — |
+| One of them is paid | Overage invoice, snapshot cleared, no units credited a second time | Invoice | — |
+| All of them fail | Written off, `OverageWrittenOff` | Mail: "we will not try again" | Mail |
+
+**While the debt stands the subscription is past due.** A customer who owes money that
+most likely cannot be collected any more books nothing new: more seats, a paid addon, a
+plan or interval change, a one-time order (with or without a code), extras on top of a
+grant and a new checkout are refused with `PastDueExpansionNotAllowedException`, now and
+as a scheduled change. A code entered in the portal still works where it is a gift
+(credits, an extension, a waiver, a discount on the renewals) — none of them charges
+anything and none of them lifts the lock. Shrinking stays
+possible. The customer reads the open amount, and why nothing can be booked, on the
+dashboard and on the usage page.
+
+The next-charge box (`NextChargeSummary`, `<x-mollie-billing::next-charge>`) keeps
+announcing the renewal for such a customer — date, lines, amount — and lists the open
+debt as a line of its own when that renewal will collect it; `total_gross` is everything
+that leaves the account that day, `gross` remains the subscription's own charge.
+
+**Access stays.** A customer who has paid the plan and owes only overage keeps the
+application in the scope of that plan: `hasAccessibleBillingSubscription()` answers true,
+`RequireActiveSubscription` (`billing.active`) lets them through, and the feature gates
+(`billing.feature`, `@planFeature`, `MollieBilling::features()`) answer as for an active
+subscription. What is locked is booking and further overage. With a renewal unpaid as
+well, nothing changes: no access, and the application's routes lead to the portal.
+
+### Past due: no further overage
+
+While a subscription is past due — for an overage debt *or* for an unpaid renewal — only
+what the wallets hold is usable. A booking that would take a wallet below zero, or
+further below, is refused exactly as it is for a billable that does not allow overage:
+`UsageLimitExceededException` from `recordBillingUsage()` / `WalletUsageService::debit()`
+and the `UsageLimitReached` event, all-or-nothing (40 units left, 50 asked: nothing is
+booked). It is one rule in one place, `canChargeBillingOverage()`, so
+`hasBillingQuotaLeft()` — the gate an app asks before doing work — gives the same answer
+as the debit. A type that still has units stays usable; a wallet that is already negative
+takes nothing more. Back on `active`, the billable's ordinary overage setting applies.
+
+> **For app developers.** `recordBillingUsage()` can now throw for a billable that allows
+> overage and has a mandate — when it is past due. If your code calls it without asking
+> `hasBillingQuotaLeft()` first and without catching `UsageLimitExceededException`,
+> because "this customer may always go over", that assumption no longer holds. Handle it
+> the way you handle a customer without overage: ask the gate, or catch the exception.
+
+The standing debt is not touched by any of this, and a renewal paid while it stands hands
+out the **whole** quota of the new period: the debt was taken off the wallet when its
+cycle gave up and is kept as money, so the new units are not netted against it. (An
+ordinary negative balance — overage not yet charged — is different: it stays on the
+wallet through a reset and is charged, as described above.)
+
+This is a different past due from the one a failed *renewal* causes, and it is recorded
+under its own key, `subscription_meta.overage_past_due_since`:
+
+| | Renewal unpaid (`past_due_since`) | Overage debt only (`overage_past_due_since`) |
+|---|---|---|
+| Renewals | Mollie retries the failed one | keep running and are booked as usual; each one is an attempt at the debt |
+| `past_due_max_days` | cancels the subscription | does **not** run — every renewal is paid |
+| Plan or interval change | the past-due reset: a fresh period, charged in full | refused — the period is paid, a reset would charge it twice |
+| "Charge now" on the dashboard | offered | not offered — it would collect the *next* period today |
+| Ends when | a renewal is paid | the debt is paid (→ active), or written off after the last attempt (→ active) |
+
+Every path that ends a dunning episode — a paid renewal, a paid plan change, a reversed
+chargeback, an operator's trial extension — asks
+`ChargeUsageOverageDirectly::statusAfterRecovery()` which status to write instead of
+writing `Active` itself. The lock ends in one place only, `releasePastDueForDebt()`.
+
+**The operator's "Retry"** in the past-due list starts a new collection cycle for a
+standing debt at once (`collectStandingDebtNow()`), without the three-day rest. It counts
+as one of the three further attempts — each cycle is up to three payments against the
+mandate, and an attempt that did not count would let the button dun without end. A second
+click while that payment is on its way starts nothing.
+
+A new checkout is refused for a past-due customer who owes — an overage debt, or an
+unpaid renewal on a subscription Mollie is still running. It stays open for the one
+past-due state with nothing to pay for: a trial that expired without a subscription.
+
+Both can hold at once. A paid renewal then ends only the renewal's episode and the
+subscription stays past due for the debt; a paid or written-off debt ends only the debt's
+and the subscription stays past due for the renewal, on the ordinary clock.
+
+A plan change while a debt stands carries it along: the standing lines travel with the
+plan change's own overage charge rather than being overwritten in the single slot.
+

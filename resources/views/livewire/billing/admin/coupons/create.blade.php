@@ -122,6 +122,10 @@ new class extends Component {
     public array $credits_payload = [];
 
     /** @var array<int, string> */
+    public array $applicable_plans = [];
+    /** @var array<int, string> */
+    public array $applicable_intervals = [];
+    /** @var array<int, string> */
     public array $applicable_addons = [];
     /** @var array<int, string> */
     public array $applicable_products = [];
@@ -139,6 +143,13 @@ new class extends Component {
                     $creditsPayload[(string) $usageType] = $qty;
                 }
             }
+
+            // The plan / interval / addon / product restrictions are offered for the two
+            // discount kinds only. Ticked under one of them and the kind then switched, they
+            // stayed in component state, out of sight — and were saved onto a credits or
+            // free-time code that `CouponService::validate()` then refused on every order
+            // naming another plan, or none.
+            $restrictable = in_array($this->type, ['single_payment', 'recurring'], true);
 
             $attrs = array_filter([
                 'code' => strtoupper(trim($this->code)),
@@ -164,8 +175,10 @@ new class extends Component {
                 'grant_on_expiry' => $this->type === 'access_grant' && ! empty($this->grant_plan_code) ? $this->grant_on_expiry : null,
                 'waiver_periods' => $this->type === 'plan_waiver' ? $this->waiver_periods : null,
                 'credits_payload' => $creditsPayload !== [] ? $creditsPayload : null,
-                'applicable_addons' => $this->applicable_addons !== [] ? array_values($this->applicable_addons) : null,
-                'applicable_products' => $this->applicable_products !== [] ? array_values($this->applicable_products) : null,
+                'applicable_plans' => $restrictable && $this->applicable_plans !== [] ? array_values($this->applicable_plans) : null,
+                'applicable_intervals' => $restrictable && $this->applicable_intervals !== [] ? array_values($this->applicable_intervals) : null,
+                'applicable_addons' => $restrictable && $this->applicable_addons !== [] ? array_values($this->applicable_addons) : null,
+                'applicable_products' => $restrictable && $this->applicable_products !== [] ? array_values($this->applicable_products) : null,
             ], fn ($v) => $v !== null && $v !== '');
 
             // Always passed for a recurring coupon, also when empty: without the key
@@ -558,6 +571,43 @@ new class extends Component {
                     <flux:input type="number" wire:model="waiver_periods" placeholder="3" :suffix="__('billing::admin.billables.subscription.free_time.periods')" min="1" required />
                 </x-mollie-billing::admin.labelled>
             </x-mollie-billing::admin.section>
+        @endif
+
+        {{-- Plan and interval restrict where a discount applies. A coupon restricted to a
+             plan is refused on every order that names another plan — or none, such as a
+             product purchase. --}}
+        @if (in_array($type, ['single_payment', 'recurring']))
+            <x-mollie-billing::admin.collapsible
+                :title="__('billing::admin.coupons.create.applicable_plans')"
+                :description="__('billing::admin.coupons.create.applicable_plans_description')"
+                :badge="(count($applicable_plans) + count($applicable_intervals)) > 0 ? __('billing::admin.coupons.create.selected_count', ['count' => count($applicable_plans) + count($applicable_intervals)]) : null"
+                :open="(count($applicable_plans) + count($applicable_intervals)) > 0"
+            >
+                <div class="flex items-center gap-1">
+                    <flux:text size="sm">{{ __('billing::admin.coupons.create.info.what_this_does') }}</flux:text>
+                    <x-mollie-billing::admin.info :text="__('billing::admin.coupons.create.info.applicable_plans')" />
+                </div>
+                <flux:checkbox.group wire:model="applicable_plans">
+                    <div class="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
+                        @foreach ($planOptions as $code => $name)
+                            <flux:checkbox value="{{ $code }}" label="{{ $name }}" />
+                        @endforeach
+                    </div>
+                </flux:checkbox.group>
+
+                <flux:separator variant="subtle" />
+
+                <div class="flex items-center gap-1">
+                    <flux:text size="sm">{{ __('billing::admin.coupons.create.applicable_intervals') }}</flux:text>
+                    <x-mollie-billing::admin.info :text="__('billing::admin.coupons.create.info.applicable_intervals')" />
+                </div>
+                <flux:checkbox.group wire:model="applicable_intervals">
+                    <div class="flex flex-wrap gap-x-6 gap-y-2">
+                        <flux:checkbox value="monthly" :label="__('billing::admin.common.monthly')" />
+                        <flux:checkbox value="yearly" :label="__('billing::admin.common.yearly')" />
+                    </div>
+                </flux:checkbox.group>
+            </x-mollie-billing::admin.collapsible>
         @endif
 
         @if (! empty($addonOptions) && in_array($type, ['single_payment', 'recurring']))

@@ -131,6 +131,26 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
         $invoices->createRefund($billable, [$line], 'Refund retry');
 
         if ($this->stillPending($billable)) {
+            // The re-appended entry is stamped "now"; the window counts from the first
+            // failure. The chain carries that in its own constructor argument, but the
+            // sweep reads it off the entry — and with a fresh stamp on every attempt a
+            // line the sweep keeps re-dispatching never reached its 7 days, so it was
+            // never dead-lettered and no operator was ever told.
+            $this->keepFirstAttemptOnEntry($billable);
+
+            // On `sync` a throw is final: `failed()` would dead-letter the line on the first
+            // Mollie error and mail the admins. The entry stays in `pending_refund_retries`
+            // instead, and SweepPendingRetriesJob runs it again every hour until the 7-day
+            // window above moves it to the dead letter.
+            if (\GraystackIT\MollieBilling\Support\BillingQueue::isSyncRun($this->job)) {
+                Log::warning('RetryRefundLineJob: refund line rejected again — left for the hourly sweep (sync queue)', [
+                    'billable_id' => $this->billableId,
+                    'first_attempt_at' => $this->firstAttemptAt,
+                ]);
+
+                return;
+            }
+
             // Throw so the queue applies the backoff ladder; the re-appended entry
             // carries the Mollie error for the next attempt and for the dead letter.
             throw new RuntimeException(sprintf(
@@ -218,6 +238,32 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
                 ),
             );
         }
+    }
+
+    private function keepFirstAttemptOnEntry(\GraystackIT\MollieBilling\Contracts\Billable $billable): void
+    {
+        if (! $billable instanceof \Illuminate\Database\Eloquent\Model) {
+            return;
+        }
+
+        $signature = $this->lineSignature($this->lineData);
+        $firstAttemptAt = $this->firstAttemptAt;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($signature, $firstAttemptAt): array {
+            $entries = (array) ($meta['pending_refund_retries'] ?? []);
+
+            foreach ($entries as $index => $entry) {
+                $line = is_array($entry) ? ($entry['line'] ?? null) : null;
+
+                if (is_array($line) && $this->lineSignature($line) === $signature) {
+                    $entries[$index]['first_attempt_at'] = $firstAttemptAt;
+                }
+            }
+
+            $meta['pending_refund_retries'] = $entries;
+
+            return $meta;
+        });
     }
 
     private function removeFromPendingRetries(\GraystackIT\MollieBilling\Contracts\Billable $billable): void

@@ -190,7 +190,11 @@
 
 <flux:callout icon="shield-check" color="zinc" inline class="mt-4 mb-6">
     @if ($trialDays > 0 && $trialFirstChargeDate !== null)
-        {{ __('billing::checkout.trial_redirect_notice', ['date' => $trialFirstChargeDate]) }}
+        <span dusk="confirm-first-charge">{{ __('billing::checkout.trial_redirect_notice', ['date' => $trialFirstChargeDate]) }}</span>
+    @elseif ($firstCharge !== null)
+        {{-- A recurring code that covers the whole order: nothing is due today, and the
+             customer is told the day the first payment is taken — N billing periods on. --}}
+        <span dusk="confirm-first-charge">{{ __('billing::checkout.full_coverage_redirect_notice', ['date' => $firstCharge->translatedFormat('d. M Y')]) }}</span>
     @else
         {{ __('billing::checkout.redirect_notice') }}
     @endif

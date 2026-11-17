@@ -147,6 +147,48 @@ fails with `Class "P\Tests\…" not found` rendered into the page.
 | `simulator()` | The package's `LifecycleSimulator` (trial expiry, overage, past-due auto-cancel, cancelled→expired). |
 | `coupons()` | `CouponService`, for creating coupons. |
 | `shot($browser, 'caption')` | Full-height screenshot + a gallery manifest line. |
+| `travelSharedClockTo('2027-03-10 09:05')` | Move "now" for the test process **and** the server — see below. Reset after every test. |
+
+### A shared clock
+
+The two processes share a database, not a clock. `Carbon::setTestNow()` in a test moves
+the test's own time only; the page the browser loads next is rendered at the machine's real
+time. A scenario that needs renewals months apart — a gift running out, a trial ending —
+could move the books forward but never look at them.
+
+`travelSharedClockTo($at)` moves both. The clock is a row in the shared settings table
+(`workbench_settings`, key `clock.now`): the instant travelled to and the real instant the
+travel happened. `Workbench\App\Support\SharedClock` turns that into `Carbon::setTestNow()`
+— in the test process when it travels, and in the Dusk server on **every request**, from
+`WorkbenchServiceProvider::register()`. Both read "now" as the travelled instant plus the
+real time elapsed since, so the clock keeps running as in production: a cache lock with a
+lifetime still runs out, and two requests are not stamped with the same microsecond.
+
+Rules that keep it from leaking:
+
+- **The server applies it, the test process never reads it at boot.** Only the `cli-server`
+  SAPI (`php -S`) reads the row. The test process boots its application *before*
+  `migrate:fresh` clears the table, and must not pick up a row an earlier test left.
+- **Every test starts on the machine's time.** `BrowserTestCase::tearDown()` deletes the row
+  and clears `Carbon::setTestNow()`, also when the test failed half-way, and `setUp()`'s
+  `migrate:fresh` would drop the row anyway.
+- **A travelled test leaves no cache behind.** The shared file cache expires entries by the
+  clock that wrote them, so one written in a travelled future would still be fresh for the
+  next test — which starts its ids over (`sub_wb_1`, billable 1) and would read it as its
+  own. `SharedClock::reset()` flushes the cache after a test that travelled.
+- **The session follows the clock.** While a clock is set the server runs with a session
+  lifetime of ten years: the file session handler compares the file's *real* modification
+  time with `now() - lifetime`, so a clock months ahead read every session as expired; and a
+  cookie stamped with an expiry in the travelled past would be dropped by Chrome, which keeps
+  the machine's time.
+- **Travel, then `actAs()` again.** The page the browser holds was rendered at the old time.
+- **Travel first, then build the world.** A billable or coupon created before the first
+  travel carries the machine's dates, and the journey then starts somewhere else than the
+  test says.
+
+`GET /_wb/clock` answers what the server thinks the time is (`now`, `travelled`) — the first
+stop when a date on screen looks wrong. `tests/Browser/Matrix/GiftLongRunMatrixTest.php`
+uses the clock for a gift with paid extras walked over five months, and pins the reset.
 
 ### Interacting with Flux
 
@@ -160,7 +202,10 @@ Three things the portal's own patterns force, all learned the hard way:
   `waitForPresence()` / `waitForAbsence()` / `domCount()` when the question is "does
   this action exist?" rather than "is it on screen?".
 - **Flux hides real inputs behind its own controls.** `jsClick()` reaches checkboxes
-  and radios that WebDriver refuses to click.
+  and radios that WebDriver refuses to click. Flux's own elements — `ui-radio` (cards
+  too), `ui-checkbox`, the heading of a folded `ui-disclosure` — take a native WebDriver
+  click; `AdminCouponFormMatrixTest::choose()` finds a control by the property it is bound
+  to and clicks what is on screen, so the form is never set through `$wire.set`.
 
 And one about time: **never wait on a stopwatch for something the server decides.**
 The VAT field is debounced and then asks VIES; a `pause(1500)` passed alone and
@@ -227,3 +272,16 @@ Make it a class extending `BrowserTestCase`.
 **A balance looks stale** — bavix/laravel-wallet caches balances in the `array`
 store by default, i.e. per process. The workbench points `wallet.cache.driver` at
 the shared file store; if you add another cache-backed dependency, do the same.
+
+**A run stops making progress and never ends** — the PHP dev server blocked on its own
+access log. `php -S` logs every request to stderr, into a pipe only the test process
+reads, and Symfony's `Process` reads a pipe only when it is asked for output.
+testbench-dusk's per-test `clearOutput()` truncates the buffer but never reads the pipe,
+so after roughly 64 KB of log (a few hundred requests) the server sits in `write()`
+forever and the test waits on ChromeDriver for a page that will not come. A class with a
+handful of tests never gets there, because every class starts a fresh server; a
+data-driven matrix class did within minutes. `BrowserTestCase::drainServerOutput()` reads
+and discards both pipes in `setUp()` and `tearDown()`. A single test that makes several
+hundred requests on its own would still fill the pipe — call `drainServerOutput()` inside
+it. To tell this hang from a slow test: `sample <pid of php -S> 1` shows
+`php_cli_server_logf → write`.

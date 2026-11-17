@@ -147,10 +147,9 @@ it('refunds the payment in full and changes nothing when the gift is gone', func
         ->and(BillingInvoice::query()->count())->toBe(2)
         ->and($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [])->toBe([]);
 
-    // Everyone is told, once.
+    // The customer is told, once. It resolved itself: no operator is asked to do anything.
     Notification::assertSentToTimes($billable, GrantExtrasPurchaseRefundedNotification::class, 1);
-    Notification::assertSentToTimes($admin, AdminPlanChangeFailedNotification::class, 1);
-    Notification::assertSentTo($admin, AdminPlanChangeFailedNotification::class, fn ($n): bool => $n->context['refund_queued'] === false && $n->context['amount_gross'] === 2526);
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
     Event::assertDispatchedTimes(GrantExtrasPurchaseRefunded::class, 1);
     Event::assertNotDispatched(DuplicatePaymentReceived::class);
     Event::assertNotDispatched(PaymentAmountMismatch::class);
@@ -205,7 +204,7 @@ it('refunds once: a re-delivery posts no second refund and sends no second mail'
         ->and($m->sentOf(CreateSubscriptionRequest::class))->toBe([]);
 
     Notification::assertSentToTimes($billable, GrantExtrasPurchaseRefundedNotification::class, 1);
-    Notification::assertSentToTimes($admin, AdminPlanChangeFailedNotification::class, 1);
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
     Event::assertDispatchedTimes(GrantExtrasPurchaseRefunded::class, 1);
     Bus::assertDispatched(RevokeMollieMandateJob::class, 1);
 });
@@ -258,7 +257,7 @@ it('does not book the refund a second time when Mollie reports it through the pa
     Event::assertDispatchedTimes(GrantExtrasPurchaseRefunded::class, 1);
 })->with(['pending' => ['pending'], 'refunded' => ['refunded']]);
 
-it('queues the refund and alerts the admins when Mollie cannot be asked to pay it out', function (): void {
+it('queues the refund without alerting anyone when Mollie cannot be asked to pay it out, and the retry posts it', function (): void {
     [$m, $billable, $admin] = giftGoneSetup();
 
     app(UpgradeLocalToMollie::class)->handleKeepingGrant($billable, ['sso'], 3);
@@ -287,8 +286,9 @@ it('queues the refund and alerts the admins when Mollie cannot be asked to pay i
     $after = giftGoneState($billable);
     expect($after)->toBe($before);
 
-    // The admins are told it is NOT refunded yet; the customer is told what happened.
-    Notification::assertSentTo($admin, AdminPlanChangeFailedNotification::class, fn ($n): bool => $n->context['refund_queued'] === true);
+    // The customer is told what happened. The refund is queued — the automatic way is
+    // still running, so no admin hears of it yet.
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
     Notification::assertSentToTimes($billable, GrantExtrasPurchaseRefundedNotification::class, 1);
 
     // A re-delivery does not post a second attempt on its own: the line is queued.
@@ -309,7 +309,30 @@ it('queues the refund and alerts the admins when Mollie cannot be asked to pay i
         ->and($invoice->fresh()->remainingRefundableNet())->toBe(0);
 
     Notification::assertSentToTimes($billable, GrantExtrasPurchaseRefundedNotification::class, 1);
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
+});
+
+it('tells an admin exactly once when the queued refund has used up its retries', function (): void {
+    [$m, $billable, $admin] = giftGoneSetup();
+
+    app(UpgradeLocalToMollie::class)->handleKeepingGrant($billable, ['sso'], 3);
+    $payment = $m->lastPayment();
+    app(CouponService::class)->revokeGrant(CouponRedemption::query()->sole(), 'test');
+
+    $m->intercept = fn (object $request) => $request instanceof CreatePaymentRefundRequest
+        ? throw new RuntimeException('Mollie is unavailable')
+        : null;
+    $m->settle($payment);
+
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
+
+    $entry = (array) ($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'][0] ?? []);
+    (new \GraystackIT\MollieBilling\Jobs\RetryRefundLineJob($billable::class, $billable->getKey(), (array) $entry['line'], now()->toIso8601String()))
+        ->failed(new RuntimeException('Mollie keeps refusing'));
+
     Notification::assertSentToTimes($admin, AdminPlanChangeFailedNotification::class, 1);
+    expect($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [])->toBe([])
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries_dead_letter'] ?? [])->toHaveCount(1);
 });
 
 it('refunds a reverse-charge customer the net amount they paid, with no VAT on either document', function (): void {
@@ -375,3 +398,55 @@ it('writes an audit entry and words the customer mail in both languages', functi
         ->and($text)->toContain('25')
         ->and($mail->actionUrl)->not->toBeEmpty();
 })->with(['en', 'de']);
+
+/*
+ * Decided by the maintainer on 16 Nov 2026: a refund that went through on its own is not an
+ * operator's business. No admin mail on a successful automatic refund — an admin hears of
+ * it only when the queued refund has used up its retries (tested above). The event and the
+ * audit entry are how the successful case stays on record.
+ */
+it('sends no admin mail on a successful automatic refund, and still dispatches the event and writes the audit entry', function (): void {
+    $m = BookingMatrix::boot();
+    Bus::fake([RevokeMollieMandateJob::class]);
+
+    $billable = $m->billable('AT');
+    $service = app(CouponService::class);
+    $coupon = $service->accessGrantCoupon('GIFT-GONE', 'pro', 'monthly', [], 90);
+    $service->redeem($coupon, $billable->fresh(), []);
+
+    $admin = new GiftGoneAdmin;
+    MollieBilling::notifyAdminUsing(fn (): array => [$admin]);
+    MollieBilling::notifyBillingAdminsUsing(fn ($b): array => [$b]);
+
+    // The real event, with its listeners (the audit trail is one of them).
+    $events = [];
+    Event::listen(GrantExtrasPurchaseRefunded::class, function (GrantExtrasPurchaseRefunded $event) use (&$events): void {
+        $events[] = $event;
+    });
+
+    app(UpgradeLocalToMollie::class)->handleKeepingGrant($billable->fresh(), ['sso'], 3);
+    $payment = $m->lastPayment();
+    $service->revokeGrant(CouponRedemption::query()->sole(), 'test');
+
+    $m->settle($payment);
+
+    // The refund went out — (15.50 + 5.55) + 20 % = 25.26.
+    expect(BookingMatrix::minor($m->sentOf(CreatePaymentRefundRequest::class)[0]))->toBe(2526);
+
+    // No operator is told anything, by any channel.
+    Notification::assertNothingSentTo($admin);
+    Notification::assertSentToTimes(new \Illuminate\Notifications\AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 0);
+
+    // The customer is, once.
+    Notification::assertSentToTimes($billable, GrantExtrasPurchaseRefundedNotification::class, 1);
+
+    // On record: the event, once, with the credit note — and the audit entry it produces.
+    expect($events)->toHaveCount(1)
+        ->and($events[0]->creditNote)->not->toBeNull();
+
+    $descriptor = BillingAuditMap::all()[GrantExtrasPurchaseRefunded::class];
+    expect(\Illuminate\Support\Facades\DB::table('activity_log')
+        ->where('event', $descriptor->key)
+        ->where('subject_id', $billable->getKey())
+        ->count())->toBe(1);
+});

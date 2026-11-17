@@ -65,11 +65,14 @@ function everyBillingNotification(): array
         OverageBillingFailedNotification::class => new OverageBillingFailedNotification($billable),
         PlanChangeFailedNotification::class => new PlanChangeFailedNotification($billable, 'tr_x'),
         RefundProcessedNotification::class => new RefundProcessedNotification($billable, $creditNote),
+        \GraystackIT\MollieBilling\Notifications\ScheduledChangeNotAppliedNotification::class => new \GraystackIT\MollieBilling\Notifications\ScheduledChangeNotAppliedNotification($billable, 'pro', 'attempts_exhausted'),
         SubscriptionCancelledNotification::class => new SubscriptionCancelledNotification($billable),
         SubscriptionPaymentFailedNotification::class => new SubscriptionPaymentFailedNotification($billable, 'tr_x', 4900, 'EUR'),
         TrialConvertedNotification::class => new TrialConvertedNotification($billable),
         TrialEndingSoonNotification::class => new TrialEndingSoonNotification($billable),
         TrialExpiredNotification::class => new TrialExpiredNotification($billable),
+        \GraystackIT\MollieBilling\Notifications\UndercollectionChargedNotification::class => new \GraystackIT\MollieBilling\Notifications\UndercollectionChargedNotification($billable, 595, 'EUR', 'renewal_created_before_change'),
+        \GraystackIT\MollieBilling\Notifications\UnwantedPaymentRefundedNotification::class => new \GraystackIT\MollieBilling\Notifications\UnwantedPaymentRefundedNotification($billable, 3451, 'EUR', 'renewal_after_end'),
         UsageThresholdNotification::class => new UsageThresholdNotification($billable, 'sms', 80),
     ];
 }

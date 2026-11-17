@@ -106,29 +106,49 @@ it('refills a free plan once per period for a year and never charges it', functi
     expect($run->units('SMS', 'subscription_renewal_rollover'))->toBe(12 * 50);
 })->with(['every night once' => 'once', 'every night twice' => 'twice']);
 
-it('clamps a month-end anchor once and then keeps that day', function (): void {
-    // Known limit, pinned so it cannot get worse: a Local period that starts on the 31st
-    // is clamped to the 28th in February and stays on the 28th from then on. It does not
-    // lose a further day per period.
+it('keeps a Local period on its anchor day through the short months', function (string $start, string $until, ?string $endsAt, array $expectedAnchors): void {
+    // A free plan, or a gift without extras, started on the 31st: the nightly pass turns
+    // the period over on the 31st, and on the last day of a month that has no 31st —
+    // 29 February in a leap year, 28 February otherwise — and returns to the 31st after it
+    // (BillingAnchor). One refill per period, on the day it begins.
     $run = UsageLongRunHarness::boot();
-    $start = Carbon::parse('2026-01-31T09:00:00Z');
-    usageLongRunLocalBillable($run, $start);
+    $start = Carbon::parse($start);
+    usageLongRunLocalBillable($run, $start, $endsAt !== null ? ['subscription_ends_at' => Carbon::parse($endsAt)] : []);
 
     $anchors = [];
 
-    for ($day = $start->copy()->addDay()->setTime(1, 0); $day->lessThan(Carbon::parse('2026-07-01')); $day->addDay()) {
+    for ($day = $start->copy()->addDay()->setTime(1, 0); $day->lessThan(Carbon::parse($until)); $day->addDay()) {
         $run->travelTo($day);
         $run->night();
 
-        $anchor = $run->fresh()->subscription_period_starts_at->toDateString();
+        $billable = $run->fresh();
+        $anchor = $billable->subscription_period_starts_at->toDateString();
+
         if (end($anchors) !== $anchor) {
             $anchors[] = $anchor;
+
+            // The period ends where the next one will begin: on the anchor day.
+            $next = $expectedAnchors[count($anchors)] ?? null;
+            if ($next !== null) {
+                expect($billable->nextBillingDate()->toDateString())->toBe($next, 'period from '.$anchor);
+            }
         }
     }
 
-    expect($anchors)->toBe(['2026-01-31', '2026-02-28', '2026-03-28', '2026-04-28', '2026-05-28', '2026-06-28']);
-    expect($run->count('Tokens', 'period_credit'))->toBe(5);
-});
+    expect($anchors)->toBe($expectedAnchors)
+        ->and($run->count('Tokens', 'period_credit'))->toBe(count($expectedAnchors) - 1);
+})->with([
+    'free plan, through a leap February' => ['2027-12-31T09:00:00Z', '2029-04-02', null,
+        ['2027-12-31', '2028-01-31', '2028-02-29', '2028-03-31', '2028-04-30', '2028-05-31', '2028-06-30', '2028-07-31', '2028-08-31', '2028-09-30', '2028-10-31', '2028-11-30', '2028-12-31', '2029-01-31', '2029-02-28', '2029-03-31'],
+    ],
+    'free plan, the 30th' => ['2026-01-30T09:00:00Z', '2026-07-01', null,
+        ['2026-01-30', '2026-02-28', '2026-03-30', '2026-04-30', '2026-05-30', '2026-06-30'],
+    ],
+    // A gift to 15 May: four boundaries before its end, none after.
+    'gift without extras, ending 15 May' => ['2026-12-31T09:00:00Z', '2027-06-30', '2027-05-15T09:00:00Z',
+        ['2026-12-31', '2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30'],
+    ],
+]);
 
 it('gives an access grant one quota per period it covers and nothing after it ends', function (int $grantMonths, int $extraDays, int $expectedRefills): void {
     $run = UsageLongRunHarness::boot();

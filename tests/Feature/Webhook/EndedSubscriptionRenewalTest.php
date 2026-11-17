@@ -45,6 +45,11 @@ beforeEach(function (): void {
     EndedRenewalFakeWebhookController::$nextPayment = null;
     app()->bind(MollieWebhookController::class, EndedRenewalFakeWebhookController::class);
 
+    // The renewal of an ended subscription is refunded and the Mollie subscription
+    // cancelled — both are Mollie calls.
+    \Mollie\Laravel\Facades\Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(fn () => \Mollie\Laravel\Facades\Mollie::getFacadeRoot());
+    \Mollie\Laravel\Facades\Mollie::shouldReceive('send')->andReturn((object) ['id' => 're_ended']);
+
     config()->set('mollie-billing-plans.plans.pro', [
         'name' => 'Pro',
         'tier' => 2,
@@ -89,7 +94,10 @@ function endedRenewalBillable(SubscriptionStatus $status): TestBillable
 
 function deliverEndedRenewal(TestBillable $billable, string $paymentId = 'tr_ended'): void
 {
-    EndedRenewalFakeWebhookController::$nextPayment = (object) [
+    // A real SDK payment, as far as the handlers are concerned: properties plus the
+    // refunds()/chargebacks() lookups — the renewal is refunded now, and the refund sync
+    // that follows in the same delivery asks the payment for its refunds.
+    EndedRenewalFakeWebhookController::$nextPayment = new class([
         'id' => $paymentId,
         'status' => 'paid',
         'amount' => (object) ['value' => '11.90', 'currency' => 'EUR'],
@@ -100,7 +108,25 @@ function deliverEndedRenewal(TestBillable $billable, string $paymentId = 'tr_end
             'billable_type' => $billable->getMorphClass(),
             'billable_id' => (string) $billable->getKey(),
         ],
-    ];
+    ]) extends \stdClass
+    {
+        public function __construct(array $attributes)
+        {
+            foreach ($attributes as $key => $value) {
+                $this->{$key} = $value;
+            }
+        }
+
+        public function refunds(): array
+        {
+            return [(object) ['id' => 're_ended', 'status' => 'pending', 'amount' => $this->amount]];
+        }
+
+        public function chargebacks(): array
+        {
+            return [];
+        }
+    };
 
     test()->postJson(route('billing.webhook'), ['id' => $paymentId])->assertStatus(200);
 }
@@ -129,7 +155,13 @@ it('does not treat a charge on a cancelled subscription as a renewal', function 
     expect(BillingInvoice::query()->where('mollie_payment_id', 'tr_ended')->where('invoice_kind', InvoiceKind::Subscription)->count())->toBe(1);
 
     Event::assertDispatched(RenewalCollectedForEndedSubscription::class);
-    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class);
+
+    // It used to stop here, with a mail asking an operator to refund and cancel by hand.
+    // Both happen on their own now — see EndedSubscriptionRenewalRefundTest — and the
+    // operator hears nothing.
+    expect(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(1)
+        ->and(BillingInvoice::query()->where('mollie_payment_id', 'tr_ended')->sole()->isFullyRefunded())->toBeTrue();
+    Notification::assertNotSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class);
 });
 
 it('does not treat a charge on an expired subscription as a renewal', function (): void {

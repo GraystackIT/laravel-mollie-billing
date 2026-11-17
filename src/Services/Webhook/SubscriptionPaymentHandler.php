@@ -21,6 +21,7 @@ use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingAnchor;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ChargeDeferral;
@@ -167,7 +168,10 @@ class SubscriptionPaymentHandler
         // granularity on both sides, because Mollie creates the charge at some hour of
         // the cycle date that nobody controls.
         $newPeriodStart = $this->cycleStart($payment);
-        $newPeriodEnd = BillingTime::addInterval($newPeriodStart, $interval);
+        // On the subscription's anchor day, so a cycle on the 31st that February moved to
+        // the 28th returns to the 31st in March (BillingAnchor).
+        $anchorDay = BillingAnchor::forCycle($billable, $billable->getBillingPeriodStartsAt(), $newPeriodStart, $interval);
+        $newPeriodEnd = BillingAnchor::next($newPeriodStart, $interval, $anchorDay);
         $chargeDay = $newPeriodStart->copy()->startOfDay();
         $nextChargeDay = Carbon::instance($newPeriodEnd)->setTimezone('UTC')->startOfDay();
 
@@ -348,13 +352,13 @@ class SubscriptionPaymentHandler
 
         if (! $waiverEndsSubscription && $this->couponService->markerExpired($billable, $nextChargeDay)) {
             try {
-                $this->patcher->updateRecurringAmount(
+                // The amount only: this charge has just been made on its cycle.
+                $this->patcher->updateRecurringAmountAfterCharge(
                     billable: $billable,
                     planCode: $planCode,
                     interval: $interval,
                     addons: $addonCodes,
                     extraSeats: $extraSeats,
-                    intervalChanged: false,
                     couponDiscountNet: 0,
                 );
                 $this->couponService->clearActiveRecurringCouponMarker($billable);
@@ -377,6 +381,12 @@ class SubscriptionPaymentHandler
                 ];
                 $billable->forceFill(['subscription_meta' => $meta])->save();
             }
+        }
+
+        // The next charge on the anchor day, at Mollie too, wherever Mollie's own rule
+        // after a month end could put it elsewhere.
+        if (! $waiverEndsSubscription) {
+            $this->pinNextChargeOnAnchor($billable, $newPeriodStart, $nextChargeDay, $interval);
         }
 
         // Before the reset, never after: this renewal is the last moment the period that
@@ -403,8 +413,15 @@ class SubscriptionPaymentHandler
 
         $updates = ['subscription_period_starts_at' => $periodStartsAt];
 
+        // A paid renewal ends the *renewal's* dunning episode. A subscription that is
+        // past due because an overage debt stands stays so: that lock ends when the debt
+        // is paid or written off (ChargeUsageOverageDirectly::releasePastDueForDebt()),
+        // and this renewal is what goes on to collect it.
         if ($wasTrial || $wasPastDue) {
-            $updates['subscription_status'] = SubscriptionStatus::Active;
+            $updates['subscription_status'] = \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::statusAfterRecovery(
+                $billable->getBillingSubscriptionMeta(),
+                SubscriptionStatus::Active,
+            );
         }
         if ($wasTrial) {
             $updates['trial_ends_at'] = null;
@@ -422,7 +439,10 @@ class SubscriptionPaymentHandler
         // row said n and the next renewal rebuilt its lines from the stale count.
         $this->mutateBillingMeta(
             $billable,
-            static function (array $meta) use ($derivedSeatCount, $seatCountAtStart, $wasPastDue, $wasTrial, $periodStartsAt): array {
+            static function (array $meta) use ($derivedSeatCount, $seatCountAtStart, $wasPastDue, $wasTrial, $periodStartsAt, $anchorDay): array {
+                // The anchor day travels with the period start it belongs to.
+                $meta = BillingAnchor::record($meta, $anchorDay, $periodStartsAt);
+
                 // Compare-and-set. The count on the invoice is the one this handler read
                 // at the top, so writing it back is a no-op — unless somebody changed it
                 // in between, and then it is a revert: a seat sync that raised the count
@@ -561,6 +581,64 @@ class SubscriptionPaymentHandler
 
             return $meta;
         });
+    }
+
+    /**
+     * Send Mollie the next charge date when Mollie's own rule could put it on another day.
+     *
+     * A subscription anchored on the 29th, 30th or 31st is charged on the last day of a
+     * shorter month (28 February). For the charge after it, Mollie may count on from that
+     * charge (28 March) or from its start date (31 March) — not documented, measured by
+     * the sandbox canary — and its start date may itself be a shortened day (a signup on
+     * 31 January is sent 28 February). The period ends on the anchor day
+     * (BillingAnchor::next()), so wherever that is not simply one month after this charge,
+     * the date is sent. Under either answer Mollie then charges where the period ends.
+     *
+     * Not for a deferred charge (a date Mollie was given on purpose), not for a date that
+     * has passed. Mollie refuses a new start date on a charged subscription, so where its own
+     * next date differs the patcher replaces the subscription (MollieSubscriptionReplacer);
+     * where it already is the anchor day nothing is sent. A failure is retried
+     * (`pending_subscription_patch`, reason `anchor_pin`); until it lands Mollie keeps its own
+     * date, and a renewal it makes there is booked from its own charge, as any renewal is.
+     */
+    protected function pinNextChargeOnAnchor(Model&Billable $billable, Carbon $cycle, Carbon $nextChargeDay, string $interval): void
+    {
+        $oneIntervalOn = BillingTime::addInterval($cycle, $interval)->utc()->toDateString();
+
+        if ($nextChargeDay->toDateString() === $oneIntervalOn
+            || ! $nextChargeDay->greaterThan(BillingTime::nowUtc()->startOfDay())
+            || ChargeDeferral::until($billable) !== null
+        ) {
+            return;
+        }
+
+        try {
+            $this->patcher->pinNextChargeDate($billable, $nextChargeDay);
+        } catch (\Throwable $e) {
+            Log::warning('Could not send the next charge date on the anchor day — queued for retry', [
+                'billable' => $billable->getKey(),
+                'next_charge' => $nextChargeDay->toDateString(),
+                'error' => $e->getMessage(),
+            ]);
+
+            // Retried by RetrySubscriptionPatchJob through the hourly sweep, until the date
+            // has come. Only into a free slot: a plan-change PATCH waiting there carries the
+            // amount the customer pays, and that matters more than the day it is collected.
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($nextChargeDay, $e): ?array {
+                if (! empty($meta['pending_subscription_patch'])) {
+                    return null;
+                }
+
+                $meta['pending_subscription_patch'] = [
+                    'reason' => 'anchor_pin',
+                    'target' => $nextChargeDay->toIso8601String(),
+                    'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                    'last_error' => $e->getMessage(),
+                ];
+
+                return $meta;
+            });
+        }
     }
 
     /**

@@ -291,6 +291,30 @@ new class extends Component {
         <flux:subheading>{{ __('billing::portal.usage_history_subtitle') }}</flux:subheading>
     </div>
 
+    {{-- Past due: the included quota is all there is until the open payment is settled. --}}
+    @if ($billable && $billable->isBillingPastDue())
+        <flux:callout variant="warning" icon="lock-closed" dusk="overage-locked">
+            <flux:callout.text>{{ __('billing::portal.usage_overage_locked_past_due') }}</flux:callout.text>
+        </flux:callout>
+    @endif
+
+    {{-- An overage charge that failed is taken off the wallet and collected again at the
+         next renewal. The meters below no longer show it, so it is said here. --}}
+    @php
+        $outstandingOverage = $billable
+            ? app(\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::class)->deferredDebtAmount($billable)
+            : null;
+    @endphp
+    @if ($outstandingOverage)
+        <flux:callout variant="warning" icon="exclamation-triangle" dusk="outstanding-overage">
+            <flux:callout.text>
+                {{ __('billing::portal.usage_history_outstanding_overage', [
+                    'amount' => \GraystackIT\MollieBilling\Support\BillingMoney::format($outstandingOverage['gross'], $outstandingOverage['currency']),
+                ]) }}
+            </flux:callout.text>
+        </flux:callout>
+    @endif
+
     {{-- Filters --}}
     <flux:card class="p-4!">
         <div class="flex flex-wrap items-end gap-4">
@@ -375,13 +399,13 @@ new class extends Component {
                     <flux:icon.arrow-trending-down class="size-4 text-red-500/70 dark:text-red-400/70" />
                 </div>
                 <div class="mt-3 flex items-baseline gap-2">
-                    <span class="text-3xl font-bold tabular-nums tracking-tight text-red-600 dark:text-red-400">{{ number_format($stats['net']) }}</span>
+                    <span dusk="usage-history-net" class="text-3xl font-bold tabular-nums tracking-tight text-red-600 dark:text-red-400">{{ number_format($stats['net']) }}</span>
                 </div>
                 <flux:text class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                     {{ __('billing::portal.usage_history_net_hint') }}
                 </flux:text>
                 <div class="mt-3 flex items-center gap-3 text-xs tabular-nums">
-                    <span class="inline-flex items-center gap-1 text-zinc-500 dark:text-zinc-400">
+                    <span dusk="usage-history-events" data-count="{{ $stats['total'] }}" class="inline-flex items-center gap-1 text-zinc-500 dark:text-zinc-400">
                         <span class="size-1.5 rounded-full bg-red-500"></span>
                         {{ trans_choice('billing::portal.usage_history_events', $stats['total'], ['count' => number_format($stats['total'])]) }}
                     </span>
@@ -395,7 +419,7 @@ new class extends Component {
                     <flux:icon.calculator class="size-4 text-zinc-400" />
                 </div>
                 <div class="mt-3">
-                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ number_format($stats['dailyAvg']) }}</span>
+                    <span dusk="usage-history-daily-avg" class="text-3xl font-bold tabular-nums tracking-tight">{{ number_format($stats['dailyAvg']) }}</span>
                 </div>
                 <flux:text class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                     {{ __('billing::portal.usage_history_daily_avg_hint') }}
@@ -516,7 +540,7 @@ new class extends Component {
                             // customer saw for every reason added after the language files.
                             $translatedReason = UsageReason::label($meta['reason'] ?? null);
                         @endphp
-                        <flux:table.row>
+                        <flux:table.row dusk="usage-history-row">
                             <flux:table.cell class="tabular-nums">{{ BillingTime::display($tx->created_at, $billable)->translatedFormat('d. M Y H:i') }}</flux:table.cell>
                             <flux:table.cell>
                                 <flux:badge size="sm" color="zinc">{{ ucfirst($meta['type'] ?? $tx->wallet?->slug ?? '—') }}</flux:badge>

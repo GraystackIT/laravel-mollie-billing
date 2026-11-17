@@ -124,7 +124,7 @@ it('keeps sweeping after a billable whose markers cannot be read', function (): 
     );
 });
 
-it('writes off an overage charge that never got a payment id', function (): void {
+it('releases an overage marker that never got a payment id and has nothing to carry', function (): void {
     // Pending with no payment id means CreatePaymentRequest itself kept failing — a dead
     // mandate. That had no terminal path: no dunning, no write-off, and safeCharge() skipped
     // every later period because the status was still pending. Silence, forever.
@@ -142,8 +142,9 @@ it('writes off an overage charge that never got a payment id', function (): void
 
     app()->call([new CleanupStalePendingOverageChargeJob, 'handle']);
 
-    expect($billable->fresh()->getBillingSubscriptionMeta()['usage_overage_status'] ?? null)
-        ->toBe(ChargeUsageOverageDirectly::STATUS_FAILED);
+    // This snapshot records no line items, so there is no debt to leave standing for the
+    // renewals — the marker simply goes, and the next overage can be charged again.
+    expect($billable->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('usage_overage_status');
 });
 
 it('leaves a fresh payment-less overage snapshot alone', function (): void {

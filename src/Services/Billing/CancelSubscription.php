@@ -41,6 +41,17 @@ class CancelSubscription
     public function handle(Billable $billable, bool $immediately = false, ?string $reason = null): void
     {
         /** @var Model&Billable $billable */
+        // Nothing to cancel is not a cancellation. Without this a billable that never
+        // subscribed took the Local branch below and came out `cancelled` with an end
+        // date thirty days ahead — which hasAccessibleBillingSubscription() answers with
+        // true: a month of access for calling "cancel" on nothing. An expired one flipped
+        // back to `cancelled` and its customer was mailed a cancellation a second time.
+        if (in_array($billable->getBillingSubscriptionStatus(), [SubscriptionStatus::New, SubscriptionStatus::Expired], true)) {
+            throw new \GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException(
+                'There is no subscription to cancel.'
+            );
+        }
+
         $isLocal = $billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value
             || $billable->getBillingSubscriptionSource() === null
             || $billable->getBillingSubscriptionSource() === SubscriptionSource::None->value;
@@ -245,7 +256,8 @@ class CancelSubscription
 
             return $meta;
         } catch (ApiException $e) {
-            if (in_array($e->getCode(), [404, 410], true)) {
+            // 404/410, or 422 "has been cancelled" for one cancelled before.
+            if (\GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer::cancelledAlready($e)) {
                 unset($meta['pending_subscription_cancel']);
 
                 return $meta;

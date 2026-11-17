@@ -54,7 +54,7 @@ class AdminPaidWithoutBillableNotification extends Notification implements Shoul
             ->subject('Mollie paid webhook received for unresolvable billable')
             ->line('A successful Mollie payment cannot be assigned to a local billable record.')
             ->line('The payment has cleared at Mollie but no invoice was generated and no wallet was credited.')
-            ->line('Manual reconciliation is required.')
+            ->line('If nothing is done, the payment is refunded to the customer automatically after '.\GraystackIT\MollieBilling\Jobs\RefundUnassignedPaymentsJob::GRACE_DAYS.' days. Should the billable it names exist by then, it is booked as an ordinary payment instead.')
             ->line('Context: '.json_encode($context, JSON_PRETTY_PRINT));
     }
 }

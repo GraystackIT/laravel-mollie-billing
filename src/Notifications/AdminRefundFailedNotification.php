@@ -22,6 +22,9 @@ class AdminRefundFailedNotification extends Notification implements ShouldQueue
 
     public readonly ?int $invoiceId;
 
+    /** The number printed on the document — what an operator can actually look up. */
+    public readonly ?string $invoiceNumber;
+
     public readonly string $reason;
 
     /**
@@ -41,6 +44,7 @@ class AdminRefundFailedNotification extends Notification implements ShouldQueue
         // exception traces routinely carry closures, which PHP refuses to serialize.
         $invoice ??= $this->probableRefundTarget($billable);
         $this->invoiceId = $invoice !== null ? (int) $invoice->id : null;
+        $this->invoiceNumber = $invoice !== null && filled($invoice->serial_number) ? (string) $invoice->serial_number : null;
         $this->reason = $exception->getMessage();
 
         $this->initializeBillingQueue();
@@ -58,7 +62,7 @@ class AdminRefundFailedNotification extends Notification implements ShouldQueue
     {
         return (new MailMessage())
             ->subject(__('billing::notifications.admin_refund_failed.subject', [
-                'invoice' => (string) ($this->invoiceId ?? '-'),
+                'invoice' => (string) ($this->invoiceNumber ?? $this->invoiceId ?? '-'),
             ]))
             ->line(__('billing::notifications.admin_refund_failed.body', ['reason' => $this->reason]))
             ->action(__('billing::emails.open_portal'), $this->billable->billingPortalUrl());
@@ -73,6 +77,7 @@ class AdminRefundFailedNotification extends Notification implements ShouldQueue
             'type' => 'admin_refund_failed',
             'customer' => $this->billable->getBillingName(),
             'invoice_id' => $this->invoiceId,
+            'invoice_number' => $this->invoiceNumber,
             'exception' => $this->reason,
         ];
     }

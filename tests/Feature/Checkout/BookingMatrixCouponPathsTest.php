@@ -114,9 +114,11 @@ it('trial + 100 % recurring coupon: the checkout names the date Mollie really ch
     expect($checkout->get('couponError'))->toBeNull()
         ->and($m->shown($checkout)['gross'])->toBe(0);
 
-    // Three periods of 30 days + 1, and charged the day after: later than the trial's end.
+    // Three billing periods, counted from the trial's end (24 March): 24 June. (Until
+    // 17 November 2026 three periods of 30 days + 1 from the signup, charged the day after:
+    // 10 June.)
     $announced = $checkout->instance()->firstChargeDate();
-    expect($announced->toDateString())->toBe('2026-06-10');
+    expect($announced->toDateString())->toBe('2026-06-24');
 
     // … and that is the date on the confirm step, not the trial's end (24 March).
     $checkout->set('step', $checkout->instance()->customStepCount() + 4)

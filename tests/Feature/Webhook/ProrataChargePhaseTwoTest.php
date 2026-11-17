@@ -273,7 +273,7 @@ it('redeems the deferred coupon and lets the Phase-2 PATCH keep the discount', f
     expect($amountProp->getValue($captured)->value)->toBe('28.56');
 });
 
-it('surfaces a paid prorata charge whose pending plan change was already cancelled', function (): void {
+it('returns a paid prorata charge whose pending plan change was already cancelled', function (): void {
     Notification::fake();
 
     $billable = new TestBillable;
@@ -304,10 +304,15 @@ it('surfaces a paid prorata charge whose pending plan change was already cancell
         $prop->setValue(null, null);
     }
 
-    // No plan change is applied — the user cancelled it — but the money is not
-    // silently dropped either.
+    // No plan change is applied — the user cancelled it — and the money is not left for
+    // an operator to refund by hand: it is booked as a payment that was not applied and
+    // returned automatically. (AutoRefundUnwantedProrataPaymentTest covers the refund,
+    // the customer mail and when an admin is told.)
     expect($billable->fresh()->subscription_plan_code)->toBe('basic');
-    expect(BillingInvoice::query()->where('mollie_payment_id', 'tr_phase2')->exists())->toBeFalse();
 
-    Notification::assertSentTo($billable, AdminPlanChangeFailedNotification::class);
+    $invoice = BillingInvoice::query()->where('mollie_payment_id', 'tr_phase2')->first();
+
+    expect($invoice)->not->toBeNull()
+        ->and(\GraystackIT\MollieBilling\Services\Webhook\UnwantedPaymentRefund::isUnwanted($invoice))->toBeTrue()
+        ->and($invoice->line_items[0]['reason'])->toBe('change_cancelled');
 });

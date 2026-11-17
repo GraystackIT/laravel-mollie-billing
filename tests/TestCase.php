@@ -59,6 +59,15 @@ abstract class TestCase extends Orchestra
         parent::setUp();
 
         MollieCall::useCurrentTransactionLevelAsBaseline();
+
+        // Refunds and chargebacks are read through MollieCall (MolliePaymentCredits). Many
+        // tests hand the webhook a payment stub that lists them itself; the double answers
+        // from the stub after the same guard a real request passes, and sends a real
+        // request for an SDK payment. See tests/Support/StubAwarePaymentCredits.php.
+        $this->app->bind(
+            \GraystackIT\MollieBilling\Support\MolliePaymentCredits::class,
+            \GraystackIT\MollieBilling\Tests\Support\StubAwarePaymentCredits::class,
+        );
     }
 
     protected function defineRoutes($router): void

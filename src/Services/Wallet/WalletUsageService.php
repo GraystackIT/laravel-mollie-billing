@@ -43,81 +43,88 @@ class WalletUsageService
 
         $thresholdPercent = null;
 
-        DB::transaction(function () use ($billable, $type, $quantity, $reason, &$thresholdPercent): void {
-            // Billable row first, wallet second — the same acquisition order the
-            // subscription-change path uses (UpdateSubscription locks the billable,
-            // then WalletPlanChangeAdjuster mutates the wallets), so the two can
-            // never deadlock against each other. The lock is exclusive because
-            // maybeNotifyThreshold() writes `subscription_meta` further down; a
-            // shared lock would have to be upgraded and two concurrent debits could
-            // deadlock on that upgrade.
-            //
-            // The refresh matters for the overage policy below: plan, interval,
-            // mandate and the opt-in flag are read from the committed row, not from
-            // a caller model that may have been loaded before a plan change.
-            if ($billable instanceof Model) {
-                $billable->newQuery()
-                    ->whereKey($billable->getKey())
-                    ->lockForUpdate()
-                    ->first();
-                $billable->refresh();
-            }
+        try {
+            DB::transaction(function () use ($billable, $type, $quantity, $reason, &$thresholdPercent): void {
+                // Billable row first, wallet second — the same acquisition order the
+                // subscription-change path uses (UpdateSubscription locks the billable,
+                // then WalletPlanChangeAdjuster mutates the wallets), so the two can
+                // never deadlock against each other. The lock is exclusive because
+                // maybeNotifyThreshold() writes `subscription_meta` further down; a
+                // shared lock would have to be upgraded and two concurrent debits could
+                // deadlock on that upgrade.
+                //
+                // The refresh matters for the overage policy below: plan, interval,
+                // mandate and the opt-in flag are read from the committed row, not from
+                // a caller model that may have been loaded before a plan change.
+                if ($billable instanceof Model) {
+                    $billable->newQuery()
+                        ->whereKey($billable->getKey())
+                        ->lockForUpdate()
+                        ->first();
+                    $billable->refresh();
+                }
 
-            $wallet = $this->resolveWallet($billable, $type);
+                $wallet = $this->resolveWallet($billable, $type);
 
-            // Pessimistic lock for atomic balance reads.
-            $wallet->newQuery()->whereKey($wallet->getKey())->lockForUpdate()->first();
-            $wallet->refresh();
+                // Pessimistic lock for atomic balance reads.
+                $wallet->newQuery()->whereKey($wallet->getKey())->lockForUpdate()->first();
+                $wallet->refresh();
 
-            $balanceBefore = (int) $wallet->balanceInt;
+                $balanceBefore = (int) $wallet->balanceInt;
 
-            // A deferred-overage record describes a debt that is on the wallet *now*. Once
-            // the balance is back at zero or above that debt is gone, and the record must
-            // go before this debit can take the wallet negative again — or the new units
-            // would be billed at the old plan's price.
-            self::syncDeferredOverage($wallet);
+                // A deferred-overage record describes a debt that is on the wallet *now*. Once
+                // the balance is back at zero or above that debt is gone, and the record must
+                // go before this debit can take the wallet negative again — or the new units
+                // would be billed at the old plan's price.
+                self::syncDeferredOverage($wallet);
 
-            // Same rule the `hasBillingQuotaLeft()` gate answers with, so a booking
-            // the app was told it may make cannot throw here — and a quota whose
-            // overage price is missing (or explicitly `false`) is capped instead of
-            // running up a negative balance that nothing can collect.
-            $hardCap = ! $billable->canChargeBillingOverage($type);
+                // Same rule the `hasBillingQuotaLeft()` gate answers with, so a booking
+                // the app was told it may make cannot throw here — and a quota whose
+                // overage price is missing (or explicitly `false`) is capped instead of
+                // running up a negative balance that nothing can collect.
+                $hardCap = ! $billable->canChargeBillingOverage($type);
 
-            $remaining = max(0, $balanceBefore);
+                $remaining = max(0, $balanceBefore);
 
-            if ($hardCap && $quantity > $remaining) {
-                event(new UsageLimitReached($billable, $type, $remaining, $quantity));
+                if ($hardCap && $quantity > $remaining) {
+                    throw new UsageLimitExceededException(
+                        $billable,
+                        $type,
+                        $balanceBefore,
+                        $quantity,
+                    );
+                }
 
-                throw new UsageLimitExceededException(
-                    $billable,
-                    $type,
-                    $balanceBefore,
-                    $quantity,
-                );
-            }
+                // Use forceWithdraw so the wallet may go negative for overage tracking.
+                $wallet->forceWithdraw($quantity, [
+                    'type' => $type,
+                    'reason' => $reason ?? 'usage',
+                ]);
 
-            // Use forceWithdraw so the wallet may go negative for overage tracking.
-            $wallet->forceWithdraw($quantity, [
-                'type' => $type,
-                'reason' => $reason ?? 'usage',
-            ]);
+                $wallet->refresh();
+                $balanceAfter = (int) $wallet->balanceInt;
 
-            $wallet->refresh();
-            $balanceAfter = (int) $wallet->balanceInt;
+                // Cross-zero detection for non-hard-cap path.
+                if (! $hardCap && $balanceBefore >= 0 && $balanceAfter < 0) {
+                    event(new UsageLimitReached(
+                        $billable,
+                        $type,
+                        max(0, $balanceBefore),
+                        $quantity,
+                    ));
+                }
 
-            // Cross-zero detection for non-hard-cap path.
-            if (! $hardCap && $balanceBefore >= 0 && $balanceAfter < 0) {
-                event(new UsageLimitReached(
-                    $billable,
-                    $type,
-                    max(0, $balanceBefore),
-                    $quantity,
-                ));
-            }
+                // Threshold marker only — the mail itself is sent after the commit.
+                $thresholdPercent = $this->markThresholdNotified($billable, $type, $balanceAfter);
+            });
+        } catch (UsageLimitExceededException $e) {
+            // Announced after the rollback, not before the throw: dispatched inside the
+            // transaction, the audit row this event writes was rolled back along with
+            // everything else — the one refusal an operator gets asked about left no trace.
+            event(new UsageLimitReached($billable, $type, max(0, $e->balance), $quantity));
 
-            // Threshold marker only — the mail itself is sent after the commit.
-            $thresholdPercent = $this->markThresholdNotified($billable, $type, $balanceAfter);
-        });
+            throw $e;
+        }
 
         // Deliberately outside the transaction: UsageThresholdNotification is not
         // queued, so a mail-transport failure used to propagate out of debit()'s
@@ -276,6 +283,12 @@ class WalletUsageService
     public const PERIOD_CREDIT_REASON = 'period_credit';
 
     /**
+     * Units handed back when an unpaid overage leaves the wallet to stand as a receivable
+     * — see ChargeUsageOverageDirectly::deferFailedCycle().
+     */
+    public const DEBT_DEFERRED_REASON = 'overage_debt_deferred';
+
+    /**
      * Transaction reasons that represent bookkeeping, not real consumption.
      */
     public const NON_USAGE_REASONS = [
@@ -297,6 +310,8 @@ class WalletUsageService
         // consumption was already counted when it was debited — counting the
         // settlement too would report every overage unit twice.
         'overage_settlement',
+        // The same units leaving the wallet unpaid, to be collected as money later.
+        self::DEBT_DEFERRED_REASON,
     ];
 
     /**

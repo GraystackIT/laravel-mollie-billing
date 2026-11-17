@@ -285,6 +285,12 @@ new class extends Component {
                         @endif
                     </div>
 
+                    {{-- What the operator wrote when issuing it. The badge alone says "Other"
+                         for exactly the refunds that needed explaining. --}}
+                    @if (filled($detail->refund_reason_text))
+                        <p dusk="refund-reason-text" class="relative mt-3 whitespace-pre-line text-sm text-amber-900/90 dark:text-amber-200/90">{{ $detail->refund_reason_text }}</p>
+                    @endif
+
                     @if ($refundDownloadUrl)
                         <div class="relative mt-4 flex justify-end border-t border-amber-200/60 pt-3 dark:border-amber-500/15">
                             <flux:button

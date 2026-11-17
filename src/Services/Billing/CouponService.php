@@ -23,6 +23,7 @@ use GraystackIT\MollieBilling\Exceptions\InvalidCouponException;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\BillingAnchor;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use Illuminate\Database\Eloquent\Model;
@@ -44,6 +45,13 @@ class CouponService
         }
 
         $attributes['code'] = strtoupper(trim((string) $attributes['code']));
+
+        // Said in a sentence. The unique index refuses a second coupon under the same
+        // code either way, but as a QueryException — which the admin form could only
+        // show as "something went wrong (23000)".
+        if (Coupon::query()->whereRaw('UPPER(code) = ?', [$attributes['code']])->exists()) {
+            throw new \InvalidArgumentException("A coupon with the code {$attributes['code']} already exists.");
+        }
 
         if (! isset($attributes['name']) || $attributes['name'] === null || $attributes['name'] === '') {
             $attributes['name'] = $attributes['code'];
@@ -205,6 +213,17 @@ class CouponService
 
         if ($coupon->type === CouponType::Recurring) {
             $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+            // A discount that has run out does not hold the slot. Its marker is only
+            // cleared by the renewal after its end, and that renewal can be weeks away
+            // (extension days keeping the charge deferred) — or, for a deactivated
+            // coupon, a period away. Until then the customer was told "another
+            // recurring coupon is already active" about one that discounts nothing.
+            // The new redemption overwrites it.
+            if (is_array($marker) && ! $this->isMarkerStillRedeemable($marker, $billable)) {
+                $marker = null;
+            }
+
             if (is_array($marker)) {
                 $markerCouponId = (int) ($marker['coupon_id'] ?? 0);
                 if ($markerCouponId !== $coupon->id) {
@@ -807,15 +826,19 @@ class CouponService
                         // The context's interval, not the billable's: `update()` redeems
                         // before it persists a changed interval, so reading it off the
                         // model computed the discount's lifetime in the wrong unit.
+                        $markerInterval = isset($context['interval']) ? (string) $context['interval'] : null;
                         $this->setActiveRecurringCouponMarker(
                             $coupon,
                             $billable,
                             $baseAmount,
-                            isset($context['interval']) ? (string) $context['interval'] : null,
-                            // When the first discounted charge is not now — a code
-                            // applied to a running subscription discounts from its
-                            // next renewal — the lifetime is counted from there.
-                            ($context['lifetime_from'] ?? null) instanceof CarbonInterface ? $context['lifetime_from'] : null,
+                            $markerInterval,
+                            // Where the discounted periods start: the period this very
+                            // charge pays for when it carries the discount, otherwise
+                            // the next charge (a code applied to a running subscription
+                            // without a charge of its own) — see recurringLifetimeFrom().
+                            ($context['lifetime_from'] ?? null) instanceof CarbonInterface
+                                ? $context['lifetime_from']
+                                : $this->recurringLifetimeFrom($billable, (int) $redemption->discount_amount_net > 0, $markerInterval),
                         );
                     }
                     break;
@@ -884,6 +907,38 @@ class CouponService
      *
      * @throws InvalidCouponException
      */
+    /**
+     * Whether this billable may still redeem the coupon — the per-billable cap, as a
+     * question. For callers that explain a code instead of validating an order with it.
+     */
+    public function hasPerBillableRedemptionLeft(Coupon $coupon, Billable $billable): bool
+    {
+        try {
+            $this->assertPerBillableLimitLeft($coupon, $billable);
+
+            return true;
+        } catch (InvalidCouponException) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether `redeem()` would take this coupon for this billable right now: the campaign
+     * cap and the per-billable cap, the two limits it enforces itself. A question asked
+     * without a lock — `redeem()` asks it again under `lockForUpdate`, and a race between
+     * the two is still possible.
+     */
+    public function hasRedemptionLeft(Coupon $coupon, Billable $billable): bool
+    {
+        $coupon = $coupon->fresh() ?? $coupon;
+
+        if ($coupon->max_redemptions !== null && $coupon->redemptions_count >= $coupon->max_redemptions) {
+            return false;
+        }
+
+        return $this->hasPerBillableRedemptionLeft($coupon, $billable);
+    }
+
     private function assertPerBillableLimitLeft(Coupon $coupon, Billable $billable): void
     {
         if (! $billable instanceof Model) {
@@ -1406,9 +1461,8 @@ class CouponService
      * The marker's lifetime is locked here as `valid_until`, computed as the
      * earliest of:
      *   - the coupon's own valid_until (if set)
-     *   - now + discount_periods × intervalDays + 1d (1d buffer so
-     *     a charge that lands a few hours after the mathematical period end is
-     *     still within the discount window)
+     *   - the day before `from + discount_periods` billing periods of the subscription
+     *     (calendar months or years on its billing day — see recurringMarkerValidUntil())
      *
      * The validator in validateRequiredFieldsForType() guarantees at least one
      * of those two gates is set on a recurring coupon.
@@ -1437,6 +1491,24 @@ class CouponService
     }
 
     /**
+     * {@see applyRecurringMarker()} for a discount whose first period does not start now —
+     * a trial signup's starts with the first charge, at the trial's end.
+     *
+     * A method of its own rather than a further parameter: apps override
+     * `applyRecurringMarker()` with its existing signature, and PHP refuses an override
+     * that has fewer parameters than the method it replaces.
+     */
+    public function applyRecurringMarkerFrom(
+        Coupon $coupon,
+        Billable $billable,
+        int $baseAmountNet,
+        string $interval,
+        CarbonInterface $lifetimeFrom,
+    ): void {
+        $this->setActiveRecurringCouponMarker($coupon, $billable, $baseAmountNet, $interval, $lifetimeFrom);
+    }
+
+    /**
      * @param  ?string  $interval  The interval the discount will actually run at. Pass it
      *                             whenever the billable's own interval is about to change
      *                             — see the lifetime computation below.
@@ -1452,6 +1524,33 @@ class CouponService
             return;
         }
 
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['active_recurring_coupon'] = $this->recurringMarkerFor($coupon, $billable, $baseAmountNet, $interval, $lifetimeFrom);
+
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * The `active_recurring_coupon` marker `redeem()` would write for this coupon — built,
+     * not written.
+     *
+     * For the caller that has to price Mollie BEFORE the redemption is written:
+     * `UpdateSubscription::update()` PATCHes the recurring amount ahead of its local
+     * writes (no Mollie call may sit inside the transaction that holds them), and the
+     * redemption belongs in that transaction. Pricing the PATCH from this marker sends the
+     * discounted amount the first time, without a redemption that a failed change would
+     * leave behind. One builder for both, so the amount sent and the marker written cannot
+     * come apart.
+     *
+     * @return array<string, mixed>
+     */
+    public function recurringMarkerFor(
+        Coupon $coupon,
+        Billable $billable,
+        int $baseAmountNet,
+        ?string $interval = null,
+        ?CarbonInterface $lifetimeFrom = null,
+    ): array {
         $now = BillingTime::nowUtc();
 
         // The interval the coupon will be charged at, which is not always the one on
@@ -1461,18 +1560,20 @@ class CouponService
         // discounted periods instead of 2. The reverse direction truncated it to 61
         // days, so the first yearly renewal got nothing.
         $interval ??= $billable->getBillingSubscriptionInterval();
+        $from = $lifetimeFrom ?? $now;
+        $day = $this->recurringAnchorDay($billable, (string) $interval, $lifetimeFrom);
 
-        // The window stays generous on purpose — `CreateSubscription` derives the
-        // 100%-coverage deferral from it, so shortening it would make Mollie start
-        // charging while the coupon is still meant to cover the period. What stops the
-        // discount at the promised number of applications is the count check in
-        // {@see isMarkerStillRedeemable()}, not this date: 30-day months are shorter
-        // than the calendar wherever February falls, so a 3-period coupon's fourth
-        // charge could land inside the window.
-        $markerValidUntil = $this->recurringMarkerValidUntil($coupon, (string) $interval, $lifetimeFrom ?? $now);
+        // The window ends the day before the first charge it no longer covers, counted in
+        // the subscription's own billing periods (see recurringMarkerValidUntil()). What
+        // stops the discount at the promised number of applications is the count check
+        // in {@see isMarkerStillRedeemable()} as well: a charge Mollie makes later than
+        // its cycle date still falls inside the window.
+        $markerValidUntil = $this->recurringMarkerValidUntilOnCycle($coupon, (string) $interval, $from, $day);
+        $chargeResumesAt = $markerValidUntil !== null
+            ? $this->recurringChargeResumesAt($coupon, (string) $interval, $from, $day)
+            : null;
 
-        $meta = $billable->getBillingSubscriptionMeta();
-        $meta['active_recurring_coupon'] = [
+        return [
             'coupon_id' => $coupon->id,
             'code' => (string) $coupon->code,
             'discount_type' => $coupon->discount_type?->value,
@@ -1480,29 +1581,59 @@ class CouponService
             'valid_until' => $markerValidUntil?->toIso8601String(),
             'base_amount_net' => max(0, $baseAmountNet),
             'first_applied_at' => $now->toIso8601String(),
+            // The number of discounted charges this grant was given, kept with it like the
+            // value and the window: `update()` may still change a redeemed coupon's
+            // `discount_periods`, and that is a change of the offer, not of what a customer
+            // who already holds it was promised.
+            'discount_periods' => $coupon->discount_periods !== null ? (int) $coupon->discount_periods : null,
+            // The first charge the discount no longer covers — on the subscription's cycle.
+            // Where Mollie is told to start charging when the discount covers everything
+            // (CreateSubscription / MollieSubscriptionPatcher::fullCoverageStartDate()).
+            // Absent on markers written before 17 November 2026: those keep the date they
+            // were given (`valid_until + 1 day`), nothing running is moved.
+            'charge_resumes_at' => $chargeResumesAt?->toIso8601String(),
         ];
-
-        $billable->forceFill(['subscription_meta' => $meta])->save();
     }
 
     /**
-     * Until when a recurring coupon applied at `$from` discounts: the earlier of the
-     * coupon's own `valid_until` and `from + discount_periods × interval days
-     * + 1 day`. Null when neither limit is set.
+     * Until when a recurring coupon whose first discounted period starts at `$from`
+     * discounts: the earlier of the coupon's own `valid_until` and the day before
+     * `from + discount_periods` billing periods. Null when neither limit is set.
      *
-     * Public because the checkout has to name the date money is first collected, and
-     * under a fully covering coupon that date is this one plus a day
-     * (`CreateSubscription::fullCoverageStartDate()`). A second copy of the arithmetic in
-     * the form is how a shown date and a charged date come apart.
+     * The periods are the subscription's own — calendar months or years on its billing
+     * day (`$anchorDay`, kept through the months that do not have it, see
+     * `Support\BillingAnchor`), not 30- or 365-day blocks. Three periods from 31 January
+     * end before 30 April, the fourth charge. In 30-day blocks they ended on 1 May and the
+     * first charge after a fully covering code fell on 3 May — and stayed on the 3rd.
+     *
+     * The day before, because a renewal is discounted while the discount is valid at the
+     * start of its day: the charge on that day is the first one that is not.
+     *
+     * Public because the checkout has to name the date money is first collected
+     * ({@see recurringChargeResumesAt()}). A second copy of the arithmetic in the form is
+     * how a shown date and a charged date come apart.
+     *
+     * The periods run on `$from`'s own day; {@see recurringMarkerValidUntilOnCycle()}
+     * takes the billing day of a cycle `$from` shows shortened.
      */
     public function recurringMarkerValidUntil(Coupon $coupon, string $interval, ?CarbonInterface $from = null): ?CarbonInterface
     {
-        $from = $from !== null ? BillingTime::toUtc($from) : BillingTime::nowUtc();
-        $maxRedemptions = (int) ($coupon->discount_periods ?? 0);
-        $intervalDays = $interval === 'yearly' ? 365 : 30;
+        return $this->recurringMarkerValidUntilOnCycle($coupon, $interval, $from, null);
+    }
 
-        $durationValidUntil = $maxRedemptions > 0
-            ? $from->copy()->addDays($maxRedemptions * $intervalDays + 1)
+    /**
+     * {@see recurringMarkerValidUntil()} on a cycle whose billing day is `$anchorDay` —
+     * for a `$from` that is the shortened day of a cycle on the 29th–31st (28 February of
+     * a cycle on the 31st). A method of its own, not a further parameter, so an app that
+     * overrides `recurringMarkerValidUntil()` keeps a compatible signature.
+     */
+    public function recurringMarkerValidUntilOnCycle(Coupon $coupon, string $interval, ?CarbonInterface $from, ?int $anchorDay): ?CarbonInterface
+    {
+        $from = $from !== null ? BillingTime::toUtc($from) : BillingTime::nowUtc();
+        $periods = (int) ($coupon->discount_periods ?? 0);
+
+        $durationValidUntil = $periods > 0
+            ? Carbon::instance(BillingAnchor::advance($from, $interval, $periods, $anchorDay)->subDay())->setTimezone('UTC')
             : null;
 
         $couponValidUntil = $coupon->valid_until;
@@ -1514,6 +1645,116 @@ class CouponService
             $durationValidUntil !== null => $durationValidUntil,
             default => null,
         };
+    }
+
+    /**
+     * The first charge a fully covering recurring coupon leaves to Mollie: the first date
+     * of the subscription's cycle — from `$from`, the first discounted period, on
+     * `$anchorDay` — that its window no longer covers. Null when the coupon has no limit.
+     *
+     * For a count of periods that is `from + discount_periods` periods, the regular charge
+     * date. For a coupon that ends on a date (`valid_until`) it is the first regular charge
+     * on or after that day — not the day after it, which lies inside a period and moved the
+     * billing day of every such customer for good.
+     */
+    public function recurringChargeResumesAt(Coupon $coupon, string $interval, ?CarbonInterface $from = null, ?int $anchorDay = null): ?Carbon
+    {
+        $from = $from !== null ? BillingTime::toUtc($from) : BillingTime::nowUtc();
+        $validUntil = $this->recurringMarkerValidUntilOnCycle($coupon, $interval, $from, $anchorDay);
+
+        if ($validUntil === null) {
+            return null;
+        }
+
+        return Carbon::instance(BillingAnchor::firstOnOrAfter($from, $interval, $anchorDay, $validUntil))->setTimezone('UTC');
+    }
+
+    /**
+     * The date a recurring coupon marker sends the charge to when it covers everything,
+     * or null for a marker that does not carry one (written before 17 November 2026, or
+     * a plan waiver, which has its own — PlanWaiver::chargeResumesAt()).
+     *
+     * @param  array<string, mixed>  $marker
+     */
+    public static function markerChargeResumesAt(array $marker): ?Carbon
+    {
+        $value = $marker['charge_resumes_at'] ?? null;
+
+        if (! is_string($value) || $value === '' || PlanWaiver::isWaiver($marker)) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value)->setTimezone('UTC');
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * The billing day a recurring coupon's periods are counted on.
+     *
+     * Applied with a period (checkout, upgrade, change), `$from` is the start of that
+     * period and its own day is the billing day. Applied from a later charge (the next
+     * renewal on the portal, a trial's end), that charge may be the shortened day of a
+     * cycle on the 29th–31st — 28 February of a cycle on the 31st — and the day of the
+     * cycle is the one it was shortened from (BillingAnchor::forCycle()).
+     */
+    public function recurringAnchorDay(Billable $billable, string $interval, ?CarbonInterface $from): ?int
+    {
+        if ($from === null) {
+            return null;
+        }
+
+        $from = BillingTime::toUtc($from);
+        $periodStart = $billable->getBillingPeriodStartsAt();
+
+        // The running period itself: its day is the one recorded for it, if any.
+        if ($periodStart !== null && BillingTime::toUtc($periodStart)->toDateString() === $from->toDateString()) {
+            return BillingAnchor::day($billable) ?? $from->day;
+        }
+
+        return BillingAnchor::forCycle($billable, $periodStart, $from, $interval);
+    }
+
+    /**
+     * Where the periods of a recurring code start when it is applied to a subscription
+     * that runs on its own cycle — null for "now" (a checkout, whose first period starts
+     * with the payment).
+     *
+     * A discount counts in charges: the period whose charge carries it is its first.
+     * When the code discounts a charge made now for the running period (the prorata of a
+     * plan change), that period is the first of the N; otherwise the first is the one the
+     * next charge opens. An interval change starts a new cycle now. Counted from "now"
+     * instead, a code entered in the middle of a period ended on a day off the cycle, and
+     * a fully covering one sent Mollie there.
+     */
+    public function recurringLifetimeFrom(Billable $billable, bool $discountsCurrentPeriod, ?string $interval = null): ?CarbonInterface
+    {
+        if ($billable->getBillingSubscriptionSource() !== SubscriptionSource::Mollie->value) {
+            return null;
+        }
+
+        $current = $billable->getBillingSubscriptionInterval();
+
+        if ($interval !== null && $current !== null && $interval !== $current) {
+            $now = BillingTime::nowUtc();
+
+            return $discountsCurrentPeriod ? $now : BillingTime::addInterval($now, $interval);
+        }
+
+        if ($discountsCurrentPeriod) {
+            // The running period — when the anchor still names one that contains today. A
+            // stale anchor (nothing turned it over) is no period to count from.
+            $start = $billable->getBillingPeriodStartsAt();
+
+            return $start !== null
+                && BillingAnchor::next($start, $current ?? $interval, BillingAnchor::day($billable))->greaterThan(BillingTime::nowUtc())
+                    ? $start
+                    : null;
+        }
+
+        return ChargeDeferral::undeferredNextChargeDate($billable);
     }
 
     /**
@@ -1548,7 +1789,41 @@ class CouponService
      */
     public function computeMarkerDiscount(Billable $billable, int $netAmount, array $target = [], ?CarbonInterface $asOf = null): int
     {
-        $marker = $this->getActiveRecurringCouponMarker($billable);
+        return $this->discountOfMarker($this->getActiveRecurringCouponMarker($billable), $billable, $netAmount, $target, $asOf);
+    }
+
+    /**
+     * {@see computeMarkerDiscount()} for a marker that is about to be written
+     * ({@see recurringMarkerFor()}) instead of the one the billable holds.
+     *
+     * @param  array<string, mixed>  $marker
+     * @param  array{plan_code?: ?string, interval?: ?string, addon_codes?: ?array<int, string>, seats?: ?int}  $target
+     */
+    public function computeDiscountOfMarker(Billable $billable, array $marker, int $netAmount, array $target = []): int
+    {
+        return $this->discountOfMarker($marker, $billable, $netAmount, $target, null);
+    }
+
+    /**
+     * {@see computeDiscountOfMarker()} judged for the day the amount is collected on
+     * (`$asOf`, null for now) — what a PATCH of Mollie's recurring amount has to ask: the
+     * next charge, not today. A method of its own so an override of
+     * `computeDiscountOfMarker()` keeps a compatible signature.
+     *
+     * @param  array<string, mixed>  $marker
+     * @param  array{plan_code?: ?string, interval?: ?string, addon_codes?: ?array<int, string>, seats?: ?int}  $target
+     */
+    public function computeDiscountOfMarkerOn(Billable $billable, array $marker, int $netAmount, array $target, ?CarbonInterface $asOf): int
+    {
+        return $this->discountOfMarker($marker, $billable, $netAmount, $target, $asOf);
+    }
+
+    /**
+     * @param  ?array<string, mixed>  $marker
+     * @param  array{plan_code?: ?string, interval?: ?string, addon_codes?: ?array<int, string>, seats?: ?int}  $target
+     */
+    private function discountOfMarker(?array $marker, Billable $billable, int $netAmount, array $target, ?CarbonInterface $asOf): int
+    {
         if ($marker === null || $netAmount <= 0) {
             return 0;
         }
@@ -1630,18 +1905,23 @@ class CouponService
         $validUntil = isset($marker['valid_until']) && $marker['valid_until'] !== null
             ? Carbon::parse((string) $marker['valid_until'])
             : null;
+
+        // A waiver ends on a day, not at the hour it was given — see PlanWaiver::endDay().
+        if ($validUntil !== null && PlanWaiver::isWaiver($marker)) {
+            $validUntil = PlanWaiver::endDay($validUntil);
+        }
+
         if ($validUntil !== null && $validUntil->lessThanOrEqualTo($at)) {
             return false;
         }
 
-        // Count as well as clock. The window is `max × 30 (+1)` days for a monthly
-        // coupon, and 30-day months are shorter than the calendar wherever February
-        // falls: a 3-period coupon redeemed on 1 December ran to day 91 while Mollie's
-        // FOURTH charge landed 1 March — day 90, inside the window — so the customer
-        // received four discounted periods and a fourth redemption row that made the
-        // audit trail look deliberate. The window cannot simply be shortened, because
-        // `CreateSubscription` derives the 100%-coverage deferral from it; the promise
-        // is a number of applications, so that is what is enforced.
+        // Count as well as clock. The window used to be `max × 30 (+1)` days, which is
+        // shorter than the calendar wherever February falls: a 3-period coupon redeemed
+        // on 1 December ran to day 91 while Mollie's FOURTH charge landed 1 March — day
+        // 90, inside the window — so the customer received four discounted periods. The
+        // window is counted in billing periods now, and markers written before that keep
+        // their date; and a charge can still be created later than its cycle date. The
+        // promise is a number of applications, so that is what is enforced as well.
         //
         // Only rows that carried a discount count. A zero-discount grant row exists
         // solely to occupy the campaign slot (the trial path writes one, since its
@@ -1652,9 +1932,13 @@ class CouponService
             // grant whose `max_redemptions_per_billable` is 1 and means "issued once",
             // not "one free period". Null there is "the date alone ends it".
             $isWaiver = PlanWaiver::isWaiver($marker);
-            $max = $isWaiver
-                ? (int) ($marker['max_applications'] ?? 0)
-                : (int) ($coupon->discount_periods ?? 0);
+            // An ordinary coupon's count as it was when the grant was given; a marker
+            // written before the count was kept with it reads the coupon.
+            $max = match (true) {
+                $isWaiver => (int) ($marker['max_applications'] ?? 0),
+                array_key_exists('discount_periods', $marker) => (int) ($marker['discount_periods'] ?? 0),
+                default => (int) ($coupon->discount_periods ?? 0),
+            };
 
             // Of THIS grant. A code that may be redeemed again
             // (`max_redemptions_per_billable > 1`) starts a new count with each

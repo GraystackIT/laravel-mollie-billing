@@ -332,6 +332,13 @@ class MollieBillingServiceProvider extends ServiceProvider
                     ->onOneServer();
             }
 
+            // The follow-up to a paid payment nobody could be found for: refunded after
+            // fourteen days unless it has found its billable by then.
+            $schedule->job(\GraystackIT\MollieBilling\Jobs\RefundUnassignedPaymentsJob::class)
+                ->dailyAt('04:15')
+                ->timezone('UTC')
+                ->onOneServer();
+
             $schedule->job(CleanupStalePendingCountryCorrectionJob::class)
                 ->hourly()
                 ->timezone('UTC')

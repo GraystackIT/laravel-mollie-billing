@@ -289,6 +289,8 @@ Whitespace is trimmed and codes are upper-cased automatically. The env value tak
 - `oss.path` — base path on the disk. Files are written as `{path}/oss-export-{YYYY}-{timestamp}.csv` so previous exports remain available as an audit trail.
 - `oss.temporary_url_expiry` — validity window of the download link in minutes (only relevant for non-`local` disks).
 
+Both `temporary_url_expiry` keys are tested in two layers: `RemoteDiskSignedUrlTest` signs with a real S3 adapter and checks `X-Amz-Expires` without any server; `RemoteDiskLiveS3Test` uploads to a real S3-compatible server and fetches the signed link — 200 inside the window, 403 for a tampered link and after the window. The second is optional and skipped unless `BILLING_S3_ENDPOINT` is set: `composer test:s3` runs it against Laravel Herd's S3 service (RustFS/MinIO on `127.0.0.1:9000`, key `herd`, secret `secretkey`); anything else via `BILLING_S3_ENDPOINT`, `BILLING_S3_KEY`, `BILLING_S3_SECRET`, `BILLING_S3_REGION` with `./vendor/bin/pest tests/Feature/Config/RemoteDiskLiveS3Test.php`. It creates and removes a bucket of its own and waits about a minute for the expiry.
+
 OSS exports run as a queued job (`GenerateOssExportJob`) — admins click "Generate" / "Regenerate" in the admin panel and the table auto-refreshes via `wire:poll` until the file is ready. The CLI command `php artisan billing:oss-export {year}` runs synchronously and persists a row in the same `billing_oss_exports` audit table, so CLI exports are downloadable from the portal too.
 
 ### Queue
@@ -303,6 +305,8 @@ OSS exports run as a queued job (`GenerateOssExportJob`) — admins click "Gener
 All background jobs shipped by the package (`PrepareUsageOverageJob`, `RetryUsageOverageChargeJob`, `RevokeMollieMandateJob`, `RetrySubscriptionPatchJob`, `RetryRefundLineJob`, `CleanupStalePendingProrataChangeJob`, `CleanupStalePendingCountryCorrectionJob`, `CleanupStalePendingOverageChargeJob`, `PruneProcessedWebhooksJob`, `ApplyScheduledChangesJob`, `SyncSeatsJob`, `GenerateOssExportJob`) and the queued `PlanChangeFailedNotification` are dispatched onto this connection/queue.
 
 Both keys default to `null`, which falls back to the framework default connection (`config('queue.default')`) and the default queue name. Set `BILLING_QUEUE_NAME=billing` (and a dedicated worker) when you want to isolate billing work from the rest of your application's queue.
+
+Run a real queue (`database`, `redis`, `sqs`, …) with a worker. On a connection with the `sync` driver every job runs inside the request that dispatches it, delays are ignored, and a job that throws has failed for good — the queue never retries it. The retry jobs then fall back to the scheduled passes: `RetryRefundLineJob`, `RetrySubscriptionPatchJob` and `RetrySubscriptionCancelJob` keep their marker and are run again by the hourly `SweepPendingRetriesJob` until their window (7 days / 24 h / 24 h) is over; `RetryUsageOverageChargeJob` leaves the charge `pending` for the nightly overage pass and tells the operator after three failed nights; the activation retry is run by the hourly sweep until its ladder (about seven and a half hours) is over. Nothing is lost, but every retry takes hours instead of minutes. `billing:check-config` warns about a `sync` connection.
 
 ---
 

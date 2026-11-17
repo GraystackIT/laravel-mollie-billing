@@ -202,3 +202,111 @@ it('ships every intent and kind text in both languages', function (string $local
     expect(__('billing::admin.coupons.create.info.valid_until_recurring'))
         ->not->toContain(__('billing::admin.coupons.create.max_per_billable'));
 })->with(['en', 'de']);
+
+// ── Fields the form did not offer, and the detail page did not show ─────────
+
+it('restricts a discount to plans and intervals from the form', function (): void {
+    couponFormIntent()
+        ->set('type', 'recurring')
+        ->assertSee(__('billing::admin.coupons.create.applicable_plans'))
+        ->assertSee(__('billing::admin.coupons.create.info.applicable_plans'))
+        ->assertSee(__('billing::admin.coupons.create.info.applicable_intervals'))
+        ->set('code', 'proyearly')
+        ->set('discount_value', 20)
+        ->set('discount_periods', 3)
+        ->set('applicable_plans', ['pro'])
+        ->set('applicable_intervals', ['monthly'])
+        ->call('save')
+        ->assertSet('error', null);
+
+    $coupon = Coupon::query()->where('code', 'PROYEARLY')->sole();
+
+    expect($coupon->applicable_plans)->toBe(['pro'])
+        ->and($coupon->applicable_intervals)->toBe(['monthly']);
+
+    // Nothing ticked stores no restriction, and the option is not offered where a plan
+    // restriction has no meaning.
+    couponFormIntent()->set('type', 'single_payment')->set('code', 'anyplan')->set('discount_value', 5)->call('save');
+    expect(Coupon::query()->where('code', 'ANYPLAN')->sole()->applicable_plans)->toBeNull();
+
+    couponFormIntent()->set('type', 'credits')->assertDontSee(__('billing::admin.coupons.create.applicable_plans'));
+});
+
+it('shows on the coupon page everything the coupon was created with', function (array $attributes, Closure $expected): void {
+    $coupon = app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->create(['code' => 'SHOWME'] + $attributes);
+
+    $page = Livewire::test('mollie-billing::admin.coupons.show', ['routeParameters' => ['coupon' => $coupon->id]]);
+
+    foreach ($expected() as $text) {
+        $page->assertSee($text);
+    }
+})->with([
+    'plan waiver: its periods' => [
+        ['type' => CouponType::PlanWaiver, 'waiver_periods' => 4],
+        fn () => [__('billing::admin.coupons.show.waiver_periods'), '4 '.__('billing::admin.billables.subscription.free_time.periods')],
+    ],
+    'grant: what happens at its end' => [
+        ['type' => CouponType::AccessGrant, 'grant_plan_code' => 'pro', 'grant_interval' => 'monthly', 'grant_duration_days' => 30, 'grant_on_expiry' => 'continue_paid'],
+        fn () => [__('billing::admin.grants.on_expiry.continue_paid'), '30 '.__('billing::admin.common.days')],
+    ],
+    'discount: the plans, intervals and usage types it is restricted to' => [
+        [
+            'type' => CouponType::Recurring, 'discount_type' => 'percentage', 'discount_value' => 10, 'discount_periods' => 2,
+            'applicable_plans' => ['pro'], 'applicable_intervals' => ['monthly'], 'applicable_usages' => ['tokens'],
+        ],
+        fn () => [
+            __('billing::admin.coupons.show.applicable_plans'), __('billing::admin.coupons.show.applicable_intervals'),
+            __('billing::admin.coupons.show.applicable_usages'), 'tokens', 'monthly',
+        ],
+    ],
+]);
+
+/*
+ * The plan / interval / addon / product restrictions are offered for the two discount kinds
+ * only. Ticked there and the kind then switched, they stayed in component state, out of
+ * sight — and were saved: a credits or free-time code carried a plan restriction nobody
+ * could see on the form, and `CouponService::validate()` refused it on every order that
+ * names another plan, or none.
+ */
+it('does not save restrictions the chosen kind does not offer, when they were ticked under another kind', function (string $type, array $fields): void {
+    $form = couponFormIntent()
+        ->set('type', 'recurring')
+        ->set('applicable_plans', ['pro'])
+        ->set('applicable_intervals', ['monthly'])
+        ->set('applicable_addons', ['sso'])
+        ->set('type', $type)
+        ->set('code', 'stale-'.$type);
+
+    foreach ($fields as $field => $value) {
+        $form->set($field, $value);
+    }
+
+    $form->call('save')->assertSet('error', null);
+
+    $coupon = Coupon::query()->where('code', strtoupper('stale-'.$type))->firstOrFail();
+
+    expect($coupon->applicable_plans)->toBeEmpty()
+        ->and($coupon->applicable_intervals)->toBeEmpty()
+        ->and($coupon->applicable_addons)->toBeEmpty()
+        ->and($coupon->applicable_products)->toBeEmpty();
+})->with([
+    'credits' => ['credits', ['credits_payload' => ['tokens' => 100]]],
+    'trial extension' => ['trial_extension', ['trial_extension_days' => 7]],
+    'plan waiver' => ['plan_waiver', ['waiver_periods' => 2]],
+]);
+
+it('keeps the restrictions for a discount kind, where the form offers them', function (): void {
+    couponFormIntent()
+        ->set('type', 'single_payment')
+        ->set('code', 'kept')
+        ->set('discount_value', 10)
+        ->set('applicable_plans', ['pro'])
+        ->set('applicable_intervals', ['monthly'])
+        ->call('save')
+        ->assertSet('error', null);
+
+    $coupon = Coupon::query()->where('code', 'KEPT')->firstOrFail();
+
+    expect($coupon->applicable_plans)->toBe(['pro'])
+        ->and($coupon->applicable_intervals)->toBe(['monthly']);
+});

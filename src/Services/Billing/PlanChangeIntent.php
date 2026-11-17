@@ -34,6 +34,13 @@ final class PlanChangeIntent
         // untouched, so the failed prior charge is not retried at the new
         // price right after the patch.
         public readonly bool $forceResetStartDate = false,
+        // The recurring-coupon marker a code entered with this change is about to write
+        // (CouponService::recurringMarkerFor()). The PATCH is priced from it instead of
+        // the marker the billable holds, because the redemption is written after Mollie
+        // has been called. Deliberately NOT serialised: a retry runs once the change has
+        // committed and reads the marker that was actually written — or, if the change
+        // failed, the absence of one.
+        public readonly ?array $couponMarker = null,
     ) {}
 
     /**

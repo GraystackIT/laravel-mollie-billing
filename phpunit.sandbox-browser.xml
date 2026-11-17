@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="./vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         failOnWarning="false">
+    <!--
+        The real Mollie test system, driven through a real browser. Needs MOLLIE_KEY=test_…,
+        a network and Chrome, and takes minutes — which is why it is in neither
+        phpunit.xml.dist nor phpunit.dusk.xml. Run it with `composer test:sandbox:browser`;
+        the long-running canary with `composer test:sandbox:canary`. See docs/sandbox-testing.md.
+    -->
+    <testsuites>
+        <testsuite name="SandboxBrowser">
+            <directory>tests/SandboxBrowser</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+    </php>
+</phpunit>

@@ -106,9 +106,11 @@ class SweepPendingRetriesJob implements ShouldQueue, ShouldBeUnique
                     // hourly no-op forever, while Mollie keeps charging cancelled subscriptions
                     // and rejected refunds never reach their customers.
                     try {
+                        $this->sweepSubscriptionReplacement($billableClass, $billable, $meta);
                         $this->sweepSubscriptionPatch($billable, $meta);
                         $this->sweepSubscriptionCancel($billableClass, $billable, $meta);
                         $this->sweepRefundLines($billableClass, $billable, $meta);
+                        $this->sweepActivationRetries($billableClass, $billable, $meta);
                     } catch (\Throwable $e) {
                         Log::error('SweepPendingRetriesJob: skipping a billable whose markers could not be swept', [
                             'billable_id' => $billable->getKey(),
@@ -117,6 +119,57 @@ class SweepPendingRetriesJob implements ShouldQueue, ShouldBeUnique
                     }
                 }
             });
+    }
+
+    /**
+     * `activation_retries` is written when an activation did not finish, and normally
+     * worked off by the RetrySubscriptionActivationJob dispatched in the same breath. A
+     * marker that outlives that job's whole ladder has nothing behind it — the queue was
+     * flushed, the worker died, or the app runs `sync` and the job was never dispatched —
+     * and it is the only trace of a customer who paid and has no subscription.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    private function sweepActivationRetries(string $billableClass, Model $billable, array $meta): void
+    {
+        $pending = $meta[\GraystackIT\MollieBilling\Support\ActivationRetry::META_KEY] ?? null;
+
+        if (! is_array($pending) || $pending === []) {
+            return;
+        }
+
+        $cutoff = BillingTime::nowUtc()->subSeconds(RetrySubscriptionActivationJob::LADDER_SECONDS);
+
+        foreach ($pending as $paymentId => $marker) {
+            $since = is_array($marker) ? ($marker['first_failed_at'] ?? null) : null;
+
+            // On `sync` no job is in flight to wait for: the sweep is the ladder itself, and
+            // the job keeps its marker until the ladder's time is over.
+            if (! RetrySubscriptionActivationJob::runsInline()
+                && is_string($since) && $since !== '' && BillingTime::toUtc($since)->gt($cutoff)) {
+                continue;
+            }
+
+            RetrySubscriptionActivationJob::dispatch((string) $paymentId, $billableClass, $billable->getKey());
+        }
+    }
+
+    /**
+     * `pending_subscription_replacement` is written by MollieSubscriptionReplacer before
+     * it cancels a charged subscription to move its next charge. Left unread after a
+     * failure between the cancel and the create, the customer has no running
+     * subscription and is never charged again. First in the row, because the PATCH
+     * retries behind it target the subscription the replacement creates.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    private function sweepSubscriptionReplacement(string $billableClass, Model $billable, array $meta): void
+    {
+        if (! is_array($meta[\GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionReplacer::META_KEY] ?? null)) {
+            return;
+        }
+
+        RetrySubscriptionReplacementJob::dispatch($billableClass, $billable->getKey());
     }
 
     /**

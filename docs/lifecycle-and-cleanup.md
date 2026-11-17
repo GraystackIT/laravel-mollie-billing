@@ -164,7 +164,7 @@ Organization::deleting(function (Organization $org) {
 `past_due` is set in two places:
 
 - **`MollieWebhookController::handleSubscriptionPaymentFailed`** — one `failed` webhook is enough to flip the status. The webhook stores `subscription_meta.payment_failure` (failure reason + timestamp) and `subscription_meta.past_due_since` (UTC ISO 8601).
-- **`RetryUsageOverageChargeJob`** — after three failed overage charge attempts (backoff 60s, 5min, 15min) the status flips to `past_due` and `past_due_since` is recorded.
+- **`RetryUsageOverageChargeJob`** — three failed overage charge attempts (backoff 60s, 5min, 15min) end that dunning cycle. It does **not** make the subscription `past_due` any more: the debt is left standing and collected again with the next renewals, see [usage-billing.md](usage-billing.md#a-debt-nobody-could-collect-stands-and-the-renewals-try-again).
 
 Mollie retries the recurring charge on its own schedule (≈14 days). A successful retry triggers `handleSubscriptionPaymentPaid` and — via the prorata charge path or a successful recovery payment — clears `payment_failure` + `past_due_since` and moves the status back to `active`.
 
@@ -195,7 +195,21 @@ Edge case, but real: Mollie reports `paid` and the payment's metadata (`billable
 2. If `MollieBilling::notifyAdminUsing()` is registered, sends `AdminPaidWithoutBillableNotification` to the registered admin recipients.
 3. Marks the webhook as processed (via the `BillingProcessedWebhook` reservation) and returns `200` to Mollie so it does not keep redelivering.
 
-The money has cleared at Mollie. The package will **not** issue an invoice (no billable to address it to), **not** credit any wallets, and **not** make subscription transitions. The notification is the prompt to reconcile manually — refund the customer, or recreate the billable and post-process via an artisan command of your own.
+The money has cleared at Mollie. The package will **not** issue an invoice (no billable to address it to), **not** credit any wallets, and **not** make subscription transitions.
+
+The notification is sent **once** per payment, and nothing has to be done about it: a trace row (`{payment}:@unassigned` in `billing_processed_webhooks`) is written, and `RefundUnassignedPaymentsJob` (daily, 04:15 UTC) follows it up after **14 days**:
+
+- if the billable the payment names exists by then, the payment is booked through the ordinary webhook path — invoice, wallet, subscription;
+- otherwise it is refunded at Mollie in full (less anything already refunded or charged back).
+
+Such a refund has no invoice and no credit note — both are addressed to a billable, and there is none; the trace row and the log are the record. A refund Mollie refuses is tried again the next night, and the admins are told after three further days, once.
+
+### Activations that do not finish, and renewals for ended subscriptions
+
+Two neighbouring cases resolve themselves the same way — an operator is told only when the automatic way is spent:
+
+- **A paid first payment (or a captured mandate) whose subscription was not created** — Mollie was unreachable for `CreateSubscription`, or the process died between the invoice and that call. `RetrySubscriptionActivationJob` runs the activation again after 1, 5, 15, 60 and 360 minutes, through the same two-phase activation, and looks at Mollie for a subscription the first attempt may already have created before it creates one. When the attempts are spent, a payment that collected money is refunded (invoice + credit note, `UnwantedPaymentRefundedNotification` to the customer) and the admins are told. The ladder needs a queue worker: on `QUEUE_CONNECTION=sync` the job is not dispatched from the webhook (it would run inside the delivery it is meant to repeat). `SweepPendingRetriesJob` dispatches it for any `activation_retries` marker older than the whole ladder — which is also the net under a job that was lost — so a sync app gets one retry on the next sweep and then the refund.
+- **A renewal Mollie collected for a subscription that has ended** — its cancellation never reached Mollie. The renewal is invoiced, refunded in full with a credit note, the Mollie subscription is cancelled, and the customer is told.
 
 **Configuration**
 

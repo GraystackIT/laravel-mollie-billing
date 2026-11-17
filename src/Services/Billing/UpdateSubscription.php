@@ -30,6 +30,14 @@ use GraystackIT\MollieBilling\Support\MollieCall;
 
 class UpdateSubscription
 {
+    /**
+     * The recurring-coupon marker of the change being run, for applyProrata()'s intent —
+     * see runUpdate().
+     *
+     * @var ?array<string, mixed>
+     */
+    private ?array $prorataCouponMarker = null;
+
     public function __construct(
         private readonly CouponService $couponService,
         private readonly SubscriptionCatalogInterface $catalog,
@@ -239,6 +247,27 @@ class UpdateSubscription
             $remainingNet = max(0, $remainingNet - $thisDiscount);
         }
 
+        // The marker the redemption in phase 3 will write, built now. Mollie is PATCHed
+        // before phase 3 (no Mollie call may sit inside the transaction that holds the
+        // local writes), and the PATCH is priced from the marker — so it used to go out
+        // at the undiscounted amount and needed a second PATCH after the commit. Priced
+        // from this one, the first PATCH already carries the discount, and nothing is
+        // written for the coupon until the change itself is written: a change that fails
+        // leaves no redemption behind. Same arguments as the `redeem()` below.
+        // Where the code's discounted periods start — decided once, for the marker the PATCH
+        // is priced from and for the redemption that writes it, so the two cannot name
+        // different dates. A change whose own charge for the running period the code
+        // discounts makes that period the first of the N; a change without one starts
+        // with the next charge. Counted from "now" instead, the window ended on a day off
+        // the cycle, and a fully covering code sent Mollie there for good.
+        $prorataCouponDiscounts = $this->computeProrataDiscountsPerCoupon($resolvedCoupons, $perCouponRecurringDiscountNet, $context);
+        $couponLifetimeFrom = $this->couponService->recurringLifetimeFrom(
+            $billable,
+            array_sum($prorataCouponDiscounts) > 0,
+            $context->newInterval,
+        );
+        $couponMarker = $this->upcomingRecurringMarker($billable, $resolvedCoupons, $newNet, $context->newInterval, $couponLifetimeFrom);
+
         // The same predicate the patcher cancels on: "the target configuration bills
         // nothing at all". Asking `planChanged && isFreePlan()` here while the patcher
         // asked `isFreePlan()` alone is how the two came apart — a free plan with a
@@ -246,6 +275,15 @@ class UpdateSubscription
         // kept source Mollie, status Active and the subscription id, so the customer
         // kept the addon and was never billed again.
         $downgradeToLocal = $context->isMollie && $context->newNet <= 0;
+
+        // Past due although the running period is paid — a balance was declined, not the
+        // renewal. A plan or interval change from there is an ordinary change, not the
+        // reset (`BillingPolicy::isPastDueReset()`), and it is what ends the dunning: the
+        // declined balance was for the configuration being left and is closed with it.
+        // Decided here, before anything is credited out of the renewal that proves it.
+        $endsDunningOfPaidPeriod = $billable->isBillingPastDue()
+            && ($context->planChanged || $context->intervalChanged)
+            && BillingPolicy::runningPeriodIsPaid($billable);
 
         // Pro-rata: ProrataExecutor handles charge/refund/sidegrade + Mollie-Subscription-PATCH.
         // For Mollie → Free, the patcher cancels the subscription.
@@ -281,7 +319,17 @@ class UpdateSubscription
         // could never be cancelled again.
         $prorataHandledByExecutor = false;
         if ($hasProrata) {
-            $prorataResult = $this->applyProrata($billable, $context, $resolvedCoupons);
+            // Handed to applyProrata() through a property: it is protected and overridden
+            // (test doubles, apps) with its existing signature.
+            $previousMarker = $this->prorataCouponMarker;
+            $this->prorataCouponMarker = $couponMarker;
+
+            try {
+                $prorataResult = $this->applyProrata($billable, $context, $resolvedCoupons);
+            } finally {
+                $this->prorataCouponMarker = $previousMarker;
+            }
+
             $billable->refresh();
 
             // Charge in flight (Mollie has been asked to charge — Phase 2 webhook will finalize).
@@ -362,6 +410,8 @@ class UpdateSubscription
         $mollieSubscriptionPatched = false;
         $patchRetry = null;
         $patchedAmountNet = null;
+        // Whether a PATCH priced with `$couponMarker` actually reached Mollie in this call.
+        $discountReachedMollie = false;
 
         if ($billable instanceof Model) {
             if ($downgradeToLocal) {
@@ -379,9 +429,9 @@ class UpdateSubscription
             } elseif ($context->isMollie && ! $prorataHandledByExecutor && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
                 // No money flow: PATCH directly via the patcher (sidegrade-style without Saldo-0 charge).
                 // Failures are queued for the RetrySubscriptionPatchJob — the local state still flips.
-                $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+                $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons, $couponMarker);
                 try {
-                    $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                    $discountReachedMollie = $this->subscriptionPatcher->updateForIntent($billable, $intent) && $couponMarker !== null;
                     $mollieSubscriptionPatched = true;
                 } catch (\Throwable $e) {
                     Log::warning('Mollie-Subscription PATCH failed — queued for retry', [
@@ -396,6 +446,11 @@ class UpdateSubscription
                 $mollieSubscriptionPatched = $prorataResult['path'] === 'sidegrade'
                     || $prorataResult['path'] === 'refund';
                 $patchedAmountNet = $newNet;
+                // The executor's own PATCH was priced with the same marker; its outcome is
+                // reported under `cancelled_at_mollie` (true: Mollie took it).
+                $discountReachedMollie = $mollieSubscriptionPatched
+                    && $couponMarker !== null
+                    && ($prorataResult['cancelled_at_mollie'] ?? false) === true;
 
                 // A seat or addon change whose prorata charge is still in flight. The local
                 // state is written in phase 3 below, so Mollie's recurring amount has to
@@ -408,9 +463,9 @@ class UpdateSubscription
                 // and switch locally only once the charge clears, so their PATCH stays in
                 // Phase 2 with the switch.
                 if ($prorataResult['path'] === 'deferred_charge') {
-                    $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+                    $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons, $couponMarker);
                     try {
-                        $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                        $discountReachedMollie = $this->subscriptionPatcher->updateForIntent($billable, $intent) && $couponMarker !== null;
                         $mollieSubscriptionPatched = true;
                     } catch (\Throwable $e) {
                         Log::warning('Mollie-Subscription PATCH failed for a seat/addon change — queued for retry', [
@@ -432,12 +487,12 @@ class UpdateSubscription
         /** @var array<int, array<string, mixed>> $deferredOverage */
         $deferredOverage = [];
 
-        $result = DB::transaction(function () use (
+        $phase3 = function () use (
             $billable, $dto, $context, $resolvedCoupons, $perCouponRecurringDiscountNet,
             $prorataResult, $downgradeToLocal,
             $newSeats, $newAddons, $newNet, $addonsAdded, $addonsRemoved, $seatsChanged,
             $couponsApplied, $cancelledAtMollie, $mollieSubscriptionPatched, $patchRetry,
-            $patchedAmountNet, &$deferredOverage,
+            $patchedAmountNet, &$deferredOverage, $endsDunningOfPaidPeriod, $couponLifetimeFrom,
         ): array {
             if ($billable instanceof Model) {
                 // Scope-free: with an app-defined applyBillingScope() the scoped query
@@ -481,6 +536,10 @@ class UpdateSubscription
                     'orderAmountNet' => $newNet,
                     'discount_amount_net' => $discount,
                 ];
+                // The start the PATCH was priced with (see where $couponMarker is built).
+                if ($couponLifetimeFrom !== null) {
+                    $context_redeem['lifetime_from'] = $couponLifetimeFrom;
+                }
                 if ($invoiceIdForRedemption !== null) {
                     $context_redeem['invoice_id'] = (int) $invoiceIdForRedemption;
                 }
@@ -544,17 +603,42 @@ class UpdateSubscription
 
                 $meta['seat_count'] = $newSeats;
 
+                // A change that is in force with this write (nothing to wait for) ends the
+                // dunning of a paid period here; one that waits for its charge ends it in
+                // `ProrataChargeHandler`, like the reset does.
+                $endsDunning = $endsDunningOfPaidPeriod && ! $downgradeToLocal && $billable->isBillingPastDue();
+
+                if ($endsDunning) {
+                    unset($meta['payment_failure'], $meta['past_due_since']);
+                }
+
                 // The wallet adjuster prorates the old plan's entitlement over the
                 // OLD period, so capture it before the write below moves the interval
                 // (and, on a downgrade to free, the period start itself).
                 $oldPeriodStart = $billable->getBillingPeriodStartsAt();
                 $oldPeriodEnd = $billable->nextBillingDate();
 
+                // An interval change in force now starts the new cycle now — Mollie's start
+                // date was reset to one new interval from today (or, under a fully covering
+                // code, to the end of its periods counted from today). It is in force here only
+                // when it charged nothing: a code covering the whole charge. Left on the old
+                // anchor, the period ran on the old day while Mollie charged on the new one.
+                $startsNewCycle = $context->intervalChanged
+                    && ! $downgradeToLocal
+                    && ! $dto->atPeriodBoundary
+                    && $billable->getBillingSubscriptionStatus() !== SubscriptionStatus::Trial;
+
                 $billable->forceFill([
                     'subscription_plan_code' => $context->newPlan,
                     'subscription_interval' => $context->newInterval,
                     'active_addon_codes' => array_values($newAddons),
                     'subscription_meta' => $meta,
+                    ...($startsNewCycle ? ['subscription_period_starts_at' => BillingTime::nowUtc()] : []),
+                    ...($endsDunning ? [
+                        // Not `Active` outright: an overage debt that stands keeps its lock.
+                        'subscription_status' => \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::statusAfterRecovery($meta, SubscriptionStatus::Active),
+                        'subscription_ends_at' => null,
+                    ] : []),
                     ...($downgradeToLocal ? [
                         'subscription_source' => SubscriptionSource::Local,
                         'subscription_period_starts_at' => BillingTime::nowUtc(),
@@ -597,9 +681,42 @@ class UpdateSubscription
                 $billable, $dto, $context, $newSeats, $newAddons, $addonsAdded, $addonsRemoved,
                 $seatsChanged, $couponApplied, $mollieSubscriptionPatched,
             );
-        });
+        };
+
+        $result = $this->undoingUnbackedDiscount($billable, $discountReachedMollie, fn (): array => DB::transaction($phase3));
 
         $this->walletAdjuster->chargeDeferredOverage($billable, $deferredOverage);
+
+        // A recurring coupon that came with this change wrote its marker in phase 3 —
+        // after Mollie was PATCHed. That PATCH is priced from `$couponMarker`, the marker
+        // phase 3 was about to write, so normally it already carried the discount. This
+        // is the safety net for when it did not reach Mollie (it failed and was queued,
+        // or nothing PATCHed in this call): re-priced from the marker as written, with
+        // everything committed and nothing held. Without either, Mollie held the full
+        // price until the pro-rata charge settled — and for good where the change costs
+        // nothing (a seat added during a trial), every renewal booked with an
+        // `adjustment` against the discount the customer was shown. Only when the
+        // billable is on the configuration the code was applied to — a plan or interval
+        // change that waits for its charge has not switched yet, and its own PATCH comes
+        // with the switch.
+        if ($billable instanceof Model && $context->isMollie && ! $downgradeToLocal && ! $discountReachedMollie) {
+            $withRecurringCoupon = false;
+
+            foreach ($resolvedCoupons as $coupon) {
+                $withRecurringCoupon = $withRecurringCoupon || $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring;
+            }
+
+            $billable->refresh();
+
+            if (
+                $withRecurringCoupon
+                && $this->couponService->getActiveRecurringCouponMarker($billable) !== null
+                && (string) $billable->getBillingSubscriptionPlanCode() === (string) $context->newPlan
+                && (string) $billable->getBillingSubscriptionInterval() === (string) $context->newInterval
+            ) {
+                app(PlanWaiver::class)->syncMollieOrQueue($billable);
+            }
+        }
 
         // This call may just have PATCHed Mollie to the amount of the configuration the
         // billable is on now. If a change is scheduled for the period end, Mollie was
@@ -649,6 +766,7 @@ class UpdateSubscription
             $context,
             $context->newSeats,
             $context->newAddons,
+            $this->prorataCouponMarker,
         );
 
         $composer = app(ProrataComposer::class);
@@ -832,7 +950,11 @@ class UpdateSubscription
     /**
      * @param  array<int, string>  $newAddons
      */
-    private function buildIntent(Billable $billable, SubscriptionChangeContext $context, int $newSeats, array $newAddons): PlanChangeIntent
+    /**
+     * @param  ?array<string, mixed>  $couponMarker  the marker a recurring code entered with
+     *                                              this change is about to write
+     */
+    private function buildIntent(Billable $billable, SubscriptionChangeContext $context, int $newSeats, array $newAddons, ?array $couponMarker = null): PlanChangeIntent
     {
         return new PlanChangeIntent(
             billable: $billable,
@@ -852,7 +974,58 @@ class UpdateSubscription
             currentAddons: $this->addonQuantities($billable, $context->currentAddons),
             newAddons: $this->addonQuantities($billable, array_values($newAddons)),
             forceResetStartDate: BillingPolicy::isPastDueReset($billable, $context->planChanged, $context->intervalChanged),
+            couponMarker: $couponMarker,
         );
+    }
+
+    /**
+     * Run phase 3; if it throws after Mollie was sent a discount, put Mollie back.
+     *
+     * Phase 3 rolls back — the redemption with it — when the campaign filled up in the
+     * meantime, a lock wait times out or a listener throws. Mollie was already PATCHed
+     * with the discounted amount, which no redemption and no marker then backs: it would
+     * collect a discount the books do not know, for as long as the code promised. Mollie
+     * is re-priced from what the committed state says (queued if that fails), and the
+     * failure goes on to the caller unchanged.
+     *
+     * @template T
+     *
+     * @param  \Closure(): T  $phase3
+     * @return T
+     */
+    private function undoingUnbackedDiscount(Billable $billable, bool $discountReachedMollie, \Closure $phase3): mixed
+    {
+        try {
+            return $phase3();
+        } catch (\Throwable $e) {
+            if ($discountReachedMollie && $billable instanceof Model) {
+                $billable->refresh();
+                app(PlanWaiver::class)->syncMollieOrQueue($billable);
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * The `active_recurring_coupon` marker the redemptions of these coupons will write —
+     * the last recurring one's, as `redeem()` overwrites the marker per coupon. Null when
+     * none of them is recurring.
+     *
+     * @param  iterable<\GraystackIT\MollieBilling\Models\Coupon>  $coupons
+     * @return ?array<string, mixed>
+     */
+    private function upcomingRecurringMarker(Billable $billable, iterable $coupons, int $newNet, string $newInterval, ?\Carbon\CarbonInterface $lifetimeFrom = null): ?array
+    {
+        $marker = null;
+
+        foreach ($coupons as $coupon) {
+            if ($coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
+                $marker = $this->couponService->recurringMarkerFor($coupon, $billable, $newNet, $newInterval, $lifetimeFrom);
+            }
+        }
+
+        return $marker;
     }
 
     /**
@@ -984,14 +1157,46 @@ class UpdateSubscription
         $oldPeriodStart = $decision['oldPeriodStart'];
         $oldPeriodEnd = $decision['oldPeriodEnd'];
 
-        // Phase 2: the Mollie PATCH, with nothing held.
+        // Phase 2: the Mollie PATCH, with nothing held. Priced with the marker the codes
+        // redeemed in phase 3 will write — see update().
         $mollieSubscriptionPatched = false;
         $patchRetry = null;
+        // Only codes phase 3 can still redeem price the PATCH. This path does not re-validate
+        // (the charge has settled), so a code whose campaign filled up meanwhile, or that
+        // this customer has used up, would otherwise reach Mollie as a discount first and
+        // be taken back after the failed redemption. An expired or switched-off code needs
+        // no check here: its marker discounts nothing. A race with another redemption of
+        // the last slot is left to the re-price after phase 3.
+        // Where the code's periods start — the running period when the charge that just
+        // settled carried its discount (see update()). Decided before anything moves the
+        // interval, and handed to the redemption below so marker and PATCH agree.
+        $billedCouponDiscount = 0;
+        foreach ($pendingProrataChargeLines as $line) {
+            if (($line['kind'] ?? null) === 'coupon') {
+                $billedCouponDiscount += abs((int) ($line['amount_net'] ?? 0));
+            }
+        }
+        $couponLifetimeFrom = $this->couponService->recurringLifetimeFrom(
+            $billable,
+            ($context->planChanged || $context->intervalChanged) && $billedCouponDiscount > 0,
+            $context->newInterval,
+        );
+        $couponMarker = $this->upcomingRecurringMarker(
+            $billable,
+            array_values(array_filter(
+                $this->pendingCoupons($pendingData),
+                fn (\GraystackIT\MollieBilling\Models\Coupon $coupon): bool => $this->couponService->hasRedemptionLeft($coupon, $billable),
+            )),
+            $newNet,
+            $context->newInterval,
+            $couponLifetimeFrom,
+        );
+        $discountReachedMollie = false;
 
         if ($decision['isMollie'] && ($context->planChanged || $context->intervalChanged || $seatsChanged || $addonsAdded || $addonsRemoved)) {
-            $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons);
+            $intent = $this->buildIntent($billable, $context, $newSeats, $newAddons, $couponMarker);
             try {
-                $this->subscriptionPatcher->updateForIntent($billable, $intent);
+                $discountReachedMollie = $this->subscriptionPatcher->updateForIntent($billable, $intent) && $couponMarker !== null;
                 $mollieSubscriptionPatched = true;
             } catch (\Throwable $e) {
                 Log::warning('Mollie-Subscription PATCH failed in applyPendingPlanChange — queued for retry', [
@@ -1006,11 +1211,14 @@ class UpdateSubscription
         /** @var array<int, array<string, mixed>> $deferredOverage */
         $deferredOverage = [];
 
-        $result = DB::transaction(function () use (
-            $billable, $pendingProrataChargeLines, $chargeInvoice, $context, $newSeats,
+        // `$pendingData` belongs in this list: without it the codes below were read from an
+        // undefined variable, so this path redeemed nothing — no row, no marker — for a
+        // charge Mollie had already collected with the discount.
+        $phase3 = function () use (
+            $billable, $pendingData, $pendingProrataChargeLines, $chargeInvoice, $context, $newSeats,
             $newAddons, $newNet, $seatsChanged, $addonsAdded, $addonsRemoved,
             $oldPeriodStart, $oldPeriodEnd, $mollieSubscriptionPatched, $patchRetry,
-            &$deferredOverage,
+            &$deferredOverage, $couponLifetimeFrom,
         ): array {
             if ($billable instanceof Model) {
                 $billable->newQuery()
@@ -1124,6 +1332,9 @@ class UpdateSubscription
                     'orderAmountNet' => $newNet,
                     'discount_amount_net' => $discount,
                 ];
+                if ($couponLifetimeFrom !== null) {
+                    $redeemContext['lifetime_from'] = $couponLifetimeFrom;
+                }
                 if ($chargeInvoice !== null) {
                     $redeemContext['invoice_id'] = (int) $chargeInvoice->id;
                 }
@@ -1156,11 +1367,55 @@ class UpdateSubscription
                 $billable, $dto, $context, $newSeats, $newAddons, $addonsAdded, $addonsRemoved,
                 $seatsChanged, $couponApplied, $mollieSubscriptionPatched,
             );
-        });
+        };
+
+        $result = $this->undoingUnbackedDiscount($billable, $discountReachedMollie, fn (): array => DB::transaction($phase3));
 
         $this->walletAdjuster->chargeDeferredOverage($billable, $deferredOverage);
 
+        // Phase 3 logs a redemption it cannot write instead of throwing (the charge has
+        // settled), so the marker the PATCH was priced with may not exist. Mollie then
+        // follows the marker that does — as it does when the PATCH itself was queued.
+        if ($couponMarker !== null && $billable instanceof Model) {
+            $billable->refresh();
+            $written = $this->couponService->getActiveRecurringCouponMarker($billable);
+
+            if (! $discountReachedMollie || (int) ($written['coupon_id'] ?? 0) !== (int) $couponMarker['coupon_id']) {
+                app(PlanWaiver::class)->syncMollieOrQueue($billable);
+            }
+        }
+
         return $result;
+    }
+
+    /**
+     * The coupons a stored change names, as phase 3 of applyPendingPlanChange() resolves
+     * them: by code, not re-validated.
+     *
+     * @param  array<string, mixed>  $pendingData
+     * @return list<\GraystackIT\MollieBilling\Models\Coupon>
+     */
+    private function pendingCoupons(array $pendingData): array
+    {
+        $codes = (array) ($pendingData['coupon_codes'] ?? []);
+
+        if ($codes === [] && ! empty($pendingData['coupon_code'])) {
+            $codes = [(string) $pendingData['coupon_code']];
+        }
+
+        $coupons = [];
+
+        foreach ($codes as $code) {
+            $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()
+                ->whereRaw('UPPER(code) = ?', [strtoupper((string) $code)])
+                ->first();
+
+            if ($coupon !== null) {
+                $coupons[] = $coupon;
+            }
+        }
+
+        return $coupons;
     }
 
     /**
@@ -1259,6 +1514,87 @@ class UpdateSubscription
     }
 
     /**
+     * Withdraw the change that is waiting for `$paymentId` — the unattended counterpart of
+     * {@see cancelPendingPlanChange()}.
+     *
+     * For a scheduled change that is given up (attempts used up, refused by the rules,
+     * cancelled by the customer) after one of its attempts had already created the prorata
+     * payment. `ScheduleSubscriptionChange::cancel()` used to remove `scheduled_change`
+     * only: `pending_prorata_change` stayed, the payment settled days later and Phase 2
+     * carried the change out — after the customer had been mailed that it was not.
+     *
+     * Differences from the button, each on purpose:
+     *
+     *  - Keyed on the payment id, not on `prorata_pending_payment_id`: that marker is
+     *    written for plan and interval changes only, and after the very failure this is
+     *    for it may not have been written at all. A waiting change that names another
+     *    payment is left alone — it belongs to a different change.
+     *  - A payment that has **already settled** is withdrawn as well. The button leaves it
+     *    to the webhook because the customer is looking at a change they still expect;
+     *    here they have been told it is off, so the webhook has to return the money, not
+     *    apply it. The marker makes it do that ({@see ProrataChargeHandler::paid()} →
+     *    `UnwantedPaymentRefund`).
+     *  - What a seat or addon change had already written — locally and at Mollie — is put
+     *    back, exactly as for a declined payment.
+     *
+     * Reaches Mollie, so never call it inside a transaction.
+     *
+     * @return bool whether a waiting change was withdrawn
+     */
+    public function withdrawPendingChangeForPayment(Billable $billable, string $paymentId): bool
+    {
+        if (! ($billable instanceof Model) || $paymentId === '') {
+            return false;
+        }
+
+        $billable->refresh();
+        $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
+
+        if (! is_array($pending) || (string) ($pending['charge_payment_id'] ?? '') !== $paymentId) {
+            return false;
+        }
+
+        $orphanReason = null;
+
+        try {
+            $payment = MollieCall::send(
+                new \Mollie\Api\Http\Requests\GetPaymentRequest($paymentId),
+            );
+
+            $status = (string) ($payment->status ?? '');
+
+            if (in_array($status, ['paid', 'authorized'], true)) {
+                $orphanReason = 'already_settled';
+            } elseif (($payment->isCancelable ?? false) === true) {
+                MollieCall::send(
+                    new \Mollie\Api\Http\Requests\CancelPaymentRequest($paymentId),
+                );
+            } elseif (! in_array($status, ['canceled', 'expired', 'failed'], true)) {
+                $orphanReason = 'not_cancelable';
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Withdrawing a waiting change: Mollie payment lookup/cancel failed — clearing local state anyway', [
+                'billable' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'error' => $e->getMessage(),
+            ]);
+
+            $orphanReason = 'lookup_failed';
+        }
+
+        if ($orphanReason !== null) {
+            $this->recordOrphanedProrataPayment($billable, $paymentId, $orphanReason);
+        }
+
+        $this->clearPendingPlanChange($billable);
+
+        app(\GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler::class)
+            ->restoreUnpaidChange($billable, (array) ($pending['intent'] ?? []));
+
+        return true;
+    }
+
+    /**
      * Remember a prorata payment that may still settle after the local pending state was
      * cleared, so the paid path has something to reconcile against instead of returning
      * early on an empty pending state.
@@ -1283,32 +1619,25 @@ class UpdateSubscription
             'payment_id' => $paymentId,
             'reason' => $reason,
             'cancelled_at' => BillingTime::nowUtc()->toIso8601String(),
-            'pending_plan_change' => $meta['pending_plan_change'] ?? null,
+            // The intent names the target as well: `pending_plan_change` is not written
+            // for a change whose `update()` threw right after the payment was created.
+            'pending_plan_change' => $meta['pending_plan_change']
+                ?? (isset($meta['pending_prorata_change']['intent']['new_plan'])
+                    ? ['plan_code' => (string) $meta['pending_prorata_change']['intent']['new_plan']]
+                    : null),
             'prorata_charge_lines' => $meta['pending_prorata_change']['charge_lines'] ?? null,
         ];
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
-        Log::error('Prorata payment orphaned by a user-initiated plan-change cancel — may still settle', [
+        // Recorded, not reported. If the payment settles after all, the paid path returns
+        // it automatically (ProrataChargeHandler → UnwantedPaymentRefund) and reads this
+        // marker for what the payment was for; if it does not, nothing needs doing. There
+        // is no step here an operator could take.
+        Log::info('Prorata payment could not be cancelled with its plan change — it is refunded if it settles', [
             'billable' => $billable->getKey(),
             'payment_id' => $paymentId,
             'reason' => $reason,
         ]);
-
-        $admins = \GraystackIT\MollieBilling\MollieBilling::notifyAdmin();
-        $admins = is_array($admins) ? $admins : iterator_to_array($admins);
-
-        if ($admins !== []) {
-            \Illuminate\Support\Facades\Notification::send($admins, \GraystackIT\MollieBilling\MollieBilling::resolveNotification(
-                \GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification::class,
-                'Plan change cancelled locally while its Mollie payment could still settle',
-                [
-                    'billable_type' => $billable->getMorphClass(),
-                    'billable_id' => $billable->getKey(),
-                    'payment_id' => $paymentId,
-                    'reason' => $reason,
-                ],
-            ));
-        }
     }
 
     /**
@@ -1369,6 +1698,20 @@ class UpdateSubscription
         $newAddons = $dto->addons !== null
             ? $this->normalizeAddonCodes($dto->addons)
             : $currentAddons;
+
+        // A plan change that says nothing about addons keeps the ones the new plan allows
+        // and drops the rest — which is what the preview has always shown the customer
+        // ("these add-ons will be removed"). Carried over unfiltered, an addon the target
+        // does not allow stayed active and stayed billed: a downgrade to the free plan
+        // with one addon kept source Mollie and a subscription for the addon alone, on a
+        // plan that does not offer it. An addon the caller names explicitly is not
+        // touched here; `validateAddons()` refuses it.
+        if ($planChanged && $dto->addons === null) {
+            $newAddons = array_values(array_filter(
+                $newAddons,
+                fn (string $code): bool => $this->catalog->planAllowsAddon($newPlan, $code),
+            ));
+        }
 
         $newNet = SubscriptionAmount::net($this->catalog, $billable, $newPlan, $newInterval, $newSeats, $newAddons);
         $currentNet = SubscriptionAmount::net($this->catalog, $billable, $currentPlan, $currentInterval, $currentSeats, $currentAddons);
@@ -1438,6 +1781,48 @@ class UpdateSubscription
     }
 
     /**
+     * What a seat or addon change gives back, per invoice line key, as the fraction of the
+     * units the line stood for before the change.
+     *
+     * @param  list<string>  $addonsRemoved
+     * @return array<string, float>
+     */
+    private function fractionsGivenBack(SubscriptionChangeContext $context, int $newSeats, array $addonsRemoved): array
+    {
+        $fractions = [];
+        $included = $this->catalog->includedSeats($context->currentPlan);
+        $extraBefore = max(0, $context->currentSeats - $included);
+        $extraAfter = max(0, $newSeats - $included);
+
+        if ($extraBefore > $extraAfter) {
+            $fractions['seats'] = ($extraBefore - $extraAfter) / $extraBefore;
+        }
+
+        foreach ($context->currentAddons as $code) {
+            $code = (string) $code;
+            $seatsBefore = SubscriptionAmount::addonChargedSeats($this->catalog, $code, $context->currentPlan, $context->currentInterval, $context->currentSeats);
+
+            if (in_array($code, $addonsRemoved, true)) {
+                $fractions['addon:'.$code] = 1.0;
+
+                if ($seatsBefore > 0) {
+                    $fractions['addon_seats:'.$code] = 1.0;
+                }
+
+                continue;
+            }
+
+            $seatsAfter = SubscriptionAmount::addonChargedSeats($this->catalog, $code, $context->currentPlan, $context->currentInterval, $newSeats);
+
+            if ($seatsBefore > $seatsAfter) {
+                $fractions['addon_seats:'.$code] = ($seatsBefore - $seatsAfter) / $seatsBefore;
+            }
+        }
+
+        return $fractions;
+    }
+
+    /**
      * Dispatch change events and build the standard result array.
      */
     private function dispatchEventsAndBuildResult(
@@ -1470,6 +1855,20 @@ class UpdateSubscription
 
         if ($context->planChanged || $context->intervalChanged) {
             $announce(new PlanChanged($billable, $context->currentPlan ?: null, $context->newPlan, $context->newInterval));
+
+            // A balance still open for the configuration that has just been left is, from
+            // now on, owed only for the days it ran — and a declined one is closed
+            // (`UndercollectionCharge::configurationLeft()`).
+            app(UndercollectionCharge::class)->configurationLeft($billable, (string) $context->currentPlan);
+        }
+
+        if (! $context->planChanged && ! $context->intervalChanged) {
+            // Seats or addons given back while a balance that pays for them is still out:
+            // its share is owed only up to now (`UndercollectionCharge::componentsGivenBack()`).
+            app(UndercollectionCharge::class)->componentsGivenBack(
+                $billable,
+                $this->fractionsGivenBack($context, $newSeats, array_values(array_map('strval', $addonsRemoved))),
+            );
         }
 
         if ($seatsChanged) {

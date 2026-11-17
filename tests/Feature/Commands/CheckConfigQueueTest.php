@@ -44,3 +44,40 @@ it('rejects a non-string queue name', function (): void {
         ->expectsOutputToContain('queue.name must be a string')
         ->assertExitCode(1);
 });
+
+it('warns that a sync queue never retries a job', function (): void {
+    // On `sync` a job runs inside the request that dispatched it, and one that throws has
+    // failed for good: `failed()` runs at once, `tries` and `backoff()` are never read. The
+    // retry jobs then have only the scheduled passes behind them — the operator should
+    // know that before the first Mollie hiccup.
+    config()->set('queue.default', 'sync');
+    config()->set('mollie-billing.queue.connection', null);
+
+    expect(\Illuminate\Support\Facades\Artisan::call('billing:check-config'))->toBe(0);
+
+    // One warning line; it says what happens and what to do.
+    expect(\Illuminate\Support\Facades\Artisan::output())
+        ->toContain('[sync] connection, which uses the sync driver')
+        ->toContain('has failed for good at its first error')
+        ->toContain('fall back to the scheduled passes')
+        ->toContain('BILLING_QUEUE_CONNECTION');
+});
+
+it('warns when only the billing connection is sync, and names it', function (): void {
+    config()->set('queue.default', 'database');
+    config()->set('queue.connections.billing-inline', ['driver' => 'sync']);
+    config()->set('mollie-billing.queue.connection', 'billing-inline');
+
+    $this->artisan('billing:check-config')
+        ->expectsOutputToContain('[billing-inline] connection, which uses the sync driver')
+        ->assertExitCode(0);
+});
+
+it('does not warn about the queue on a real one', function (): void {
+    config()->set('queue.default', 'sync');
+    config()->set('mollie-billing.queue.connection', 'database');
+
+    $this->artisan('billing:check-config')
+        ->doesntExpectOutputToContain('uses the sync driver')
+        ->assertExitCode(0);
+});

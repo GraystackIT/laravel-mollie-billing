@@ -64,6 +64,10 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
         public readonly string|int $billableId,
         public readonly int $seats,
         public readonly ?int $delta = null,
+        /** How often this change has already been put back because the seat lock was busy. */
+        public readonly int $requeues = 0,
+        /** How often it has been put back to wait for another change's payment. */
+        public readonly int $waits = 0,
     ) {
         // Generated at construction, not in uniqueId(): the id must survive
         // serialisation, otherwise the worker would release a lock it never took.
@@ -86,7 +90,11 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
     {
         // Deltas must never collapse into one another — two "+1"s are two seats. Only
         // absolute targets are deduplicated, where a repeat is genuinely a no-op.
-        return $this->delta !== null
+        //
+        // A copy put back on the queue is never a duplicate: it is dispatched from inside
+        // the run it continues, while that run still holds the unique lock — keyed on the
+        // seat count, an absolute copy was dropped right there and the change was lost.
+        return $this->delta !== null || $this->requeues > 0 || $this->waits > 0
             ? $this->billableClass.':'.$this->billableId.':seats:'.$this->token
             : $this->billableClass.':'.$this->billableId.':seats:'.$this->seats;
     }
@@ -96,6 +104,37 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
 
     /** How long a seat job waits for the one ahead of it before giving up. */
     public const LOCK_WAIT_SECONDS = 30;
+
+    /**
+     * How often a seat change is put back on the queue when the lock stays busy.
+     *
+     * Waiting out the lock used to end in a `LockTimeoutException`, and with `tries = 1`
+     * that was the end of the seat change: a `failed_jobs` row, nobody told, a member
+     * invited and a seat never billed. Nothing has happened at that point — no Mollie
+     * call, no write — so the change can simply be queued again. Bounded, so a lock that
+     * is never released (it expires on its own after `timeout + 60` seconds) cannot turn
+     * into an endless loop; past the bound the job fails as before, which by then says
+     * something is genuinely wrong.
+     */
+    public const MAX_REQUEUES = 5;
+
+    /** Seconds before a put-back seat change is tried again. */
+    public const REQUEUE_DELAY_SECONDS = 60;
+
+    /**
+     * A seat change that meets another change still waiting for its payment.
+     *
+     * `ValidateSubscriptionChange` allows one change in flight per subscription, so a second
+     * "member invited" inside the confirmation window of the first — a card payment takes
+     * seconds, SEPA days — was refused with `InvalidSubscriptionStateException`, and with
+     * `tries = 1` the member's seat was never billed. Nothing has happened at that point, so
+     * the change waits: put back every ten minutes for up to seven days, the time after which
+     * CleanupStalePendingProrataChangeJob settles an unanswered change for good. Past that the
+     * job fails as before.
+     */
+    public const PENDING_WAIT_SECONDS = 600;
+
+    public const MAX_PENDING_WAITS = 1008;
 
     public function handle(SyncSeats $service): void
     {
@@ -117,13 +156,33 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
         // operator can act on. Holding a cache lock across the Mollie round trip is the
         // established shape here — update() and RefundInvoiceService both do it.
         $lock = Cache::lock(self::LOCK_PREFIX.$this->billableClass.':'.$this->billableId, $this->timeout + 60);
-        $lock->block(self::LOCK_WAIT_SECONDS);
+
+        try {
+            $lock->block($this->lockWaitSeconds());
+        } catch (\Illuminate\Contracts\Cache\LockTimeoutException $e) {
+            if ($this->requeues >= self::MAX_REQUEUES) {
+                throw $e;
+            }
+
+            // A new job rather than `release()`: releasing counts against `tries = 1`.
+            // The copy carries the same change — the delta is resolved when it runs.
+            self::dispatch($this->billableClass, $this->billableId, $this->seats, $this->delta, $this->requeues + 1, $this->waits)
+                ->delay(self::REQUEUE_DELAY_SECONDS);
+
+            return;
+        }
 
         try {
             $this->run($service, $class);
         } finally {
             $lock->release();
         }
+    }
+
+    /** Overridable so a test does not have to sit out the real wait. */
+    protected function lockWaitSeconds(): int
+    {
+        return self::LOCK_WAIT_SECONDS;
     }
 
     /**
@@ -174,6 +233,33 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $service->handle($billable, $target);
+        try {
+            $service->handle($billable, $target);
+        } catch (\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException $e) {
+            if (! $this->waitsForPendingChange($billable)) {
+                throw $e;
+            }
+
+            self::dispatch($this->billableClass, $this->billableId, $this->seats, $this->delta, $this->requeues, $this->waits + 1)
+                ->delay(self::PENDING_WAIT_SECONDS);
+        }
+    }
+
+    /**
+     * Whether the refusal was "another change is waiting for its payment", and this change
+     * may wait for it. Not on a sync run: a delay is ignored there, so the copy would run at
+     * once against the same pending change, again and again — the job fails as before, and
+     * `billing:check-config` warns about the sync driver.
+     */
+    private function waitsForPendingChange(Model $billable): bool
+    {
+        if ($this->waits >= self::MAX_PENDING_WAITS || \GraystackIT\MollieBilling\Support\BillingQueue::isSyncRun($this->job)) {
+            return false;
+        }
+
+        /** @var Billable&Model $billable */
+        $meta = $billable->refresh()->getBillingSubscriptionMeta();
+
+        return ! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change']);
     }
 }

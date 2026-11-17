@@ -59,7 +59,7 @@ return [
     'payment_succeeded' => 'Payment received',
     'payment_failed' => 'Payment failed: :reason',
     'renewal_collected_for_ended_subscription' => 'A renewal was collected for a subscription that no longer runs (:status) — needs refunding',
-    'renewal_undercollected' => 'A billing period was collected at less than its configuration costs — not charged automatically',
+    'renewal_undercollected' => 'A billing period was collected at less than its configuration costs — the balance is charged separately',
     'payment_amount_mismatch' => 'Paid amount differs from the expected amount',
     'duplicate_payment_received' => 'Duplicate payment received and ignored',
     'checkout_started' => 'Checkout started',
@@ -68,6 +68,7 @@ return [
     'one_time_order_failed' => 'One-time purchase :product failed: :reason',
     'overage_charged' => 'Usage overage charged',
     'overage_charge_failed' => 'Usage overage charge failed (attempt :attempt)',
+    'overage_written_off' => 'Unpaid usage overage written off after :attempts further collection attempts',
 
     // Invoices
     'invoice_created' => 'Invoice :serial issued',
@@ -75,15 +76,18 @@ return [
     'credit_note_issued' => 'Credit note :serial issued',
     'refund_reversed' => 'Refund did not arrive — credit note reversed by :serial',
     'grant_extras_purchase_refunded' => 'Purchase of extras not carried out — the free period had ended; payment :serial refunded',
+    'unwanted_payment_refunded' => 'A payment that was no longer wanted (:serial) was refunded automatically',
     'chargeback_reversed' => 'Chargeback on invoice :serial reversed',
     'invoice_pdf_regenerated' => 'Invoice :serial PDF regenerated',
 
     // Payment method
     'mandate_updated' => 'Payment method updated',
     'mollie_subscription_reference_cleared' => 'Subscription no longer exists at Mollie — reference cleared',
+    'mollie_subscription_replaced' => 'Subscription replaced at Mollie to move its next charge',
 
     // Promo codes / grants
     'coupon_redeemed' => 'Promo code :code redeemed',
+    'coupon_redemption_record_missing' => 'Promo code :code was honoured on the payment, but its redemption could not be recorded',
     'grant_revoked' => 'Access granted by promo code :code revoked',
 
     // Trial

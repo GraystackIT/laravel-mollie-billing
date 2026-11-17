@@ -140,7 +140,7 @@ it('books a paid charge whose webhook was lost, by replaying the delivery', func
         ->not->toHaveKey(ChargeUsageOverageDirectly::META_KEY);
 });
 
-it('writes off a charge Mollie reports as failed, so the next cycle is free', function (): void {
+it('ends the cycle of a charge Mollie reports as failed and leaves the debt for the renewals', function (): void {
     $billable = stalledOverageBillable(ageHours: 100);
 
     Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 'tr_stalled', 'status' => 'failed']);
@@ -152,21 +152,48 @@ it('writes off a charge Mollie reports as failed, so the next cycle is free', fu
     expect($billable->fresh()->getBillingSubscriptionMeta()['usage_overage_status'])
         ->toBe(ChargeUsageOverageDirectly::STATUS_FAILED);
 
-    // The debt is still on the wallet, so somebody has to know it was never collected.
-    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class);
+    // The debt stands as a receivable and the next renewals collect it on their own, so
+    // there is nothing to tell an operator yet.
+    Notification::assertNothingSent();
 });
 
-it('writes off a charge still sitting at open past the hard limit', function (): void {
+it('cancels a charge still sitting at open past the hard limit before it frees the slot', function (): void {
     $billable = stalledOverageBillable(ageHours: 24 * 20);
 
-    // A payment stuck in `open` for three weeks is not going to settle, and leaving the
-    // snapshot armed costs the customer more than a fresh attempt does.
-    Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 'tr_stalled', 'status' => 'open']);
+    // A payment stuck in `open` for three weeks is not going to settle — but the slot is
+    // only freed once Mollie has cancelled it, or it could still pay out after the next
+    // renewal collected the same debt.
+    $requests = [];
+    Mollie::shouldReceive('send')->twice()->andReturnUsing(function ($request) use (&$requests): object {
+        $requests[] = $request::class;
+
+        return (object) ['id' => 'tr_stalled', 'status' => 'open'];
+    });
 
     app(CleanupStalePendingOverageChargeJob::class)->handle();
 
     expect($billable->fresh()->getBillingSubscriptionMeta()['usage_overage_status'])
-        ->toBe(ChargeUsageOverageDirectly::STATUS_FAILED);
+        ->toBe(ChargeUsageOverageDirectly::STATUS_FAILED)
+        ->and($requests[1] ?? null)->toBe(\Mollie\Api\Http\Requests\CancelPaymentRequest::class);
+});
+
+it('keeps the slot for a stale charge Mollie will not cancel', function (): void {
+    $billable = stalledOverageBillable(ageHours: 24 * 20);
+
+    Mollie::shouldReceive('send')->twice()->andReturnUsing(function ($request): object {
+        if ($request instanceof \Mollie\Api\Http\Requests\CancelPaymentRequest) {
+            throw new RuntimeException('The payment cannot be cancelled.');
+        }
+
+        return (object) ['id' => 'tr_stalled', 'status' => 'pending'];
+    });
+
+    app(CleanupStalePendingOverageChargeJob::class)->handle();
+
+    // Still in flight: nothing else may charge this debt while it can settle.
+    expect($billable->fresh()->getBillingSubscriptionMeta()['usage_overage_status'])
+        ->toBe(ChargeUsageOverageDirectly::STATUS_PENDING);
+    Notification::assertNothingSent();
 });
 
 it('keeps waiting on a charge that is open but not yet past the hard limit', function (): void {

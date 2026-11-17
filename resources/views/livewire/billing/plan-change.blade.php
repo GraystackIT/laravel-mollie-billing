@@ -462,7 +462,17 @@ new class extends Component {
         if (! $sc) return;
 
         try {
-            $service->apply($billable);
+            $service->apply($billable, onRequest: true);
+
+            // `apply()` also returns without doing anything — a change that waits for its
+            // renewal, one that no longer fits. Only say "changed" when it was.
+            $billable->refresh();
+            if (! empty($billable->getBillingSubscriptionMeta()['scheduled_change'])) {
+                $this->toast(__('billing::portal.flash.scheduled_change_not_yet'), 'warning');
+
+                return;
+            }
+
             $this->toast(__('billing::portal.flash.plan_changed'), 'success');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Scheduled plan change (apply now) failed', [
@@ -532,8 +542,14 @@ new class extends Component {
             }
 
             if (! empty($result['scheduledFor'])) {
-                $date = BillingTime::display(\Carbon\Carbon::parse((string) $result['scheduledFor'])->setTimezone('UTC'), $billable)->translatedFormat('d. M Y');
-                $this->toast(__('billing::portal.flash.plan_scheduled', ['date' => $date]), 'success');
+                $date = BillingTime::billingDay(\Carbon\Carbon::parse((string) $result['scheduledFor']))->translatedFormat('d. M Y');
+                // Scheduled while a payment is open: it does not go away with the change.
+                $this->toast(
+                    $billable->isBillingPastDue()
+                        ? __('billing::portal.flash.plan_scheduled_past_due', ['date' => $date])
+                        : __('billing::portal.flash.plan_scheduled', ['date' => $date]),
+                    $billable->isBillingPastDue() ? 'warning' : 'success',
+                );
             } else {
                 $this->toast(__('billing::portal.flash.plan_changed'), 'success');
             }
@@ -543,6 +559,9 @@ new class extends Component {
             $this->appliedCouponInfo = [];
             $this->couponInput = '';
             $this->couponError = null;
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
+            // Not an error to report: the customer is told what to do first.
+            $this->toast($e->getMessage(), 'danger');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Plan change failed', [
                 'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
@@ -608,7 +627,11 @@ new class extends Component {
         }
 
         $grossAmount = (int) ($this->preview['grossTotal'] ?? 0);
-        if ($grossAmount <= 0) {
+
+        // Nothing owed and no code to explain it is not an order. Nothing owed BECAUSE a
+        // code covers the whole price is: the service asks Mollie for a €0 authorisation
+        // (the paid plan needs a mandate), exactly as the checkout does for that order.
+        if ($grossAmount < 0 || ($grossAmount === 0 && $this->appliedCouponCodes === [])) {
             $this->toast(__('billing::portal.flash.error'), 'danger');
             return null;
         }
@@ -683,6 +706,69 @@ new class extends Component {
         } finally {
             $submitLock->release();
         }
+    }
+
+    /**
+     * For an upgrade from a free plan that a code covers in full: when money is first
+     * collected, and how much. Null whenever something is due today (or nothing ever is).
+     *
+     * @return array{date: \Carbon\CarbonInterface, gross: int}|null
+     */
+    public function fullCoverageFirstCharge(): ?array
+    {
+        $billable = $this->readableBillable();
+
+        if (! $billable || ! $this->selectedPlan || ! $billable->isLocalBillingSubscription()
+            || count($this->appliedCouponCodes) !== 1
+            || (int) ($this->preview['grossTotal'] ?? -1) !== 0
+        ) {
+            return null;
+        }
+
+        $coupon = \GraystackIT\MollieBilling\Models\Coupon::query()
+            ->whereRaw('UPPER(code) = ?', [strtoupper((string) $this->appliedCouponCodes[0])])
+            ->first();
+
+        if ($coupon === null) {
+            return null;
+        }
+
+        $catalog = app(SubscriptionCatalogInterface::class);
+        $now = \GraystackIT\MollieBilling\Support\BillingTime::nowUtc();
+        $extraSeats = max(0, (int) ($this->preview['newSeats'] ?? 0) - (int) ($this->preview['newIncludedSeats'] ?? 0));
+        $addonCodes = array_values(array_diff(
+            $billable->getActiveBillingAddonCodes(),
+            (array) ($this->preview['incompatibleAddons'] ?? []),
+        ));
+
+        $priced = app(\GraystackIT\MollieBilling\Services\Webhook\FirstPaymentCouponPricing::class)
+            ->price($billable, (string) $coupon->code, $this->selectedPlan, $this->selectedInterval, $addonCodes, $extraSeats);
+
+        if ($priced === null || $priced['order_amount_net'] <= 0) {
+            return null;
+        }
+
+        // The same two dates CreateSubscription chooses between: the first regular charge
+        // the code no longer covers while it still covers the next one, otherwise one
+        // interval from now.
+        $resumesAt = (int) $priced['recurring_discount_net'] >= (int) $priced['order_amount_net']
+            ? MollieBilling::coupons()->recurringChargeResumesAt($coupon, $this->selectedInterval, $now)
+            : null;
+        $date = $resumesAt ?? \GraystackIT\MollieBilling\Support\BillingTime::addInterval($now, $this->selectedInterval);
+
+        $country = trim((string) ($billable->getBillingCountry() ?? ''));
+        $rate = $country === '' ? 0.0 : (float) app(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class)
+            ->calculate($country, (int) $priced['order_amount_net'], $billable)['rate'];
+
+        return [
+            'date' => $date,
+            'gross' => BillingMoney::grossWithLineVat(
+                \GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher::recurringLineNets(
+                    $catalog, $billable, $this->selectedPlan, $this->selectedInterval, $addonCodes, $extraSeats, (int) $priced['order_amount_net'],
+                ),
+                $rate,
+            ),
+        ];
     }
 
     public function openEditBillingModal(): void
@@ -820,7 +906,7 @@ new class extends Component {
                     'plan_code' => $sc['plan_code'] ?? null,
                     'interval' => $sc['interval'] ?? null,
                     'scheduled_at' => isset($sc['scheduled_at'])
-                        ? BillingTime::display(\Carbon\Carbon::parse((string) $sc['scheduled_at'])->setTimezone('UTC'), $billable)->translatedFormat('d. M Y')
+                        ? BillingTime::billingDay(\Carbon\Carbon::parse((string) $sc['scheduled_at']))->translatedFormat('d. M Y')
                         : null,
                 ];
             }
@@ -906,7 +992,7 @@ new class extends Component {
             $headerEndsLabel = __('billing::portal.next_billing');
         }
 
-        $headerEndsDate = $headerEndsAt ? BillingTime::display($headerEndsAt, $billable)?->translatedFormat('d. M Y') : null;
+        $headerEndsDate = $headerEndsAt ? BillingTime::billingDay($headerEndsAt)?->translatedFormat('d. M Y') : null;
     @endphp
 
     @if ($billable && $headerPlanCode)
@@ -946,6 +1032,8 @@ new class extends Component {
             </div>
         </flux:card>
     @endif
+
+    <x-mollie-billing::change-notices :billable="$billable" />
 
     @if ($planChangeFailed)
         <flux:callout variant="danger" icon="exclamation-triangle">
@@ -1030,6 +1118,20 @@ new class extends Component {
                             <span>{{ __('billing::portal.total') }}</span>
                             <span dusk="upgrade-total">{{ BillingMoney::format($previewGross) }}</span>
                         </div>
+                        @php
+                            $firstCharge = $this->fullCoverageFirstCharge();
+                        @endphp
+                        @if ($firstCharge !== null)
+                            <div class="pt-2 text-sm text-zinc-600 dark:text-zinc-400" dusk="upgrade-first-charge">
+                                {{ __('billing::portal.upgrade_first_charge', [
+                                    'date' => \GraystackIT\MollieBilling\Support\BillingTime::billingDay($firstCharge['date'])->translatedFormat('d. M Y'),
+                                    'amount' => BillingMoney::format($firstCharge['gross']),
+                                ]) }}
+                            </div>
+                            <div class="pt-1 text-sm text-zinc-600 dark:text-zinc-400" dusk="upgrade-authorisation-notice">
+                                {{ __('billing::portal.upgrade_authorisation_notice') }}
+                            </div>
+                        @endif
                     </div>
                 </div>
             </div>
@@ -1545,8 +1647,14 @@ new class extends Component {
                                 </div>
                             </flux:callout>
                         @elseif (($error['type'] ?? '') === 'past_due_expansion')
-                            <flux:callout variant="danger" icon="exclamation-triangle">
-                                {{ __('billing::portal.error_past_due_expansion') }}
+                            <flux:callout variant="danger" icon="exclamation-triangle" dusk="change-refused-past-due">
+                                {{-- The refusal's own sentence: seats and add-ons, a booking, or a plan
+                                     change under an open usage amount each say something different. --}}
+                                {{ $error['message'] ?? __('billing::portal.error_past_due_expansion') }}
+                            </flux:callout>
+                        @elseif (($error['type'] ?? '') === 'subscription_ended')
+                            <flux:callout variant="danger" icon="exclamation-triangle" dusk="change-refused-subscription-ended">
+                                {{ __('billing::portal.error_subscription_ended') }}
                             </flux:callout>
                         @elseif (($error['type'] ?? '') === 'interval_change_under_waiver')
                             <flux:callout variant="warning" icon="exclamation-triangle">
@@ -1856,8 +1964,9 @@ new class extends Component {
                                                     {{ __('billing::portal.prorata_sidegrade_no_charge') }}
                                                 </div>
                                             @elseif ($refundedGross > 0)
-                                                <div class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
-                                                    {{ __('billing::portal.prorata_refund_separate', ['amount' => BillingMoney::format($refundedGross)]) }}
+                                                <div dusk="prorata-refund-separate" data-refund-minor="{{ $refundedGross }}" class="mt-1.5 text-xs italic text-zinc-500 dark:text-zinc-400">
+                                                    {{-- "Once this payment has been captured" only where there is one. --}}
+                                                    {{ __($chargedNowGross > 0 ? 'billing::portal.prorata_refund_separate' : 'billing::portal.prorata_refund_only', ['amount' => BillingMoney::format($refundedGross)]) }}
                                                 </div>
                                             @endif
                                         </div>
@@ -2069,6 +2178,16 @@ new class extends Component {
                             </div>
                         </div>
                     </div>
+
+                    @if ($billable?->isBillingPastDue() && $showScheduledOption && ! $hasBlockingErrors)
+                        {{-- A cheaper plan can be scheduled while a payment is open; a dearer
+                             one cannot. Either way the open payment stays what it is. --}}
+                        <div class="border-t border-zinc-200/75 px-6 py-4 dark:border-zinc-700/50">
+                            <flux:callout variant="warning" icon="exclamation-triangle" dusk="schedule-past-due-notice">
+                                {{ __('billing::portal.schedule_past_due_notice') }}
+                            </flux:callout>
+                        </div>
+                    @endif
 
                     {{-- Action bar: Switch + Button --}}
                     <div class="border-t border-zinc-200/75 px-6 py-4 dark:border-zinc-700/50">

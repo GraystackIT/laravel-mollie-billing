@@ -70,6 +70,16 @@ class ValidateSubscriptionChange
         // Not on the Phase-2 re-validation: that change was accepted — and paid for —
         // before; a plan change is what ends the past-due state in the first place.
         if (! $context->isPendingReapply) {
+            $this->assertSubscriptionStillRuns(
+                $billable,
+                $context->planChanged || $context->intervalChanged,
+                $context->seatsExplicit,
+                $context->currentSeats,
+                $context->newSeats,
+                array_values(array_diff($context->newAddons, $context->currentAddons)),
+                $context->newInterval,
+            );
+
             $this->assertNoPastDueExpansion(
                 $billable,
                 $context->planChanged || $context->intervalChanged,
@@ -186,6 +196,45 @@ class ValidateSubscriptionChange
      *
      * @throws PastDueExpansionNotAllowedException
      */
+    /**
+     * Nothing that is charged, and no plan or interval move, on a subscription that has
+     * been cancelled or has expired — see {@see SubscriptionEndedChangeNotAllowedException}.
+     *
+     * Same shape and same callers as {@see assertNoPastDueExpansion()}: the immediate
+     * path, the scheduled path and the preview have to give one answer.
+     *
+     * @param  array<int, string>  $addedAddons
+     *
+     * @throws \GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException
+     */
+    public function assertSubscriptionStillRuns(
+        Billable $billable,
+        bool $planOrIntervalChanged,
+        bool $seatsExplicit,
+        int $currentSeats,
+        int $newSeats,
+        array $addedAddons,
+        string $interval,
+    ): void {
+        if (! in_array($billable->getBillingSubscriptionStatus(), [
+            \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled,
+            \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Expired,
+        ], true)) {
+            return;
+        }
+
+        $extraSeats = $seatsExplicit ? max(0, $newSeats - $currentSeats) : 0;
+
+        $paidAddons = array_filter(
+            array_map('strval', $addedAddons),
+            fn (string $code): bool => ! $this->catalog->addonIsFree($code, $interval),
+        );
+
+        if ($planOrIntervalChanged || $extraSeats > 0 || $paidAddons !== []) {
+            throw new \GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException($billable);
+        }
+    }
+
     public function assertNoPastDueExpansion(
         Billable $billable,
         bool $planOrIntervalChanged,
@@ -195,7 +244,20 @@ class ValidateSubscriptionChange
         array $addedAddons,
         string $interval,
     ): void {
-        if ($planOrIntervalChanged || ! $billable->isBillingPastDue()) {
+        if (! $billable->isBillingPastDue()) {
+            return;
+        }
+
+        if ($planOrIntervalChanged) {
+            // The past-due reset is the way out of a *failed renewal*: nothing of the
+            // period was paid, so the new plan opens a fresh one and charges it in full.
+            // A subscription that is past due only because an overage debt stands has
+            // paid its period — the reset would charge a second full period for it, and
+            // the rule is that a customer who owes books nothing new.
+            if (\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebtOnly($billable)) {
+                throw PastDueExpansionNotAllowedException::planChange($billable);
+            }
+
             return;
         }
 

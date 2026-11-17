@@ -196,7 +196,9 @@ it('can be extended by days and by periods', function (): void {
     expect($afterDays->toDateString())->toBe($end->copy()->addDays(15)->toDateString());
 
     $afterPeriods = $waiver->extendByPeriods($billable->fresh(), 2);
-    expect($afterPeriods->toDateString())->toBe($end->copy()->addDays(15 + 60)->toDateString());
+    // Whole billing periods on the calendar, not 30-day blocks (which made this
+    // assertion depend on whether February lay in between).
+    expect($afterPeriods->toDateString())->toBe($end->copy()->addDays(15)->addMonthsNoOverflow(2)->toDateString());
 });
 
 it('says the subscription ends when the next charge is no longer covered and the gift ends', function (): void {

@@ -190,13 +190,15 @@ it('stores the addon payload the target plan can actually host', function (): vo
     expect($stored['addons'])->toBe([]);
 });
 
-it('keeps a scheduled change the current seat usage blocks, and tells the operators once', function (): void {
-    MollieBilling::notifyAdminUsing(fn (): array => [new AnonymousNotifiable]);
+it('drops a scheduled change the current seat usage blocks and tells the customer, not the operators', function (): void {
+    $admin = new AnonymousNotifiable;
+    MollieBilling::notifyAdminUsing(fn (): array => [$admin]);
 
     $billable = unsoldBillable([
         'subscription_plan_code' => 'pro',
         'subscription_meta' => ['mollie_subscription_id' => 'sub_unsold', 'seat_count' => 14, 'used_seats' => 14],
     ]);
+    MollieBilling::notifyBillingAdminsUsing(fn ($b): array => [$b]);
 
     app(ScheduleSubscriptionChange::class)->schedule($billable, [
         'plan_code' => 'starter',
@@ -204,21 +206,25 @@ it('keeps a scheduled change the current seat usage blocks, and tells the operat
     ]);
 
     // starter includes 2 seats and sells none extra; 14 members are assigned. At period end
-    // the validator refuses. Re-thrown, that failed ApplyScheduledChangesJob — which
-    // allows a single attempt — every night for as long as the customer kept the seats,
-    // and nobody was told: the admin branch was an empty `if` with a "out of scope for
-    // this phase" comment.
+    // the validator refuses — and will refuse again tomorrow. It used to be kept and
+    // mailed to the admins every night; now it is dropped at once and the customer, who
+    // is the one who can release seats, is told why.
     $billable->fresh()->forceFill(['scheduled_change_at' => BillingTime::nowUtc()->subMinute()])->save();
 
     app(ScheduleSubscriptionChange::class)->apply($billable->fresh());
 
     $fresh = $billable->fresh();
 
-    // Kept, not dropped: removing members makes this very change applicable tomorrow.
-    expect($fresh->getBillingSubscriptionMeta()['scheduled_change'] ?? null)->not->toBeNull()
+    expect($fresh->getBillingSubscriptionMeta()['scheduled_change'] ?? null)->toBeNull()
+        ->and($fresh->scheduled_change_at)->toBeNull()
         ->and($fresh->subscription_plan_code)->toBe('pro');
 
-    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class);
+    Notification::assertSentTo(
+        $fresh,
+        \GraystackIT\MollieBilling\Notifications\ScheduledChangeNotAppliedNotification::class,
+        fn ($n): bool => $n->reason === 'seats_in_use',
+    );
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
 });
 
 it('still drops a change its own validation can never accept', function (): void {

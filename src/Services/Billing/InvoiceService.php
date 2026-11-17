@@ -21,7 +21,9 @@ use GraystackIT\MollieBilling\Events\CreditNoteIssued;
 use GraystackIT\MollieBilling\Events\InvoiceCreated;
 use GraystackIT\MollieBilling\Events\InvoicePdfRegenerated;
 use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
+use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
+use GraystackIT\MollieBilling\Exceptions\RefundExceedsLineAmountException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
@@ -47,6 +49,14 @@ use GraystackIT\MollieBilling\Support\MollieCall;
 class InvoiceService
 {
     use MutatesBillingMeta;
+
+    /**
+     * `subscription_meta` key for a prorata payment that is being created: written before
+     * Mollie is asked, removed in the same write that records the payment. Still there
+     * afterwards means Mollie may hold a payment nothing points at — see
+     * {@see resolveChargeInCreation()}.
+     */
+    public const CHARGE_IN_CREATION_KEY = 'prorata_charge_in_creation';
 
     /**
      * Whether billing_invoices carries the optional `locale` column, resolved
@@ -237,10 +247,12 @@ class InvoiceService
         // onto credit lines that exceed the original lines they reverse — with
         // refunded_net summing past amount_net so the invoice never reads as
         // fully refunded. Remaining-balance checks stay with the refund
-        // services; this is the invariant of the document itself.
-        if ($amountNet > (int) $original->amount_net) {
+        // services; this is the invariant of the document itself. Measured against what the
+        // invoice holds — its header, except for a settled plan-switch document, whose
+        // header is zero while its own charge lines are real, paid-for service.
+        if ($amountNet > $original->refundableBaseNet()) {
             throw new RefundExceedsInvoiceAmountException(
-                "Credit note of {$amountNet} exceeds invoice {$original->id} net amount {$original->amount_net}."
+                "Credit note of {$amountNet} exceeds invoice {$original->id} net amount {$original->refundableBaseNet()}."
             );
         }
 
@@ -434,6 +446,171 @@ class InvoiceService
     }
 
     /**
+     * The lines of `$original` a refund can be booked against one at a time, with what is
+     * left of each.
+     *
+     * The same lines {@see allocateCredit()} spreads a refund over: discount lines are
+     * folded into the line they reduced, so a line offers what was actually paid for it,
+     * and its budget is net and VAT charged minus what earlier credit notes gave back on
+     * it — never more than the invoice as a whole has left, which a credit booked without
+     * a line (a plan switch settled out of this invoice, a legacy refund) can make smaller.
+     * Lines with nothing left are left out unless `$withExhausted` asks for them. An
+     * invoice whose lines cannot be folded into positive ones offers none — it is refunded
+     * as a whole only. A settled plan-switch invoice offers its own charge lines; the
+     * credits it carries against the invoice it was settled out of are not its lines.
+     *
+     * @return list<array{index: int, label: ?string, net: int, rate: float, remaining_net: int, remaining_vat: int}>
+     */
+    public function refundableLines(BillingInvoice $original, bool $withExhausted = false): array
+    {
+        $lines = [];
+        $invoiceRemaining = $original->remainingRefundableNet();
+
+        foreach ($this->foldedLineParts($original) as $part) {
+            $remainingNet = max(0, min($part['net'] - $part['credited_net'], $invoiceRemaining));
+
+            if ($remainingNet <= 0 && ! $withExhausted) {
+                continue;
+            }
+
+            $lines[] = [
+                'index' => $part['index'],
+                'label' => $part['label'],
+                'net' => $part['net'],
+                'rate' => $part['rate'],
+                'remaining_net' => $remainingNet,
+                'remaining_vat' => max(0, $part['charged_vat'] - $part['credited_vat']),
+            ];
+        }
+
+        return $lines;
+    }
+
+    /**
+     * The credit-note line that refunds `$amountNet` of one line of `$original`.
+     *
+     * Taxed at that line's own rate and inside that line's remaining VAT, exactly as
+     * {@see allocateCredit()} taxes a chunk — so a line refunded in several steps gives
+     * back precisely the VAT it charged — and pointed at the line through
+     * `parent_line_item_index`, which is what later refunds measure the line's budget by.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws InvalidRefundTargetException      the index names no line that can be refunded on its own
+     * @throws RefundExceedsLineAmountException  more than is left of the line
+     */
+    public function creditLineFor(BillingInvoice $original, int $lineIndex, int $amountNet): array
+    {
+        if ($amountNet <= 0) {
+            throw new \InvalidArgumentException('Refund amount must be positive.');
+        }
+
+        $part = null;
+        foreach ($this->foldedLineParts($original) as $candidate) {
+            if ($candidate['index'] === $lineIndex) {
+                $part = $candidate;
+            }
+        }
+
+        if ($part === null) {
+            throw new InvalidRefundTargetException("Line {$lineIndex} of invoice {$original->id} cannot be refunded on its own.");
+        }
+
+        $remainingNet = max(0, min($part['net'] - $part['credited_net'], $original->remainingRefundableNet()));
+
+        if ($amountNet > $remainingNet) {
+            throw new RefundExceedsLineAmountException($lineIndex, $remainingNet, $amountNet);
+        }
+
+        $vat = $this->capAtRemainingInvoiceVat($original, $this->partCreditVat([
+            'net' => $amountNet,
+            'rate' => $part['rate'],
+            'charged_net' => $part['net'],
+            'charged_vat' => $part['charged_vat'],
+            'credited_net' => $part['credited_net'],
+            'credited_vat' => $part['credited_vat'],
+        ]));
+
+        return [
+            'kind' => 'refund',
+            'code' => null,
+            'label' => $part['label'] !== null
+                ? __('billing::portal.credit_note_line_label', ['serial' => $original->serial_number, 'label' => $part['label']])
+                : __('billing::portal.credit_note_label', ['serial' => $original->serial_number]),
+            'quantity' => 1,
+            'unit_price_net' => -$amountNet,
+            'amount_net' => -$amountNet,
+            'vat_rate' => $part['rate'],
+            'vat_amount' => -$vat,
+            'amount_gross' => -($amountNet + $vat),
+            'period_start' => ($original->period_start ?? BillingTime::nowUtc())->toIso8601String(),
+            'period_end' => ($original->period_end ?? BillingTime::nowUtc())->toIso8601String(),
+            'parent_invoice_id' => $original->id,
+            'parent_line_item_index' => $lineIndex,
+            'mollie_refund_id' => null,
+        ];
+    }
+
+    /**
+     * Every line of `$original` with its charged net and VAT and what earlier credit notes
+     * gave back on it.
+     *
+     * @return list<array{index: int, net: int, rate: float, label: ?string, charged_vat: int, credited_net: int, credited_vat: int}>
+     */
+    private function originalLineParts(BillingInvoice $original): array
+    {
+        $credited = $original->creditedPerOriginalLine();
+
+        $parts = [];
+        foreach ((array) ($original->line_items ?? []) as $index => $line) {
+            // A line carrying a `parent_invoice_id` is a credit against ANOTHER invoice — on
+            // a settled plan-switch document, the old plan credited out of the invoice that
+            // paid for the period. It is not a discount of this invoice's charges, and folded
+            // into them it cancelled them out: nothing left to credit on a document whose
+            // charge line is real, paid-for service ({@see BillingInvoice::refundableBaseNet()}).
+            if (! is_array($line) || ($line['parent_invoice_id'] ?? null) !== null) {
+                continue;
+            }
+
+            $net = self::lineNet($line);
+            $rate = (float) ($line['vat_rate'] ?? 0.0);
+
+            $parts[] = [
+                'index' => (int) $index,
+                'net' => $net,
+                'rate' => $rate,
+                'label' => isset($line['label']) ? (string) $line['label'] : (isset($line['description']) ? (string) $line['description'] : null),
+                // What the document says this line was taxed — not net × rate:
+                // the original rounded per line, so only its own figure adds
+                // back up to the header VAT it charged.
+                'charged_vat' => array_key_exists('vat_amount', $line) ? (int) $line['vat_amount'] : (int) round($net * $rate / 100),
+                'credited_net' => (int) ($credited[(int) $index]['net'] ?? 0),
+                'credited_vat' => (int) ($credited[(int) $index]['vat'] ?? 0),
+            ];
+        }
+
+        return $parts;
+    }
+
+    /**
+     * {@see originalLineParts()} with the discount lines folded into the lines they
+     * reduced; empty when that leaves a line that is not positive.
+     *
+     * @return list<array{index: int, net: int, rate: float, label: ?string, charged_vat: int, credited_net: int, credited_vat: int}>
+     */
+    private function foldedLineParts(BillingInvoice $original): array
+    {
+        $parts = $this->originalLineParts($original);
+
+        $totalNet = 0;
+        foreach ($parts as $part) {
+            $totalNet += $part['net'];
+        }
+
+        return $this->foldNegativeParts($parts, $totalNet);
+    }
+
+    /**
      * Split a credited net amount across the original invoice's line items.
      *
      * Every part carries the budget of the line it credits — the net and the VAT
@@ -455,30 +632,7 @@ class InvoiceService
      */
     private function allocateCredit(BillingInvoice $original, int $amountNet): array
     {
-        $credited = $original->creditedPerOriginalLine();
-
-        $parts = [];
-        foreach ((array) ($original->line_items ?? []) as $index => $line) {
-            if (! is_array($line)) {
-                continue;
-            }
-
-            $net = self::lineNet($line);
-            $rate = (float) ($line['vat_rate'] ?? 0.0);
-
-            $parts[] = [
-                'index' => (int) $index,
-                'net' => $net,
-                'rate' => $rate,
-                'label' => isset($line['label']) ? (string) $line['label'] : (isset($line['description']) ? (string) $line['description'] : null),
-                // What the document says this line was taxed — not net × rate:
-                // the original rounded per line, so only its own figure adds
-                // back up to the header VAT it charged.
-                'charged_vat' => array_key_exists('vat_amount', $line) ? (int) $line['vat_amount'] : (int) round($net * $rate / 100),
-                'credited_net' => (int) ($credited[(int) $index]['net'] ?? 0),
-                'credited_vat' => (int) ($credited[(int) $index]['vat'] ?? 0),
-            ];
-        }
+        $parts = $this->originalLineParts($original);
 
         $totalNet = 0;
         foreach ($parts as $part) {
@@ -499,14 +653,31 @@ class InvoiceService
             ]];
         }
 
-        // Proportional allocation. The residual left by per-part rounding goes to
-        // the largest part so the allocated nets add up to $amountNet exactly.
+        // Proportional allocation, weighted by what each line has LEFT. Weighted by the
+        // original shares, a refund that followed a refund of one line (a refund by line,
+        // `refundOverageUnits()`, any credit note with custom lines) put that line's share
+        // onto a line with nothing left — credited at 0 VAT there, while the line that
+        // still had money was taxed on too little: the customer got VAT short. Before
+        // anything was credited the two weightings are the same. The residual left by
+        // per-part rounding goes to the largest part so the nets add up exactly.
+        $remainingTotal = 0;
+        foreach ($folded as $part) {
+            $remainingTotal += max(0, $part['net'] - $part['credited_net']);
+        }
+
+        $byRemaining = $remainingTotal > 0;
+
         $allocated = [];
         $sum = 0;
         foreach ($folded as $part) {
-            $net = $amountNet === $totalNet
-                ? $part['net']
-                : (int) round($amountNet * $part['net'] / $totalNet);
+            $remaining = max(0, $part['net'] - $part['credited_net']);
+
+            $net = match (true) {
+                $byRemaining && $amountNet === $remainingTotal => $remaining,
+                $byRemaining => (int) round($amountNet * $remaining / $remainingTotal),
+                $amountNet === $totalNet => $part['net'],
+                default => (int) round($amountNet * $part['net'] / $totalNet),
+            };
             $sum += $net;
             // `net` becomes the credited chunk; the line's own (folded) net is
             // kept as the budget partCreditVat() measures the chunk against.
@@ -589,7 +760,13 @@ class InvoiceService
         // per-original-line map would miss every credit line without a
         // `parent_line_item_index` — a credit note created with custom `line_items` —
         // and the cap would then permit VAT that has already been credited back.
-        return max(0, min($vat, abs((int) $original->amount_vat) - $original->creditedVatTotal()));
+        // A settled plan-switch document nets to zero in its header; the VAT it can give
+        // back is its own charge lines', like its refundable net.
+        $chargedVat = $original->settled_by_invoice_id === null
+            ? abs((int) $original->amount_vat)
+            : max(0, $original->refundableBaseGross() - $original->refundableBaseNet());
+
+        return max(0, min($vat, $chargedVat - $original->creditedVatTotal()));
     }
 
     /**
@@ -1304,7 +1481,7 @@ class InvoiceService
      * Returns null when the chain leads nowhere (or loops), which makes the caller write an
      * unsettled document rather than one pointing at money that does not exist.
      */
-    private static function settlementRoot(?BillingInvoice $invoice): ?BillingInvoice
+    public static function settlementRoot(?BillingInvoice $invoice): ?BillingInvoice
     {
         $seen = [];
 
@@ -1874,6 +2051,32 @@ class InvoiceService
 
         $currency = self::configuredCurrency();
 
+        // A payment an earlier attempt created without our learning its id: take it over
+        // for the same change, or get it out of the way for a different one — never a
+        // second debit next to it.
+        if ($this->takeOverChargeInCreation($billable, $intent)) {
+            return;
+        }
+
+        // Noted BEFORE Mollie is asked, in a write of its own that commits at once. If the
+        // answer is lost (a timeout) or the write below fails, Mollie holds a payment
+        // nothing points at; the token in its metadata is how the next attempt — or the
+        // payment's own webhook — finds it again.
+        $token = (string) Str::uuid();
+        $chargeLinesData = array_map(fn (ProrataLine $l) => $l->toArray(), $chargeLines);
+        $refundLinesData = array_map(fn (ProrataLine $l) => $l->toArray(), $pendingRefundLines);
+
+        $this->mutateBillingMeta($billable, fn (array $meta): array => [
+            ...$meta,
+            self::CHARGE_IN_CREATION_KEY => [
+                'token' => $token,
+                'charge_lines' => $chargeLinesData,
+                'refund_lines' => $refundLinesData,
+                'intent' => $intent->toArray(),
+                'created_at' => BillingTime::nowUtc()->toIso8601String(),
+            ],
+        ]);
+
         // Mollie metadata is hard-capped at 1024 bytes — keep it to a minimal correlation
         // payload. The full charge/refund line list lives in subscription_meta.pending_prorata_change
         // and is read back by the Phase-2 webhook.
@@ -1884,6 +2087,7 @@ class InvoiceService
                 'type' => 'prorata_charge',
                 'billable_type' => $billable->getMorphClass(),
                 'billable_id' => (string) $billable->getKey(),
+                'charge_token' => $token,
             ],
             sequenceType: 'recurring',
             mandateId: $billable->getMollieMandateId(),
@@ -1896,16 +2100,206 @@ class InvoiceService
         // anything a concurrent writer committed in that window was reverted — including a
         // `pending_refund_retries` line the retry job had just consumed, which
         // SweepPendingRetriesJob then paid out a second time.
-        $this->mutateBillingMeta($billable, fn (array $meta): array => [
-            ...$meta,
-            'pending_prorata_change' => [
-                'charge_payment_id' => is_object($payment) ? ($payment->id ?? null) : null,
-                'charge_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $chargeLines),
-                'refund_lines' => array_map(fn (ProrataLine $l) => $l->toArray(), $pendingRefundLines),
-                'intent' => $intent->toArray(),
-                'created_at' => BillingTime::nowUtc()->toIso8601String(),
-            ],
-        ]);
+        $this->mutateBillingMeta($billable, function (array $meta) use ($payment, $chargeLinesData, $refundLinesData, $intent): array {
+            unset($meta[self::CHARGE_IN_CREATION_KEY]);
+
+            return [
+                ...$meta,
+                'pending_prorata_change' => [
+                    'charge_payment_id' => is_object($payment) ? ($payment->id ?? null) : null,
+                    'charge_lines' => $chargeLinesData,
+                    'refund_lines' => $refundLinesData,
+                    'intent' => $intent->toArray(),
+                    'created_at' => BillingTime::nowUtc()->toIso8601String(),
+                ],
+            ];
+        });
+    }
+
+    /**
+     * Deal with a payment an earlier attempt may have created without our learning its id.
+     *
+     * Returns true when that payment was adopted for this very change — it is then the
+     * change's pending payment, and no new one may be created. False when there is nothing
+     * in the way (no marker, Mollie holds no such payment, or it is dead). A lost payment
+     * for a *different* change is cancelled where Mollie allows it; otherwise it is left to
+     * settle and is returned in full by the webhook (`UnwantedPaymentRefund`), because
+     * nothing claims it.
+     *
+     * @throws \RuntimeException when Mollie cannot say whether the payment exists — creating a
+     *         second one on a guess is exactly the double debit this exists to prevent
+     */
+    private function takeOverChargeInCreation(Billable $billable, PlanChangeIntent $intent): bool
+    {
+        /** @var Model&Billable $billable */
+        $marker = $billable->refresh()->getBillingSubscriptionMeta()[self::CHARGE_IN_CREATION_KEY] ?? null;
+
+        if (! is_array($marker)) {
+            return false;
+        }
+
+        $payment = $this->resolveChargeInCreation($billable, $marker);
+
+        if ($payment === null) {
+            $this->forgetChargeInCreation($billable, (string) ($marker['token'] ?? ''));
+
+            return false;
+        }
+
+        if ($this->sameIntent((array) ($marker['intent'] ?? []), $intent->toArray())) {
+            return $this->adoptChargeInCreation($billable, (string) ($marker['token'] ?? ''), (string) $payment->id);
+        }
+
+        if (($payment->isCancelable ?? false) === true) {
+            try {
+                MollieCall::send(new \Mollie\Api\Http\Requests\CancelPaymentRequest((string) $payment->id));
+            } catch (\Throwable $e) {
+                Log::warning('A lost prorata payment of an earlier change could not be cancelled — it is returned if it settles', [
+                    'billable' => $billable->getKey(),
+                    'payment_id' => $payment->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->forgetChargeInCreation($billable, (string) ($marker['token'] ?? ''));
+
+        return false;
+    }
+
+    /**
+     * The live payment Mollie holds for a noted charge, or null when it holds none — or
+     * only a dead one, or one that has already been booked (its webhook arrived and
+     * returned it).
+     *
+     * @param  array<string, mixed>  $marker  the {@see CHARGE_IN_CREATION_KEY} entry
+     *
+     * @throws \RuntimeException when Mollie cannot be asked
+     */
+    public function resolveChargeInCreation(Billable $billable, array $marker): ?object
+    {
+        $token = (string) ($marker['token'] ?? '');
+        $customerId = (string) ($billable->getMollieCustomerId() ?? '');
+
+        if ($token === '' || $customerId === '') {
+            return null;
+        }
+
+        try {
+            $payments = MollieCall::send(new \Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest($customerId, limit: 50));
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('Mollie could not be asked whether an earlier prorata payment exists: '.$e->getMessage(), 0, $e);
+        }
+
+        if (! is_iterable($payments)) {
+            $payments = is_object($payments) ? ($payments->data ?? ($payments->payments ?? [])) : [];
+        }
+
+        foreach (is_iterable($payments) ? $payments : [] as $payment) {
+            $metadata = (array) json_decode((string) json_encode($payment->metadata ?? []), true);
+
+            if (($metadata['type'] ?? null) !== 'prorata_charge' || (string) ($metadata['charge_token'] ?? '') !== $token) {
+                continue;
+            }
+
+            if (in_array((string) ($payment->status ?? ''), ['failed', 'canceled', 'expired'], true)) {
+                return null;
+            }
+
+            if (BillingInvoice::query()->where('mollie_payment_id', (string) $payment->id)->exists()) {
+                return null;
+            }
+
+            return $payment;
+        }
+
+        return null;
+    }
+
+    /**
+     * Make a noted charge the change's pending payment, as if its creation had answered.
+     * Only while nothing else holds the slot. Returns whether it was adopted.
+     */
+    public function adoptChargeInCreation(Billable $billable, string $token, string $paymentId): bool
+    {
+        if (! ($billable instanceof Model) || $token === '' || $paymentId === '') {
+            return false;
+        }
+
+        $adopted = false;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($token, $paymentId, &$adopted): ?array {
+            $marker = $meta[self::CHARGE_IN_CREATION_KEY] ?? null;
+
+            if (! is_array($marker) || (string) ($marker['token'] ?? '') !== $token || ! empty($meta['pending_prorata_change'])) {
+                return null;
+            }
+
+            unset($meta[self::CHARGE_IN_CREATION_KEY]);
+            $meta['pending_prorata_change'] = [
+                'charge_payment_id' => $paymentId,
+                'charge_lines' => (array) ($marker['charge_lines'] ?? []),
+                'refund_lines' => (array) ($marker['refund_lines'] ?? []),
+                'intent' => (array) ($marker['intent'] ?? []),
+                'created_at' => (string) ($marker['created_at'] ?? BillingTime::nowUtc()->toIso8601String()),
+            ];
+            $adopted = true;
+
+            return $meta;
+        });
+
+        if ($adopted) {
+            Log::info('A prorata payment whose creation went unanswered was found at Mollie and taken over', [
+                'billable' => $billable->getKey(),
+                'payment_id' => $paymentId,
+            ]);
+        }
+
+        return $adopted;
+    }
+
+    /** Drop the note of a charge in creation — only the one with this token. */
+    public function forgetChargeInCreation(Billable $billable, string $token): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($token): ?array {
+            if ((string) ($meta[self::CHARGE_IN_CREATION_KEY]['token'] ?? '') !== $token) {
+                return null;
+            }
+
+            unset($meta[self::CHARGE_IN_CREATION_KEY]);
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Whether two serialised intents describe the same change. The billable keys are left
+     * out: a morph alias and a class name name the same row.
+     *
+     * @param  array<string, mixed>  $a
+     * @param  array<string, mixed>  $b
+     */
+    private function sameIntent(array $a, array $b): bool
+    {
+        $normalise = function (array $intent): array {
+            unset($intent['billable_type'], $intent['billable_id']);
+
+            foreach (['current_addons', 'new_addons'] as $key) {
+                $addons = (array) ($intent[$key] ?? []);
+                ksort($addons);
+                $intent[$key] = $addons;
+            }
+
+            ksort($intent);
+
+            return $intent;
+        };
+
+        return $normalise($a) == $normalise($b);
     }
 
     /**

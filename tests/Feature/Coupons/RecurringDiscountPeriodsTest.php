@@ -138,13 +138,21 @@ it('refuses a recurring coupon with neither a period count nor a date', function
         ->toThrow(InvalidArgumentException::class, 'Recurring coupons need a limit');
 });
 
-it('derives the marker lifetime from discount_periods in the interval it runs at', function (string $interval, int $days): void {
+it('derives the marker lifetime from discount_periods in the interval it runs at', function (string $interval, string $from, string $expected): void {
     $coupon = discountPeriodsCoupon('LIFE'.strtoupper($interval), ['discount_periods' => 2, 'max_redemptions_per_billable' => 5]);
-    $from = Carbon::parse('2027-01-01 00:00:00', 'UTC');
 
-    expect(app(CouponService::class)->recurringMarkerValidUntil($coupon, $interval, $from)->toIso8601String())
-        ->toBe($from->copy()->addDays($days)->toIso8601String());
-})->with([['monthly', 61], ['yearly', 731]]);
+    // The day before the third charge: two billing periods — calendar months or years on
+    // the day the first one started, shortened where a month does not have it.
+    expect(app(CouponService::class)->recurringMarkerValidUntil($coupon, $interval, Carbon::parse($from, 'UTC'))->toIso8601String())
+        ->toBe($expected);
+})->with([
+    'monthly from the 1st' => ['monthly', '2027-01-01 00:00:00', '2027-02-28T00:00:00+00:00'],
+    'yearly from the 1st' => ['yearly', '2027-01-01 00:00:00', '2028-12-31T00:00:00+00:00'],
+    // Charges 31 Jan, 28 Feb, 31 Mar: the window ends on 30 March, not on 2 April.
+    'monthly from the 31st' => ['monthly', '2027-01-31 10:00:00', '2027-03-30T10:00:00+00:00'],
+    // Charges 29 Feb 2028, 28 Feb 2029, 28 Feb 2030.
+    'yearly from 29 February' => ['yearly', '2028-02-29 10:00:00', '2030-02-27T10:00:00+00:00'],
+]);
 
 it('lets a customer redeem a recurring coupon again when the per-customer limit allows it', function (): void {
     $billable = discountPeriodsBillable();

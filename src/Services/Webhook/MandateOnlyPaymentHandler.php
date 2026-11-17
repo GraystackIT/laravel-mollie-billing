@@ -21,6 +21,7 @@ use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
+use GraystackIT\MollieBilling\Support\ActivationRetry;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\TrialQuota;
@@ -73,6 +74,22 @@ class MandateOnlyPaymentHandler
         }
 
         return ! $billable->hasAccessibleBillingSubscription();
+    }
+
+    /**
+     * Whether this authorisation upgrades a free (local) plan under a code that covers
+     * the price in full — started on the plan screen, `UpgradeLocalToMollie`.
+     *
+     * The accessible subscription the gate finds is then the very plan being replaced,
+     * not a second subscription. Only a LOCAL one qualifies: once a Mollie subscription
+     * runs, the same payment is a duplicate like any other.
+     *
+     * @param  array<string, mixed>  $metadata
+     */
+    protected function replacesLocalPlan(Billable $billable, array $metadata): bool
+    {
+        return ($metadata['pending_subscription_upgrade_from_local'] ?? false) === true
+            && $billable->isLocalBillingSubscription();
     }
 
     public function __construct(
@@ -158,13 +175,26 @@ class MandateOnlyPaymentHandler
         // after-checkout hook — rolled back the trial state and
         // `mollie_subscription_id` while the subscription existed at Mollie, and the
         // re-delivery created a second one.
-        $gate = $this->openGate($payment, $billable, $paymentId);
+        $gate = $this->openGate($payment, $billable, $paymentId, $metadata);
 
         if ($gate === ActivationGate::AlreadyBooked) {
             // See FirstPaymentHandler: an invoice without a finished activation is a
             // crash between the two, not a completed run — and silence there left a
             // paying customer with no subscription and nobody informed.
             if (! $this->support->activationCompleted($billable)) {
+                // See FirstPaymentHandler: the retry job resumes this state.
+                if (ActivationRetry::resuming()) {
+                    $this->support->claimForResume($billable, $paymentId);
+
+                    try {
+                        $this->activateAfterMandate($payment, $billable, $metadata);
+                    } finally {
+                        $this->support->releaseActivationClaim($billable, $paymentId);
+                    }
+
+                    return;
+                }
+
                 $this->support->reportIncompleteActivation($billable, $payment, 'mandate_only');
             } else {
                 Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
@@ -202,17 +232,17 @@ class MandateOnlyPaymentHandler
      * and for the trial branch it simply never matches — the accessible Trial
      * subscription is what stops a re-run there, reported as the duplicate outcome.
      */
-    protected function openGate(object $payment, Billable $billable, string $paymentId): ActivationGate
+    protected function openGate(object $payment, Billable $billable, string $paymentId, array $metadata = []): ActivationGate
     {
         /** @var Model&Billable $billable */
-        return DB::transaction(function () use ($payment, $billable, $paymentId): ActivationGate {
+        return DB::transaction(function () use ($payment, $billable, $paymentId, $metadata): ActivationGate {
             $this->support->lockBillableRow($billable);
 
             if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
                 return ActivationGate::AlreadyBooked;
             }
 
-            if ($billable->hasAccessibleBillingSubscription()) {
+            if ($billable->hasAccessibleBillingSubscription() && ! $this->replacesLocalPlan($billable, $metadata)) {
                 return ActivationGate::Duplicate;
             }
 
@@ -249,7 +279,8 @@ class MandateOnlyPaymentHandler
             );
         } else {
             $this->activateCouponSubscriptionAfterMandate(
-                $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode
+                $payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $couponCode,
+                ($metadata['pending_subscription_upgrade_from_local'] ?? false) === true,
             );
         }
 
@@ -271,16 +302,57 @@ class MandateOnlyPaymentHandler
         array $addonCodes,
         int $extraSeats,
         string $couponCode,
+        bool $upgradeFromLocal = false,
     ): void {
         /** @var Model&Billable $billable */
 
-        if (! $this->mayActivate($billable)) {
+        // The free plan this upgrade replaces. Remembered on the billable before anything
+        // is overwritten, so a retry that resumes after the invoice still knows what the
+        // wallets have to be moved away from.
+        $origin = null;
+
+        if ($upgradeFromLocal) {
+            $origin = $billable->getBillingSubscriptionMeta()['upgrade_from_local_origin'] ?? null;
+
+            if (! is_array($origin) && $billable->isLocalBillingSubscription()) {
+                $origin = [
+                    'plan' => (string) ($billable->getBillingSubscriptionPlanCode() ?? ''),
+                    'interval' => (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'),
+                    'period_start' => $billable->getBillingPeriodStartsAt()?->toIso8601String(),
+                    'period_end' => $billable->nextBillingDate()?->toIso8601String(),
+                ];
+
+                $billable->forceFill(['subscription_meta' => array_merge(
+                    $billable->getBillingSubscriptionMeta(),
+                    ['upgrade_from_local_origin' => $origin],
+                )])->save();
+            }
+        }
+
+        if (! $this->mayActivate($billable) && ! is_array($origin)) {
             // A mandate has already been captured at this point, so a skip here is not a
             // no-op — it is a customer who paid (or accepted a €0 authorisation) and got
             // nothing. Reported, not just logged.
             $this->support->reportSkippedActivation($billable, $payment, 'coupon');
 
             return;
+        }
+
+        // A retry resumes after the first attempt already put this code's recurring marker
+        // on the billable (it is written before the Mollie call). Validating the code
+        // against its own marker answers "already active", so the retry could never
+        // price it and never finish. The marker is this activation's own unfinished work:
+        // take it off, price, and it is written again below.
+        if (ActivationRetry::resuming()) {
+            $marker = $this->couponService->getActiveRecurringCouponMarker($billable);
+
+            if (is_array($marker)
+                && strcasecmp((string) ($marker['code'] ?? ''), $couponCode) === 0
+                && ! $this->support->activationCompleted($billable)
+            ) {
+                $this->couponService->clearActiveRecurringCouponMarker($billable);
+                $billable->refresh();
+            }
         }
 
         $pricedCoupon = $this->firstPaymentCouponPricing->price(
@@ -324,7 +396,12 @@ class MandateOnlyPaymentHandler
             return;
         }
 
-        if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
+        // On a retry the audit invoice of this payment already exists and is reused.
+        $resumedInvoice = ActivationRetry::resuming()
+            ? \GraystackIT\MollieBilling\Models\BillingInvoice::query()->where('mollie_payment_id', (string) ($payment->id ?? ''))->first()
+            : null;
+
+        if ($resumedInvoice === null && $this->support->invoiceAlreadyExistsForPayment($payment)) {
             Log::info('Webhook re-delivery: invoice exists for mandate-only activation, skipping', [
                 'payment_id' => $payment->id ?? null,
                 'billable_id' => $billable->getKey(),
@@ -332,11 +409,24 @@ class MandateOnlyPaymentHandler
             return;
         }
 
-        $billable->forceFill([
-            'subscription_plan_code' => $planCode,
-            'subscription_interval' => SubscriptionInterval::from($interval),
-            'subscription_period_starts_at' => BillingTime::nowUtc(),
-        ])->save();
+        if ($resumedInvoice !== null) {
+            $invoice = $resumedInvoice;
+        } else {
+        // A new customer has no plan yet, so the plan can be written ahead of the invoice.
+        // An upgrade must not: the customer is on a free plan that is ACTIVE, and writing
+        // the paid plan's code onto it before the subscription exists handed them that
+        // plan for nothing for as long as Mollie refused to create it. There the plan
+        // moves with the subscription (CreateSubscription writes it), and the invoice is
+        // given its period explicitly instead of reading it off the billable.
+        $periodStart = BillingTime::nowUtc();
+
+        if (! is_array($origin)) {
+            $billable->forceFill([
+                'subscription_plan_code' => $planCode,
+                'subscription_interval' => SubscriptionInterval::from($interval),
+                'subscription_period_starts_at' => $periodStart,
+            ])->save();
+        }
 
         $lineItems = SubscriptionAmount::lineItems($this->catalog, $billable, $planCode, $interval, $extraSeats, $addonCodes);
 
@@ -368,7 +458,12 @@ class MandateOnlyPaymentHandler
         }
 
         try {
-            $invoice = $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
+            $invoice = is_array($origin)
+                ? $this->salesInvoiceService->createForPayment(
+                    $payment, 'subscription', $lineItems, $billable,
+                    $periodStart, BillingTime::addInterval($periodStart, $interval),
+                )
+                : $this->salesInvoiceService->createForPayment($payment, 'subscription', $lineItems, $billable);
         } catch (\Throwable $e) {
             Log::error('Mandate-only audit invoice creation failed — re-delivery will retry', [
                 'billable_id' => $billable->getKey(),
@@ -385,6 +480,7 @@ class MandateOnlyPaymentHandler
             // is exactly how FirstPaymentHandler handles the same failure.
             throw $e;
         }
+        }
 
         // A Recurring coupon keeps discounting the renewals, so its discount must
         // reach CreateSubscription — and the marker has to exist *before* that
@@ -399,11 +495,14 @@ class MandateOnlyPaymentHandler
                 $pricedCoupon['coupon'],
                 $billable,
                 (int) $pricedCoupon['order_amount_net'],
+                // The interval being BOOKED: on an upgrade the billable still carries the
+                // free plan's, and two free years would be counted as two free months.
+                $interval,
             );
         }
 
         try {
-            $this->createSubscription->handle($billable, [
+            $this->support->createSubscription($this->createSubscription, $billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
@@ -421,9 +520,8 @@ class MandateOnlyPaymentHandler
                 'CreateSubscription during mandate-only activation failed',
                 $e,
             );
-            event(new PaymentSucceeded($billable, $invoice));
-            $this->support->notifyInvoiceAvailable($billable, $invoice);
 
+            // Announced when the retry lands — see FirstPaymentHandler.
             return;
         }
 
@@ -443,6 +541,43 @@ class MandateOnlyPaymentHandler
         // Each step isolated — see WebhookSupport::completeActivation(). Once the invoice
         // exists a throw here is terminal: the re-delivery answers AlreadyBooked and takes
         // the quiet branch, so whatever was skipped would never run.
+        if (is_array($origin)) {
+            // An upgrade, not a first booking: the wallets hold the free plan's quota and
+            // are moved to the new plan's (as the paid upgrade does), not credited on top.
+            $this->support->completeActivation(
+                $billable,
+                $invoice,
+                [],
+                function () use ($billable, $origin, $planCode, $interval): void {
+                    if ((string) $origin['plan'] !== '') {
+                        app(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class)->adjust(
+                            $billable,
+                            (string) $origin['plan'],
+                            (string) $origin['interval'],
+                            $planCode,
+                            $interval,
+                            isset($origin['period_start']) ? \Carbon\Carbon::parse((string) $origin['period_start']) : null,
+                            isset($origin['period_end']) ? \Carbon\Carbon::parse((string) $origin['period_end']) : null,
+                        );
+                    }
+
+                    $meta = $billable->getBillingSubscriptionMeta();
+                    unset($meta['upgrade_from_local_origin']);
+                    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+                    event(new \GraystackIT\MollieBilling\Events\SubscriptionUpgradedFromLocal(
+                        $billable,
+                        (string) $origin['plan'],
+                        (string) $origin['interval'],
+                        $planCode,
+                        $interval,
+                    ));
+                },
+            );
+
+            return;
+        }
+
         $this->support->completeActivation(
             $billable,
             $invoice,
@@ -504,17 +639,24 @@ class MandateOnlyPaymentHandler
             $recurringDiscountNet = (int) ($pricedCoupon['recurring_discount_net'] ?? 0);
 
             if ($recurringDiscountNet > 0) {
-                $this->couponService->applyRecurringMarker(
+                $this->couponService->applyRecurringMarkerFrom(
                     $pricedCoupon['coupon'],
                     $billable,
                     (int) $pricedCoupon['order_amount_net'],
                     $interval,
+                    // Its periods are the subscription's, and the first one starts with
+                    // the first charge, at the trial's end. Counted from the signup, a
+                    // trial ate into the code: "two periods free" behind a 14-day trial
+                    // deferred the charge to 62 days after the signup — 48 days after the
+                    // trial, on a day off the cycle — and a partial code behind a long
+                    // trial could end before its last promised charge.
+                    BillingTime::nowUtc()->addDays($trialDays),
                 );
             }
         }
 
         try {
-            $this->createSubscription->handle($billable, [
+            $this->support->createSubscription($this->createSubscription, $billable, [
                 'plan_code' => $planCode,
                 'interval' => $interval,
                 'addon_codes' => $addonCodes,
@@ -532,20 +674,12 @@ class MandateOnlyPaymentHandler
                 'error' => $e->getMessage(),
             ]);
 
-            event(new SubscriptionActivationFailed(
-                $billable,
-                $planCode,
-                $interval,
-                (string) ($payment->id ?? ''),
-                null,
-                $e->getMessage(),
-            ));
-
-            // Admins too. CreateSubscription can throw AFTER the Mollie call but before
-            // its local save, which leaves a live Mollie subscription with no local
-            // record of it — the costliest state in the package, and the only signal was
-            // a log line and an event most apps do not listen to.
-            $this->support->reportIncompleteActivation($billable, $payment, 'trial_activation');
+            // CreateSubscription can throw AFTER the Mollie call but before its local
+            // save, which leaves a live Mollie subscription with no local record of it —
+            // the costliest state in the package. The retry looks for that subscription
+            // before it creates one (WebhookSupport::createSubscription()). The event is
+            // dispatched there too, once per payment.
+            $this->support->reportIncompleteActivation($billable, $payment, 'trial_activation', $e->getMessage());
 
             return;
         }

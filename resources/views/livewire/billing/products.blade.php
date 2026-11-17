@@ -278,6 +278,9 @@ new class extends Component {
             }
 
             $this->toast(__('billing::portal.products.error'), 'danger');
+        } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+            // Not an error to report: the customer is told what to do first.
+            $this->toast($e->getMessage(), 'danger');
         } catch (\Throwable $e) {
             report($e);
             $this->toast(__('billing::portal.products.error'), 'danger');
@@ -515,7 +518,7 @@ new class extends Component {
                                 <div class="flex items-center gap-6 sm:shrink-0">
                                     <div class="text-right">
                                         <div class="flex items-baseline gap-1">
-                                            <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($product['price_net']) }}</span>
+                                            <span class="text-2xl font-bold tabular-nums tracking-tight" dusk="product-price-{{ $product['code'] }}">{{ BillingMoney::format($product['price_net']) }}</span>
                                         </div>
                                         <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                                     </div>
@@ -537,7 +540,9 @@ new class extends Component {
                             </div>
                         </flux:card>
 
-                        {{-- Purchase confirm modal --}}
+                        {{-- Purchase confirm modal — only where a purchase is possible: a page for a
+                             customer who may not buy carries no dialog and no purchase action. --}}
+                        @unless ($localBlocksProducts)
                         <flux:modal name="purchase-{{ $product['code'] }}" class="max-w-md">
                             <div class="space-y-6">
                                 <div class="space-y-2">
@@ -589,6 +594,16 @@ new class extends Component {
                                         </flux:text>
                                     @endif
 
+                                    {{-- What is actually collected. The body above states the list price
+                                         and the line above what a coupon takes off; without this the
+                                         customer had to subtract the two to learn the amount. --}}
+                                    @if (($couponDiscounts[$product['code']] ?? 0) > 0)
+                                        <flux:text class="text-sm font-medium text-zinc-900 dark:text-white">
+                                            {{ __('billing::portal.products.confirm.total') }}
+                                            <span class="tabular-nums" dusk="product-total-{{ $product['code'] }}">{{ BillingMoney::format(max(0, $product['price_net'] - ($couponDiscountsDisplay[$product['code']] ?? $couponDiscounts[$product['code']] ?? 0))) }}</span>
+                                        </flux:text>
+                                    @endif
+
                                     @if (! empty($couponErrors[$product['code']] ?? null))
                                         <flux:text class="text-xs text-rose-600 dark:text-rose-400">{{ $couponErrors[$product['code']] }}</flux:text>
                                     @endif
@@ -612,6 +627,7 @@ new class extends Component {
                                 </div>
                             </div>
                         </flux:modal>
+                        @endunless
                     @endforeach
                 </div>
                 @endforeach

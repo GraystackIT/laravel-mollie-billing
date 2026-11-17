@@ -61,6 +61,20 @@ class StartSubscriptionCheckout
     public function handle(Billable $billable, array $request): array
     {
         /** @var Model&Billable $billable */
+        // Past due is not "no subscription". A customer who owes — an overage debt, or a
+        // renewal on a subscription Mollie is still running — does not take out a new
+        // one beside it: the checkout page redirects such a visitor, but this service is
+        // the seam the Livewire component and an app's own code pass through, and it let
+        // them start a second subscription while the first stayed unpaid. What stays
+        // open is the one past-due state with nothing to pay for: a trial that expired
+        // without a subscription at Mollie, for which this checkout is the way forward.
+        if ($billable->isBillingPastDue() && (
+            \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebt($billable)
+            || app(MollieSubscriptionGate::class)->hasLiveMollieSubscription($billable)
+        )) {
+            throw \GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException::booking($billable);
+        }
+
         if ($billable->hasAccessibleBillingSubscription()) {
             throw new \RuntimeException('Billable already has an active subscription.');
         }
@@ -323,6 +337,11 @@ class StartSubscriptionCheckout
             sequenceType: 'first',
             customerId: $customerId,
         ));
+
+        // Only once Mollie holds the payment: a checkout that was refused before this
+        // point never started. The event existed, was mapped to an audit row and had a
+        // translation — and nothing dispatched it.
+        event(new \GraystackIT\MollieBilling\Events\CheckoutStarted($billable));
 
         return [
             'checkout_url' => method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null,

@@ -220,8 +220,11 @@ class PlanWaiver
         // Mollie collected the full price three days late and called that a free month.
         // The end sits one day before the charge that is collected again, because that
         // is the date both full-coverage deferrals add a day to.
+        // On the subscription's billing day: from a next charge on 28 February of a cycle
+        // on the 31st, two periods end on 30 April, not on 28 April (BillingAnchor).
+        $nextCharge = $this->nextCharge($billable, $interval);
         $resumesAt = $until === null
-            ? self::advance($this->nextCharge($billable, $interval), $interval, $periods ?? 1)
+            ? self::advance($nextCharge, $interval, $periods ?? 1, $this->cycleDay($billable, $interval, $nextCharge))
             : null;
 
         $validUntil = $until !== null
@@ -315,7 +318,9 @@ class PlanWaiver
             (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'),
         );
 
-        $this->mutateBillingMeta($billable, function (array $meta) use ($periods, $nextCharge, &$newEnd): ?array {
+        $cycleDay = $this->cycleDay($billable, (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'), $nextCharge);
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($periods, $nextCharge, $cycleDay, &$newEnd): ?array {
             $marker = $meta['active_recurring_coupon'] ?? null;
 
             if (! is_array($marker) || ! self::isWaiver($marker)) {
@@ -330,14 +335,14 @@ class PlanWaiver
                 // billing cycle. One that has already run out starts again at the next
                 // charge rather than at a date in the past.
                 $from = $resumesAt !== null && $resumesAt->isFuture() ? $resumesAt : $nextCharge;
-                $resumesAt = self::advance($from, $interval, $periods);
+                $resumesAt = self::advance($from, $interval, $periods, $cycleDay);
                 $newEnd = $resumesAt->copy()->subDay();
                 $marker['charge_resumes_at'] = $resumesAt->toIso8601String();
             } else {
                 // A gift with an end date: that date moves.
                 $current = self::parse($marker['valid_until'] ?? null);
                 $from = $current !== null && $current->isFuture() ? $current : Carbon::instance(BillingTime::nowUtc());
-                $newEnd = self::advance($from, $interval, $periods);
+                $newEnd = self::advance($from, $interval, $periods, $cycleDay);
             }
 
             $marker['valid_until'] = $newEnd->toIso8601String();
@@ -478,7 +483,7 @@ class PlanWaiver
      * @param  array<string, mixed>  $marker
      * @param  CarbonInterface  $nextRegularCharge  where the charge sits when nothing defers it
      */
-    public static function chargeResumesAt(array $marker, CarbonInterface $nextRegularCharge, string $interval): ?Carbon
+    public static function chargeResumesAt(array $marker, CarbonInterface $nextRegularCharge, string $interval, ?int $anchorDay = null): ?Carbon
     {
         if (! self::isWaiver($marker)) {
             return null;
@@ -496,10 +501,12 @@ class PlanWaiver
             return null;
         }
 
+        $end = self::endDay($end);
+
         // Stepped from the same anchor each time, so a cycle on the 31st does not
         // drift to the 28th and stay there.
         for ($i = 0; $i < 600; $i++) {
-            $boundary = self::advance($nextRegularCharge, $interval, $i);
+            $boundary = self::advance($nextRegularCharge, $interval, $i, $anchorDay);
 
             if ($boundary->greaterThanOrEqualTo($end)) {
                 return $boundary;
@@ -601,18 +608,42 @@ class PlanWaiver
             : BillingTime::toUtc(BillingTime::addInterval($now, $interval));
     }
 
-    private static function advance(CarbonInterface $from, string $interval, int $periods): Carbon
+    /**
+     * `$periods` billing periods after `$from`, on the cycle's day (`$day`, honoured where
+     * `$from` lies on it — see BillingAnchor::advance()).
+     */
+    private static function advance(CarbonInterface $from, string $interval, int $periods, ?int $day = null): Carbon
     {
-        $at = BillingTime::toUtc($from);
+        return Carbon::instance(\GraystackIT\MollieBilling\Support\BillingAnchor::advance(BillingTime::toUtc($from), $interval, $periods, $day))
+            ->setTimezone('UTC');
+    }
 
-        return $interval === 'yearly'
-            ? $at->addYearsNoOverflow(max(0, $periods))
-            : $at->addMonthsNoOverflow(max(0, $periods));
+    /** The billing day of the cycle whose next charge is `$nextCharge`. */
+    private function cycleDay(Billable $billable, string $interval, CarbonInterface $nextCharge): ?int
+    {
+        return app(CouponService::class)->recurringAnchorDay($billable, $interval, $nextCharge);
     }
 
     public static function intervalDays(string $interval): int
     {
         return $interval === 'yearly' ? 365 : 30;
+    }
+
+    /**
+     * The day a waiver ends on: the start of its `valid_until` day, in UTC.
+     *
+     * "A renewal is plan-free when it falls before the gift's end", and a gift has no
+     * partial days. The renewal side is already a day — the charge day is the start of the
+     * cycle's day (`SubscriptionPaymentHandler`), because Mollie creates the charge at some
+     * hour early that morning. `valid_until` kept the hour the gift was given, so a gift
+     * given at 10:00 on 10 January for 90 days still "covered" the charge of 10 April —
+     * and gave the whole period to 10 May away, while the same gift given at midnight did
+     * not. Compared day against day, the renewal on the gift's last day is the first one
+     * that is charged, whatever the hour.
+     */
+    public static function endDay(CarbonInterface $validUntil): Carbon
+    {
+        return Carbon::instance($validUntil)->setTimezone('UTC')->startOfDay();
     }
 
     private static function parse(mixed $value): ?Carbon

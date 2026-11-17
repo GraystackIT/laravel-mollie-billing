@@ -12,7 +12,6 @@ use GraystackIT\MollieBilling\Jobs\RevokeMollieMandateJob;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\MollieBilling;
-use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Notifications\GrantExtrasPurchaseRefundedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
@@ -310,30 +309,19 @@ class GrantExtrasPurchaseRefund
             }
         }, 'grant_extras_refund.customer_notification', $billable);
 
-        $this->support->safely(function () use ($billable, $invoice, $creditNote, $paymentId): void {
-            $admins = MollieBilling::notifyAdmin();
-            $admins = is_array($admins) ? $admins : iterator_to_array($admins);
-
-            if ($admins === []) {
-                return;
-            }
-
-            Notification::send($admins, MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                $creditNote !== null
-                    ? 'A purchase of extras on a gifted plan was not carried out because the gift had ended — the payment has been refunded'
-                    : 'A purchase of extras on a gifted plan was not carried out because the gift had ended — the REFUND COULD NOT BE POSTED and is queued for retry',
-                [
-                    'billable_id' => $billable->getKey(),
-                    'payment_id' => $paymentId,
-                    'invoice_id' => $invoice->getKey(),
-                    'invoice_serial' => $invoice->serial_number,
-                    'amount_gross' => (int) $invoice->amount_gross,
-                    'credit_note_serial' => $creditNote?->serial_number,
-                    'refund_queued' => $creditNote === null,
-                ],
-            ));
-        }, 'grant_extras_refund.admin_notification', $billable);
+        // No admin mail here — neither when the refund went through (it resolved itself)
+        // nor when it did not: a refund Mollie would not take is queued
+        // (`pending_refund_retries`), which is the automatic way still running. The event
+        // above carries a null credit note, so the audit trail says "queued", and
+        // `RetryRefundLineJob` tells an admin — once — when the retries are used up and the
+        // line moves to the dead letter. Same rule as `UnwantedPaymentRefund`.
+        if ($creditNote === null) {
+            \Illuminate\Support\Facades\Log::warning('Refund of a grant-extras purchase is queued for retry', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'invoice_id' => $invoice->getKey(),
+            ]);
+        }
 
         // The first payment captured a mandate at Mollie. The billable does not adopt it —
         // a mandate on file is what denies a later checkout its trial — so it is revoked

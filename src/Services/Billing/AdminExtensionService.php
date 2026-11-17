@@ -33,6 +33,29 @@ use Illuminate\Support\Str;
  */
 class AdminExtensionService
 {
+    use \GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
+
+    /**
+     * For how long an identical action on the same billable is refused.
+     *
+     * Each action mints a fresh code, so nothing made a second, identical request a
+     * no-op: a double click on "extend by 14 days" gave 28. Livewire sends such requests
+     * one after the other, not at the same time — a lock that is released when the
+     * first one finishes would let the second straight through. It is therefore held
+     * for a few seconds after a success, and released at once after a refusal.
+     */
+    public const REPEAT_GUARD_SECONDS = 5;
+
+    /**
+     * For how long an identical action is refused while the first one is still running.
+     * Longer than any action takes (they include a Mollie call); short enough that one
+     * whose process died does not keep the operator out for long.
+     */
+    public const RUNNING_GUARD_SECONDS = 120;
+
+    /** Where the guard is kept: `subscription_meta`, one entry per action. */
+    public const GUARD_META_KEY = 'admin_extension_guard';
+
     public function __construct(
         private readonly CouponService $coupons,
         private readonly PlanWaiver $waiver,
@@ -46,10 +69,10 @@ class AdminExtensionService
     {
         $this->assertPositive($days, 'days');
 
-        return $this->issue($billable, 'EXT', [
+        return $this->once($billable, 'days:'.$days, fn (): CouponRedemption => $this->issue($billable, 'EXT', [
             'type' => CouponType::PeriodExtension,
             'grant_duration_days' => $days,
-        ]);
+        ]));
     }
 
     /**
@@ -59,10 +82,129 @@ class AdminExtensionService
     {
         $this->assertPositive($periods, 'periods');
 
-        return $this->issue($billable, 'PLANFREE', [
+        return $this->once($billable, 'periods:'.$periods, fn (): CouponRedemption => $this->issue($billable, 'PLANFREE', [
             'type' => CouponType::PlanWaiver,
             'waiver_periods' => $periods,
-        ]);
+        ]));
+    }
+
+    /**
+     * Run an action unless the identical one has just been run for this billable.
+     *
+     * @template T
+     *
+     * @param  \Closure(): T  $action
+     * @return T
+     *
+     * @throws InvalidSubscriptionStateException when it is a repeat
+     */
+    private function once(Billable $billable, string $what, \Closure $action): mixed
+    {
+        // Kept on the billable's row, under its row lock — not in the cache. A cache lock
+        // guards nothing across requests on the `array` store (one process's memory) or
+        // the `null` store (every lock is granted), and the operator's two clicks are two
+        // requests. The row is shared by every process whatever the cache is.
+        if (! $billable instanceof Model) {
+            return $action();
+        }
+
+        $token = (string) Str::uuid();
+        $claimed = false;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($what, $token, &$claimed): ?array {
+            $guards = self::liveGuards($meta);
+
+            if (isset($guards[$what])) {
+                return null;
+            }
+
+            $guards[$what] = ['token' => $token, 'state' => 'running', 'at' => BillingTime::nowUtc()->toIso8601String()];
+            $meta[self::GUARD_META_KEY] = $guards;
+            $claimed = true;
+
+            return $meta;
+        });
+
+        if (! $claimed) {
+            throw new InvalidSubscriptionStateException(__('billing::admin.billables.subscription.flash.extension_repeated'));
+        }
+
+        try {
+            $result = $action();
+        } catch (\Throwable $e) {
+            // Released at once: a corrected retry must not be told to wait.
+            $this->settleGuard($billable, $what, $token, null);
+
+            throw $e;
+        }
+
+        // Held for a few seconds from now: the guard running out IS the guard.
+        $this->settleGuard($billable, $what, $token, ['token' => $token, 'state' => 'done', 'at' => BillingTime::nowUtc()->toIso8601String()]);
+
+        return $result;
+    }
+
+    /**
+     * Replace (or, with null, remove) this call's own guard entry. Another call's entry
+     * — one that took over an expired claim — is left alone.
+     *
+     * @param  ?array<string, string>  $entry
+     */
+    private function settleGuard(Model $billable, string $what, string $token, ?array $entry): void
+    {
+        $this->mutateBillingMeta($billable, function (array $meta) use ($what, $token, $entry): ?array {
+            $guards = self::liveGuards($meta);
+
+            if (($guards[$what]['token'] ?? null) !== $token && isset($guards[$what])) {
+                return null;
+            }
+
+            if ($entry === null) {
+                unset($guards[$what]);
+            } else {
+                $guards[$what] = $entry;
+            }
+
+            if ($guards === []) {
+                unset($meta[self::GUARD_META_KEY]);
+            } else {
+                $meta[self::GUARD_META_KEY] = $guards;
+            }
+
+            return $meta;
+        });
+    }
+
+    /**
+     * The guard entries that still hold — expired ones are dropped on every write.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, array<string, string>>
+     */
+    private static function liveGuards(array $meta): array
+    {
+        $now = BillingTime::nowUtc();
+        $live = [];
+
+        foreach ((array) ($meta[self::GUARD_META_KEY] ?? []) as $what => $entry) {
+            if (! is_array($entry) || ! is_string($entry['at'] ?? null)) {
+                continue;
+            }
+
+            try {
+                $at = Carbon::parse($entry['at']);
+            } catch (\Throwable) {
+                continue;
+            }
+
+            $holds = ($entry['state'] ?? null) === 'running' ? self::RUNNING_GUARD_SECONDS : self::REPEAT_GUARD_SECONDS;
+
+            if ($at->copy()->addSeconds($holds)->greaterThan($now)) {
+                $live[(string) $what] = $entry;
+            }
+        }
+
+        return $live;
     }
 
     /**
@@ -76,6 +218,12 @@ class AdminExtensionService
     public function extendGrant(Billable $billable, int $days, ?string $onExpiry = null): Carbon
     {
         $this->assertPositive($days, 'days');
+
+        return $this->once($billable, 'grant:'.$days.':'.($onExpiry ?? ''), fn (): Carbon => $this->extendGrantOnce($billable, $days, $onExpiry));
+    }
+
+    private function extendGrantOnce(Billable $billable, int $days, ?string $onExpiry): Carbon
+    {
 
         if (! $billable instanceof Model) {
             throw new InvalidSubscriptionStateException('This billable cannot be extended.');

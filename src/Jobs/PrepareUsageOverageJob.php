@@ -371,7 +371,10 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $isLocal = $billable->isLocalBillingSubscription();
         $hasMandate = $billable->hasMollieMandate();
         $isCancelled = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Cancelled;
-        $isPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
+        // Past due because a *renewal* is unpaid. A subscription that is past due only for
+        // a standing overage debt keeps renewing — that renewal is what collects the debt.
+        $isPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue
+            && ! ChargeUsageOverageDirectly::isPastDueForOverageDebtOnly($billable);
 
         // Trial-lifecycle notifications and expiry transitions live in
         // ProcessTrialLifecycleJob — this job is concerned with overage charging
@@ -536,9 +539,16 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         // case existed. The quota is per period and not owed in arrears, so it is
         // credited once, for the period now beginning.
         $periodStart = \Carbon\CarbonImmutable::instance($boundary);
+        // The anchor day carries on through the periods nobody is charged for, so the
+        // charge that ends the deferral finds the period on the subscription's own day.
+        // Nothing recorded yet (the deferral began with the signup): the period's own day.
+        $anchorDay = \GraystackIT\MollieBilling\Support\BillingAnchor::day($billable)
+            ?? ($billable->getBillingPeriodStartsAt() !== null
+                ? \Carbon\CarbonImmutable::instance($billable->getBillingPeriodStartsAt())->utc()->day
+                : null);
 
         for ($i = 0; $i < 600; $i++) {
-            $next = BillingTime::addInterval($periodStart, $interval);
+            $next = \GraystackIT\MollieBilling\Support\BillingAnchor::next($periodStart, $interval, $anchorDay);
 
             if ($next->greaterThan($tomorrowStart)) {
                 break;
@@ -552,7 +562,11 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
 
         // Anchor first: a refill that failed half-way must not be repeated in full
         // tomorrow, which is what an unmoved anchor would cause.
-        $this->mutateBillingMeta($billable, function (array $meta): array {
+        $this->mutateBillingMeta($billable, function (array $meta) use ($anchorDay, $periodStart): array {
+            if ($anchorDay !== null) {
+                $meta = \GraystackIT\MollieBilling\Support\BillingAnchor::record($meta, $anchorDay, $periodStart);
+            }
+
             // An override that has passed describes a period that is over.
             $override = $meta['next_charge_date_override'] ?? null;
 
@@ -579,10 +593,11 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             && app(\GraystackIT\MollieBilling\Services\Billing\PlanWaiver::class)->endsSubscription($billable, $periodEnd);
 
         // The hand-over back to the renewal webhook. A deferral does not have to end on a
-        // period boundary — a recurring coupon's ends `N × 30 + 2` days after it was
-        // applied, which for three monthly periods from 10 January is 12 April. Refilling
-        // on 10 April and again when the charge settles on the 12th credited the same
-        // period twice, and a rollover type kept the second quota for good.
+        // period boundary — a recurring coupon's ended `N × 30 + 2` days after it was
+        // applied until 17 November 2026 (three monthly periods from 10 January: 12 April),
+        // and markers written before then keep that date; a period extension adds days.
+        // Refilling on 10 April and again when the charge settles on the 12th credited the
+        // same period twice, and a rollover type kept the second quota for good.
         //
         // So a stretch that is cut short by the returning charge is not a period of its
         // own: it belongs to the one before it, and the charge's own renewal brings the
@@ -659,7 +674,9 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        if (! $hasOverage) {
+        // A debt standing from an earlier cycle is not on a wallet. Whether it is due is
+        // `handle()`'s decision; whether there is anything to ask about is this one.
+        if (! $hasOverage && $chargeService->deferredDebtLines($billable) === []) {
             return;
         }
 
@@ -704,7 +721,17 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
         $included = $catalog->includedUsages($planCode, $interval);
         $support = app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class);
 
-        DB::transaction(function () use ($billable, $walletService, $catalog, $included, $tomorrowStart, $support): void {
+        // The day the period keeps through the short months, as for a Mollie renewal: a
+        // free plan started on the 31st turns over on 28 February and on 31 March again,
+        // not on the 28th for good (BillingAnchor).
+        $anchorDay = \GraystackIT\MollieBilling\Support\BillingAnchor::forCycle(
+            $billable,
+            $billable->getBillingPeriodStartsAt(),
+            $tomorrowStart,
+            (string) ($interval ?? 'monthly'),
+        );
+
+        DB::transaction(function () use ($billable, $walletService, $catalog, $included, $tomorrowStart, $support, $anchorDay): void {
             foreach ($included as $type => $quantity) {
                 if ((int) $quantity > 0) {
                     if ($catalog->usageRollover((string) $type)) {
@@ -730,6 +757,11 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
 
             $billable->forceFill([
                 'subscription_period_starts_at' => $tomorrowStart,
+                'subscription_meta' => \GraystackIT\MollieBilling\Support\BillingAnchor::record(
+                    $billable->getBillingSubscriptionMeta(),
+                    $anchorDay,
+                    $tomorrowStart,
+                ),
             ])->save();
         });
     }

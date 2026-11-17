@@ -53,6 +53,34 @@ new class extends Component {
             return;
         }
 
+        // A debt whose own dunning cycle has given up is not something the retry job
+        // can move: its budget is spent, so the job only gave up again and mailed the
+        // customer a second time. For that case the operator's click starts a new
+        // collection cycle.
+        $overage = app(\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::class);
+
+        if ($overage->deferredDebtLines($b) !== [] || \GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::isPastDueForOverageDebt($b)) {
+            try {
+                $outcome = $overage->collectStandingDebtNow($b);
+            } catch (\Throwable $e) {
+                report($e);
+                $this->error = __('billing::admin.past_due.debt_collection_failed', ['name' => $b->getBillingName()]);
+
+                return;
+            }
+
+            if ($outcome !== 'nothing') {
+                $this->flash = __(
+                    $outcome === 'started'
+                        ? 'billing::admin.past_due.debt_collection_started'
+                        : 'billing::admin.past_due.debt_collection_in_flight',
+                    ['name' => $b->getBillingName()],
+                );
+
+                return;
+            }
+        }
+
         RetryUsageOverageChargeJob::dispatch($class, $b->getKey());
         $this->flash = __('billing::admin.past_due.retry_dispatched', ['name' => $b->getBillingName()]);
     }

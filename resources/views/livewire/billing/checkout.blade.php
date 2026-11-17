@@ -504,11 +504,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
      *
      * A trial defers it to the trial's end. A recurring coupon that covers the whole
      * order defers it past the coupon — Mollie cannot hold an amount of 0, so the
-     * subscription keeps its full price and starts charging the day after the discount
-     * ends. With both, the later date applies. This is `CreateSubscription`'s own rule,
-     * asked of the same `CouponService::recurringMarkerValidUntil()` it reads its marker
-     * from: the confirm step used to print the trial end regardless, which for a
-     * three-month coupon on a 14-day trial named a date months before the real one.
+     * subscription keeps its full price and starts charging with the first regular
+     * charge the discount no longer covers; its periods start at the first charge, the
+     * trial's end where there is one. This is `CreateSubscription`'s own rule, asked of
+     * the same `CouponService::recurringChargeResumesAt()` its marker is written from:
+     * the confirm step used to print the trial end regardless, which for a three-month
+     * coupon on a 14-day trial named a date months before the real one.
      */
     public function firstChargeDate(): ?\Carbon\CarbonInterface
     {
@@ -523,10 +524,9 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             $coupon = Coupon::query()->whereRaw('UPPER(code) = ?', [strtoupper($code)])->first();
 
             if ($coupon !== null && $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
-                $until = MollieBilling::coupons()->recurringMarkerValidUntil($coupon, $this->interval, $now);
+                $afterCoupon = MollieBilling::coupons()->recurringChargeResumesAt($coupon, $this->interval, $date ?? $now);
 
-                if ($until !== null) {
-                    $afterCoupon = \GraystackIT\MollieBilling\Support\BillingTime::toUtc($until)->addDay();
+                if ($afterCoupon !== null) {
                     $date = $date === null ? $afterCoupon : \GraystackIT\MollieBilling\Support\BillingTime::latest($date, $afterCoupon);
                 }
             }
@@ -1148,6 +1148,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
+        if ($this->couponEndsBeforeFirstCharge($coupon)) {
+            $this->couponError = __('billing::checkout.coupon_ends_before_first_charge');
+
+            return;
+        }
+
         if ($this->couponNeedsExistingSubscription($coupon)) {
             $this->couponError = __('billing::checkout.coupon_requires_active_subscription');
 
@@ -1304,6 +1310,15 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return 'not_with_trial';
         }
 
+        // Same as applyCoupon(): a plan with a trial picked after the code was applied, or
+        // a page left open until the trial outlasts the code, must not carry a discount the
+        // first charge will not have.
+        if ($this->couponEndsBeforeFirstCharge($coupon)) {
+            $this->applied_coupon = null;
+
+            return 'ends_before_first_charge';
+        }
+
         if ($this->couponNeedsExistingSubscription($coupon)) {
             $this->applied_coupon = null;
 
@@ -1345,6 +1360,23 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     {
         return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment
             && $this->trialApplies($this->plan_code, $this->interval);
+    }
+
+    /**
+     * A dated recurring code that is over before the trial ends discounts nothing: the
+     * first charge is at the trial end, and by then the code no longer applies. The summary
+     * showed its discount all the same — 35.70 for a first charge that is 42.00.
+     * `FirstPaymentCouponPricing::price()` puts no discount on the subscription in that
+     * case; this keeps the form from promising one.
+     */
+    private function couponEndsBeforeFirstCharge(Coupon $coupon): bool
+    {
+        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring
+            && $coupon->valid_until !== null
+            && $this->trialApplies($this->plan_code, $this->interval)
+            && \GraystackIT\MollieBilling\Support\BillingTime::toUtc($coupon->valid_until)->lessThanOrEqualTo(
+                \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays($this->planTrialDays($this->plan_code, $this->interval)),
+            );
     }
 
     /**
@@ -1435,6 +1467,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'not_with_trial' => __('billing::checkout.coupon_not_with_trial'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
             'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
+            'ends_before_first_charge' => __('billing::checkout.coupon_ends_before_first_charge'),
             'too_close_to_charge' => __('billing::checkout.coupon_too_close_to_charge'),
             'per_billable_limit_reached' => __('billing::checkout.coupon_per_billable_limit_reached'),
             'full_coverage_use_access_grant' => __('billing::checkout.coupon_full_coverage_use_access_grant'),
@@ -1920,6 +1953,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     'class' => $billable->getMorphClass(),
                     'id' => (string) $billable->getKey(),
                 ]]);
+            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
+                // Not a failure of the payment: this customer owes money and takes out
+                // nothing new until it is settled. Say that, not "payment failed".
+                $this->errorMessage = $e->getMessage();
+
+                return null;
             } catch (\Throwable $e) {
                 report($e);
                 try {

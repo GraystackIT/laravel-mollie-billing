@@ -5,6 +5,7 @@ How the package handles dates and times — persistence, computation, customer-p
 - **Persistence:** all date values are stored in **UTC** in the database.
 - **Computation:** all internal calculations (period math, OSS quarter boundaries, trial / cancel / coupon logic, job cutoffs) are performed in **UTC**.
 - **Portal display:** in the billable's timezone — overridable per app/user via `getBillingTimezone()`. Without an override the default `mollie-billing.billing_timezone` (default `UTC`) is used.
+- **Billing days are the exception:** a charge date, a period boundary, the end of a subscription, a trial or a gift is shown as the UTC calendar day the package computes it on, in every timezone (`BillingTime::billingDay()`). Mollie charges on a date, at an hour nobody chooses (measured 00:28 UTC); converted, the same charge moved by a day for a customer west of UTC depending on which instant it was anchored on. Moments — an invoice, a usage booking, a purchase — stay in the billable's timezone.
 - **Admin display:** **always UTC**, identical to the database values and to logs / Mollie events.
 
 ## Independence from `app.timezone`

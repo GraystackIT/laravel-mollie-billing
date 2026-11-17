@@ -374,6 +374,20 @@ it('still reports an expired single-payment code as expired', function (): void 
         ->toBe(__('billing::checkout.coupon_expired'));
 });
 
+it('says a single-payment code is used up instead of pointing at where to enter it', function (): void {
+    $billable = portalRedeemPaying();
+    $coupon = app(CouponService::class)->create([
+        'code' => 'USEDPACK', 'type' => CouponType::SinglePayment, 'discount_type' => DiscountType::Percentage, 'discount_value' => 20,
+        'applicable_products' => ['token-pack'],
+    ]);
+    app(CouponService::class)->redeem($coupon, $billable, ['productCodes' => ['token-pack'], 'orderAmountNet' => 1000]);
+
+    $outcome = app(RedeemCouponFromPortal::class)->handle($billable->fresh(), 'USEDPACK');
+
+    expect($outcome->redeemed)->toBeFalse()
+        ->and($outcome->message)->toBe(__('billing::checkout.coupon_per_billable_limit_reached'));
+});
+
 // ── The product as a gift ───────────────────────────────────────────────────
 
 it('activates a gifted plan for a customer without a subscription', function (): void {

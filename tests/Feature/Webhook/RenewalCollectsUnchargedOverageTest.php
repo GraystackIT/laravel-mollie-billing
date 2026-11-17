@@ -202,11 +202,12 @@ it('does not charge a second time when the sweep already has a charge in flight'
         ->and((int) $billable->getWallet('SMS')->refresh()->balanceInt)->toBe(13);
 });
 
-it('leaves a written-off cycle written off', function (): void {
-    // Documented behaviour, unchanged: a cycle that spent its dunning budget was written
-    // off with the past-due transition. The renewal neither re-charges it nor carries it.
+it('collects the debt of a cycle that gave up, instead of writing it off', function (): void {
+    // The rule this replaces: a cycle that spent its dunning budget was written off by the
+    // renewal's reset. Now the renewal starts a new cycle for it. (This fixture is a row as
+    // an older release left it — status `failed`, units still on the wallet.)
     Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
-    Mollie::shouldReceive('send')->never();
+    Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 'tr_again', 'status' => 'open']);
 
     $billable = uncollectedOverageBillable(37, [
         ChargeUsageOverageDirectly::META_KEY => [
@@ -219,7 +220,14 @@ it('leaves a written-off cycle written off', function (): void {
 
     deliverUncollectedRenewal($billable);
 
-    expect((int) $billable->refresh()->getWallet('SMS')->refresh()->balanceInt)->toBe(50);
+    $billable->refresh();
+    $snapshot = $billable->getBillingSubscriptionMeta()[ChargeUsageOverageDirectly::META_KEY];
+
+    // One payment for the 37 units — not for 74 — and the debt carried until it settles.
+    expect($snapshot['payment_id'])->toBe('tr_again')
+        ->and((int) $snapshot['amount_net'])->toBe(555)
+        ->and($snapshot['line_items'])->toHaveCount(1)
+        ->and((int) $billable->getWallet('SMS')->refresh()->balanceInt)->toBe(13);
 });
 
 it('carries the debt when the charge cannot be created at all', function (): void {

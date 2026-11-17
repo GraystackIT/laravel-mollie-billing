@@ -51,6 +51,24 @@ Refund a specific net amount (in cents). Works for any invoice type.
 $refundService->refundPartially($invoice, 500, RefundReasonCode::Goodwill, 'customer request');
 ```
 
+#### `refundLine($invoice, $lineIndex, $amountNet, $reason, $reasonText)`
+
+Refund part or all of **one line** of an invoice — the addon that was never used, the seats booked by mistake. The credit note carries one line that points at the original line (`parent_line_item_index`), is taxed at that line's own rate and stays inside the VAT that line has left, so a line refunded in several steps gives back exactly the VAT it charged. The amount may not exceed what is left of the line (`RefundExceedsLineAmountException`, a subclass of `RefundExceedsInvoiceAmountException`); an index that names no refundable line throws `InvalidRefundTargetException`. Both are checked against the invoice row locked for the refund. Discount lines are folded into the line they reduced, so a line refunds what was actually paid for it. Money only: an overage line gives no wallet units back — use `refundOverageUnits()` for that.
+
+```php
+$refundService->refundLine($invoice, 1, 900, RefundReasonCode::BillingError); // 9.00 of line #1
+```
+
+`InvoiceService::refundableLines($invoice)` lists the lines with what is left of each (`index`, `label`, `rate`, `remaining_net`, `remaining_vat`); `refund()` takes the same as `'line_index' => 1`.
+
+A refund that is spread over the lines (`refundPartially()`, `refundFully()`) is weighted by what each line has **left**, so after a refund of one line the rest goes onto the lines that still have money, at their rates.
+
+A line never offers more than the invoice as a whole has left: a credit booked without a line (a plan switch settled out of this invoice, a legacy refund) lowers it.
+
+### Settled plan-switch invoices
+
+A saldo-zero plan-switch invoice (`InvoiceService::createPlanSwitchInvoice()`) collected no payment of its own; it was settled out of the invoice that paid for the period (`settled_by_invoice_id`). Every refund of it — by amount or by line — is posted against that payment (`BillingInvoice::refundablePaymentId()`), the same place a plan change's refund of it goes (`InvoiceService::createRefund()`), and under that invoice's refund lock, which the payment's webhook takes too. The credit note is booked against the switch invoice itself. What can be refunded is its own charge lines (`refundableBaseNet()` / `refundableBaseGross()`); the credits it carries against the invoice it was settled out of are not its lines and are never offered. An invoice whose settlement chain leads to no payment is refused with `InvalidRefundTargetException` — the panel shows no refund button for it.
+
 #### `refundOverageUnits($invoice, $usageType, $units, $reason, $reasonText)`
 
 Refund specific overage units. The refund amount is computed from the unit price on the invoice. Wallet units are credited back automatically.
@@ -84,6 +102,7 @@ $refundService->refund($invoice, [
     'reason_text' => 'optional explanation',
     'notify_user' => true,
     'line_items' => null,           // custom credit note line items
+    'line_index' => null,           // refund by line (not together with line_items)
 ]);
 ```
 
@@ -272,6 +291,8 @@ Both dedup keys are stamped onto the credit note's lines **before the row is com
 The admin panel includes a refund modal at `/billing/admin` that calls `RefundInvoiceService::refund()` directly. It supports:
 
 - Full or partial refunds by invoice ID
+- Refunds by line: a select offers every line with something left ("Pro — €29.00 left"); choosing one fills in that remainder, which can be lowered but not exceeded, and the refund goes through `refundLine()`
+- The line is read again when the refund is confirmed: if a colleague refunded part of it meanwhile, the operator is told the new remainder; if all of it, that it is already refunded — also when the other refund lands between the panel's check and the refund's lock (`RefundExceedsLineAmountException`)
 - All reason codes with optional text
 - Optional user notification toggle
 
@@ -283,6 +304,7 @@ The same invoice list also exposes a **Regenerate PDF** action per row. It calls
 |-----------|------|
 | `InvalidRefundTargetException` | Invoice not paid, no Mollie payment ID, or wrong invoice type for method |
 | `RefundExceedsInvoiceAmountException` | Refund amount exceeds remaining refundable balance |
+| `RefundExceedsLineAmountException` | A refund by line exceeds what is left of that line (`remainingNet`, `lineIndex`) |
 | `InvalidArgumentException` | Missing `reason_code`, or `reason_text` required for `Other` |
 
 ## Artisan Command

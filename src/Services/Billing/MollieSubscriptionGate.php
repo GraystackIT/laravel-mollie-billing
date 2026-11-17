@@ -135,6 +135,13 @@ class MollieSubscriptionGate
      */
     public function hasLiveMollieSubscription(Billable $billable): bool
     {
+        // Between the cancel and the create of a replacement (MollieSubscriptionReplacer)
+        // the old id is cancelled and the new one not there yet. The subscription is
+        // live in every sense that matters here: a checkout now would start a second one.
+        if (MollieSubscriptionReplacer::pending($billable)) {
+            return true;
+        }
+
         $snapshot = $this->snapshot($billable);
 
         return $snapshot !== null && in_array($snapshot->status, [
@@ -194,6 +201,12 @@ class MollieSubscriptionGate
             return;
         }
 
+        // Cancelled by a replacement that has not created its successor yet: the id is
+        // the replacer's to swap, and dropping it would announce a lost subscription.
+        if (MollieSubscriptionReplacer::pending($billable)) {
+            return;
+        }
+
         unset($meta['mollie_subscription_id']);
         $billable->forceFill(['subscription_meta' => $meta])->save();
 
@@ -210,6 +223,12 @@ class MollieSubscriptionGate
         // `hasLiveMollieSubscription()` answering false afterwards looks exactly like a
         // billable that never had one.
         event(new MollieSubscriptionReferenceCleared($billable, (string) $subscriptionId, $reason));
+    }
+
+    /** Drop the cached snapshot of a subscription whose state has just changed. */
+    public static function forget(string $subscriptionId): void
+    {
+        Cache::forget(self::cacheKey($subscriptionId));
     }
 
     private static function cacheKey(string $subscriptionId): string

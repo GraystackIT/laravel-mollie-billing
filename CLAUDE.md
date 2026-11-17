@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Before reporting anything as a defect, read `docs/decisions.md`.** It records the behaviour that looks wrong and is not — the enforced invariants, the deliberate choices, and the findings that were investigated and refuted — so a review spends its attention on something new. Add to it whenever a judgement call is made. And treat a finding as a *claim* until it is reproduced: the fix is only believed once its test has also been run against the unfixed file and seen to fail there.
 
+**`docs/flows.md` is the overview of every booking flow** — checkout, trial, coupons, renewal, dunning, plan changes, overage, refunds, the scheduled jobs — as one diagram per flow. Any change to a flow is made there in the same change: a new service, handler, job or event, a changed transition, a new coupon type, a changed order of Mollie call and booking. `tests/Feature/Coverage/FlowDiagramGuardTest.php` enforces that the names are complete and exist; whether a diagram is *right* remains the author's job.
+
 ## Commands
 
 ```bash
@@ -25,6 +27,7 @@ composer browser:assets                                 # rebuild Vite assets fi
 composer browser:gallery                                # screenshots → index.html
 
 composer test:sandbox                                   # real Mollie API, needs MOLLIE_KEY=test_…
+composer test:concurrency                               # two PHP processes against the money-path locks (docs/concurrency-testing.md)
 ```
 
 `composer test:browser` runs past Composer's 300-second process timeout; it dies mid-suite and
@@ -85,6 +88,8 @@ Idempotency has two layers: (1) `reserve()` serializes deliveries that are still
 `MollieCall::send()` also owns the **idempotency key** for the calls that have a meaningful one: `send($request, $key)` sets it on the shared client and clears it in a `finally`, because the SDK clears the key from a *response* middleware that a throw never reaches — and a leaked key means the next mutating request gets this operation's cached response or a 400. Mollie caches a key for **one hour** and rejects a reused key whose parameters differ, so a key must be stable across *retries of one operation* and must move when the amount does: see `RefundInvoiceService` (`invoice-refund:…`) and `ChargeUsageOverageDirectly` (`usage-overage:…`, keyed on the dunning cycle). Note the SDK puts a *random* key on every POST by default, which protects nothing across retries.
 
 `MollieCall::send()` enforces a second invariant at the same door: **every amount is written with its currency's own number of decimals.** Mollie reads the number as written, so a hand-assembled `"10.5"` is a wrong charge rather than a rejected one, and `"500.00"` for a zero-decimal currency like JPY is off by a factor of a hundred in a request the API accepts. Build amounts with `BillingMoney::mollieAmount()` / `InvoiceService::molliePrice()`, never `number_format($cents / 100, 2)` or a `(string)` cast. Pinned by `tests/Feature/Billing/MollieAmountScaleGuardTest.php`.
+
+**Mollie refuses a new `startDate` once it has charged a subscription** (422 "…already charged", measured 17 November 2026; amount, interval, description and metadata are still taken). Every PATCH of the billable's subscription therefore goes through `MollieSubscriptionPatcher::sendUpdate()`, which tries the PATCH and, on exactly that refusal, replaces the subscription (`MollieSubscriptionReplacer`: marker → cancel → create with the new start date, never today or earlier; finished by `RetrySubscriptionReplacementJob`). `mollie_subscription_id` can change while a subscription runs; never send a start date to Mollie past that door. See `docs/flows.md` § 6.1.
 
 A relative mutation (enable *one* addon, move seats by a delta) must not be serialised with a transaction around `update()`. Pass `UpdateSubscription::update()` a **closure** instead: it is resolved on the billable refreshed under the change lock, so the read and the write share one critical section without holding anything across the Mollie calls.
 

@@ -307,9 +307,10 @@ it('computes the marker lifetime from the target interval, not the current one',
         $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon']['valid_until']
     );
 
-    // 2 monthly periods, not 2 yearly ones.
+    // 2 monthly periods, not 2 yearly ones: the day before the third charge, two calendar
+    // months on (the window counts billing periods since 17 November 2026).
     expect($validUntil->toDateString())
-        ->toBe(BillingTime::nowUtc()->addDays(2 * 30 + 1)->toDateString())
+        ->toBe(BillingTime::nowUtc()->addMonthsNoOverflow(2)->subDay()->toDateString())
         ->and($validUntil->lessThan(BillingTime::nowUtc()->addYear()))->toBeTrue();
 });
 

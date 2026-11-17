@@ -704,6 +704,20 @@ class MollieWebhookController extends Controller
             'currency' => $currency,
         ]);
 
+        // The one durable trace such a payment can have — there is no billable whose meta
+        // could carry it. `RefundUnassignedPaymentsJob` returns the money after fourteen
+        // days unless the payment has found its billable by then. It also makes this a
+        // report that is sent once: every later delivery of the payment (the refund's own
+        // webhook among them) finds the row and stays quiet.
+        $trace = BillingProcessedWebhook::query()->firstOrCreate(
+            ['mollie_payment_id' => $paymentId, 'event_signature' => BillingProcessedWebhook::unassignedSignature($paymentId)],
+            ['received_at' => BillingTime::nowUtc()],
+        );
+
+        if (! $trace->wasRecentlyCreated) {
+            return;
+        }
+
         $admins = MollieBilling::notifyAdmin();
         $admins = is_array($admins) ? $admins : iterator_to_array($admins);
         if ($admins !== []) {

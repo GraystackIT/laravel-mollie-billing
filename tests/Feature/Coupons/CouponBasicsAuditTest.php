@@ -143,7 +143,7 @@ it('treats a code as case-insensitive and ignores surrounding whitespace', funct
 
     // And a second coupon cannot be created under the same code in another case.
     expect(fn () => $service->create(['code' => 'Winter26', 'type' => CouponType::Credits, 'credits_payload' => ['tokens' => 5]]))
-        ->toThrow(\Illuminate\Database\QueryException::class);
+        ->toThrow(InvalidArgumentException::class, 'A coupon with the code WINTER26 already exists.');
 });
 
 // ── Limits ──────────────────────────────────────────────────────────────────
@@ -266,6 +266,33 @@ it('leaves running discounts at the value they were granted at when the coupon i
 
     // What the customer was promised, and what Mollie was priced at.
     expect($service->computeMarkerDiscount($billable->fresh(), 6500))->toBe(1300);
+});
+
+it('leaves running discounts at the number of periods they were granted with when the coupon is edited', function (): void {
+    // The value and the window travel with the grant (the marker); the count did not —
+    // it was read off the coupon at every renewal. Cutting `discount_periods` from six
+    // to one in code ended the discount of every customer already holding the code
+    // after their first discounted charge.
+    $service = app(CouponService::class);
+    $billable = couponBasicsPaying();
+
+    $coupon = $service->create([
+        'code' => 'REC6EDIT', 'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage, 'discount_value' => 20, 'discount_periods' => 6,
+    ]);
+    $service->redeem($coupon, $billable, ['orderAmountNet' => 6500, 'interval' => 'monthly', 'discount_amount_net' => 1300]);
+
+    $service->update($coupon->fresh(), ['discount_periods' => 1]);
+
+    expect($service->computeMarkerDiscount($billable->fresh(), 6500))->toBe(1300)
+        ->and($service->redeemRecurringCouponForRenewal($billable->fresh(), 6500, 0))->not->toBeNull()
+        ->and($service->computeMarkerDiscount($billable->fresh(), 6500))->toBe(1300);
+
+    // A customer redeeming it from now on gets the new offer: one period.
+    $other = couponBasicsPaying();
+    $service->redeem($coupon->fresh(), $other, ['orderAmountNet' => 6500, 'interval' => 'monthly', 'discount_amount_net' => 1300]);
+
+    expect($service->computeMarkerDiscount($other->fresh(), 6500))->toBe(0);
 });
 
 it('rejects an edit that would make a redeemed recurring coupon exceed 100%', function (): void {

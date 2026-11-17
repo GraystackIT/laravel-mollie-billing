@@ -121,6 +121,35 @@ it('treats a 404 from Mollie as already cancelled', function (): void {
     expect($b->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('pending_subscription_cancel');
 });
 
+it('treats Mollie\'s 422 for a subscription cancelled before as already cancelled', function (): void {
+    // Measured 17 November 2026: a second cancel is refused with a 422, not answered 404.
+    // A subscription replaced to move its charge date is such a one — any later cancel
+    // aimed at its id (the renewal of an ended subscription, a retry) meets this answer.
+    Notification::fake();
+    \GraystackIT\MollieBilling\MollieBilling::notifyAdminUsing(fn () => [new AnonymousNotifiable]);
+
+    Mollie::shouldReceive('send')
+        ->withArgs(fn ($req) => $req instanceof CancelSubscriptionRequest)
+        ->andThrow(cancelApiException('Error executing API call (422: Unprocessable Entity): The subscription has been cancelled.', 422));
+
+    $b = cancelMarkerBillable([
+        'mollie_customer_id' => 'cst_cancel',
+        'mollie_subscription_id' => 'sub_cancelled_before',
+        'first_attempt_at' => BillingTime::nowUtc()->subMinutes(10)->toIso8601String(),
+    ]);
+
+    (new RetrySubscriptionCancelJob(
+        TestBillable::class,
+        $b->getKey(),
+        'cst_cancel',
+        'sub_cancelled_before',
+        BillingTime::nowUtc()->subMinutes(10)->toIso8601String(),
+    ))->handle();
+
+    expect($b->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('pending_subscription_cancel');
+    Notification::assertNothingSent();
+});
+
 it('rethrows a non-terminal Mollie error so the queue backs off', function (): void {
     Mollie::shouldReceive('send')
         ->withArgs(fn ($req) => $req instanceof CancelSubscriptionRequest)

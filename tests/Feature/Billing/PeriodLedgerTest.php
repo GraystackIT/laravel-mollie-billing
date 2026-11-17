@@ -109,7 +109,22 @@ function ledgerBillable(string $periodStart = '2026-01-01T09:00:00Z'): TestBilla
 
 function deliverLedgerRenewal(TestBillable $billable, string $paymentId, string $paidAt, string $gross): void
 {
-    LedgerFakeWebhookController::$nextPayment = (object) [
+    // A payment object, not a bare stdClass: a renewal that is refunded automatically
+    // (collected after the subscription ended) is asked for its refunds like a real one.
+    $payment = new class extends stdClass
+    {
+        public function refunds(): array
+        {
+            return [];
+        }
+
+        public function chargebacks(): array
+        {
+            return [];
+        }
+    };
+
+    foreach ([
         'id' => $paymentId,
         'status' => 'paid',
         'amount' => (object) ['value' => $gross, 'currency' => 'EUR'],
@@ -120,7 +135,11 @@ function deliverLedgerRenewal(TestBillable $billable, string $paymentId, string 
             'billable_type' => $billable->getMorphClass(),
             'billable_id' => (string) $billable->getKey(),
         ],
-    ];
+    ] as $key => $value) {
+        $payment->{$key} = $value;
+    }
+
+    LedgerFakeWebhookController::$nextPayment = $payment;
 
     test()->postJson(route('billing.webhook'), ['id' => $paymentId])->assertStatus(200);
 }
@@ -387,9 +406,16 @@ it('ends a subscription at the period boundary and stops billing it', function (
         ->and($expired->subscription_plan_code)->toBeNull()
         ->and($expired->hasAccessibleBillingSubscription())->toBeFalse();
 
-    // And no renewal is booked for a subscription that ended: a late delivery is reported,
-    // not treated as a period the customer bought.
+    // And no renewal is kept for a subscription that ended: a late charge is invoiced and
+    // returned in full, not treated as a period the customer bought.
     deliverLedgerRenewal($billable->fresh(), 'tr_ledger_after_end', '2026-03-01T09:00:05Z', '51.60');
+
+    $late = BillingInvoice::query()->where('mollie_payment_id', 'tr_ledger_after_end')->sole();
+    $creditNote = BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->latest('id')->first();
+
+    expect((int) $late->amount_gross)->toBe(5160)
+        ->and($creditNote)->not->toBeNull()
+        ->and((int) $creditNote->amount_gross)->toBe(-5160);
 
     expect($billable->fresh()->subscription_status)->toBe(SubscriptionStatus::Expired)
         ->and($billable->fresh()->subscription_period_starts_at->toIso8601String())

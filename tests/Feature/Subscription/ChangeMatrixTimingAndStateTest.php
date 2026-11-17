@@ -16,7 +16,12 @@ beforeEach(fn () => World::boot());
 dataset('timing discounts', [
     'no discount' => 'none',
     '50 % coupon' => 'pct50',
+    'fixed coupon' => 'fixed',
+    '50 % coupon, last period' => 'pct50-last',
+    'waiver until a date, then ends' => 'waiver-date-end',
+    'waiver until a date, then paid' => 'waiver-date-paid',
     'waiver for N periods' => 'waiver-periods',
+    'waiver with a granted addon' => 'waiver-gift',
 ]);
 
 // ── First and last day ──────────────────────────────────────────────────────
@@ -42,7 +47,15 @@ it('credits the whole paid share for a seat removed on the first day', function 
 
     // The seat was paid 5.00 — 2.50 under the 50 % coupon; under a waiver it is an extra
     // and was paid in full.
-    expect($report['booked'])->toBe([['seats', null, $discount === 'pct50' ? -250 : -500]])
+    // 2.50 under the 50 % coupon (also in its last period: that is what was paid); under
+    // the fixed coupon the 10.00 off 64.00 are spread over the lines, 5.00 × 54/64 = 4.22.
+    $expected = match ($discount) {
+        'pct50', 'pct50-last' => -250,
+        'fixed' => -422,
+        default => -500,
+    };
+
+    expect($report['booked'])->toBe([['seats', null, $expected]])
         ->and($report['booked'])->toBe($report['previewed']);
 
     World::assertNothingOverRefunded($billable);
@@ -220,8 +233,11 @@ it('resets a past-due subscription with a full first period on a plan change', f
         // Moved one period out — Mollie must not retry the failed charge at the new price.
         ->and(World::$heldStartDate)->not->toBeNull();
 
+    // Read before the renewal: a waiver that ends inside the period it opens is used up
+    // by it, and Mollie is then re-priced to the full amount for the one after.
+    $held = World::heldGross();
     $renewal = World::renew($billable);
-    expect((int) $renewal->amount_gross)->toBe(World::heldGross())
+    expect((int) $renewal->amount_gross)->toBe($held)
         ->and(array_column((array) $renewal->line_items, 'kind'))->not->toContain('adjustment');
 })->with('timing discounts');
 

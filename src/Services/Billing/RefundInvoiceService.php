@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
+use GraystackIT\MollieBilling\Exceptions\RefundExceedsLineAmountException;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminRefundFailedNotification;
@@ -55,7 +56,7 @@ class RefundInvoiceService
      * (see {@see performRefund()}); only the admin alert for a failed Mollie call
      * is sent from here, after that transaction has rolled back.
      *
-     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
+     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array, line_index?: ?int}  $request
      *
      * @throws InvalidRefundTargetException        Invoice is not paid or has no Mollie payment.
      * @throws RefundExceedsInvoiceAmountException  Requested amount exceeds remaining refundable balance.
@@ -68,6 +69,11 @@ class RefundInvoiceService
         $walletCredits = $request['wallet_credits'] ?? [];
         $notifyUser = $request['notify_user'] ?? true;
         $lineItems = $request['line_items'] ?? null;
+        $lineIndex = isset($request['line_index']) ? (int) $request['line_index'] : null;
+
+        if ($lineIndex !== null && $lineItems !== null) {
+            throw new \InvalidArgumentException('line_index and line_items cannot be combined: a refund by line builds its own credit line.');
+        }
 
         if ($reasonCode === RefundReasonCode::Other && ($reasonText === null || trim($reasonText) === '')) {
             throw new \InvalidArgumentException('reason_text is required when reason_code is Other.');
@@ -77,8 +83,13 @@ class RefundInvoiceService
             throw new InvalidRefundTargetException('Only paid invoices can be refunded.');
         }
 
-        if (empty($invoice->mollie_payment_id)) {
-            throw new InvalidRefundTargetException('Invoice has no Mollie payment id.');
+        // Its own payment, or — for a settled plan-switch document — the payment its charges
+        // were paid out of. That is where the money is, and where `createRefund()` already
+        // posts a plan change's refund of such a document; the panel offers the refund on
+        // the same condition. Refusing it here left the operator a button that could only
+        // answer with an error.
+        if ($invoice->refundablePaymentId() === null) {
+            throw new InvalidRefundTargetException('Invoice has no Mollie payment to refund against: it collected none, and no invoice it was settled out of did.');
         }
 
         // The admin alert for a failed Mollie refund has to survive the rollback
@@ -89,7 +100,7 @@ class RefundInvoiceService
         $mollieFailure = null;
 
         try {
-            return $this->performRefund($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems, $mollieFailure);
+            return $this->performRefund($invoice, $request, $reasonCode, $reasonText, $walletCredits, $notifyUser, $lineItems, $lineIndex, $mollieFailure);
         } catch (\Throwable $e) {
             if ($mollieFailure !== null) {
                 $this->notifyAdminsOfFailedRefund(
@@ -125,7 +136,7 @@ class RefundInvoiceService
      * invoice has to travel with it — an operator diagnosing the failure needs the refund
      * target, and the alert's own fallback can only guess at it.
      *
-     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array}  $request
+     * @param  array{amount_net?: ?int, wallet_credits?: array<string,int>, reason_code: RefundReasonCode, reason_text?: ?string, notify_user?: bool, line_items?: ?array, line_index?: ?int}  $request
      * @param  array<string,int>  $walletCredits
      * @param  array{billable: Billable, exception: \Throwable, invoice: BillingInvoice}|null  $mollieFailure
      */
@@ -137,13 +148,21 @@ class RefundInvoiceService
         array $walletCredits,
         bool $notifyUser,
         ?array $lineItems,
+        ?int $lineIndex,
         ?array &$mollieFailure,
     ): BillingInvoice {
         // Serialised per invoice with a cache lock rather than a transaction: a double-click
         // or two tabs are the realistic concurrency here, and this keeps them apart without a
         // database transaction spanning the Mollie round trip. Non-blocking on purpose — the
         // loser is told to wait rather than sitting on a worker.
-        $lock = Cache::lock('billing:invoice-refund:'.$invoice->id, 120);
+        //
+        // Keyed on the invoice that holds the payment. For a settled plan-switch document
+        // that is the invoice it was settled out of: the refund moves that payment's money,
+        // and the webhook for that payment — which books refunds it does not recognise —
+        // serialises on that invoice's lock.
+        $lockInvoice = InvoiceService::settlementRoot($invoice) ?? $invoice;
+        $paymentId = (string) $invoice->refundablePaymentId();
+        $lock = Cache::lock('billing:invoice-refund:'.$lockInvoice->id, 120);
 
         if (! $lock->get()) {
             throw new RefundInProgressException($invoice);
@@ -151,11 +170,21 @@ class RefundInvoiceService
 
         try {
             // ── Phase 1: decide, under the row lock, in a transaction of its own ──────────
-            /** @var array{net:int, gross:int, description:string, billable:Billable|null, already_refunded_net:int} $plan */
-            $plan = DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $lineItems): array {
+            /** @var array{net:int, gross:int, description:string, billable:Billable|null, already_refunded_net:int, line_items:?array} $plan */
+            $plan = DB::transaction(function () use ($invoice, $request, $reasonCode, $reasonText, $lineItems, $lineIndex): array {
                 $fresh = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
-                $refundAmountNet = $request['amount_net'] ?? $fresh->remainingRefundableNet();
+                // A refund by line defaults to what is left of that line, not of the invoice.
+                $lineRemaining = null;
+                if ($lineIndex !== null) {
+                    foreach ($this->invoices->refundableLines($fresh) as $line) {
+                        if ($line['index'] === $lineIndex) {
+                            $lineRemaining = $line['remaining_net'];
+                        }
+                    }
+                }
+
+                $refundAmountNet = $request['amount_net'] ?? $lineRemaining ?? $fresh->remainingRefundableNet();
 
                 if ($refundAmountNet <= 0) {
                     throw new \InvalidArgumentException('Refund amount must be positive.');
@@ -165,6 +194,13 @@ class RefundInvoiceService
                     throw new RefundExceedsInvoiceAmountException(
                         "Refund of {$refundAmountNet} exceeds remaining refundable amount {$fresh->remainingRefundableNet()}."
                     );
+                }
+
+                // A refund by line: the credit line is built here, from the row just locked,
+                // so the line's budget it is measured against is the committed one — not
+                // what the operator's screen showed before somebody else refunded.
+                if ($lineIndex !== null) {
+                    $lineItems = [$this->invoices->creditLineFor($fresh, $lineIndex, $refundAmountNet)];
                 }
 
                 // Per-item VAT is the source of truth: the credit note taxes every
@@ -186,6 +222,7 @@ class RefundInvoiceService
                     // What had already been credited back when this attempt was planned —
                     // the idempotency key in Phase 2 is built on it.
                     'already_refunded_net' => (int) $fresh->effectiveRefundedNet(),
+                    'line_items' => $lineItems,
                 ];
             });
 
@@ -203,7 +240,12 @@ class RefundInvoiceService
             // a genuine second refund sees the first one's increment. So Mollie replays
             // the original refund for the former and creates a new one for the latter.
             $idempotencyKey = sprintf(
-                'invoice-refund:%d:%d:%d:%s',
+                // The payment id is in the key because the invoice's row id means nothing to
+                // Mollie: two installations on one Mollie account (staging beside production,
+                // a restored database) both have an invoice 1, and Mollie answers the second
+                // one's refund with 400 "idempotency key used before on a different URL".
+                'invoice-refund:%s:%d:%d:%d:%s',
+                $paymentId,
                 (int) $invoice->getKey(),
                 (int) $plan['gross'],
                 (int) $plan['already_refunded_net'],
@@ -214,7 +256,7 @@ class RefundInvoiceService
                 Mollie::setIdempotencyKey($idempotencyKey);
 
                 $mollieRefundId = $this->callMollieRefund(
-                    $invoice->mollie_payment_id,
+                    $paymentId,
                     $plan['gross'],
                     $plan['description'],
                     InvoiceService::normalizeCurrency($invoice->currency),
@@ -236,7 +278,7 @@ class RefundInvoiceService
             }
 
             // ── Phase 3: book it. The money has moved, so this stays short ───────────────
-            $creditNote = DB::transaction(function () use ($invoice, $plan, $lineItems, $reasonCode, $reasonText, $walletCredits, $mollieRefundId): BillingInvoice {
+            $creditNote = DB::transaction(function () use ($invoice, $plan, $reasonCode, $reasonText, $walletCredits, $mollieRefundId): BillingInvoice {
                 $fresh = BillingInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
 
                 // Snapshot what was effectively refunded BEFORE we persist the new
@@ -252,7 +294,7 @@ class RefundInvoiceService
                 $creditNote = $this->invoices->createCreditNote(
                     $fresh,
                     $plan['net'],
-                    $lineItems,
+                    $plan['line_items'],
                     $reasonText,
                     deferDocument: true,
                 );
@@ -270,7 +312,7 @@ class RefundInvoiceService
                 // refund, which clamps against the same figure) may have credited part of
                 // this invoice. The money is out either way, so the document stands and the
                 // cache column just may not exceed what was charged.
-                $fresh->refunded_net = min((int) $fresh->amount_net, $reconciledBaseNet + $plan['net']);
+                $fresh->refunded_net = min($fresh->refundableBaseNet(), $reconciledBaseNet + $plan['net']);
                 $fresh->save();
 
                 if ($plan['billable'] !== null) {
@@ -390,6 +432,33 @@ class RefundInvoiceService
             'reason_code' => $reason,
             'reason_text' => $reasonText,
             'line_items' => $lineItems,
+        ]);
+    }
+
+    /**
+     * Refund part or all of ONE line of an invoice — the addon that was never used, the
+     * seats booked by mistake.
+     *
+     * The credit note carries one line pointing at that original line
+     * (`parent_line_item_index`), taxed at its rate and inside its remaining VAT. The
+     * amount may not exceed what is left of the line ({@see InvoiceService::refundableLines()}),
+     * which is checked against the row locked for the refund. Discount lines are folded
+     * into the line they reduced, so a line refunds what was actually paid for it.
+     *
+     * Money only: an overage line gives no wallet units back — that is
+     * {@see refundOverageUnits()}.
+     *
+     * @throws InvalidRefundTargetException      the index names no line that can be refunded on its own
+     * @throws RefundExceedsLineAmountException  more than is left of the line
+     */
+    public function refundLine(BillingInvoice $invoice, int $lineIndex, int $amountNet, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
+    {
+        return $this->refund($invoice, [
+            'amount_net' => $amountNet,
+            'line_index' => $lineIndex,
+            'wallet_credits' => [],
+            'reason_code' => $reason,
+            'reason_text' => $reasonText,
         ]);
     }
 

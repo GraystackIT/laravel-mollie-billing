@@ -64,6 +64,7 @@ return [
     'available_addons' => 'Add-ons',
     'addon_price' => '+:currency:price/:interval',
     'addon_seat_price' => '+ :price / seat',
+    'addon_included_seats' => '{1} :count seat included|[2,*] :count seats included',
 
     // Step 3: addons + seats
     'addons_heading' => 'Add-ons',
@@ -93,6 +94,7 @@ return [
     'trial_summary_heading' => ':days-day free trial',
     'trial_summary_body' => 'You have :days days to try the plan before the first payment is charged. You can cancel any time during the trial.',
     'trial_redirect_notice' => 'After confirming you will be redirected to Mollie to authorise your payment method. No charge during the trial — the first payment is taken on :date.',
+    'full_coverage_redirect_notice' => 'After confirming you will be redirected to Mollie to authorise your payment method. Nothing is charged today — your coupon covers the first periods, and the first payment is taken on :date.',
     'confirm_and_pay' => 'Confirm and pay',
     'processing' => 'Processing…',
     'continue' => 'Continue',
@@ -119,6 +121,7 @@ return [
     'coupon_requires_billable' => 'This coupon cannot be applied during checkout.',
     'coupon_requires_trial' => 'This coupon extends a trial, and the selected plan does not offer one.',
     'coupon_not_with_trial' => 'This coupon discounts a first payment, and this plan starts with a free trial — there is no first payment to discount. The code stays valid for a purchase without a trial.',
+    'coupon_ends_before_first_charge' => 'This coupon expires before your free trial ends, so it would not reduce your first payment.',
     'coupon_recurring_conflict' => 'Another recurring coupon is already active on this subscription.',
     'coupon_requires_active_subscription' => 'An active subscription is required to redeem this coupon.',
     'coupon_too_close_to_charge' => 'The next charge is too close to safely apply this coupon. Please try again after the next billing date.',

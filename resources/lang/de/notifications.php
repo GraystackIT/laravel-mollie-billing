@@ -14,6 +14,41 @@ return [
         'body' => 'Deine Testphase ist am :date abgelaufen und es wurde rechtzeitig keine Zahlungsmethode hinterlegt. Du kannst jederzeit ein Abonnement abschließen, um den Zugriff wiederherzustellen — deine bisherige Konfiguration bleibt erhalten.',
         'body_with_mandate' => 'Deine Testphase ist am :date abgelaufen, die erste Zahlung für dein Abonnement ist aber nicht bei uns eingegangen. Bitte prüfe deine Zahlungsmethode und schließe das Abonnement erneut ab, um den Zugriff wiederherzustellen — deine bisherige Konfiguration bleibt erhalten.',
     ],
+    'unwanted_payment_refunded' => [
+        'subject' => 'Ihre Zahlung bei :app wird erstattet',
+        'refund' => 'Der Betrag von :amount wird auf das verwendete Zahlungsmittel zurückerstattet. Je nach Bank kann das einige Tage dauern.',
+        'reasons' => [
+            'default' => 'Wir haben eine Zahlung von Ihnen erhalten, die nicht zugeordnet werden konnte.',
+            'renewal_after_end' => 'Wir haben eine Verlängerung für Ihr Abo abgebucht, obwohl es bereits beendet ist. Das war ein Versehen unsererseits; das Abo wird nicht weiter belastet.',
+            'activation_failed' => 'Ihre Zahlung ist bei uns eingegangen, Ihr Abo konnte jedoch trotz mehrerer Versuche nicht eingerichtet werden.',
+            'change_cancelled' => 'Wir haben die Zahlung für eine Änderung Ihres Abos erhalten, die Sie zwischenzeitlich storniert hatten. Die Änderung wurde nicht durchgeführt.',
+            'subscription_ended' => 'Wir haben die Zahlung für eine Änderung Ihres Abos erhalten, das Abo war zwischenzeitlich jedoch beendet. Die Änderung wurde nicht durchgeführt.',
+        ],
+    ],
+    'scheduled_change_not_applied' => [
+        'subject' => 'Ihre geplante Änderung bei :app wurde nicht durchgeführt',
+        'body' => 'Die von Ihnen geplante Änderung auf :plan konnte nicht durchgeführt werden. Ihr Abo läuft unverändert weiter.',
+        'next' => 'Sie können die Änderung jederzeit erneut vornehmen.',
+        'payment_returned' => 'Eine Zahlung für diese Änderung war bereits unterwegs und ließ sich nicht mehr aufhalten. Wir erstatten sie vollständig, sobald sie eingeht, und bestätigen das gesondert.',
+        'action' => 'Abo verwalten',
+        'reasons' => [
+            'default' => 'Die Änderung ist mit Ihrem Abo in seinem jetzigen Zustand nicht möglich.',
+            'attempts_exhausted' => 'Wir haben es mehrfach versucht; ein technisches Problem hat es jedes Mal verhindert.',
+            'seats_in_use' => 'Es sind mehr Plätze belegt, als der gewählte Plan zulässt. Bitte geben Sie zuerst Plätze frei.',
+            'payment_outstanding' => 'Es ist noch eine Zahlung offen. Bitte begleichen Sie diese zuerst.',
+            'not_available' => 'Der gewählte Plan oder eine seiner Optionen steht für Ihr Abo nicht mehr zur Verfügung.',
+        ],
+    ],
+    'undercollection_charged' => [
+        'subject' => 'Nachbelastung für Ihr Abo bei :app',
+        'charge' => 'Wir ziehen den Differenzbetrag von :amount als gesonderte Zahlung von Ihrem Zahlungsmittel ein.',
+        'invoice' => 'Sie erhalten dafür eine eigene Rechnung.',
+        'reasons' => [
+            'default' => 'Ihre letzte reguläre Zahlung hat nicht alles abgedeckt, was Ihr Abo in diesem Abrechnungszeitraum umfasst hat.',
+            'renewal_created_before_change' => 'Sie haben kurz vor der Verlängerung Ihres Abos Plätze oder ein Addon hinzugebucht. Die Verlängerung war zu diesem Zeitpunkt bereits mit dem bisherigen Betrag vorbereitet und enthielt diese daher nicht.',
+            'plan_change_spanned_renewal' => 'Ihr Planwechsel wurde wirksam, nachdem sich Ihr Abo bereits zum Preis des bisherigen Plans verlängert hatte. Die Verlängerung hat den neuen Plan daher nicht abgedeckt.',
+        ],
+    ],
     'grant_extras_purchase_refunded' => [
         'subject' => 'Dein Kauf bei :app konnte nicht ausgeführt werden',
         'body' => 'Dein Kauf von Extras konnte nicht ausgeführt werden, weil dein Gratiszeitraum inzwischen beendet ist.',
@@ -43,12 +78,14 @@ return [
         'overage_blocked' => 'Weitere :type-Nutzung ist erst in der nächsten Periode oder nach einem Tarifwechsel möglich.',
     ],
     'overage_billing_failed' => [
-        'subject' => 'Dienst pausiert: Mehrverbrauch konnte nicht abgebucht werden',
-        'body' => 'Wir haben dreimal versucht, :amount für deinen Mehrverbrauch abzubuchen, doch die Zahlung ist fehlgeschlagen. Der Dienst ist pausiert, bis du deine Zahlungsmethode aktualisierst.',
+        'subject' => 'Mehrverbrauch konnte nicht abgebucht werden',
+        'body' => 'Wir haben dreimal versucht, :amount für deinen Mehrverbrauch abzubuchen, doch die Zahlung ist fehlgeschlagen.',
+        'will_retry' => 'Wir versuchen es mit deiner nächsten Verlängerung automatisch erneut. Bitte prüfe deine Zahlungsmethode. Solange der Betrag offen ist, kannst du in deinem Abo nichts Neues buchen.',
+        'final' => 'Wir werden diesen Betrag nicht erneut einziehen.',
     ],
     'admin_overage_billing_failed' => [
-        'subject' => '[Admin] Mehrverbrauchsabbuchung für :customer fehlgeschlagen',
-        'body' => 'Nach 3 Versuchen konnte der Mehrverbrauch für :customer (:amount) nicht eingezogen werden. Der Kunde wurde auf past_due gesetzt.',
+        'subject' => '[Admin] Mehrverbrauch für :customer abgeschrieben',
+        'body' => 'Der Mehrverbrauch für :customer (:amount) konnte nicht eingezogen werden – weder im eigenen Mahnlauf noch bei den :attempts Verlängerungen, die es erneut versucht haben. Er wurde abgeschrieben; im Wallet ist nichts mehr offen. Die Buchungssperre ist aufgehoben; ist zusätzlich eine Verlängerung unbezahlt, bleibt das Abo deshalb überfällig.',
     ],
     'country_mismatch_self' => [
         'subject' => 'Wir müssen dein Rechnungsland verifizieren',

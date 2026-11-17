@@ -193,7 +193,10 @@ it('returns the charge to the regular date on an upgrade and defers it again on 
 it('ends the deferral on an interval change the coupon no longer covers', function (): void {
     // A 100 % coupon covers whatever the plan costs at the new interval only up to the
     // amount it was applied against: yearly Basic is 100.00, the coupon is locked to
-    // 10.00, so the yearly charge is owed — from one year on, the reset cadence.
+    // 10.00, so the yearly charge is owed — from one year on, the reset cadence. And that
+    // charge is a year away, long after the code's periods: Mollie holds the full yearly
+    // price (since 17 November 2026 the PATCH judges the code for the day it is collected
+    // on; it used to send 108.00, 10.00 off, for a charge the code no longer covers).
     [$billable, ] = deferralLifecycleCovered();
 
     app(MollieSubscriptionPatcher::class)->updateForIntent(
@@ -205,7 +208,7 @@ it('ends the deferral on an interval change the coupon no longer covers', functi
     $billable->refresh();
     $patch = DeferralLifecycleMollie::last();
 
-    expect(DeferralLifecycleMollie::amount($patch))->toBe('108.00')
+    expect(DeferralLifecycleMollie::amount($patch))->toBe('120.00')
         ->and(DeferralLifecycleMollie::startDate($patch))->toBe(BillingTime::nowUtc()->addYearNoOverflow()->toDateString())
         ->and(ChargeDeferral::until($billable))->toBeNull();
 });

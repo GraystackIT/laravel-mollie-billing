@@ -24,6 +24,25 @@ class BillingProcessedWebhook extends Model
     }
 
     /**
+     * Trace of a paid payment no billable could be found for.
+     *
+     * Not an outcome and not a reservation: it is the only durable record such a payment
+     * can have — there is no billable whose meta could carry it — and what
+     * `RefundUnassignedPaymentsJob` works from. `received_at` is when the payment was
+     * first seen unassigned; `processed_at` stays null until it is booked or refunded.
+     * The `@` keeps it outside the outcome value space, like the pending signature.
+     */
+    public const UNASSIGNED_SUFFIX = ':@unassigned';
+
+    /** Set once an operator has been told that the automatic refund keeps failing. */
+    public const UNASSIGNED_REFUND_FAILED_SUFFIX = ':@unassigned-refund-failed';
+
+    public static function unassignedSignature(string $paymentId): string
+    {
+        return $paymentId.self::UNASSIGNED_SUFFIX;
+    }
+
+    /**
      * Signature of an in-progress reservation. The `@` prefix keeps it outside
      * the value space of {@see outcomeSignature()}: `pending` is itself a valid
      * Mollie payment status, so a plain `:pending` suffix would collide with the

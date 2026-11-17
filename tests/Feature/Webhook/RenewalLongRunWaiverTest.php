@@ -117,3 +117,46 @@ it('waives the plan for exactly N periods of a paying subscription, then charges
 
     Event::assertNotDispatched(PaymentAmountMismatch::class);
 })->with([1, 3]);
+
+/*
+ * Extras bought on the day of the gift: Mollie then charges on the gift's own calendar day,
+ * and the last renewal falls on the day the gift ends — 10 April, for a gift given on
+ * 10 January at 10:00 for 90 days. "A renewal is plan-free when it falls before the gift's
+ * end", and there are no partial days: 10 April is not before 10 April. Mollie creates the
+ * charge early that morning, hours before the time of day the gift was given; compared
+ * instant against instant, that renewal counted as inside the gift and a whole further month
+ * was given away — or not, depending on the hour the operator clicked.
+ */
+it('does not waive the renewal that falls on the day the gift ends', function (string $onExpiry): void {
+    $world = longRunStartGifted('2027-01-10 10:00:00', 90, $onExpiry, '2027-01-10 10:05:00', ['sso'], 2);
+
+    $charges = [];
+
+    foreach (range(1, 4) as $n) {
+        $payment = longRunRenew($world);
+
+        if ($payment === null) {
+            break;
+        }
+
+        $day = substr($payment->createdAt, 0, 10);
+        $waived = $day < '2027-04-10';
+        $invoice = longRunAssertRenewal($world, $payment, $waived ? '17.85' : '52.36');
+        $charges[$day] = longRunWaiverLine($invoice) !== null;
+    }
+
+    if ($onExpiry === 'end') {
+        // 10 February and 10 March, both free of the plan; the subscription ends on 10 April.
+        expect($charges)->toBe(['2027-02-10' => true, '2027-03-10' => true])
+            ->and($world->cancelled)->toBeTrue()
+            ->and($world->billable->getBillingSubscriptionEndsAt()->toDateString())->toBe('2027-04-10');
+
+        return;
+    }
+
+    // 10 April is the first renewal at the full price.
+    expect($charges)->toBe(['2027-02-10' => true, '2027-03-10' => true, '2027-04-10' => false, '2027-05-10' => false])
+        ->and($world->cancelled)->toBeFalse();
+
+    Event::assertNotDispatched(PaymentAmountMismatch::class);
+})->with(['end', 'continue_paid']);

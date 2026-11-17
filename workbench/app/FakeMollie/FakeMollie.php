@@ -147,8 +147,14 @@ class FakeMollie
         // renewals produce distinct, forward-walking `paidAt` anchors. Settling
         // every renewal at `now()` instead made the second one land on the same
         // instant as the first, so the billing period appeared not to advance.
+        //
+        // At 09:00 UTC unless a test asks for another hour (`recurring_charge_time`, "HH:MM"):
+        // real Mollie creates its charges shortly after midnight UTC (measured 00:28), which
+        // is the previous calendar day for a customer west of UTC.
+        [$hour, $minute] = array_map('intval', explode(':', (string) WorkbenchSetting::get('recurring_charge_time', '09:00')) + [1 => 0]);
+
         $scheduled = $subscription->next_payment_date !== null
-            ? \Illuminate\Support\Carbon::parse((string) $subscription->next_payment_date)->setTime(9, 0)
+            ? \Illuminate\Support\Carbon::parse((string) $subscription->next_payment_date, 'UTC')->setTime($hour, $minute)
             : now();
 
         $isYearly = str_contains((string) $subscription->interval, 'year')
@@ -167,11 +173,35 @@ class FakeMollie
         ]);
 
         DB::table('fake_mollie_subscriptions')->where('id', $subscriptionId)->update([
-            'next_payment_date' => ($isYearly ? $scheduled->copy()->addYear() : $scheduled->copy()->addMonth())->toDateString(),
+            'next_payment_date' => self::nextAfter($subscription, $scheduled, $isYearly)->toDateString(),
             'updated_at' => now(),
         ]);
 
         return self::paymentJson(self::payment($payment['id']));
+    }
+
+    /**
+     * Mollie's next date after a charge. Mollie never overflows a month (31 January → 28
+     * February). What it does after a month end is not known before the canary's March 2027
+     * visit, so a test chooses (`cadence_after_month_end`): `drift` counts on from the
+     * charge (28 Feb → 28 Mar, the default), `clamp` from the subscription's start date
+     * (31 Jan, 28 Feb → 31 Mar). A start date the package PATCHed is the start date.
+     */
+    private static function nextAfter(object $subscription, \Illuminate\Support\Carbon $charged, bool $yearly): \Illuminate\Support\Carbon
+    {
+        if (WorkbenchSetting::get('cadence_after_month_end', 'drift') === 'clamp' && $subscription->start_date !== null) {
+            $start = \Illuminate\Support\Carbon::parse((string) $subscription->start_date, 'UTC');
+
+            for ($n = 1; $n < 600; $n++) {
+                $candidate = $yearly ? $start->copy()->addYearsNoOverflow($n) : $start->copy()->addMonthsNoOverflow($n);
+
+                if ($candidate->toDateString() > $charged->toDateString()) {
+                    return $candidate;
+                }
+            }
+        }
+
+        return $yearly ? $charged->copy()->addYearNoOverflow() : $charged->copy()->addMonthNoOverflow();
     }
 
     public static function payment(string $id): array

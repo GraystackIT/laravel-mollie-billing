@@ -8,6 +8,7 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 
 class BillingPolicy
 {
@@ -31,7 +32,71 @@ class BillingPolicy
      */
     public static function isPastDueReset(Billable $billable, bool $planChanged, bool $intervalChanged): bool
     {
-        return $billable->isBillingPastDue() && ($planChanged || $intervalChanged);
+        return $billable->isBillingPastDue()
+            && ($planChanged || $intervalChanged)
+            && ! self::runningPeriodIsPaid($billable);
+    }
+
+    /**
+     * Whether the period that is running right now was paid for.
+     *
+     * The reset's premise is that it was not: the renewal failed, the anchor stayed on
+     * the period that has ended, and the new plan opens a fresh one at full price. A
+     * subscription can be past due without that being true — its renewal was collected
+     * and only a balance charged on top of it was declined
+     * ({@see \GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::failed()}).
+     * Resetting there charged a second full period on top of a paid one and credited
+     * nothing: Starter → Pro across a renewal, the balance declined, back to Starter on
+     * 10 Feb cost 20.00 for a February already paid at 20.00.
+     *
+     * Paid means: the period has not ended, and an invoice that collected money states
+     * a line for it which nobody has taken back. A balance line does not count — it is
+     * what was declined, or a supplement to the renewal that is asked for here — and a
+     * renewal the bank pulled back (a chargeback, also a partial one, as long as it stands)
+     * paid for nothing.
+     */
+    public static function runningPeriodIsPaid(Billable $billable): bool
+    {
+        $start = $billable->getBillingPeriodStartsAt();
+        $end = $billable->nextBillingDate();
+        $now = BillingTime::nowUtc();
+
+        if ($start === null || $end === null || $now->lt($start) || $now->gte($end)) {
+            return false;
+        }
+
+        if ((string) ($billable->getBillingSubscriptionMeta()['payment_failure']['reason'] ?? '') === 'chargeback') {
+            return false;
+        }
+
+        foreach (['plan', 'seats', 'addon', 'addon_seats'] as $kind) {
+            foreach (BillingInvoice::currentPeriodLines($billable, $kind, null) as $candidate) {
+                $invoice = $candidate['invoice'];
+                $line = $invoice->lineItem($candidate['line_index']) ?? [];
+
+                if (($line['undercollection'] ?? false) === true
+                    || empty($invoice->mollie_payment_id)
+                    || $invoice->remainingRefundableNet() <= 0
+                    // Charged back, wholly or in part, and not reversed: the bank took the
+                    // money. Read off the books, not off `payment_failure` — a later
+                    // failure (the declined balance) overwrites that reason.
+                    || app(\GraystackIT\MollieBilling\Services\Webhook\ChargebackHandler::class)
+                        ->hasStandingChargebackBookings((object) ['id' => (string) $invoice->mollie_payment_id])
+                ) {
+                    continue;
+                }
+
+                $lineStart = $line['period_start'] ?? $invoice->period_start;
+
+                if ($lineStart !== null && BillingTime::toUtc($lineStart)->gt($now)) {
+                    continue;
+                }
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

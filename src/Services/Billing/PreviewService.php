@@ -231,6 +231,22 @@ class PreviewService
             $errors[] = ['type' => 'past_due_expansion', 'message' => $e->getMessage()];
         }
 
+        // The same for a subscription that has been cancelled or has expired: the change
+        // is refused, so the preview does not quote a price for it.
+        try {
+            app(ValidateSubscriptionChange::class)->assertSubscriptionStillRuns(
+                $billable,
+                $planChanged || $intervalChanged,
+                $dto->seats !== null,
+                $currentSeats,
+                $newSeats,
+                array_values(array_diff(array_map('strval', array_keys(array_filter($newAddons, fn ($q): bool => (int) $q > 0))), array_keys($currentAddons))),
+                $newInterval,
+            );
+        } catch (\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
+            $errors[] = ['type' => 'subscription_ended', 'message' => $e->getMessage()];
+        }
+
         // The change itself is refused (ValidateSubscriptionChange::assertIntervalChangeAllowed);
         // the preview says so instead of quoting a price for it.
         if ($intervalChanged && app(PlanWaiver::class)->marker($billable) !== null) {
@@ -585,34 +601,9 @@ class PreviewService
                 $newSeats,
                 $currentAddons,
                 $newAddons,
-                $this->buildProrataCouponDiscountLines($resolvedRecurringCoupons),
+                $resolvedRecurringCoupons,
             ),
         ];
-    }
-
-    /**
-     * Build the per-coupon discount lines for the prorata charge ("due now").
-     *
-     * Renders the discount that was actually applied to the prorata charge — already
-     * pre-computed in the loop above as `$entry['prorataDiscount']`. No further scaling
-     * here.
-     *
-     * @param  list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int, prorataDiscount?: int}>  $recurringCoupons
-     * @return list<array{coupon: \GraystackIT\MollieBilling\Models\Coupon, discount: int}>
-     */
-    private function buildProrataCouponDiscountLines(array $recurringCoupons): array
-    {
-        $out = [];
-
-        foreach ($recurringCoupons as $entry) {
-            $proratedDiscount = (int) ($entry['prorataDiscount'] ?? 0);
-
-            if ($proratedDiscount > 0) {
-                $out[] = ['coupon' => $entry['coupon'], 'discount' => $proratedDiscount];
-            }
-        }
-
-        return $out;
     }
 
     /**
@@ -683,27 +674,51 @@ class PreviewService
             }
         }
 
-        // Append coupon discount lines (negative amounts) so the "due now" panel
-        // mirrors the recurring panel and the user sees exactly what each coupon
-        // contributes. VAT rate falls back to the plan-line rate of the new plan.
+        // Append coupon discount lines (negative amounts) — computed exactly as
+        // UpdateSubscription::withCouponDiscountLines() books them: each coupon's rate
+        // against what the change costs (charge lines minus refund lines), in order, never
+        // below zero, at the VAT rate of a charge-direction line.
+        //
+        // This used to take the discount from the legacy aggregate `prorataChargeNet`,
+        // which is only computed for a plan or interval change. A code entered on the
+        // seat or addon form therefore previewed no discount on the amount due now while
+        // the charge that followed carried one — the preview quoted 4.07 for a seat that
+        // was then collected at 3.26.
         $vatRate = 0.0;
+        $fallbackVatRate = 0.0;
         foreach ($lines as $line) {
-            if ($line->kind === 'plan' && $line->vatRate > 0) {
-                $vatRate = (float) $line->vatRate;
-                break;
+            if ($line->vatRate > 0) {
+                if ($line->direction === 'charge' && $vatRate === 0.0) {
+                    $vatRate = (float) $line->vatRate;
+                } elseif ($fallbackVatRate === 0.0) {
+                    $fallbackVatRate = (float) $line->vatRate;
+                }
             }
         }
+        if ($vatRate === 0.0) {
+            $vatRate = $fallbackVatRate;
+        }
+
+        $remainingForCoupons = $totalNet;
 
         foreach ($couponDiscountLines as $entry) {
-            $discountNet = (int) ($entry['discount'] ?? 0);
+            if ($remainingForCoupons <= 0) {
+                break;
+            }
+            $discountNet = min(
+                $this->couponService->computeRecurringDiscount($entry['coupon'], $remainingForCoupons),
+                $remainingForCoupons,
+            );
             if ($discountNet <= 0) {
                 continue;
             }
+            $remainingForCoupons -= $discountNet;
             $vatAmount = (int) round($discountNet * $vatRate / 100);
             $serialized[] = [
                 'kind' => 'coupon',
                 'category' => 'coupon',
                 'direction' => 'charge',
+                'code' => (string) $entry['coupon']->code,
                 'label' => __('billing::portal.coupon_label', ['code' => (string) $entry['coupon']->code]),
                 'amount_net' => -$discountNet,
                 'vat_amount' => -$vatAmount,

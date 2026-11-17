@@ -16,7 +16,8 @@
     $state = $summary['state'] ?? NextChargeSummary::STATE_NONE;
     $fmtDate = fn ($date) => $date === null
         ? null
-        : ($billable !== null ? BillingTime::display($date, $billable) : BillingTime::displayUtc($date))?->translatedFormat('d. M Y');
+        // Charge date, end and "free until" are billing days — see BillingTime::billingDay().
+        : BillingTime::billingDay($date)?->translatedFormat('d. M Y');
     $date = $fmtDate($summary['date'] ?? null);
     $endsAt = $fmtDate($summary['ends_at'] ?? null);
     $freeUntil = $fmtDate($summary['plan_free_until'] ?? null);
@@ -30,7 +31,7 @@
             <flux:text class="mt-1 font-semibold">
                 <span data-next-charge-date>{{ $date ?? '—' }}</span>
                 <span class="text-zinc-400">·</span>
-                <span class="tabular-nums" data-next-charge-gross>{{ BillingMoney::format($summary['gross']) }}</span>
+                <span class="tabular-nums" data-next-charge-gross>{{ BillingMoney::format($summary['total_gross'] ?? $summary['gross']) }}</span>
             </flux:text>
         @elseif ($state === NextChargeSummary::STATE_FREE)
             <flux:text class="mt-1 font-semibold text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.next_charge.free') }}</flux:text>
@@ -75,9 +76,17 @@
                 <dt class="text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.next_charge.vat', ['rate' => rtrim(rtrim(number_format((float) $summary['vat_rate'], 1, '.', ''), '0'), '.')]) }}</dt>
                 <dd class="tabular-nums">{{ BillingMoney::format($summary['vat']) }}</dd>
             </div>
+            @if (! empty($summary['overage_debt']))
+                {{-- Collected with this renewal, as a payment of its own; gross, because its
+                     VAT was fixed when the charge was first made. --}}
+                <div class="flex justify-between gap-4 text-red-600 dark:text-red-400" data-next-charge-debt>
+                    <dt>{{ __('billing::portal.next_charge.overage_debt') }}</dt>
+                    <dd class="tabular-nums">{{ BillingMoney::format($summary['overage_debt']['gross']) }}</dd>
+                </div>
+            @endif
             <div class="flex justify-between gap-4 font-semibold">
                 <dt>{{ __('billing::portal.next_charge.total') }}</dt>
-                <dd class="tabular-nums">{{ BillingMoney::format($summary['gross']) }}</dd>
+                <dd class="tabular-nums" data-next-charge-total>{{ BillingMoney::format($summary['total_gross'] ?? $summary['gross']) }}</dd>
             </div>
         </dl>
 

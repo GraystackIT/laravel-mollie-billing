@@ -76,7 +76,12 @@ class WalletPlanChangeAdjuster
 
         $boundariesExplicit = $oldPeriodStart !== null;
         $periodStart = $oldPeriodStart ?? $billable->getBillingPeriodStartsAt();
-        $periodEnd = $oldPeriodEnd ?? $this->derivePeriodEnd($periodStart, $oldInterval);
+        $periodEnd = $oldPeriodEnd ?? $this->derivePeriodEnd(
+            $periodStart,
+            $oldInterval,
+            // The billable's own period ends on its anchor day (BillingAnchor).
+            $boundariesExplicit ? null : \GraystackIT\MollieBilling\Support\BillingAnchor::day($billable),
+        );
 
         $prorationUsable = $this->prorationIsUsable(
             $billable,
@@ -450,15 +455,17 @@ class WalletPlanChangeAdjuster
     /**
      * End of the period being left: start + the *old* interval.
      */
-    private function derivePeriodEnd(?CarbonInterface $periodStart, string $oldInterval): ?CarbonInterface
+    private function derivePeriodEnd(?CarbonInterface $periodStart, string $oldInterval, ?int $anchorDay = null): ?CarbonInterface
     {
         if ($periodStart === null) {
             return null;
         }
 
-        return strtolower($oldInterval) === SubscriptionInterval::Yearly->value
-            ? BillingTime::addInterval($periodStart, 'yearly')
-            : BillingTime::addInterval($periodStart, 'monthly');
+        return \GraystackIT\MollieBilling\Support\BillingAnchor::next(
+            $periodStart,
+            strtolower($oldInterval) === SubscriptionInterval::Yearly->value ? 'yearly' : 'monthly',
+            $anchorDay,
+        );
     }
 
     /**

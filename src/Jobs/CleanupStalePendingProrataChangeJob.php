@@ -37,6 +37,19 @@ use GraystackIT\MollieBilling\Support\MollieCall;
  * - Mollie unreachable past the hard limit → clear the pending state and alert, since
  *   the outcome cannot be established.
  *
+ * Two further loose ends are tied up on the same pass, for billables with or without a
+ * pending change:
+ *
+ * - An `orphaned_prorata_payment` recorded with reason `lookup_failed` — a withdrawn
+ *   change whose payment could not be cancelled because Mollie could not be asked. Asked
+ *   again here: cancelled if Mollie still allows it, forgotten if it is dead, marked
+ *   `not_cancelable` if it is under way. A payment that settles is returned by the webhook
+ *   in any case; cancelling it spares the customer the debit and the refund.
+ * - A `prorata_charge_in_creation` note older than CHARGE_IN_CREATION_LIMIT_HOURS: a
+ *   payment whose creation went unanswered and that no attempt has taken over since. The
+ *   payment is cancelled where possible and the note dropped, so a late settlement is
+ *   returned rather than carrying out a change nobody has asked for again in two days.
+ *
  * Scheduled daily by the service provider.
  */
 class CleanupStalePendingProrataChangeJob implements ShouldQueue
@@ -56,6 +69,9 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
      * immediately, regardless of age.
      */
     private const HARD_LIMIT_DAYS = 7;
+
+    /** Past one nightly retry of a scheduled change, with a day to spare. */
+    public const CHARGE_IN_CREATION_LIMIT_HOURS = 48;
 
     public int $tries = 1;
 
@@ -90,6 +106,9 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             ->whereNotNull('subscription_meta')
             ->chunkById(200, function ($billables) use ($threshold): void {
                 foreach ($billables as $billable) {
+                    $this->retryCancelOfWithdrawnPayment($billable);
+                    $this->expireChargeInCreation($billable);
+
                     $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
 
                     if (empty($pending)) {
@@ -114,6 +133,97 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                     $this->processBillable($billable);
                 }
             });
+    }
+
+    /**
+     * Ask Mollie again about the payment of a withdrawn change it could not be asked about.
+     */
+    private function retryCancelOfWithdrawnPayment($billable): void
+    {
+        $orphan = $billable->getBillingSubscriptionMeta()['orphaned_prorata_payment'] ?? null;
+
+        if (! is_array($orphan) || ($orphan['reason'] ?? null) !== 'lookup_failed' || empty($orphan['payment_id'])) {
+            return;
+        }
+
+        $paymentId = (string) $orphan['payment_id'];
+
+        try {
+            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
+            $status = (string) ($payment->status ?? '');
+            $cancelled = false;
+
+            if (! in_array($status, ['paid', 'authorized', 'failed', 'canceled', 'expired'], true) && ($payment->isCancelable ?? false) === true) {
+                MollieCall::send(new \Mollie\Api\Http\Requests\CancelPaymentRequest($paymentId));
+                $cancelled = true;
+            }
+        } catch (\Throwable $e) {
+            Log::warning('CleanupStalePendingProrataChangeJob: Mollie still unreachable for the payment of a withdrawn change', [
+                'billable_id' => $billable->getKey(),
+                'payment_id' => $paymentId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId, $status, $cancelled): ?array {
+            if ((string) ($meta['orphaned_prorata_payment']['payment_id'] ?? '') !== $paymentId) {
+                return null;
+            }
+
+            if ($cancelled || in_array($status, ['failed', 'canceled', 'expired'], true)) {
+                // Nothing will arrive.
+                unset($meta['orphaned_prorata_payment']);
+            } elseif (! in_array($status, ['paid', 'authorized'], true)) {
+                // Under way and past stopping: it is returned when it settles.
+                $meta['orphaned_prorata_payment']['reason'] = 'not_cancelable';
+            } else {
+                $meta['orphaned_prorata_payment']['reason'] = 'already_settled';
+            }
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Drop a note of a payment whose creation went unanswered and that nothing has taken
+     * over within CHARGE_IN_CREATION_LIMIT_HOURS — cancelling the payment where Mollie
+     * still allows it.
+     */
+    private function expireChargeInCreation($billable): void
+    {
+        $key = \GraystackIT\MollieBilling\Services\Billing\InvoiceService::CHARGE_IN_CREATION_KEY;
+        $marker = $billable->getBillingSubscriptionMeta()[$key] ?? null;
+
+        if (! is_array($marker)) {
+            return;
+        }
+
+        $createdAt = isset($marker['created_at']) ? BillingTime::toUtc((string) $marker['created_at']) : null;
+
+        if ($createdAt !== null && $createdAt->greaterThan(BillingTime::nowUtc()->subHours(self::CHARGE_IN_CREATION_LIMIT_HOURS))) {
+            return;
+        }
+
+        $invoices = app(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class);
+
+        try {
+            $payment = $invoices->resolveChargeInCreation($billable, $marker);
+
+            if ($payment !== null && ($payment->isCancelable ?? false) === true) {
+                MollieCall::send(new \Mollie\Api\Http\Requests\CancelPaymentRequest((string) $payment->id));
+            }
+        } catch (\Throwable $e) {
+            // Not a reason to keep the note: with nothing claiming it, a payment that
+            // settles is returned by the webhook.
+            Log::warning('CleanupStalePendingProrataChangeJob: could not ask Mollie about an unanswered prorata payment — dropping its note, it is returned if it settles', [
+                'billable_id' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $invoices->forgetChargeInCreation($billable, (string) ($marker['token'] ?? ''));
     }
 
     private function processBillable($billable): void

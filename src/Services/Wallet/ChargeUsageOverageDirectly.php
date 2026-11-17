@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Wallet;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
@@ -62,6 +63,44 @@ class ChargeUsageOverageDirectly
      */
     public const PAYMENT_UNKNOWN_KEY = 'payment_unknown_at';
 
+    /**
+     * How many later renewals try to collect a debt again after its dunning cycle gave up.
+     *
+     * A cycle that spent its budget used to be the end: the operators were mailed, and the
+     * next renewal's reset wrote the debt off. That is work for a person in a case a
+     * machine can settle — most failed overage payments are a limit or an expired card,
+     * and both are fixed by the customer within a period or two. So the debt stands (see
+     * {@see deferFailedCycle()}) and each of the next renewals starts one fresh cycle for
+     * it. Only when this many of them have failed as well is it written off for good, and
+     * only then is anybody told.
+     */
+    public const MAX_RENEWAL_RECOLLECTIONS = 3;
+
+    /** `subscription_meta` key counting the renewal re-collections of the standing debt. */
+    public const RECOLLECTIONS_KEY = 'usage_overage_recollections';
+
+    /**
+     * Days a debt rests after a cycle gave up before a renewal may try again.
+     *
+     * The sweep charges the night before a renewal, so a cycle that fails does so hours
+     * before that renewal arrives — and trying again the next morning is a fourth attempt
+     * on a payment method that has just refused three. With this the renewal of the same
+     * boundary stands down and the next one, a period later, collects.
+     */
+    public const RECOLLECT_AFTER_DAYS = 3;
+
+    /**
+     * Since when the subscription is past due **because of a standing overage debt**.
+     *
+     * Deliberately not `past_due_since`: that key is the clock of a failed *renewal*, and
+     * `past_due_max_days` after it the subscription is cancelled. A customer whose
+     * renewals are paid and who owes a few units of overage is locked (no new bookings)
+     * but not on that clock — the debt has its own end, {@see MAX_RENEWAL_RECOLLECTIONS}.
+     * If a renewal fails as well, `past_due_since` is set by the renewal handler as for
+     * anybody else and the ordinary dunning runs beside this.
+     */
+    public const PAST_DUE_KEY = 'overage_past_due_since';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -91,7 +130,367 @@ class ChargeUsageOverageDirectly
             return UsageOverageChargeResult::nothingToCharge();
         }
 
+        // A debt left standing by a failed cycle is collected again from here — the
+        // renewal and the last sweep before a subscription ends both arrive through this
+        // method — but not before it has rested: see RECOLLECT_AFTER_DAYS.
+        if ($this->deferredDebtLines($billable) !== []) {
+            // While it rests nothing is charged at all: there is one slot, the debt is in
+            // it, and new overage on the wallets is carried by the reset until then.
+            return $this->recollect($billable, includeStandingDebt: $this->deferredDebtIsDue($billable));
+        }
+
         return $this->chargeFromWallets($billable);
+    }
+
+    // ── A debt whose dunning cycle gave up ────────────────────────────────────
+
+    /**
+     * An operator asks for the standing debt to be collected now.
+     *
+     * One more cycle, exactly like the one a renewal starts, without waiting out
+     * {@see RECOLLECT_AFTER_DAYS} — somebody has just spoken to the customer. It **counts**
+     * as one of the {@see MAX_RENEWAL_RECOLLECTIONS} attempts: every cycle is up to three
+     * payments against the same mandate, and an attempt that did not count would let the
+     * button dun without end. Asked again while that cycle's payment is on its way,
+     * nothing happens (the in-flight guard), and the idempotency key of the charge is
+     * the cycle's, so a double click cannot become two payments either.
+     *
+     * @return 'started'|'in_flight'|'nothing'
+     */
+    public function collectStandingDebtNow(Billable $billable): string
+    {
+        if ($this->anotherChargeIsInFlight($billable)) {
+            return 'in_flight';
+        }
+
+        if ($this->deferredDebtLines($billable) === []) {
+            return 'nothing';
+        }
+
+        $result = $this->recollect($billable, includeStandingDebt: true);
+
+        return $result->outcome === UsageOverageChargeOutcome::Charged ? 'started' : 'nothing';
+    }
+
+    /**
+     * The lines of a debt that is standing after a failed cycle, or [] when there is none.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function deferredDebtLines(Billable $billable): array
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (($meta['usage_overage_status'] ?? null) !== self::STATUS_FAILED) {
+            return [];
+        }
+
+        // Only lines that have left the wallet. A `failed` snapshot written before debts
+        // were deferred still has its units ON the wallet (its lines settle it), and those
+        // are found there by the ordinary wallet pass — counting them here as well would
+        // charge them twice.
+        return array_values(array_filter(
+            (array) ($meta[self::META_KEY]['line_items'] ?? []),
+            static fn ($line): bool => is_array($line)
+                && ($line['settles_wallet'] ?? true) === false
+                && (int) ($line['total_net'] ?? 0) > 0,
+        ));
+    }
+
+    /**
+     * The standing debt as the customer would be charged for it: net and gross, or null.
+     *
+     * @return array{net:int, gross:int, currency:string}|null
+     */
+    public function deferredDebtAmount(Billable $billable): ?array
+    {
+        if ($this->deferredDebtLines($billable) === []) {
+            return null;
+        }
+
+        $snapshot = (array) ($billable->getBillingSubscriptionMeta()[self::META_KEY] ?? []);
+
+        return [
+            'net' => (int) ($snapshot['amount_net'] ?? 0),
+            'gross' => (int) ($snapshot['amount_gross'] ?? 0),
+            'currency' => (string) ($snapshot['currency'] ?? config('mollie-billing.currency', 'EUR')),
+        ];
+    }
+
+    /** Whether the standing debt has rested long enough for another attempt. */
+    public function deferredDebtIsDue(Billable $billable, ?\Carbon\CarbonInterface $at = null): bool
+    {
+        if ($this->deferredDebtLines($billable) === []) {
+            return false;
+        }
+
+        // `$at`: asked for a moment to come — "will the renewal on that day collect it?"
+        $at = $at !== null ? BillingTime::toUtc($at) : BillingTime::nowUtc();
+
+        $failedAt = $billable->getBillingSubscriptionMeta()[self::META_KEY]['failed_at'] ?? null;
+
+        if (! is_string($failedAt) || $failedAt === '') {
+            return true;
+        }
+
+        try {
+            return BillingTime::toUtc($failedAt)->addDays(self::RECOLLECT_AFTER_DAYS)->lessThanOrEqualTo($at);
+        } catch (\Throwable) {
+            return true;
+        }
+    }
+
+    /**
+     * A dunning cycle has given up: decide what becomes of the debt.
+     *
+     * While renewals still have attempts left, the debt **stands** — as a receivable in
+     * the snapshot, and off the wallet. Off the wallet, because a negative balance is
+     * netted against the next period's quota by the reset that preserves it, which would
+     * have the customer pay in units for something we go on to collect in money; the
+     * units are credited back here and the lines are marked `settles_wallet: false`, so
+     * the payment that finally settles credits nothing a second time.
+     *
+     * Once {@see MAX_RENEWAL_RECOLLECTIONS} renewals have tried, it is written off for
+     * good: the snapshot goes, `OverageWrittenOff` records what was given up, and the
+     * caller tells the operators.
+     *
+     * Only call this for a cycle that is over at Mollie — every payment of it failed,
+     * expired or was cancelled. A payment that could still settle must keep its slot.
+     *
+     * @return 'deferred'|'written_off'|'none'
+     */
+    public function deferFailedCycle(Billable $billable): string
+    {
+        if (! $billable instanceof Model) {
+            return 'none';
+        }
+
+        $outcome = 'none';
+        $creditBack = [];
+        $writtenOff = null;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use (&$outcome, &$creditBack, &$writtenOff): ?array {
+            $snapshot = (array) ($meta[self::META_KEY] ?? []);
+            $lines = array_values(array_filter((array) ($snapshot['line_items'] ?? []), 'is_array'));
+
+            if ($snapshot === [] || $lines === []) {
+                // Nothing recorded to carry: the marker alone must not linger.
+                unset($meta['usage_overage_status'], $meta['usage_overage_attempts'], $meta[self::COUNTED_PAYMENTS_KEY]);
+                $outcome = 'none';
+
+                return $meta;
+            }
+
+            // Units still on the wallet as debt leave it, once.
+            foreach ($lines as $index => $line) {
+                if (($line['settles_wallet'] ?? true) === false) {
+                    continue;
+                }
+
+                $creditBack[] = ['type' => (string) ($line['type'] ?? $line['code'] ?? ''), 'quantity' => (int) ($line['quantity'] ?? 0)];
+                $lines[$index]['settles_wallet'] = false;
+            }
+
+            $recollections = (int) ($meta[self::RECOLLECTIONS_KEY] ?? 0);
+
+            if ($recollections >= self::MAX_RENEWAL_RECOLLECTIONS) {
+                $writtenOff = [
+                    'line_items' => $lines,
+                    'amount_net' => (int) ($snapshot['amount_net'] ?? 0),
+                    'amount_gross' => (int) ($snapshot['amount_gross'] ?? 0),
+                    'attempts' => $recollections,
+                ];
+
+                unset(
+                    $meta[self::META_KEY],
+                    $meta['usage_overage_status'],
+                    $meta['usage_overage_attempts'],
+                    $meta[self::COUNTED_PAYMENTS_KEY],
+                    $meta[self::RECOLLECTIONS_KEY],
+                );
+                $outcome = 'written_off';
+
+                return $meta;
+            }
+
+            $snapshot['line_items'] = $lines;
+            $snapshot['failed_at'] = BillingTime::nowUtc()->toIso8601String();
+            unset($snapshot[self::PAYMENT_UNKNOWN_KEY]);
+
+            $meta[self::META_KEY] = $snapshot;
+            $meta['usage_overage_status'] = self::STATUS_FAILED;
+            $outcome = 'deferred';
+
+            return $meta;
+        });
+
+        // After the commit: the wallet has its own lock and its own transaction.
+        foreach ($creditBack as $credit) {
+            if ($credit['type'] !== '' && $credit['quantity'] > 0) {
+                app(WalletUsageService::class)->credit($billable, $credit['type'], $credit['quantity'], WalletUsageService::DEBT_DEFERRED_REASON);
+            }
+        }
+
+        if ($writtenOff !== null) {
+            event(new \GraystackIT\MollieBilling\Events\OverageWrittenOff(
+                $billable,
+                $writtenOff['line_items'],
+                $writtenOff['amount_net'],
+                $writtenOff['amount_gross'],
+                $writtenOff['attempts'],
+            ));
+        }
+
+        // A debt that stands locks the subscription; one that is gone unlocks it.
+        match ($outcome) {
+            'deferred' => $this->markPastDueForDebt($billable),
+            default => $this->releasePastDueForDebt($billable),
+        };
+
+        return $outcome;
+    }
+
+    /**
+     * THE answer to "may this subscription leave past due now?".
+     *
+     * Every path that ends a dunning episode — a paid renewal, a paid plan change, a
+     * reversed chargeback, an operator's trial extension — asks here what status to
+     * write instead of writing `Active` (or `Trial`) itself. While an overage debt
+     * stands the answer is PastDue, whatever else has just been settled: the lock ends
+     * in exactly one place, {@see releasePastDueForDebt()}.
+     *
+     * @param  array<string, mixed>  $meta  the subscription meta about to be written
+     */
+    public static function statusAfterRecovery(array $meta, SubscriptionStatus $recovered): SubscriptionStatus
+    {
+        return isset($meta[self::PAST_DUE_KEY]) ? SubscriptionStatus::PastDue : $recovered;
+    }
+
+    /** Past due, and an overage debt is (one of) the reason(s). */
+    public static function isPastDueForOverageDebt(Billable $billable): bool
+    {
+        return $billable->isBillingPastDue()
+            && isset($billable->getBillingSubscriptionMeta()[self::PAST_DUE_KEY]);
+    }
+
+    /**
+     * Past due for the overage debt and for nothing else: every renewal is paid.
+     *
+     * This is the state in which the things written for a *failed renewal* are wrong —
+     * the period is paid, so there is nothing to "reset", no charge to bring forward and
+     * no cancellation clock to run.
+     */
+    public static function isPastDueForOverageDebtOnly(Billable $billable): bool
+    {
+        if (! self::isPastDueForOverageDebt($billable)) {
+            return false;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        return empty($meta['past_due_since']) && empty($meta['payment_failure']);
+    }
+
+    /**
+     * The dunning cycle of an overage charge gave up: the subscription is past due until
+     * the debt is paid or written off. The customer books nothing new in that state
+     * (`ValidateSubscriptionChange::assertNoPastDueExpansion()`).
+     *
+     * Only a subscription that is still running can be dunned — the same guard
+     * ChargebackHandler and SubscriptionPaymentHandler::failed() apply. Forcing PastDue
+     * onto a Cancelled row inside its grace period would undo the cancellation.
+     */
+    public function markPastDueForDebt(Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        \Illuminate\Support\Facades\DB::transaction(function () use ($billable): void {
+            $locked = $billable->newQuery()
+                ->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
+                ->whereKey($billable->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if (! $locked instanceof Model) {
+                return;
+            }
+
+            $status = $locked->getBillingSubscriptionStatus();
+
+            if (! in_array($status, [SubscriptionStatus::Active, SubscriptionStatus::Trial, SubscriptionStatus::PastDue], true)) {
+                return;
+            }
+
+            $meta = (array) ($locked->subscription_meta ?? []);
+            $meta[self::PAST_DUE_KEY] ??= BillingTime::nowUtc()->toIso8601String();
+
+            $write = ['subscription_status' => SubscriptionStatus::PastDue, 'subscription_meta' => $meta];
+            $locked->forceFill($write)->save();
+            $billable->forceFill($write)->syncOriginal();
+        });
+    }
+
+    /**
+     * The overage debt is gone — paid, or written off. The lock it caused goes with it;
+     * the subscription returns to Active unless a renewal is unpaid as well, in which
+     * case the ordinary renewal dunning keeps it past due and decides what happens next.
+     *
+     * A no-op for a subscription that is not past due for an overage debt.
+     */
+    public function releasePastDueForDebt(Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        \Illuminate\Support\Facades\DB::transaction(function () use ($billable): void {
+            $locked = $billable->newQuery()
+                ->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
+                ->whereKey($billable->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if (! $locked instanceof Model) {
+                return;
+            }
+
+            $meta = (array) ($locked->subscription_meta ?? []);
+
+            if (! isset($meta[self::PAST_DUE_KEY])) {
+                return;
+            }
+
+            unset($meta[self::PAST_DUE_KEY]);
+            $write = ['subscription_meta' => $meta];
+
+            if ($locked->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue
+                && empty($meta['past_due_since'])
+                && empty($meta['payment_failure'])
+            ) {
+                $write['subscription_status'] = SubscriptionStatus::Active;
+            }
+
+            $locked->forceFill($write)->save();
+            $billable->forceFill($write)->syncOriginal();
+        });
+    }
+
+    /**
+     * One more cycle for the standing debt, together with whatever the wallets owe now.
+     */
+    private function recollect(Billable $billable, bool $includeStandingDebt = true): UsageOverageChargeResult
+    {
+        if (! $includeStandingDebt) {
+            // Not yet: leave the snapshot untouched, there is one slot and the debt is in it.
+            return UsageOverageChargeResult::nothingToCharge();
+        }
+
+        return $this->charge($billable, [
+            ...$this->deferredDebtLines($billable),
+            ...$this->buildLineItemsFromWallets($billable),
+        ]);
     }
 
     /**
@@ -122,7 +521,9 @@ class ChargeUsageOverageDirectly
             return UsageOverageChargeResult::nothingToCharge();
         }
 
-        return $this->charge($billable, $lineItems);
+        // A debt standing from a failed cycle lives in the same single slot. Charging the
+        // plan change on its own would overwrite it — so it travels with this charge.
+        return $this->charge($billable, [...$this->deferredDebtLines($billable), ...$lineItems]);
     }
 
     /**
@@ -541,8 +942,16 @@ class ChargeUsageOverageDirectly
             // Within one cycle the inheritance is exactly right — p1 → p2 → p3 must keep
             // accumulating — so this only fires when the previous cycle is finished.
             if (($meta['usage_overage_status'] ?? null) === self::STATUS_FAILED) {
+                // …and it is one of the renewals' attempts at a debt that was left standing.
+                if ($existing !== []) {
+                    $meta[self::RECOLLECTIONS_KEY] = (int) ($meta[self::RECOLLECTIONS_KEY] ?? 0) + 1;
+                }
+
                 $existing = [];
                 unset($meta[self::COUNTED_PAYMENTS_KEY], $meta['usage_overage_attempts']);
+            } elseif (($meta['usage_overage_status'] ?? null) === null) {
+                // A debt nobody has tried to collect before starts with a full budget.
+                unset($meta[self::RECOLLECTIONS_KEY]);
             }
 
             $meta[self::META_KEY] = [

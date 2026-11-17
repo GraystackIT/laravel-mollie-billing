@@ -86,6 +86,13 @@ class StartGrantExtrasPurchase
      */
     public function handle(Billable $billable, array $addonCodes, int $seats): ?string
     {
+        // Past due — for an unpaid renewal or for an overage debt — books nothing new.
+        // `eligible()` already keeps the screens from offering this; the service is also
+        // what an app calls directly.
+        if ($billable->isBillingPastDue()) {
+            throw \GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException::booking($billable);
+        }
+
         $key = $billable instanceof Model ? (string) $billable->getKey() : spl_object_hash($billable);
         $lock = Cache::lock('billing:checkout-submit:'.$key, 60);
 

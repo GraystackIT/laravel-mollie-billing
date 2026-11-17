@@ -32,6 +32,7 @@ dataset('plan change discounts', [
     'waiver until a date, then paid' => 'waiver-date-paid',
     'waiver for N periods' => 'waiver-periods',
     'waiver with a granted addon' => 'waiver-gift',
+    '100 % coupon' => 'full100',
 ]);
 
 dataset('plan changes', [
@@ -99,6 +100,13 @@ it('leaves plan, Mollie and the books untouched when the prorata payment is decl
         ->and(World::$heldValue)->toBe($heldBefore)
         ->and(World::$refunds)->toBe([])
         ->and(World::netCollected($billable))->toBe($collectedBefore);
+
+    if (World::recurringNet($billable) === 0) {
+        // Fully covered: the charge is deferred past the discount, there is no renewal.
+        expect(ChargeDeferral::until($billable))->not->toBeNull();
+
+        return;
+    }
 
     // The renewal that follows is the old configuration's, to the cent.
     $renewal = World::renew($billable);
