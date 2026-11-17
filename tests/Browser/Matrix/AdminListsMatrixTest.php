@@ -91,20 +91,39 @@ class AdminListsMatrixTest extends BrowserTestCase
                 'subscription_status' => 3,
             ];
 
+            // A billable without a plan shows a dash and sorts as the NULL it is: first.
+            $sortedCopy = static function (array $values): array {
+                usort($values, static fn (string $a, string $b): int => strcasecmp($a === '—' ? '' : $a, $b === '—' ? '' : $b));
+
+                return $values;
+            };
+
+            // Wait for the order instead of a fixed pause: on a loaded machine the
+            // second click's round trip once outlasted 900 ms and the "descending"
+            // read still showed the ascending rows. A wrong order still fails — the
+            // wait times out and the assertion names what the screen shows.
+            $waitFor = static function (Browser $browser, callable $condition): void {
+                try {
+                    $browser->waitUsing(10, 100, $condition);
+                } catch (\Facebook\WebDriver\Exception\TimeoutException) {
+                    // fall through to the assertion for a readable diff
+                }
+            };
+
             foreach ($columns as $column => $index) {
                 $this->clickWire($browser, '[wire\\:click="sort(\''.$column.'\')"]');
-                $browser->pause(900);
+                $waitFor($browser, function () use ($browser, $index, $sortedCopy): bool {
+                    $values = $this->column($browser, $index);
+
+                    return $values === $sortedCopy($values);
+                });
                 $ascending = $this->column($browser, $index);
 
                 $this->clickWire($browser, '[wire\\:click="sort(\''.$column.'\')"]');
-                $browser->pause(900);
+                $waitFor($browser, fn (): bool => $this->column($browser, $index) === array_reverse($ascending));
                 $descending = $this->column($browser, $index);
 
-                // A billable without a plan shows a dash and sorts as the NULL it is: first.
-                $sorted = $ascending;
-                usort($sorted, static fn (string $a, string $b): int => strcasecmp($a === '—' ? '' : $a, $b === '—' ? '' : $b));
-
-                expect($ascending)->toBe($sorted, 'ascending by '.$column)
+                expect($ascending)->toBe($sortedCopy($ascending), 'ascending by '.$column)
                     ->and($descending)->toBe(array_reverse($ascending), 'descending by '.$column);
             }
 

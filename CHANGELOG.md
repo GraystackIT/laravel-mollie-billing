@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Tests
+
+- Browser, feature and unit coverage for `show_unit_price`: gross for a consumer, net under
+  reverse charge, German number format, no unit price without the flag, for a quantity of 1
+  or without a usage type; `billing:check-config` error and warning; `BillingMoney::formatUnitPrice()`
+  (including a zero-decimal currency) and `BillingMoney::count()`.
+- The products-page fix of 0.6.0 (pack size in the active locale, usage type by its display
+  name) is pinned by a browser test that fails against the 0.5.1 page.
+- The admin billables list's sort check waits for the new order instead of a fixed pause; on
+  a loaded machine the second click's round trip outlasted it once.
+
 ## [0.6.0] - 2026-11-17
 
 ### Added

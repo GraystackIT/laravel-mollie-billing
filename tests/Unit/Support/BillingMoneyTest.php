@@ -149,3 +149,44 @@ it('collapses to the plain sum at a zero rate', function (): void {
     expect(BillingMoney::grossWithLineVat([550, 550], 0.0))->toBe(1100)
         ->and(BillingMoney::grossWithLineVat([], 19.0))->toBe(0);
 });
+
+it('prices one unit of a pack with two decimals more than the currency', function (): void {
+    config()->set('mollie-billing.currency', 'EUR');
+    config()->set('mollie-billing.currency_symbol', '€');
+
+    app()->setLocale('en');
+    // 1000 SMS for €99.13: a unit costs less than the smallest coin.
+    expect(BillingMoney::formatUnitPrice(9913, 1000))->toBe('€0.0991')
+        ->and(BillingMoney::formatUnitPrice(8330, 1000))->toBe('€0.0833')
+        // A pack worth more than a unit per coin keeps its four decimals too.
+        ->and(BillingMoney::formatUnitPrice(123456, 10))->toBe('€123.4560')
+        // A non-positive quantity divides by one instead of by zero.
+        ->and(BillingMoney::formatUnitPrice(500, 0))->toBe('€5.0000');
+
+    app()->setLocale('de');
+    expect(BillingMoney::formatUnitPrice(9913, 1000))->toBe('€0,0991')
+        ->and(BillingMoney::formatUnitPrice(123456, 10))->toBe('€123,4560');
+
+    app()->setLocale('en');
+});
+
+it('adds two decimals to the currency’s own, not to two', function (): void {
+    config()->set('mollie-billing.currency', 'JPY');
+    config()->set('mollie-billing.currency_symbol', '');
+    app()->setLocale('en');
+
+    // ¥500 for 3 units: JPY has no decimals, so the unit price gets two.
+    expect(BillingMoney::formatUnitPrice(500, 3))->toBe('JPY 166.67');
+});
+
+it('writes a whole count in the active locale', function (): void {
+    app()->setLocale('en');
+    expect(BillingMoney::count(1000))->toBe('1,000')
+        ->and(BillingMoney::count(500))->toBe('500');
+
+    app()->setLocale('de');
+    expect(BillingMoney::count(1000))->toBe('1.000')
+        ->and(BillingMoney::count(1250000))->toBe('1.250.000');
+
+    app()->setLocale('en');
+});
