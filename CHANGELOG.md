@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Documentation
+
+- `docs/usage-billing.md`: the hand-over after a charge deferral still described a recurring
+  coupon's window as `N × 30 + 2` days. Since 0.5.0 it counts billing periods; the old date
+  applies only to markers written before that release.
+
 ## [0.5.0] - 2026-11-17
 
 ### Behaviour changes an application must know
