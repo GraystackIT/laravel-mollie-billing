@@ -145,6 +145,8 @@ return [
     'scheduled_change_on' => 'Wird am :date umgestellt',
     'per_month' => '/Monat',
     'per_year' => '/Jahr',
+    'per_month_standalone' => 'pro Monat',
+    'per_year_standalone' => 'pro Jahr',
     'save_yearly' => ':percent% sparen',
     'save_up_to' => 'Bis zu :percent% sparen',
     'seats_included_count' => ':count Platz inkl.|:count Plätze inkl.',
@@ -298,6 +300,8 @@ return [
     'seats_warning_below_used' => 'Aktuell sind :used Plätze belegt. Eine Reduzierung darunter kann den Zugang für einige Mitglieder einschränken.',
     'prices_excl_vat' => 'Preise exkl. USt.',
     'prices_incl_vat' => 'Preise inkl. USt.',
+    'price_excl_vat' => 'exkl. USt.',
+    'price_incl_vat' => 'inkl. USt.',
     'seats_flash' => [
         'too_many' => 'Das sind mehr Plätze, als wir in einer Änderung verarbeiten können (Maximum :max). Für größere Teams sprechen Sie uns bitte an.',
         'synced' => 'Plätze aktualisiert.',

@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+
+### Added
+
+- Domestic business customers with a VAT number see both net and VAT-inclusive prices
+  when choosing plans, addons, seats and usage allowances. The net price is emphasized;
+  each amount carries its own VAT label. Applies to the portal and checkout without
+  changing tax calculations or charges.
+
+### Changed
+
+- Standalone billing intervals on the seats page and checkout addon selection use
+  "per month" / "per year" ("pro Monat" / "pro Jahr" in German).
+
+### Fixed
+
+- The domestic B2B seat summary applies the displayed coupon's VAT to its VAT-inclusive
+  total and rounds VAT on the seat line total, keeping the net and inclusive prices consistent.
+
 ## [0.6.1] - 2026-11-17
 
 ### Tests

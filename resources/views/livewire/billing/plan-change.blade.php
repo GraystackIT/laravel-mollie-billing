@@ -947,6 +947,7 @@ new class extends Component {
             'pendingPlanChange' => $pendingPlanChange,
             'planChangeFailed' => $planChangeFailed,
             'reverseCharge' => $reverseCharge,
+            'showNetAndGross' => \GraystackIT\MollieBilling\Support\BillingPriceDisplay::forBillable($billable),
             'displayCountry' => $displayCountry,
             // Gates both savings badges in the plan selector: the "save up to X%"
             // on the yearly toggle and the per-card percentage.
@@ -1257,7 +1258,7 @@ new class extends Component {
                                 @if ($isFree)
                                     {{ __('billing::portal.free') }}
                                 @else
-                                    {{ BillingMoney::format($price) }}
+                                    <x-mollie-billing::price-details :net="$netPrice" align="start" :show-both="$showNetAndGross">{{ BillingMoney::format($price) }}</x-mollie-billing::price-details>
                                 @endif
                             </span>
                             @unless ($isFree)
@@ -1267,7 +1268,7 @@ new class extends Component {
                         @if ($showYearlySavings && $savings > 0)
                             <flux:badge size="sm" color="lime" icon="arrow-trending-down" class="mt-2 mb-2">{{ __('billing::portal.save_yearly', ['percent' => round($savings)]) }}</flux:badge>
                         @endif
-                        @unless ($isFree)
+                        @unless ($isFree || $showNetAndGross)
                             <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
                         @endunless
                     </div>
@@ -1288,6 +1289,7 @@ new class extends Component {
                             $quotaRows[] = [
                                 'label' => trans_choice('billing::portal.seats_included_count', $seats, ['count' => number_format($seats)]),
                                 'unit' => __('billing::portal.seat_unit'),
+                                'extra_net' => $seatPriceNet,
                                 'extra' => $seatPrice !== null && $seatPrice > 0 ? $seatPrice : null,
                                 'extra_title' => $seatPrice !== null && $seatPrice > 0
                                     ? __('billing::portal.seat_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($seatPrice)])
@@ -1302,6 +1304,7 @@ new class extends Component {
                             $quotaRows[] = [
                                 'label' => __('billing::portal.usage_included_count', ['count' => number_format($included), 'type' => $usageLabel]),
                                 'unit' => $usageLabel,
+                                'extra_net' => $overageNet,
                                 'extra' => $overageDisplay !== null && $overageDisplay > 0 ? $overageDisplay : null,
                                 'extra_title' => $overageDisplay !== null && $overageDisplay > 0
                                     ? __('billing::portal.usage_overage_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($overageDisplay), 'type' => $usageLabel])
@@ -1318,7 +1321,7 @@ new class extends Component {
                                     <div class="flex items-baseline justify-between gap-3 text-zinc-600 dark:text-zinc-300">
                                         <span>{{ $row['label'] }}</span>
                                         @if ($row['extra'] !== null)
-                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($row['extra']), 'unit' => $row['unit']]) }}</span>
+                                            <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="{{ $row['extra_title'] }}"><x-mollie-billing::price-details :net="$row['extra_net']" :show-both="$showNetAndGross" :net-label="__('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($row['extra_net']), 'unit' => $row['unit']])">{{ __('billing::portal.quota_extra_price', ['currency' => $currencySymbol, 'price' => BillingMoney::numberFromMinor($row['extra']), 'unit' => $row['unit']]) }}</x-mollie-billing::price-details></span>
                                         @endif
                                     </div>
                                 @endforeach

@@ -14,13 +14,15 @@
             @endforeach
         </flux:radio.group>
     @endif
-    <flux:text class="text-xs mb-4">
-        @if ($showsNet)
-            {{ __('billing::checkout.prices_net') }}
-        @else
-            {{ __('billing::checkout.prices_incl_vat', ['rate' => rtrim(rtrim(number_format($vatRate, 1), '0'), '.'), 'country' => $this->countries()[$billing_country] ?? $billing_country]) }}
-        @endif
-    </flux:text>
+    @unless ($showNetAndGross)
+        <flux:text class="text-xs mb-4">
+            @if ($showsNet)
+                {{ __('billing::checkout.prices_net') }}
+            @else
+                {{ __('billing::checkout.prices_incl_vat', ['rate' => rtrim(rtrim(number_format($vatRate, 1), '0'), '.'), 'country' => $this->countries()[$billing_country] ?? $billing_country]) }}
+            @endif
+        </flux:text>
+    @endunless
 </div>
 
 @php
@@ -66,7 +68,7 @@
 
                 <div class="flex flex-wrap items-baseline gap-x-3 gap-y-2">
                     <div class="flex items-baseline gap-1.5">
-                        <span class="text-5xl font-bold tracking-tight tabular-nums">{{ $money($displayCents) }}</span>
+                        <span class="text-5xl font-bold tracking-tight tabular-nums"><x-mollie-billing::price-details :net="$netCents" align="start" :show-both="$showNetAndGross">{{ $money($displayCents) }}</x-mollie-billing::price-details></span>
                         <span class="text-base text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
                     </div>
                     @if ($trialDays > 0)
@@ -84,7 +86,7 @@
                     <div class="{{ $quotaRowClass }}">
                         <span>{{ trans_choice('billing::checkout.seats_included', $plan['included_seats'] ?? 0, ['count' => $plan['included_seats'] ?? 0]) }}</span>
                         @if ($seatPriceNet !== null && $seatPriceNet > 0)
-                            <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet))]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet)), 'unit' => __('billing::checkout.seat_unit')]) }}</span>
+                            <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet))]) }}"><x-mollie-billing::price-details :net="$seatPriceNet" :show-both="$showNetAndGross" :net-label="__('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($seatPriceNet), 'unit' => __('billing::checkout.seat_unit')])">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet)), 'unit' => __('billing::checkout.seat_unit')]) }}</x-mollie-billing::price-details></span>
                         @endif
                     </div>
 
@@ -92,7 +94,7 @@
                         <div class="{{ $quotaRowClass }}">
                             <span>{{ __('billing::checkout.usage_included', ['count' => number_format($usage['included']), 'type' => $usage['label']]) }}</span>
                             @if (($usage['overage_price'] ?? 0) > 0)
-                                <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'type' => $usage['label']]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'unit' => $usage['label']]) }}</span>
+                                <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'type' => $usage['label']]) }}"><x-mollie-billing::price-details :net="$usage['overage_price']" :show-both="$showNetAndGross" :net-label="__('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($usage['overage_price']), 'unit' => $usage['label']])">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'unit' => $usage['label']]) }}</x-mollie-billing::price-details></span>
                             @endif
                         </div>
                     @endforeach
@@ -127,7 +129,7 @@
                             @foreach ($planAddons as $addon)
                                 <div class="flex items-baseline justify-between gap-3 text-sm">
                                     <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($addon['description'])) title="{{ $addon['description'] }}" @endif>{{ $addon['name'] }}</span>
-                                    <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}@if (($addon['seat_price_net'] ?? null) !== null && $addon['seat_price_net'] > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($priceFormatter($addon['seat_price_net']))]) }}@endif</span>
+                                    <span @class(['shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400', 'flex flex-col items-end gap-1' => $showNetAndGross])><x-mollie-billing::price-details :net="$addon['price_net']" :show-both="$showNetAndGross" :net-label="__('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($addon['price_net']), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')])">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</x-mollie-billing::price-details>@if (($addon['seat_price_net'] ?? null) !== null && $addon['seat_price_net'] > 0) <x-mollie-billing::price-details :net="$addon['seat_price_net']" :show-both="$showNetAndGross" :net-label="__('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($addon['seat_price_net'])])">{{ __('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($priceFormatter($addon['seat_price_net']))]) }}</x-mollie-billing::price-details>@endif</span>
                                 </div>
                             @endforeach
                         </div>
@@ -186,7 +188,7 @@
                     {{-- Price + trial badge --}}
                     <div>
                         <div class="flex items-baseline gap-1">
-                            <span class="text-3xl font-bold tracking-tight tabular-nums" dusk="plan-price-{{ $code }}">{{ $money($displayCents) }}</span>
+                            <span class="text-3xl font-bold tracking-tight tabular-nums" dusk="plan-price-{{ $code }}"><x-mollie-billing::price-details :net="$netCents" align="start" :show-both="$showNetAndGross">{{ $money($displayCents) }}</x-mollie-billing::price-details></span>
                             <span class="text-sm text-zinc-500 dark:text-zinc-400">/{{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}</span>
                         </div>
                         @php($trialDays = $this->trialApplies($code, $interval) ? $this->planTrialDays($code, $interval) : 0)
@@ -206,7 +208,7 @@
                         <div class="{{ $quotaRowClass }}">
                             <span>{{ trans_choice('billing::checkout.seats_included', $plan['included_seats'] ?? 0, ['count' => $plan['included_seats'] ?? 0]) }}</span>
                             @if ($seatPriceNet !== null && $seatPriceNet > 0)
-                                <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet))]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet)), 'unit' => __('billing::checkout.seat_unit')]) }}</span>
+                                <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.extra_seat_cost', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet))]) }}"><x-mollie-billing::price-details :net="$seatPriceNet" :show-both="$showNetAndGross" :net-label="__('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($seatPriceNet), 'unit' => __('billing::checkout.seat_unit')])">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($seatPriceNet)), 'unit' => __('billing::checkout.seat_unit')]) }}</x-mollie-billing::price-details></span>
                             @endif
                         </div>
 
@@ -214,7 +216,7 @@
                             <div class="{{ $quotaRowClass }}">
                                 <span>{{ __('billing::checkout.usage_included', ['count' => number_format($usage['included']), 'type' => $usage['label']]) }}</span>
                                 @if (($usage['overage_price'] ?? 0) > 0)
-                                    <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'type' => $usage['label']]) }}">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'unit' => $usage['label']]) }}</span>
+                                    <span class="{{ $quotaPriceClass }}" title="{{ __('billing::checkout.usage_overage', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'type' => $usage['label']]) }}"><x-mollie-billing::price-details :net="$usage['overage_price']" :show-both="$showNetAndGross" :net-label="__('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($usage['overage_price']), 'unit' => $usage['label']])">{{ __('billing::checkout.quota_extra_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($usage['overage_price'])), 'unit' => $usage['label']]) }}</x-mollie-billing::price-details></span>
                                 @endif
                             </div>
                         @endforeach
@@ -245,7 +247,7 @@
                         @foreach ($planAddons as $addon)
                             <div class="flex items-baseline justify-between gap-3 text-sm">
                                 <span class="text-zinc-600 dark:text-zinc-300" @if (! empty($addon['description'])) title="{{ $addon['description'] }}" @endif>{{ $addon['name'] }}</span>
-                                <span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}@if (($addon['seat_price_net'] ?? null) !== null && $addon['seat_price_net'] > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($priceFormatter($addon['seat_price_net']))]) }}@endif</span>
+                                <span @class(['shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400', 'flex flex-col items-end gap-1' => $showNetAndGross])><x-mollie-billing::price-details :net="$addon['price_net']" :show-both="$showNetAndGross" :net-label="__('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($addon['price_net']), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')])">{{ __('billing::checkout.addon_price', ['currency' => $currencySymbol, 'price' => $moneyNumber($priceFormatter($addon['price_net'])), 'interval' => $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year')]) }}</x-mollie-billing::price-details>@if (($addon['seat_price_net'] ?? null) !== null && $addon['seat_price_net'] > 0) <x-mollie-billing::price-details :net="$addon['seat_price_net']" :show-both="$showNetAndGross" :net-label="__('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($addon['seat_price_net'])])">{{ __('billing::checkout.addon_seat_price', ['price' => $currencySymbol.$moneyNumber($priceFormatter($addon['seat_price_net']))]) }}</x-mollie-billing::price-details>@endif</span>
                             </div>
                         @endforeach
                     </div>

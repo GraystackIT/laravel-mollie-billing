@@ -145,6 +145,8 @@ return [
     'scheduled_change_on' => 'Switches on :date',
     'per_month' => '/month',
     'per_year' => '/year',
+    'per_month_standalone' => 'per month',
+    'per_year_standalone' => 'per year',
     'save_yearly' => 'Save :percent%',
     'save_up_to' => 'Save up to :percent%',
     'seats_included_count' => ':count seat included|:count seats included',
@@ -298,6 +300,8 @@ return [
     'seats_warning_below_used' => 'You currently have :used seats in use. Reducing below this number may restrict access for some members.',
     'prices_excl_vat' => 'Prices excl. VAT.',
     'prices_incl_vat' => 'Prices incl. VAT.',
+    'price_excl_vat' => 'excl. VAT',
+    'price_incl_vat' => 'incl. VAT',
     'seats_flash' => [
         'too_many' => 'That is more seats than we can process in one change (maximum :max). Please contact us for a larger team.',
         'synced' => 'Seats updated.',

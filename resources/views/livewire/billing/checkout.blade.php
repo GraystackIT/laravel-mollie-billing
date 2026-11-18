@@ -968,7 +968,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         ];
     }
 
-    /** @return array{vatRate:float,showsNet:bool,priceFormatter:\Closure,money:\Closure,currencySymbol:string,totals:array,customStepCount:int,customStepViews:array} */
+    /** @return array{vatRate:float,showsNet:bool,showNetAndGross:bool,priceFormatter:\Closure,money:\Closure,currencySymbol:string,totals:array,customStepCount:int,customStepViews:array} */
     public function with(VatCalculationService $vat): array
     {
         $rate = $this->vatRate($vat);
@@ -978,6 +978,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return [
             'vatRate' => $rate,
             'showsNet' => $showsNet,
+            'showNetAndGross' => \GraystackIT\MollieBilling\Support\BillingPriceDisplay::showsNetAndGross($this->taxCountry(), $this->taxVatNumber()),
             'priceFormatter' => function (int $netCents) use ($rate, $showsNet): int {
                 if ($showsNet || $netCents === 0) {
                     return $netCents;

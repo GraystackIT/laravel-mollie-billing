@@ -466,6 +466,8 @@ new class extends Component {
                 'code' => $code,
                 'name' => $catalog->addonName($code) ?? $code,
                 'price' => $displayPrice,
+                'netPrice' => $netPrice,
+                'seatPriceNet' => $seatPriceNet,
                 'seatPrice' => $seatPriceNet !== null && $seatPriceNet > 0 ? $displaySeatPrice : null,
                 'includedSeats' => $catalog->addonIncludedSeats($code),
                 // Base AND per-seat price — an addon with base 0 and a seat price is not free.
@@ -489,6 +491,7 @@ new class extends Component {
             'catalog' => $catalog,
             'hasPendingPlanChange' => $billable?->hasPendingBillingPlanChange() ?? false,
             'reverseCharge' => $reverseCharge,
+            'showNetAndGross' => \GraystackIT\MollieBilling\Support\BillingPriceDisplay::forBillable($billable),
         ];
     }
 };
@@ -595,13 +598,15 @@ new class extends Component {
                             @endif
                             <div class="text-right">
                                 <div class="flex items-baseline gap-1">
-                                    <span class="text-2xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($addon['price']) }}</span>
+                                    <span class="text-2xl font-bold tabular-nums tracking-tight"><x-mollie-billing::price-details :net="$addon['netPrice']" :show-both="$showNetAndGross">{{ BillingMoney::format($addon['price']) }}</x-mollie-billing::price-details></span>
                                     <span class="text-sm text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }}</span>
                                 </div>
                                 @if ($addon['seatPrice'] !== null)
-                                    <flux:text class="text-xs tabular-nums text-zinc-500">{{ __('billing::portal.addon_price_per_seat', ['price' => BillingMoney::format($addon['seatPrice'])]) }}@if ($addon['includedSeats'] > 0) · {{ trans_choice('billing::portal.addon_included_seats', $addon['includedSeats'], ['count' => $addon['includedSeats']]) }}@endif</flux:text>
+                                    <flux:text class="text-xs tabular-nums text-zinc-500"><x-mollie-billing::price-details :net="$addon['seatPriceNet']" :show-both="$showNetAndGross" :net-label="__('billing::portal.addon_price_per_seat', ['price' => BillingMoney::format($addon['seatPriceNet'])])">{{ __('billing::portal.addon_price_per_seat', ['price' => BillingMoney::format($addon['seatPrice'])]) }}</x-mollie-billing::price-details>@if ($addon['includedSeats'] > 0) · {{ trans_choice('billing::portal.addon_included_seats', $addon['includedSeats'], ['count' => $addon['includedSeats']]) }}@endif</flux:text>
                                 @endif
-                                <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
+                                @unless ($showNetAndGross)
+                                    <flux:text class="text-xs text-zinc-400">{{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
+                                @endunless
                             </div>
 
                             @php

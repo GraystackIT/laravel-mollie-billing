@@ -438,14 +438,40 @@ new class extends Component {
             }
         }
 
+        $showNetAndGross = \GraystackIT\MollieBilling\Support\BillingPriceDisplay::forBillable($billable);
+        $extraCostNet = $extraSeats * (int) $seatPriceNet;
+        $extraCost = $seatPrice !== null ? $extraSeats * $seatPrice : null;
+        $totalCostNet = max(0, $extraCostNet - ($this->couponDiscountNet ?? 0));
+        $totalCost = max(0, ($extraCost ?? 0) - ($this->couponDiscountNet ?? 0));
+
+        if ($showNetAndGross) {
+            try {
+                $vat = app(VatCalculationService::class);
+                $country = (string) $billable->getBillingCountry();
+                // These are display lines: round VAT on the seat total and the coupon
+                // separately, just as billing does. A net discount cannot be subtracted
+                // from a gross price when both are shown together.
+                $extraCost = (int) $vat->calculate($country, $extraCostNet, $billable)['gross'];
+                $discountGross = (int) $vat->calculate($country, min($extraCostNet, $this->couponDiscountNet ?? 0), $billable)['gross'];
+                $totalCost = max(0, $extraCost - $discountGross);
+            } catch (\Throwable) {
+                // Keep the existing display fallback if the country cannot be priced.
+            }
+        }
+
         return [
             'billable' => $billable,
             'includedSeats' => $includedSeats,
             'seatPrice' => $seatPrice,
+            'seatPriceNet' => $seatPriceNet,
+            'effectiveSeatPriceNet' => $seatPriceNet !== null ? $seatPriceNet + $addonSeatPriceNet : null,
             'effectiveSeatPrice' => $effectiveSeatPrice,
             'usedSeats' => $usedSeats,
             'extraSeats' => $extraSeats,
-            'extraCost' => $seatPrice !== null ? $extraSeats * $seatPrice : null,
+            'extraCost' => $extraCost,
+            'extraCostNet' => $extraCostNet,
+            'totalCost' => $totalCost,
+            'totalCostNet' => $totalCostNet,
             'interval' => $interval,
             'currencySymbol' => $currencySymbol,
             // Seats management is only meaningful when the active plan sells
@@ -458,6 +484,7 @@ new class extends Component {
             // recurring price.
             'dueNowGross' => $this->dueNow($billable),
             'reverseCharge' => $reverseCharge,
+            'showNetAndGross' => $showNetAndGross,
         ];
     }
 };
@@ -607,12 +634,12 @@ new class extends Component {
                         </div>
                     </div>
                     <div class="mt-3">
-                        <span class="text-3xl font-bold tabular-nums tracking-tight">{{ BillingMoney::format($seatPrice) }}</span>
+                        <span class="text-3xl font-bold tabular-nums tracking-tight"><x-mollie-billing::price-details :net="$seatPriceNet" align="start" :show-both="$showNetAndGross">{{ BillingMoney::format($seatPrice) }}</x-mollie-billing::price-details></span>
                     </div>
                     @if ($effectiveSeatPrice !== null)
-                        <flux:text class="mt-1 text-xs tabular-nums text-zinc-500">{{ __('billing::portal.seat_price_with_addons', ['price' => BillingMoney::format($effectiveSeatPrice)]) }}</flux:text>
+                        <flux:text class="mt-1 text-xs tabular-nums text-zinc-500"><x-mollie-billing::price-details :net="$effectiveSeatPriceNet" :show-both="$showNetAndGross" :net-label="__('billing::portal.seat_price_with_addons', ['price' => BillingMoney::format($effectiveSeatPriceNet)])">{{ __('billing::portal.seat_price_with_addons', ['price' => BillingMoney::format($effectiveSeatPrice)]) }}</x-mollie-billing::price-details></flux:text>
                     @endif
-                    <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
+                    <flux:text class="mt-1 text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month_standalone') : __('billing::portal.per_year_standalone') }}@unless ($showNetAndGross) · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}@endunless</flux:text>
                 </flux:card>
             @endif
         </div>
@@ -667,9 +694,9 @@ new class extends Component {
                                     <div class="flex items-center justify-between text-sm">
                                         <span class="text-zinc-600 dark:text-zinc-300">
                                             {{ $extraSeats }} {{ __('billing::portal.seats_extra') }}
-                                            <span class="text-zinc-400">&times; {{ BillingMoney::format($seatPrice) }}</span>
+                                            <span class="text-zinc-400">&times; <x-mollie-billing::price-details :net="$seatPriceNet" align="start" :show-both="$showNetAndGross">{{ BillingMoney::format($seatPrice) }}</x-mollie-billing::price-details></span>
                                         </span>
-                                        <span dusk="seats-extra-cost" class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200">{{ BillingMoney::format($extraCost) }}</span>
+                                        <span dusk="seats-extra-cost" class="tabular-nums font-medium text-zinc-700 dark:text-zinc-200"><x-mollie-billing::price-details :net="$extraCostNet" :show-both="$showNetAndGross">{{ BillingMoney::format($extraCost) }}</x-mollie-billing::price-details></span>
                                     </div>
                                 @endif
                                 @if (($couponDiscountNet ?? 0) > 0)
@@ -681,7 +708,7 @@ new class extends Component {
                                 <flux:separator class="my-1!" />
                                 <div class="flex items-center justify-between">
                                     <span class="font-medium text-zinc-700 dark:text-zinc-200">{{ __('billing::portal.seats_total_cost') }}</span>
-                                    <span dusk="seats-total" class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white">{{ BillingMoney::format(max(0, ($extraCost ?? 0) - ($couponDiscountNet ?? 0))) }}</span>
+                                    <span dusk="seats-total" class="text-lg font-bold tabular-nums text-zinc-900 dark:text-white"><x-mollie-billing::price-details :net="$totalCostNet" :show-both="$showNetAndGross">{{ BillingMoney::format($totalCost) }}</x-mollie-billing::price-details></span>
                                 </div>
                                 @if ($dueNowGross !== 0)
                                     <div class="flex items-center justify-between text-sm">
@@ -689,7 +716,7 @@ new class extends Component {
                                         <span dusk="{{ $dueNowGross > 0 ? 'seats-due-now' : 'seats-credit' }}" class="tabular-nums font-medium {{ $dueNowGross > 0 ? 'text-zinc-800 dark:text-zinc-100' : 'text-emerald-600 dark:text-emerald-400' }}">{{ BillingMoney::format(abs($dueNowGross)) }}</span>
                                     </div>
                                 @endif
-                                <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month') : __('billing::portal.per_year') }} · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}</flux:text>
+                                <flux:text class="text-xs text-zinc-400">{{ $interval === 'monthly' ? __('billing::portal.per_month_standalone') : __('billing::portal.per_year_standalone') }}@unless ($showNetAndGross) · {{ $reverseCharge ? __('billing::portal.prices_excl_vat') : __('billing::portal.prices_incl_vat') }}@endunless</flux:text>
 
                                 <flux:separator class="my-3!" />
 
