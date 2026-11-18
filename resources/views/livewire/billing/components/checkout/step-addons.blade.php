@@ -25,8 +25,13 @@
                                     @endif
                                 </div>
                             </div>
-                            <div class="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
-                                {{ $addonPrice }}@if ($addonSeatPrice !== null && $addonSeatPrice > 0) {{ __('billing::checkout.addon_seat_price', ['price' => $money($priceFormatter((int) $addonSeatPrice))]) }}@if ((int) ($addon['included_seats'] ?? 0) > 0) ({{ trans_choice('billing::checkout.addon_included_seats', (int) $addon['included_seats'], ['count' => (int) $addon['included_seats']]) }})@endif @endif / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
+                            <div @class(['text-sm tabular-nums text-zinc-600 dark:text-zinc-400', 'flex flex-col items-end gap-1' => $showNetAndGross])>
+                                <x-mollie-billing::price-details :net="(int) ($addon['intervals'][$interval]['price_net'] ?? 0)" :show-both="$showNetAndGross">{{ $addonPrice }}</x-mollie-billing::price-details>@if ($addonSeatPrice !== null && $addonSeatPrice > 0) <x-mollie-billing::price-details :net="(int) $addonSeatPrice" :show-both="$showNetAndGross" :net-label="__('billing::checkout.addon_seat_price', ['price' => $money((int) $addonSeatPrice)])">{{ __('billing::checkout.addon_seat_price', ['price' => $money($priceFormatter((int) $addonSeatPrice))]) }}</x-mollie-billing::price-details>@if ((int) ($addon['included_seats'] ?? 0) > 0) ({{ trans_choice('billing::checkout.addon_included_seats', (int) $addon['included_seats'], ['count' => (int) $addon['included_seats']]) }})@endif @endif
+                                @if ($showNetAndGross)
+                                    <span>{{ $interval === 'monthly' ? __('billing::portal.per_month_standalone') : __('billing::portal.per_year_standalone') }}</span>
+                                @else
+                                    / {{ $interval === 'monthly' ? __('billing::checkout.per_month') : __('billing::checkout.per_year') }}
+                                @endif
                             </div>
                         </label>
                     @endif
@@ -45,7 +50,7 @@
                     </flux:text>
                     <flux:text class="text-sm">
                         {{ __('billing::checkout.extra_seat_price') }}
-                        <strong class="font-semibold text-zinc-900 dark:text-white">{{ $money($priceFormatter((int) $seatPrice)) }}</strong>
+                        <strong class="font-semibold text-zinc-900 dark:text-white"><x-mollie-billing::price-details :net="(int) $seatPrice" :show-both="$showNetAndGross">{{ $money($priceFormatter((int) $seatPrice)) }}</x-mollie-billing::price-details></strong>
                     </flux:text>
                 </div>
                 <div class="flex shrink-0 items-center gap-2">
@@ -56,13 +61,15 @@
         </section>
     @endif
 
-    <flux:text class="text-xs text-center">
-        @if ($showsNet)
-            {{ __('billing::checkout.prices_net') }}
-        @else
-            {{ __('billing::checkout.prices_incl_vat', ['rate' => rtrim(rtrim(number_format($vatRate, 1), '0'), '.'), 'country' => $this->countries()[$billing_country] ?? $billing_country]) }}
-        @endif
-    </flux:text>
+    @unless ($showNetAndGross)
+        <flux:text class="text-xs text-center">
+            @if ($showsNet)
+                {{ __('billing::checkout.prices_net') }}
+            @else
+                {{ __('billing::checkout.prices_incl_vat', ['rate' => rtrim(rtrim(number_format($vatRate, 1), '0'), '.'), 'country' => $this->countries()[$billing_country] ?? $billing_country]) }}
+            @endif
+        </flux:text>
+    @endunless
 </div>
 
 <div class="flex items-center justify-between pt-2">
