@@ -156,6 +156,81 @@ it('creates a payment when the previous one is no longer payable', function (): 
     expect($billable->fresh()->getPendingFirstPaymentId())->toBe('tr_new');
 });
 
+it('creates a payment when the open one has lost its checkout link', function (): void {
+    $billable = reentrantBillable();
+    $billable->recordPendingFirstPayment('tr_left');
+    MollieBilling::resolveBillableUsing(fn () => $billable);
+
+    // "Previous page" at Mollie after picking a method: the payment stays `open`, but Mollie
+    // drops its checkout link, so nobody can pay it any more. Sending the customer to the
+    // return page instead — which polls that `open` payment — was a dead end they could not
+    // leave until the payment expired.
+    $requests = [];
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$requests) {
+        $requests[] = $request::class;
+
+        if ($request instanceof \Mollie\Api\Http\Requests\GetPaymentRequest) {
+            return new class
+            {
+                public string $id = 'tr_left';
+
+                public string $status = 'open';
+
+                public function getCheckoutUrl(): ?string
+                {
+                    return null;
+                }
+            };
+        }
+
+        return new class
+        {
+            public string $id = 'tr_new';
+
+            public string $status = 'open';
+
+            public function getCheckoutUrl(): string
+            {
+                return 'https://mollie.test/checkout/tr_new';
+            }
+        };
+    });
+
+    Livewire::test('mollie-billing::checkout')
+        ->set('plan_code', 'pro')
+        ->set('interval', 'monthly')
+        ->call('submit')
+        ->assertRedirect('https://mollie.test/checkout/tr_new');
+
+    expect($requests[0])->toBe(\Mollie\Api\Http\Requests\GetPaymentRequest::class)
+        ->and($requests)->toContain(\Mollie\Api\Http\Requests\CreatePaymentRequest::class)
+        ->and($billable->fresh()->getPendingFirstPaymentId())->toBe('tr_new');
+});
+
+it('sends a pending first payment without a checkout link to the return page', function (): void {
+    $billable = reentrantBillable();
+    $billable->recordPendingFirstPayment('tr_sepa');
+    MollieBilling::resolveBillableUsing(fn () => $billable);
+
+    // `pending` has left the browser (SEPA, bank transfer) and may still be paid: no second
+    // payment, the return page follows this one to its end.
+    $requests = [];
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$requests) {
+        $requests[] = $request::class;
+
+        return (object) ['id' => 'tr_sepa', 'status' => 'pending'];
+    });
+
+    Livewire::test('mollie-billing::checkout')
+        ->set('plan_code', 'pro')
+        ->set('interval', 'monthly')
+        ->call('submit')
+        ->assertRedirect(\GraystackIT\MollieBilling\Support\BillingRoute::url('return', $billable));
+
+    expect($requests)->toBe([\Mollie\Api\Http\Requests\GetPaymentRequest::class])
+        ->and($billable->fresh()->getPendingFirstPaymentId())->toBe('tr_sepa');
+});
+
 it('releases the lock so the customer can retry after a failure', function (): void {
     $billable = reentrantBillable();
     MollieBilling::resolveBillableUsing(fn () => $billable);

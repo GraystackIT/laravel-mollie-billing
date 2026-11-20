@@ -1590,8 +1590,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
      * The hosted checkout URL of a first payment that is still awaiting the customer,
      * or null when there is nothing to return to.
      *
-     * A payment Mollie still reports as `open` (or `pending`, for a method that has
-     * left the browser) is this checkout, not a new one. Minting a second
+     * A payment Mollie still reports as `open` with a checkout link (or `pending`, for a
+     * method that has left the browser) is this checkout, not a new one. Minting a second
      * `sequenceType: first` payment for the same intent means two payments that can
      * both be paid — the second one is caught by the activation gate, but only as a
      * duplicate, after the money moved.
@@ -1619,17 +1619,39 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return null;
         }
 
-        if (! in_array((string) ($payment->status ?? ''), ['open', 'pending'], true)) {
+        $status = (string) ($payment->status ?? '');
+
+        if (! in_array($status, ['open', 'pending'], true)) {
             return null;
         }
 
         $url = method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null;
 
+        if ($url) {
+            return $url;
+        }
+
         // A `pending` payment has already left the hosted page (SEPA, vouchers), so it
         // carries no checkout link — there is nothing to send the customer back to, but
         // there is also nothing to charge them for twice. Send them to the return page,
         // which is what polls this payment to completion.
-        return $url ?: BillingRoute::url('return', $billable);
+        if ($status === 'pending') {
+            return BillingRoute::url('return', $billable);
+        }
+
+        // `open` without a checkout link: the customer picked a method at Mollie and then
+        // left through "previous page". Mollie drops the link at that point (measured
+        // 20 November 2026: status `open`, method `creditcard`, no `_links.checkout`), so
+        // nobody can pay this payment any more and it only waits for its expiry. Sending the
+        // customer to the return page here was a dead end: that page polled the `open`
+        // payment, and every new attempt at the checkout landed on it again. A fresh payment
+        // is the way out; should the old one settle after all, the activation gate catches it.
+        Log::info('Pending first payment can no longer be paid; starting a new one', [
+            'billable_id' => $billable->getKey(),
+            'payment_id' => $paymentId,
+        ]);
+
+        return null;
     }
 
     /**

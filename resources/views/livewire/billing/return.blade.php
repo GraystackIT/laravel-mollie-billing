@@ -24,6 +24,13 @@ new class extends Component {
     /** First N ticks run at 2s; afterwards we slow down to 5s. */
     private const FAST_POLL_TICKS = 5;
 
+    /**
+     * Ticks (~10s) a subscription first payment may stay `open` after the customer is back on
+     * this page before it counts as abandoned. Some methods return before Mollie has the
+     * bank's answer, so `open` right after the redirect is not yet a verdict.
+     */
+    private const ABANDONED_AFTER_TICKS = 5;
+
     public bool $activated = false;
     public bool $failed = false;
     public bool $timedOut = false;
@@ -372,6 +379,21 @@ new class extends Component {
             return;
         }
 
+        // Still `open` while the customer is here, not at Mollie: they left the hosted page
+        // without paying ("previous page" at Mollie lands on this redirect URL, not on the
+        // cancel URL). Waiting for it is waiting for its expiry behind a spinner.
+        // Say so and lead back into the checkout, which resumes the payment while Mollie
+        // still offers its checkout link and starts a new one when it no longer does.
+        //
+        // The marker stays: the checkout reads it to decide between those two, and should
+        // the payment settle after all, this page still finds it.
+        if ($status === 'open' && $this->pollCount >= self::ABANDONED_AFTER_TICKS) {
+            $this->failed = true;
+            $this->failureReason = 'abandoned';
+
+            return;
+        }
+
         // status === 'paid' but no active subscription yet means the webhook
         // is still en route. Keep polling.
     }
@@ -440,7 +462,7 @@ new class extends Component {
             </div>
         @elseif($failed)
             <flux:icon.x-circle class="mx-auto size-12 text-red-500" />
-            <flux:heading size="xl">{{ __('billing::portal.return.failed_title') }}</flux:heading>
+            <flux:heading size="xl">{{ $failureReason === 'abandoned' ? __('billing::portal.return.abandoned_title') : __('billing::portal.return.failed_title') }}</flux:heading>
             <flux:text>
                 {{ __('billing::portal.return.failed_body_'.($failureReason ?? 'failed')) }}
             </flux:text>

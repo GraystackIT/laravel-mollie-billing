@@ -210,7 +210,14 @@ sequenceDiagram
   `upgrade_from_local_origin` — it polls and asks Mollie about the pending payment), or
   nothing is: "no subscription has been taken out yet" with the way back into the
   checkout, and no polling. A failed / cancelled / expired payment is reported once and
-  clears the marker, so a later visit lands in the last state.
+  clears the marker, so a later visit lands in the last state. A first payment still
+  `open` after ~10 s of polling counts as **abandoned** — "previous page" at Mollie lands on
+  the redirect URL, not the cancel URL, and leaves the payment `open` — and the page says
+  so and leads back into the checkout; the marker stays.
+- **A second submit with a first payment on record** (`reusablePendingCheckoutUrl()`):
+  `open` with a checkout link → back to that link, no second payment; `pending` → the
+  return page; `open` *without* a checkout link (Mollie drops it once the customer has
+  picked a method and gone back) or any terminal status → a new payment.
 - **The confirm button names the path** `StartSubscriptionCheckout::handle()` will take
   (`checkout::bookingPath()`): pay now, start the trial and add a payment method, add a
   payment method under a fully covering code, activate a free plan, or activate an access

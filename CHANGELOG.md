@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Previous page" at Mollie no longer traps the customer.** Mollie sends that link to the
+  redirect URL and leaves the payment `open`, without a checkout link once a method was
+  picked. The return page polled that payment as "activating…" until it expired, and the
+  checkout sent every new attempt back to it. The return page now reports a first payment
+  still `open` after ~10 s as "Payment not completed" with "Try again", and the checkout
+  starts a new payment when the open one has lost its checkout link (`pending` still goes to
+  the return page, an `open` payment with a link is still resumed).
+
 ## [0.7.5] - 2026-11-20
 
 ### Added

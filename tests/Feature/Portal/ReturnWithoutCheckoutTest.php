@@ -84,6 +84,63 @@ it('still waits for a first payment that is open at Mollie', function (): void {
         ->and($page->instance()->shouldPoll())->toBeTrue();
 });
 
+/*
+ * "Previous page" at Mollie leads to the redirect URL — this page — and leaves the payment
+ * `open`. The page used to poll it until it expired, and the checkout sent every new attempt
+ * back here: a dead end. After a grace of a few ticks it now says the payment was not
+ * completed and leads back into the checkout.
+ */
+it('calls a first payment that stays open while the customer is here abandoned, and leads back into the checkout', function (): void {
+    $m = BookingMatrix::boot();
+    $billable = $m->billable('AT');
+    $billable->recordPendingFirstPayment('tr_rwc');
+    rwcMollieSays($m, 'open');
+
+    $page = Livewire::test('mollie-billing::return');
+
+    // Right after the redirect `open` is no verdict yet: some methods return before Mollie
+    // has the bank's answer.
+    foreach (range(1, 4) as $tick) {
+        $page->call('checkStatus');
+        expect($page->get('failed'))->toBeFalse("abandoned after only {$tick} tick(s)");
+    }
+
+    $page->call('checkStatus');
+
+    expect($page->get('failed'))->toBeTrue()
+        ->and($page->get('failureReason'))->toBe('abandoned')
+        ->and($page->get('activated'))->toBeFalse()
+        ->and($page->instance()->shouldPoll())->toBeFalse();
+    $page->assertSee(__('billing::portal.return.abandoned_title'))
+        ->assertSee(__('billing::portal.return.failed_body_abandoned'))
+        ->assertSee(__('billing::portal.return.try_again'))
+        ->assertSeeHtml('href="'.e($page->instance()->checkoutUrl()).'"')
+        ->assertDontSee(__('billing::portal.return.processing_title'))
+        ->assertDontSeeHtml('wire:poll');
+
+    // The marker stays: the checkout decides from it whether the payment can be resumed, and
+    // a payment that settles after all is still found by this page.
+    expect($billable->fresh()->getPendingFirstPaymentId())->toBe('tr_rwc')
+        ->and($billable->fresh()->hasAccessibleBillingSubscription())->toBeFalse();
+});
+
+it('keeps waiting for a pending first payment however long it takes', function (): void {
+    $m = BookingMatrix::boot();
+    $billable = $m->billable('AT');
+    $billable->recordPendingFirstPayment('tr_rwc');
+    rwcMollieSays($m, 'pending');
+
+    $page = Livewire::test('mollie-billing::return');
+
+    // `pending` has left the browser (SEPA, bank transfer): the bank decides, not the customer.
+    foreach (range(1, 10) as $tick) {
+        $page->call('checkStatus');
+    }
+
+    expect($page->get('failed'))->toBeFalse()
+        ->and($page->instance()->shouldPoll())->toBeTrue();
+});
+
 it('keeps waiting for a paid payment whose webhook is late, and reports the activation when it lands', function (): void {
     $m = BookingMatrix::boot();
     $billable = $m->billable('AT');

@@ -4608,3 +4608,41 @@ Three findings from a walk through the checkout:
 | Browser regression: `CheckoutOptions`, `CheckoutOtherPaths`, `CheckoutSubscription` matrices, `CheckoutTest`, `TrialTest`, `CouponCheckoutTest`, `CouponCatalogCheckoutTest`, `CouponWindowMatrixTest` | — | 278 green |
 
 Open: nothing.
+
+## "Previous page" at Mollie: the return page and the checkout sent the customer in a circle (20 November 2026)
+
+Reported from meinrezept: a trial checkout, credit card picked at Mollie, then "Vorige Seite".
+The customer landed on "Abo wird aktiviert…" and stayed there; starting the checkout again
+landed on the same page instead of Mollie.
+
+Reproduced against the live test payment (`GetPaymentRequest`): status `open`, method
+`creditcard`, **no `_links.checkout`**, expiry 15 minutes after creation. Mollie sends
+"previous page" to the `redirectUrl`, not the `cancelUrl`, and the payment stays `open`.
+
+- The return page polled an `open` payment as "still in flight" — for 90 s, and then again
+  on every "check again", until the payment expired.
+- `reusablePendingCheckoutUrl()` answered `open` without a checkout link with the return
+  page (the fallback was written for `pending`), so every new submit went back there.
+
+### What was decided
+
+- **`open` without a checkout link is not a checkout to return to.** Nobody can pay it any
+  more; the checkout creates a new payment. `pending` without a link still goes to the return
+  page — it has left the browser and may still be paid. A payment that settles after all is
+  caught by the activation gate as before. The old payment is not cancelled: a credit-card
+  payment is not cancelable at Mollie, and it expires on its own.
+- **`open` while the customer is on the return page is abandoned after a grace**
+  (`ABANDONED_AFTER_TICKS`, 5 ticks ≈ 10 s; some methods return before Mollie has the bank's
+  answer). Shown as "payment not completed" (`failureReason = 'abandoned'`) with "try again"
+  into the checkout, which resumes at Mollie while the link exists and starts over when it
+  does not. Unlike failed/canceled/expired the **marker stays**, so the checkout can make
+  that choice and a late `paid` is still found.
+
+### Tests: red before, green after
+
+| Test | Against the unchanged components | With the change |
+|---|---|---|
+| `CheckoutReentrancyTest` › creates a payment when the open one has lost its checkout link | red (redirect to the return page) | green |
+| `CheckoutReentrancyTest` › sends a pending first payment without a checkout link to the return page | green (pins the unchanged branch) | green |
+| `ReturnWithoutCheckoutTest` › calls a first payment that stays open … abandoned | red (polls on) | green |
+| `ReturnWithoutCheckoutTest` › keeps waiting for a pending first payment | green (pins the unchanged branch) | green |
