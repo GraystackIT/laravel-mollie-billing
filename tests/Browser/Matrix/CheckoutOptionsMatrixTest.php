@@ -386,7 +386,14 @@ class CheckoutOptionsMatrixTest extends BrowserTestCase
             $vatSays('vat_verified_domestic');
             $this->clickWire($browser, '[wire\\:click="next"]');
             $browser->waitForText('Matrix Team', 10)->pause(500);
-            $this->assertShownAmount($browser, 'plan-price-mx-team', 3540, 'domestic business: 20 %');
+            // Since 0.7.0 a domestic business reads both prices: net emphasized, and the gross
+            // it actually pays with 20 % VAT beside it — not the reverse-charge net alone.
+            $normalise = static fn (string $value): string => str_replace([' ', "\u{00a0}", "\u{202f}", "\n"], '', $value);
+            $this->assertSame(
+                $normalise($this->money(2950).__('billing::portal.price_excl_vat').$this->money(3540).__('billing::portal.price_incl_vat')),
+                $normalise($browser->text('[dusk="plan-price-mx-team"]')),
+                'domestic business: net, and the 20 % gross it pays',
+            );
         });
     }
 

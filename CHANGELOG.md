@@ -36,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An access grant on a plan with trial days, and a free plan with trial days, announced a
   trial on the confirm step that the booking never started.
 
+### Tests
+
+- The checkout browser matrix expected the reverse-charge-style single price for a domestic
+  business on the plan card; since 0.7.0 that card shows the net price and the VAT-inclusive
+  price it pays. The assertion now checks both.
+
 ## [0.7.0] - 2026-11-18
 
 ### Added
