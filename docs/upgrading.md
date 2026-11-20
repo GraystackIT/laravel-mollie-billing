@@ -487,7 +487,35 @@ lock live in it. On the `array` or `null` store they guard nothing across reques
 does not depend on it: it is kept on the billable's row, in
 `subscription_meta.admin_extension_guard`.)
 
-### 2.12 Earlier entries of this release
+### 2.12 Checkout draft, return page and confirm button (0.7.5)
+
+- **The checkout resumes an unfinished order.** What was typed and picked is kept in the
+  **session** and restored on a reload or a later visit (see § 3). It is filed per signed-in
+  user (default guard), billable and checkout URL, so nothing has to be done for logout or
+  account switches — but a logout that does **not** invalidate the session (Laravel's default
+  `logout` does) keeps the previous user's draft in that browser until it expires; it is
+  never shown to anyone else. Apps whose own tests open the checkout twice in one session and
+  expect an empty form either use a fresh session or forget `CheckoutDraft::SESSION_KEY`.
+- **The confirm button follows the booking path.** "Confirm and pay" now appears only when
+  the first period is paid at once. A trial reads "Start trial and add payment method", a code
+  covering the first charge "Confirm and add payment method", a free plan "Activate free
+  plan", an access grant "Activate access" — new keys in `checkout.php` (`confirm_start_trial`,
+  `confirm_add_payment_method`, `confirm_activate_free`, `confirm_activate_access`,
+  `free_activation_notice`, `access_grant_notice`). The free and grant paths no longer say
+  "you will be redirected to Mollie". An access grant or a free plan that carries trial days no
+  longer announces a trial (the service never started one). Check own tests or texts that
+  looked for "Confirm and pay" on these paths. Whether your trial button needs
+  "zahlungspflichtig" wording (§ 312j BGB) is a legal decision for your shop; override the key.
+- **The return page opened without a checkout** (bookmark, typed in, reopened after a reported
+  failure) no longer shows "Activating your subscription…" and polls; it says "No
+  subscription has been taken out yet" and links to the checkout. New keys in `portal.php`:
+  `return.no_subscription_title`, `return.no_subscription_body`, `return.continue_checkout`.
+- **Published views and translations** have to be re-published to get any of this:
+  `livewire/billing/checkout.blade.php`, `livewire/billing/return.blade.php`,
+  `livewire/billing/components/checkout/step-confirm.blade.php`, and `checkout.php` /
+  `portal.php` in every published locale (`en`, `de` ship with the package).
+
+### 2.13 Earlier entries of this release
 
 The release also contains the changes that were already listed under `[Unreleased]` before
 this round — among them a plan change that lands on `max(used seats, included seats)`,
@@ -496,6 +524,17 @@ being charged, and the billing period following Mollie's charge date. They are d
 the [changelog](../CHANGELOG.md) and are not repeated here.
 
 ## 3. Optional — new possibilities
+
+- **Checkout draft** (0.7.5). On by default; two keys tune it:
+
+  ```php
+  'checkout_draft_ttl_minutes' => 1440,          // since the last change; 0 = off
+  'checkout_draft_custom_data' => ['terms'],     // customData keys of your own steps to keep
+  ```
+
+  List in `checkout_draft_custom_data` only plain answers (a ticked box, a chosen option),
+  never a confirmation code or anything your step verifies server-side: those steps are shown
+  again on resume, which is the point. See [configuration.md](configuration.md).
 
 - **Hidden usage types** (after 0.5.1). `'visible' => false` on a usage type keeps it off the
   plan cards of the checkout and the plan-change screen, while it is credited, metered and

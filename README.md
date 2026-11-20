@@ -493,6 +493,8 @@ Highlights of `config/mollie-billing.php`:
 | `primary_color` | Accent color for checkout UI (hex, e.g. `#6366f1`). |
 | `dashboard_url` | URL the portal logo links to (e.g. your app's main dashboard). Supports `route:` prefix. |
 | `checkout_back_url` | Where the checkout "Back" link leads (default `/`). |
+| `checkout_draft_ttl_minutes` | How long an unfinished checkout is kept in the session and resumed (default `1440`, `0` = off). |
+| `checkout_draft_custom_data` | `customData` keys of your own checkout steps a draft may keep (default none). |
 | `checkout_countries` | Countries shown in checkout (regions, include, exclude). |
 | `allow_overage_default` | Default policy when a plan does not declare its own overage rule. |
 | `additional_countries` | ISO-3166 codes + VAT rates for non-EU jurisdictions. |

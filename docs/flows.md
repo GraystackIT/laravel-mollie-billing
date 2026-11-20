@@ -195,6 +195,26 @@ sequenceDiagram
 - **Abandoned:** a `failed` / `canceled` / `expired` first payment never makes a billable
   past due; `CleanupOrphanedBillablesJob` removes a billable that never got further and
   dispatches `CheckoutAbandoned`.
+- **Draft before the submit.** The checkout keeps what was typed and picked as a draft in
+  the session (`CheckoutDraft`, `checkout_draft_ttl_minutes`), filed per signed-in user,
+  billable and checkout URL. A reload or a later visit restores it and re-runs the step
+  validators in order (VIES included) to resume at the furthest step that holds; the coupon
+  is re-validated by code. Nothing is written to the billable for it, and no amount, VIES
+  verdict or billable id is ever taken from it. It survives a payment left at Mollie (a
+  signup's draft follows the billable it created, `CheckoutDraft::adoptCreated()`), and is
+  dropped by `CheckoutDraft::forgetFor()` once the subscription exists — the return page,
+  a booking that completes without Mollie, or the checkout redirecting an active billable —
+  and when the billable is gone or the visitor may no longer act for it.
+- **Return page.** It decides on load: the subscription has landed (activated), something
+  is under way (`pending_first_payment_id`, `activation_claim`, `activation_retries`,
+  `upgrade_from_local_origin` — it polls and asks Mollie about the pending payment), or
+  nothing is: "no subscription has been taken out yet" with the way back into the
+  checkout, and no polling. A failed / cancelled / expired payment is reported once and
+  clears the marker, so a later visit lands in the last state.
+- **The confirm button names the path** `StartSubscriptionCheckout::handle()` will take
+  (`checkout::bookingPath()`): pay now, start the trial and add a payment method, add a
+  payment method under a fully covering code, activate a free plan, or activate an access
+  grant. A trial is announced only on the trial path.
 
 ---
 

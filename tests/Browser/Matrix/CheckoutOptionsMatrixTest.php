@@ -733,6 +733,201 @@ class CheckoutOptionsMatrixTest extends BrowserTestCase
         $this->assertFalse($billable->refresh()->hasAccessibleBillingSubscription());
     }
 
+    public function test_the_return_page_opened_without_a_payment_says_no_subscription_was_taken_out(): void
+    {
+        $this->cmCatalog();
+        $billable = $this->cmCustomer('AT');
+
+        $this->browse(function (Browser $browser) use ($billable): void {
+            // Straight to the return page — no checkout, no payment.
+            $this->actAs($browser, $billable, '/billing/return');
+            $browser->resize(390, 844);
+            $browser->waitForText(__('billing::portal.return.no_subscription_title'), 15)
+                ->assertSee(__('billing::portal.return.no_subscription_body'))
+                ->assertSee(__('billing::portal.return.continue_checkout'))
+                ->assertDontSee(__('billing::portal.return.processing_title'))
+                ->assertDontSee(__('billing::portal.return.title'));
+            $polls = fn (): int => (int) $browser->script('return [...document.querySelectorAll("*")].filter(e => [...e.attributes].some(a => a.name.startsWith("wire:poll"))).length')[0];
+            $this->assertSame(0, $polls(), 'nothing to wait for, nothing polled');
+
+            // Still nothing after the time a poll would have taken.
+            $browser->pause(2500)->assertSee(__('billing::portal.return.no_subscription_title'));
+            $this->shot($browser, 'Return-Seite ohne Zahlung');
+
+            // The way back into the checkout.
+            $browser->resize(390, 844)->clickLink(__('billing::portal.return.continue_checkout'));
+            $this->waitForPathContains($browser, '/billing/checkout');
+            $browser->waitForText('Matrix Team', 15);
+        });
+
+        $this->assertFalse($billable->refresh()->hasAccessibleBillingSubscription());
+    }
+
+    // ── Checkout draft ─────────────────────────────────────────────────────────
+
+    /** @return array<string, array{0:int,1:int,2:string}> */
+    public static function draftViewports(): array
+    {
+        return [
+            'desktop, monthly' => [1440, 1100, 'monthly'],
+            'desktop, yearly' => [1440, 1100, 'yearly'],
+            'mobile, monthly' => [390, 844, 'monthly'],
+            'mobile, yearly' => [390, 844, 'yearly'],
+        ];
+    }
+
+    #[DataProvider('draftViewports')]
+    public function test_a_checkout_draft_survives_leaving_the_page_and_a_reload(int $width, int $height, string $interval): void
+    {
+        $this->cmCatalog();
+
+        $this->browse(function (Browser $browser) use ($width, $height, $interval): void {
+            $this->anonymousCheckout($browser, '?plan=mx-team&interval='.$interval);
+            $browser->resize($width, $height);
+
+            $this->fillBillingStep($browser, 'AT');
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitForText(__('billing::checkout.headline_plan'), 10);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitForText('Matrix CRM', 10)->pause(400);
+            $this->jsClick($browser, '[value="mx-crm"]');
+            $browser->pause(900);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitFor('[wire\\:click="submit"]', 15)->pause(500);
+            $total = $browser->text('[dusk="confirm-total"]');
+
+            // Left completely, then opened again — without the plan in the URL.
+            $browser->visit('/');
+            $browser->visit('/billing/checkout')->waitFor('[wire\\:click="submit"]', 15)->pause(400);
+            $browser->resize($width, $height);
+            $browser->assertSee(__('billing::checkout.headline_confirm'))
+                ->assertSee('Acme GmbH')
+                ->assertSee('Musterweg 12')
+                ->assertSee('Matrix Team')
+                ->assertSee('Matrix CRM')
+                ->assertSee($interval === 'monthly' ? __('billing::checkout.monthly') : __('billing::checkout.yearly'));
+            $this->assertSame($total, $browser->text('[dusk="confirm-total"]'), 'priced again to the cent');
+
+            // And a reload of that page.
+            $browser->refresh();
+            $browser->waitFor('[wire\\:click="submit"]', 15)->pause(400)->resize($width, $height);
+            $browser->assertSee('Acme GmbH')->assertSee('Matrix CRM');
+            $this->assertSame($total, $browser->text('[dusk="confirm-total"]'));
+            $this->shot($browser, 'Entwurf nach Reload ('.$interval.', '.$width.'px)');
+
+            // Back still walks the restored steps.
+            $browser->resize($width, $height);
+            $this->clickWire($browser, '[wire\\:click="back"]');
+            $browser->waitForText(__('billing::checkout.headline_addons'), 10)->pause(400);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitFor('[wire\\:click="submit"]', 15)->pause(400)->assertSee('Matrix CRM');
+            $this->assertSame($total, $browser->text('[dusk="confirm-total"]'), 'the addon is still in the order');
+        });
+    }
+
+    public function test_checkout_drafts_are_kept_apart_between_accounts_and_dropped_once_booked(): void
+    {
+        $this->cmCatalog();
+        $alice = $this->cmCustomer('AT');
+        $bob = $this->cmCustomer('AT');
+
+        $this->browse(function (Browser $browser) use ($alice, $bob): void {
+            $this->cmWalkToConfirm($browser, $alice, 'mx-team', 'yearly', ['softdrinks']);
+
+            // Same browser, same session: now acting as another account.
+            $browser->visit('/_wb/act-as/'.$bob->getKey())->visit('/billing/checkout')->waitForText('Matrix Team', 15)->pause(400);
+            $browser->assertSee(__('billing::checkout.headline_plan'))
+                ->assertDontSee(__('billing::checkout.headline_confirm'));
+            $this->assertSame(0, $this->domCount($browser, '[wire\\:click="submit"]'), 'not on anyone\'s confirm step');
+            $this->shot($browser, 'Anderes Konto: kein fremder Entwurf');
+
+            // Back as the first account: its own draft.
+            $browser->visit('/_wb/act-as/'.$alice->getKey())->visit('/billing/checkout')->waitFor('[wire\\:click="submit"]', 15)->pause(400);
+            $browser->assertSee(__('billing::checkout.headline_confirm'))->assertSee('Softdrinks')->assertSee(__('billing::checkout.yearly'));
+
+            $this->cmSubmitAndPay($browser, 'AT');
+        });
+
+        $this->assertSame(SubscriptionStatus::Active, $alice->refresh()->subscription_status);
+        $this->assertFalse($bob->refresh()->hasAccessibleBillingSubscription());
+    }
+
+    public function test_config_checkout_draft_custom_data_and_ttl_decide_what_a_reload_resumes(): void
+    {
+        $this->cmCatalog();
+        WorkbenchSetting::set('checkout_custom_step', '1');
+        $this->cmConfig('mollie-billing.checkout_draft_custom_data', ['terms']);
+
+        $this->browse(function (Browser $browser): void {
+            $browser->visit('/');
+            $browser->driver->manage()->deleteAllCookies();
+            $browser->visit('/billing/checkout?plan=mx-team')->waitForText('Accept the workbench terms', 15)->pause(400);
+            $browser->click('[dusk="wb-terms"]')->pause(600);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $this->fillBillingStep($browser, 'AT');
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitForText(__('billing::checkout.headline_plan'), 10);
+
+            // checkout_draft_custom_data lists the step's answer: a reload resumes past it.
+            $browser->refresh();
+            $browser->waitForText(__('billing::checkout.headline_plan'), 15)
+                ->assertSee(__('billing::checkout.step_counter', ['current' => 3, 'total' => 5]), true);
+            $this->shot($browser, 'Eigener Schritt: Antwort im Entwurf');
+
+            // Not listed: the answer is not kept, the step is asked again — the address is still there.
+            $this->cmConfig('mollie-billing.checkout_draft_custom_data', []);
+            $browser->refresh();
+            $browser->waitForText('Accept the workbench terms', 15);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitFor('[dusk="wb-terms-error"]', 10);
+            $browser->click('[dusk="wb-terms"]')->pause(600);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitFor('input[name="company_name"]', 10);
+            $this->assertSame('Acme GmbH', $browser->value('input[name="company_name"]'));
+
+            // checkout_draft_ttl_minutes = 0: no draft at all.
+            $this->cmConfig('mollie-billing.checkout_draft_ttl_minutes', 0);
+            $browser->refresh();
+            $browser->waitForText('Accept the workbench terms', 15);
+            $browser->click('[dusk="wb-terms"]')->pause(600);
+            $this->clickWire($browser, '[wire\\:click="next"]');
+            $browser->waitFor('input[name="company_name"]', 10);
+            $this->assertSame('', $browser->value('input[name="company_name"]'));
+        });
+    }
+
+    public function test_the_confirm_button_says_what_submitting_does_trial_payment_or_free(): void
+    {
+        $this->cmCatalog();
+        $first = $this->cmCustomer('AT');
+        $returning = $this->cmReturningCustomer('AT');
+        $free = $this->cmCustomer('AT');
+
+        $this->browse(function (Browser $browser) use ($first, $returning, $free): void {
+            // A trial that really starts: no "pay" on the button, the trial and the first charge named.
+            $this->cmWalkToConfirm($browser, $first, 'mx-trial');
+            $this->assertSame(__('billing::checkout.confirm_start_trial'), trim($browser->text('[dusk="confirm-submit-label"]')));
+            $browser->assertDontSee(__('billing::checkout.confirm_and_pay'))
+                ->assertSee(__('billing::checkout.trial_summary_heading', ['days' => 7]))
+                ->assertSee(now('UTC')->addDays(7)->translatedFormat('d. M Y'));
+            $this->shot($browser, 'Testphase: Button nennt Testphase und Zahlungsmethode');
+
+            // The same plan for a customer with a mandate on file: no trial again, paid now.
+            $this->cmWalkToConfirm($browser, $returning, 'mx-trial');
+            $this->assertSame(__('billing::checkout.confirm_and_pay'), trim($browser->text('[dusk="confirm-submit-label"]')));
+            $browser->assertDontSee(__('billing::checkout.trial_summary_heading', ['days' => 7]))
+                ->assertSee(__('billing::checkout.redirect_notice'));
+            $this->shot($browser, 'Wiederkehrend: Bestätigen und bezahlen');
+
+            // A free plan: activated, not paid.
+            $this->cmWalkToConfirm($browser, $free, 'mx-free');
+            $this->assertSame(__('billing::checkout.confirm_activate_free'), trim($browser->text('[dusk="confirm-submit-label"]')));
+            $browser->assertSee(__('billing::checkout.free_activation_notice'))
+                ->assertDontSee(__('billing::checkout.redirect_notice'));
+            $this->shot($browser, 'Gratisplan: Kostenlosen Plan aktivieren');
+        });
+    }
+
     // ── Screens ────────────────────────────────────────────────────────────────
 
     public function test_the_dashboard_states_the_plan_the_checkout_booked(): void

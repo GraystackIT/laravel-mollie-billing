@@ -38,6 +38,19 @@ return [
     // Where the checkout "Back" link leads when no explicit $backUrl is passed.
     'checkout_back_url' => env('BILLING_CHECKOUT_BACK_URL', '/'),
 
+    // Checkout draft: what a customer typed and picked in the checkout survives a reload or
+    // leaving the page, and the checkout resumes at the furthest step that still validates.
+    // Kept in the session only — never written to the billable — and separated by signed-in
+    // user, billable and checkout URL, so a logout, an account switch or another tenant never
+    // sees it. Prices, VAT, coupons and permissions are worked out again on every resume.
+    // Minutes since the last change before a draft is dropped; 0 switches drafts off.
+    'checkout_draft_ttl_minutes' => (int) env('BILLING_CHECKOUT_DRAFT_TTL_MINUTES', 1440),
+
+    // `customData` keys of app-provided checkout steps a draft may keep. Nothing else of
+    // `customData` is stored: those steps may hold confirmations or codes that must not be
+    // restored. A step whose data is not listed here is shown again on resume.
+    'checkout_draft_custom_data' => [],
+
     // Countries available in the checkout country selector.
     // 'regions': built-in groups — currently only 'EU' (27 member states).
     // 'include': individual ISO-3166-1 alpha-2 codes to offer on top of the regions.

@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\CheckoutDraft;
 use GraystackIT\MollieBilling\Support\Sanitize;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
@@ -44,6 +45,9 @@ class BillingPortalController extends Controller
             $billable->hasAccessibleBillingSubscription()
             || $mollieGate->hasLiveMollieSubscription($billable)
         )) {
+            // Whatever this session kept of a checkout for it is done with.
+            CheckoutDraft::forgetFor($billable);
+
             return redirect()->route(
                 BillingRoute::name('index'),
                 MollieBilling::resolveUrlParameters($billable),

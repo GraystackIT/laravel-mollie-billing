@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **The checkout resumes an unfinished order.** Address, plan, interval, addons, seats, the
+  coupon code and the step reached are kept as a draft in the session and restored after a
+  reload or a later visit, at the furthest step that still validates. Filed per signed-in
+  user, billable and checkout URL; input only — prices, VAT, the VIES result, the coupon and
+  permissions are worked out again on every resume, and nothing is written to the billable.
+  Dropped once the subscription exists, after `checkout_draft_ttl_minutes` (default 1440,
+  `0` = off), and when the billable is deleted or may no longer be acted for. App step data
+  is kept only for the `customData` keys listed in `checkout_draft_custom_data`.
+- **The return page knows when there is no checkout.** Opened without a payment or an
+  activation under way and without a subscription, it says "No subscription has been taken
+  out yet" and offers "Continue subscription checkout" — no activation claim, no polling.
+  Pending payments, late webhooks, activations waiting for their retry, upgrades from a free
+  plan and failed / cancelled / expired payments keep their own states.
+
+### Changed
+
+- **The checkout's confirm button names what submitting does** (`checkout::bookingPath()`,
+  mirroring `StartSubscriptionCheckout::handle()`): "Confirm and pay" only when the first
+  period is paid now; "Start trial and add payment method" for a trial that really starts;
+  "Confirm and add payment method" when a code covers the first charge; "Activate free plan"
+  and "Activate access" for the local paths, each with its own notice instead of "you will be
+  redirected to Mollie". New keys in `en` and `de`.
+
+### Fixed
+
+- An access grant on a plan with trial days, and a free plan with trial days, announced a
+  trial on the confirm step that the booking never started.
+
 ## [0.7.0] - 2026-11-18
 
 ### Added

@@ -317,6 +317,8 @@ it('actions checkout@next, @back, @displayStep, @totalSteps, @timelineSteps, @ti
         'key' => 'terms', 'label' => 'Terms', 'headline' => 'Accept the terms', 'description' => 'Before anything else.',
         'view' => 'mollie-billing::livewire.billing.components.checkout.step-billing',
     ]]);
+    // A fresh visit, not a resume of the checkout walked above in this same session.
+    session()->forget(\GraystackIT\MollieBilling\Support\CheckoutDraft::SESSION_KEY);
     $custom = Livewire::test('mollie-billing::checkout')->set('plan_code', 'pro');
     expect($custom->instance()->customStepCount())->toBe(1)
         ->and($custom->instance()->totalSteps())->toBe(5)

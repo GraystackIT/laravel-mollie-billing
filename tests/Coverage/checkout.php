@@ -56,6 +56,24 @@ return [
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_config_back_url_countries_default_country_and_ip_country_shape_the_first_step',
         ],
     ],
+    'config:checkout_draft_ttl_minutes' => [
+        'feature' => [
+            'tests/Feature/Checkout/CheckoutDraftTest.php::expires a draft after its time, and keeps none when drafts are switched off',
+            'tests/Feature/Checkout/CheckoutDraftTest.php::resumes a signup after a reload with everything typed and picked',
+        ],
+        'browser' => [
+            'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_config_checkout_draft_custom_data_and_ttl_decide_what_a_reload_resumes',
+            'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_a_checkout_draft_survives_leaving_the_page_and_a_reload',
+        ],
+    ],
+    'config:checkout_draft_custom_data' => [
+        'feature' => [
+            'tests/Feature/Checkout/CheckoutDraftTest.php::keeps only the custom step data the app allowed',
+        ],
+        'browser' => [
+            'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_config_checkout_draft_custom_data_and_ttl_decide_what_a_reload_resumes',
+        ],
+    ],
     'config:checkout_countries.regions' => [
         'feature' => [
             'tests/Feature/Coverage/CheckoutConfigKeysTest.php::config checkout_countries.regions:',
@@ -511,6 +529,14 @@ return [
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_a_trial_checkout_names_its_days_and_the_date_of_the_first_charge',
         ],
     ],
+    'action:checkout@bookingPath' => [
+        'feature' => [
+            'tests/Feature/Checkout/ConfirmButtonBookingPathTest.php::names the booking path on the button and the service takes exactly that path',
+        ],
+        'browser' => [
+            'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_confirm_button_says_what_submitting_does_trial_payment_or_free',
+        ],
+    ],
     'action:checkout@applyCoupon' => [
         'feature' => [
             'tests/Feature/Coverage/CheckoutCatalogAndActionsTest.php::actions checkout@applyCoupon, @removeCoupon, @submit',
@@ -797,6 +823,7 @@ return [
     'action:return@checkStatus' => [
         'feature' => [
             'tests/Feature/Coverage/CheckoutCatalogAndActionsTest.php::actions return@checkStatus, @shouldPoll',
+            'tests/Feature/Portal/ReturnWithoutCheckoutTest.php::says on load that no subscription was taken out',
         ],
         'browser' => [
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_return_page_waits_while_the_payment_is_still_open_and_activates_when_it_settles',
@@ -807,6 +834,7 @@ return [
             'tests/Feature/Coverage/CheckoutCatalogAndActionsTest.php::actions return@checkStatus, @shouldPoll',
         ],
         'browser' => [
+            'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_return_page_opened_without_a_payment_says_no_subscription_was_taken_out',
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_return_page_names_a_payment_that_did_not_go_through_and_offers_the_way_back',
         ],
     ],
@@ -845,8 +873,10 @@ return [
     'action:return@shouldPoll' => [
         'feature' => [
             'tests/Feature/Coverage/CheckoutCatalogAndActionsTest.php::actions return@checkStatus, @shouldPoll',
+            'tests/Feature/Portal/ReturnWithoutCheckoutTest.php::says on load that no subscription was taken out',
         ],
         'browser' => [
+            'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_return_page_opened_without_a_payment_says_no_subscription_was_taken_out',
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_return_page_waits_while_the_payment_is_still_open_and_activates_when_it_settles',
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_the_return_page_gives_up_waiting_after_its_tick_budget_and_check_again_resumes',
         ],

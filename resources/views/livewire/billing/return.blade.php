@@ -5,7 +5,10 @@ use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use GraystackIT\MollieBilling\Services\Billing\StartOneTimeOrderCheckout;
 use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
+use GraystackIT\MollieBilling\Support\ActivationRetry;
 use GraystackIT\MollieBilling\Support\BillingRoute;
+use GraystackIT\MollieBilling\Support\CheckoutDraft;
+use GraystackIT\MollieBilling\Services\Webhook\WebhookSupport;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Log;
@@ -26,6 +29,14 @@ new class extends Component {
     public bool $timedOut = false;
     /** No payment to report on (session lost, page opened directly). */
     public bool $unresolved = false;
+
+    /**
+     * Subscription checkout: there is no subscription, and nothing that could still become one
+     * — no first payment on record, no activation running or waiting for its retry. The page was
+     * opened without a checkout behind it (directly, from a bookmark, after a failure it already
+     * reported). Decided on mount, so it never claims a payment or polls for one.
+     */
+    public bool $noSubscription = false;
     public ?string $failureReason = null;
     public ?string $origin = null;
     public int $pollCount = 0;
@@ -54,9 +65,57 @@ new class extends Component {
 
         $billable = $this->authorizedBillable();
 
-        if ($billable !== null && $this->checkoutHasLanded($billable)) {
-            $this->activated = true;
+        // Nobody this visitor may see — neither an authorized billable nor this browser's own
+        // checkout. There is no process to wait for, so do not pretend there is one.
+        if ($billable === null) {
+            $this->noSubscription = true;
+
+            return;
         }
+
+        if ($this->checkoutHasLanded($billable)) {
+            $this->markActivated($billable);
+
+            return;
+        }
+
+        if (! $this->checkoutInFlight($billable)) {
+            $this->noSubscription = true;
+        }
+    }
+
+    /**
+     * Whether something is under way that can still turn into this billable's subscription.
+     *
+     * - a first payment on record (`pending_first_payment_id`): still open at Mollie, or paid and
+     *   the webhook not here yet — the marker is dropped only once the paid handlers have run,
+     *   and a failed payment keeps it until this page has reported the failure;
+     * - an activation running right now (`activation_claim`) or waiting for its retry
+     *   (`activation_retries`) — paid, not yet activated;
+     * - an upgrade away from a local plan that has not finished (`upgrade_from_local_origin`).
+     *
+     * None of these and no subscription means there is no checkout to report on.
+     */
+    private function checkoutInFlight(Billable $billable): bool
+    {
+        if ($billable->getPendingFirstPaymentId() !== null) {
+            return true;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        return ! empty($meta[ActivationRetry::META_KEY])
+            || ! empty($meta[WebhookSupport::ACTIVATION_CLAIM_META_KEY])
+            || isset($meta['upgrade_from_local_origin']);
+    }
+
+    /** The checkout arrived: say so, and drop what the checkout kept of it in this session. */
+    private function markActivated(Billable $billable): void
+    {
+        $this->activated = true;
+        $this->timedOut = false;
+
+        CheckoutDraft::forgetFor($billable);
     }
 
     /**
@@ -153,7 +212,7 @@ new class extends Component {
 
     public function checkStatus(): void
     {
-        if ($this->activated || $this->failed || $this->unresolved) {
+        if ($this->activated || $this->failed || $this->unresolved || $this->noSubscription) {
             return;
         }
 
@@ -183,8 +242,8 @@ new class extends Component {
             $billable->refresh();
 
             if ($this->checkoutHasLanded($billable)) {
-                $this->activated = true;
-                $this->timedOut = false;
+                $this->markActivated($billable);
+
                 return;
             }
 
@@ -352,7 +411,7 @@ new class extends Component {
 
     public function shouldPoll(): bool
     {
-        return ! $this->activated && ! $this->failed && ! $this->timedOut && ! $this->unresolved;
+        return ! $this->activated && ! $this->failed && ! $this->timedOut && ! $this->unresolved && ! $this->noSubscription;
     }
 
     /** Where "try again" leads: back to the product list, or into checkout. */
@@ -388,6 +447,15 @@ new class extends Component {
             <div class="flex justify-center gap-2">
                 <flux:button variant="primary" href="{{ $this->retryUrl() }}">
                     {{ $origin === 'products' ? __('billing::portal.products.back_to_products') : __('billing::portal.return.try_again') }}
+                </flux:button>
+            </div>
+        @elseif($noSubscription)
+            <flux:icon.information-circle class="mx-auto size-12 text-zinc-400" />
+            <flux:heading size="xl" dusk="return-no-subscription">{{ __('billing::portal.return.no_subscription_title') }}</flux:heading>
+            <flux:text>{{ __('billing::portal.return.no_subscription_body') }}</flux:text>
+            <div class="flex justify-center gap-2">
+                <flux:button variant="primary" href="{{ $this->checkoutUrl() }}">
+                    {{ __('billing::portal.return.continue_checkout') }}
                 </flux:button>
             </div>
         @elseif($unresolved)

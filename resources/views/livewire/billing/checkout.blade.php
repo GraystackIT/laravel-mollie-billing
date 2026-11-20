@@ -12,6 +12,7 @@ use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use GraystackIT\MollieBilling\Support\BillingMoney;
+use GraystackIT\MollieBilling\Support\CheckoutDraft;
 use GraystackIT\MollieBilling\Support\Sanitize;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\Relation;
@@ -104,6 +105,26 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     #[Locked]
     public bool $billing_locked = false;
 
+    /**
+     * Where this checkout's draft is filed in the session ({@see CheckoutDraft}), or null when
+     * this instance keeps none: drafts switched off, or the checkout was opened for a billable
+     * the visitor may not act for. Derived on mount from the signed-in user, the authorized
+     * billable and the checkout URL — never from anything the browser sends.
+     */
+    #[Locked]
+    public ?string $draftKey = null;
+
+    /** Hash of the signed-in user the draft belongs to; a different one stops it being written. */
+    #[Locked]
+    public ?string $draftViewer = null;
+
+    /** The billable the draft is filed for ("class:key", or "new" for a signup). */
+    #[Locked]
+    public string $draftSubject = 'new';
+
+    /** Something the draft keeps changed during this request. Per request, never serialised. */
+    private bool $draftDirty = false;
+
     // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
@@ -182,14 +203,28 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             $this->step = $this->customStepCount() + 2;
         }
 
-        // Pre-select plan and/or interval from query parameters
+        // An unfinished checkout of this visitor, for this billable and this checkout URL. Never
+        // for a billable the visitor was refused: there is nothing of theirs to resume there.
+        $draft = $refused ? null : $this->openDraft($existing);
+
+        if ($draft !== null) {
+            $this->restoreDraftInputs($draft);
+        }
+
+        // Pre-select plan and/or interval from query parameters. A link that names a different
+        // plan or interval than the draft is a new choice: it wins, and the resume stops at the
+        // plan step so the customer sees what they are now buying.
+        $queryOverridesDraft = false;
+
         $plan = request()->query('plan');
-        if ($plan !== null && array_key_exists($plan, $this->plans())) {
+        if (is_string($plan) && array_key_exists($plan, $this->plans())) {
+            $queryOverridesDraft = $draft !== null && $plan !== $this->plan_code;
             $this->plan_code = $plan;
         }
 
         $interval = request()->query('interval');
-        if ($interval !== null && in_array($interval, ['monthly', 'yearly'], true)) {
+        if (is_string($interval) && in_array($interval, ['monthly', 'yearly'], true)) {
+            $queryOverridesDraft = $queryOverridesDraft || ($draft !== null && $interval !== $this->interval);
             $this->interval = $interval;
         }
 
@@ -209,7 +244,325 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         // as to the property default, so normalise instead of trusting either.
         $this->interval = $this->firstOfferedInterval($this->plan_code, $this->interval);
 
+        if ($draft !== null) {
+            $this->resumeDraft($draft, $queryOverridesDraft);
+        }
+
         $this->adoptAutoApplyCoupon();
+    }
+
+    // -------------------------------------------------------------------------
+    // Checkout draft
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mark the draft for writing whenever the browser changed a property. Which properties end
+     * up in it is decided by {@see draftPayload()}, not here.
+     */
+    public function updated(string $property): void
+    {
+        $this->draftDirty = true;
+    }
+
+    /** Write the draft at the end of every request that changed something it keeps. */
+    public function dehydrate(): void
+    {
+        if ($this->draftDirty) {
+            $this->persistDraft();
+        }
+    }
+
+    /**
+     * Derive this checkout's draft key and read the draft filed under it.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function openDraft(?Billable $subject): ?array
+    {
+        if (! CheckoutDraft::enabled()) {
+            return null;
+        }
+
+        $viewer = CheckoutDraft::viewer();
+        $this->draftSubject = CheckoutDraft::subject($subject);
+        $this->draftViewer = CheckoutDraft::viewerFingerprint($viewer);
+        $this->draftKey = CheckoutDraft::key($viewer, $this->draftSubject, CheckoutDraft::context(request()->route()));
+
+        $draft = CheckoutDraft::read($this->draftKey);
+
+        // A signup that created this very billable and was then left at Mollie: its draft was
+        // filed as "new". Now that the visitor comes back as that billable — authorized by the
+        // caller, under the same signed-in user and session — it continues here.
+        if ($draft === null && $subject !== null) {
+            $draft = CheckoutDraft::adoptCreated($this->draftViewer, $this->draftSubject, $this->draftKey);
+        }
+
+        if ($draft === null) {
+            return null;
+        }
+
+        // The billable this draft's checkout created is gone since (orphan cleanup, an admin).
+        // Nothing of it is restored — and nothing re-created from it: the checkout starts over.
+        $created = CheckoutDraft::createdBillable($this->draftKey);
+
+        if ($created !== null && ! $this->billableExists($created['class'], $created['id'])) {
+            CheckoutDraft::forget($this->draftKey);
+
+            return null;
+        }
+
+        return $draft;
+    }
+
+    /**
+     * Put the draft's inputs back into the form. Only plain input: the address while it is not
+     * locked to a billable's persisted data, the selection when the catalog still sells it, and
+     * the `customData` keys the app allowed. Prices, VAT and the coupon are worked out afterwards.
+     *
+     * @param  array<string, mixed>  $draft
+     */
+    private function restoreDraftInputs(array $draft): void
+    {
+        if (! $this->billing_locked) {
+            foreach (['company_name', 'billing_street', 'billing_postal_code', 'billing_city'] as $field) {
+                if (isset($draft[$field])) {
+                    $this->{$field} = (string) $draft[$field];
+                }
+            }
+
+            if (isset($draft['billing_country']) && array_key_exists($draft['billing_country'], $this->countries())) {
+                $this->billing_country = (string) $draft['billing_country'];
+            }
+
+            if (array_key_exists('vat_number', $draft)) {
+                $this->vat_number = filled($draft['vat_number']) ? (string) $draft['vat_number'] : null;
+            }
+        }
+
+        if (isset($draft['plan_code']) && array_key_exists($draft['plan_code'], $this->plans())) {
+            $this->plan_code = (string) $draft['plan_code'];
+        }
+
+        if (isset($draft['interval'])) {
+            $this->interval = (string) $draft['interval'];
+        }
+
+        if (isset($draft['addon_codes'])) {
+            $this->addon_codes = array_values((array) $draft['addon_codes']);
+        }
+
+        if (isset($draft['extra_seats'])) {
+            $this->extra_seats = (int) $draft['extra_seats'];
+        }
+
+        if (is_array($draft['custom_data'] ?? null)) {
+            $this->customData = array_merge($this->customData, $draft['custom_data']);
+        }
+    }
+
+    /**
+     * Bring the restored form to a state the server agrees with, then resume at the furthest
+     * step that still validates.
+     *
+     * @param  array<string, mixed>  $draft
+     */
+    private function resumeDraft(array $draft, bool $queryOverridesDraft): void
+    {
+        $initialStep = $this->step;
+
+        $this->dropAddonsNotSoldInSelection();
+
+        // The coupon is re-validated by code, exactly as if typed: an expired, exhausted or no
+        // longer fitting code is refused with its reason instead of carrying a stale discount.
+        if (filled($draft['coupon_code'] ?? null)) {
+            $this->coupon_input = (string) $draft['coupon_code'];
+            $this->applyCoupon();
+        }
+
+        $target = (int) ($draft['step'] ?? $initialStep);
+
+        // Step numbers include the app's own steps. If their number changed since the draft was
+        // written, a package step keeps meaning the same package step.
+        $savedOffset = (int) ($draft['custom_steps'] ?? $this->customStepCount());
+        $offset = $this->customStepCount();
+
+        if ($savedOffset !== $offset) {
+            $target = $target > $savedOffset ? $target - $savedOffset + $offset : min($target, max(1, $offset));
+        }
+
+        if ($queryOverridesDraft) {
+            $target = min($target, $this->customStepCount() + 2);
+        }
+
+        $this->step = $this->resumableStep($target);
+
+        $this->resetErrorBag();
+        $this->resetValidation();
+
+        if ($this->step !== $initialStep) {
+            $this->enterCustomStep($this->step);
+        }
+    }
+
+    /**
+     * The furthest step up to `$target` whose predecessors all validate now — run through the
+     * same validators `next()` and `submit()` use, so a resume can never skip a check. The
+     * VAT number is re-verified on the way (VIES), never taken from the draft.
+     */
+    private function resumableStep(int $target): int
+    {
+        $offset = $this->customStepCount();
+
+        // The steps a customer walks through, in order. A locked billing step starts at the plan
+        // step, exactly as mount() does without a draft.
+        $sequence = $this->billing_locked ? [] : range(1, $offset + 1);
+        $sequence[] = $offset + 2;
+
+        if ($this->hasAddonsOrSeatsStep()) {
+            $sequence[] = $offset + 3;
+        }
+
+        $sequence[] = $offset + 4;
+
+        $resume = $sequence[0];
+
+        foreach ($sequence as $candidate) {
+            $resume = $candidate;
+
+            if ($candidate >= $target || ! $this->stepHoldsSilently($candidate)) {
+                break;
+            }
+        }
+
+        return $resume;
+    }
+
+    private function stepHoldsSilently(int $step): bool
+    {
+        $offset = $this->customStepCount();
+
+        try {
+            if ($step <= $offset) {
+                $this->validateCustomStep($step);
+            } else {
+                match ($step - $offset) {
+                    1 => $this->validateStep1(),
+                    2 => $this->validateStep2(),
+                    3 => $this->validateStep3(),
+                    default => null,
+                };
+            }
+
+            $holds = $this->getErrorBag()->isEmpty();
+        } catch (\Illuminate\Validation\ValidationException) {
+            $holds = false;
+        } catch (\Throwable $e) {
+            report($e);
+            $holds = false;
+        }
+
+        $this->resetErrorBag();
+
+        return $holds;
+    }
+
+    /**
+     * Write the draft — unless the person or the billable it was opened for no longer fits.
+     *
+     * A different signed-in user (logout and login in another tab, an account switch) stops it
+     * and drops what was kept: the draft belongs to who opened the page. So does a billable that
+     * was deleted since or that the visitor may no longer act for.
+     */
+    private function persistDraft(): void
+    {
+        if ($this->draftKey === null || ! CheckoutDraft::enabled()) {
+            return;
+        }
+
+        if (! hash_equals((string) $this->draftViewer, CheckoutDraft::viewerFingerprint(CheckoutDraft::viewer()))) {
+            $this->discardDraft();
+
+            return;
+        }
+
+        $billable = null;
+
+        if ($this->billableId !== null) {
+            $billable = $this->resolveBillable();
+
+            if ($billable === null || (! $this->billableCreatedHere && ! MollieBilling::authorizes(request(), $billable))) {
+                $this->discardDraft();
+
+                return;
+            }
+        }
+
+        CheckoutDraft::write(
+            $this->draftKey,
+            $this->draftPayload(),
+            $this->draftSubject,
+            (string) $this->draftViewer,
+            $this->billableCreatedHere ? $billable : null,
+        );
+    }
+
+    /**
+     * What the draft keeps: input only. Never the VIES verdict, a price, a discount amount, an
+     * error or the billable id — those are the server's to work out again.
+     *
+     * @return array<string, mixed>
+     */
+    private function draftPayload(): array
+    {
+        $payload = [
+            'step' => $this->step,
+            'custom_steps' => $this->customStepCount(),
+            'plan_code' => $this->plan_code,
+            'interval' => $this->interval,
+            'addon_codes' => $this->addon_codes,
+            'extra_seats' => $this->extra_seats,
+            'coupon_code' => $this->applied_coupon['code'] ?? null,
+            'custom_data' => $this->customData,
+        ];
+
+        // A locked address is the billable's persisted one, not input — nothing to keep.
+        if (! $this->billing_locked) {
+            $payload += [
+                'company_name' => $this->company_name,
+                'billing_street' => $this->billing_street,
+                'billing_postal_code' => $this->billing_postal_code,
+                'billing_city' => $this->billing_city,
+                'billing_country' => $this->billing_country,
+                'vat_number' => $this->vat_number,
+            ];
+        }
+
+        return $payload;
+    }
+
+    /** Drop this checkout's draft (and any other of the billable's) and stop writing one. */
+    private function discardDraft(?Billable $billable = null): void
+    {
+        if ($this->draftKey !== null) {
+            CheckoutDraft::forget($this->draftKey);
+        }
+
+        if ($billable !== null) {
+            CheckoutDraft::forgetFor($billable);
+        }
+
+        $this->draftKey = null;
+    }
+
+    private function billableExists(string $morphClass, string $id): bool
+    {
+        $class = Relation::getMorphedModel($morphClass) ?? $morphClass;
+
+        if (! is_a($class, Model::class, true) || ! is_a($class, Billable::class, true)) {
+            return false;
+        }
+
+        return $class::query()->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->whereKey($id)->exists();
     }
 
     /**
@@ -485,12 +838,65 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     }
 
     /**
+     * Which branch of `StartSubscriptionCheckout::handle()` a submit would take right now — the
+     * booking path, not what the catalog offers in principle.
+     *
+     * Asked in the service's own order and on its own terms, so the confirm step can name what
+     * the button really does:
+     *  - `access_grant` — the coupon is an access grant: activated locally, nothing collected;
+     *  - `free`         — a free plan whose order costs nothing: activated locally;
+     *  - `trial`        — a trial starts (trial days, no mandate yet, the order costs something):
+     *                     a payment method is authorised, nothing is charged until the trial ends;
+     *  - `mandate`      — a code covers the whole first charge: a payment method is authorised,
+     *                     nothing is charged today;
+     *  - `payment`      — the first period is paid now.
+     *
+     * The plan's `trial_days` alone are not the answer: a returning customer with a mandate, an
+     * access grant and a free plan all skip the trial branch.
+     */
+    public function bookingPath(): string
+    {
+        // The service takes the form's code, else the one a promotion link left in the session.
+        $code = (string) ($this->applied_coupon['code'] ?? '');
+
+        if ($code === '') {
+            $session = session(StartSubscriptionCheckout::AUTO_APPLY_COUPON_SESSION_KEY);
+            $code = is_string($session) ? $session : '';
+        }
+
+        if ($code !== '') {
+            $type = Coupon::query()->whereRaw('UPPER(code) = ?', [strtoupper($code)])->value('type');
+            $type = $type instanceof \GraystackIT\MollieBilling\Enums\CouponType ? $type : \GraystackIT\MollieBilling\Enums\CouponType::tryFrom((string) $type);
+
+            if ($type === \GraystackIT\MollieBilling\Enums\CouponType::AccessGrant) {
+                return 'access_grant';
+            }
+        }
+
+        $gross = $this->totals(app(VatCalculationService::class))['gross'];
+        $orderNet = $this->subtotalNet();
+        $planIsFree = app(SubscriptionCatalogInterface::class)->basePriceNet($this->plan_code, $this->interval) === 0;
+
+        if ($gross === 0 && $planIsFree && ($code === '' || $orderNet === 0)) {
+            return 'free';
+        }
+
+        if ($this->trialApplies($this->plan_code, $this->interval) && ($gross > 0 || $orderNet > 0)) {
+            return 'trial';
+        }
+
+        return $gross === 0 ? 'mandate' : 'payment';
+    }
+
+    /**
      * The trial length this checkout announces: the plan's own days plus what an
-     * applied TrialExtension coupon adds. 0 when no trial will start.
+     * applied TrialExtension coupon adds. 0 when no trial will start — decided by the
+     * booking path, so an access grant, a free plan or a returning customer is never
+     * promised one.
      */
     public function announcedTrialDays(): int
     {
-        if (! $this->trialApplies($this->plan_code, $this->interval)) {
+        if ($this->plan_code === '' || $this->bookingPath() !== 'trial') {
             return 0;
         }
 
@@ -1095,6 +1501,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function applyCoupon(): void
     {
+        $this->draftDirty = true;
         $this->couponError = null;
 
         $code = strtoupper(trim($this->coupon_input));
@@ -1174,6 +1581,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function removeCoupon(): void
     {
+        $this->draftDirty = true;
         $this->applied_coupon = null;
         $this->couponError = null;
     }
@@ -1490,6 +1898,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function next(): void
     {
+        $this->draftDirty = true;
         $offset = $this->customStepCount();
         $pkg = $this->packageStep();
 
@@ -1546,6 +1955,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     public function back(): void
     {
+        $this->draftDirty = true;
         $offset = $this->customStepCount();
         $pkg = $this->packageStep();
 
@@ -1714,6 +2124,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         $this->billableId = (string) $billable->getKey();
         $this->billableClass = $billable->getMorphClass();
         $this->billableCreatedHere = true;
+        // The draft records that this checkout created it (see CheckoutDraft::write()).
+        $this->draftDirty = true;
 
         event(new CheckoutStarted($billable));
     }
@@ -1838,6 +2250,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             }
             /** @var \Illuminate\Database\Eloquent\Model&Billable $billable */
             if ($billable->hasAccessibleBillingSubscription()) {
+                $this->discardDraft($billable);
+
                 return $this->redirect(BillingRoute::url('index', $billable), navigate: false);
             }
 
@@ -1977,8 +2391,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             }
 
             if (! empty($result['checkout_url'])) {
+                // The draft stays: a customer who cancels on Mollie's page lands back on this
+                // checkout and finds it as they left it. It is dropped once the subscription is
+                // there (the return page, or the checkout's own redirect for an active one).
+                $this->draftDirty = true;
+
                 return $this->redirect($result['checkout_url'], navigate: false);
             }
+
+            // Booked without leaving the site: the checkout is done.
+            $this->discardDraft($billable);
 
             // Zero-amount / local subscription — no Mollie redirect needed
             try {

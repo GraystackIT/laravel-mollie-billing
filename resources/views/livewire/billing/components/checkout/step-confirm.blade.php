@@ -1,4 +1,14 @@
 @php($plan = $this->selectedPlan())
+{{-- What submitting actually does — the branch StartSubscriptionCheckout will take, not
+     the trial days the catalog offers in principle. Labels and the notice follow it. --}}
+@php($bookingPath = $this->bookingPath())
+@php($confirmLabel = match ($bookingPath) {
+    'trial' => __('billing::checkout.confirm_start_trial'),
+    'mandate' => __('billing::checkout.confirm_add_payment_method'),
+    'free' => __('billing::checkout.confirm_activate_free'),
+    'access_grant' => __('billing::checkout.confirm_activate_access'),
+    default => __('billing::checkout.confirm_and_pay'),
+})
 {{-- Plan days plus whatever an applied TrialExtension coupon adds: the activation
      redeems that coupon against the trial it just started, so the customer really
      does get the sum. Advertising the plan's own length here promised less than
@@ -189,7 +199,11 @@
 </div>
 
 <flux:callout icon="shield-check" color="zinc" inline class="mt-4 mb-6">
-    @if ($trialDays > 0 && $trialFirstChargeDate !== null)
+    @if ($bookingPath === 'access_grant')
+        <span dusk="confirm-booking-notice">{{ __('billing::checkout.access_grant_notice') }}</span>
+    @elseif ($bookingPath === 'free')
+        <span dusk="confirm-booking-notice">{{ __('billing::checkout.free_activation_notice') }}</span>
+    @elseif ($trialDays > 0 && $trialFirstChargeDate !== null)
         <span dusk="confirm-first-charge">{{ __('billing::checkout.trial_redirect_notice', ['date' => $trialFirstChargeDate]) }}</span>
     @elseif ($firstCharge !== null)
         {{-- A recurring code that covers the whole order: nothing is due today, and the
@@ -203,7 +217,7 @@
 <div class="flex items-center justify-between pt-2">
     <flux:button wire:click="back" variant="ghost" icon="arrow-left">{{ __('billing::checkout.back') }}</flux:button>
     <flux:button wire:click="submit" variant="primary" icon:trailing="arrow-right" :disabled="$processing" wire:loading.attr="disabled" wire:loading.class="opacity-50 cursor-not-allowed">
-        <span wire:loading.remove wire:target="submit">{{ __('billing::checkout.confirm_and_pay') }}</span>
+        <span wire:loading.remove wire:target="submit" dusk="confirm-submit-label" data-booking-path="{{ $bookingPath }}">{{ $confirmLabel }}</span>
         <span wire:loading wire:target="submit">{{ __('billing::checkout.processing') }}</span>
     </flux:button>
 </div>

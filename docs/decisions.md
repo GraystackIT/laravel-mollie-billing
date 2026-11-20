@@ -4512,3 +4512,99 @@ hides, `billing:check-config` rejecting anything else.
 | same, with the dashboard listing only visible types | meter test red (no `usage-meter-SMS`) | — |
 
 Open: nothing.
+
+## Checkout draft, return page without a checkout, confirm button by booking path (20 November 2026)
+
+Three findings from a walk through the checkout:
+
+1. Leaving the checkout or reloading it lost everything typed, picked and the step reached.
+2. `/billing/return` opened without any payment behind it showed "Activating your
+   subscription…" and polled for ~90 seconds before timing out.
+3. The confirm button said "Confirm and pay" on a trial, directly below the notice that
+   nothing is charged during it.
+
+### Checkout draft — what was decided
+
+- **Session, not database, not the billable.** The draft is in the session
+  (`CheckoutDraft::SESSION_KEY`), so it is bound to one browser and ends with the session.
+  Nothing of it is written to the billable: an address typed into an unlocked billing step is
+  persisted by `submit()` exactly as before, and only there.
+- **Filed per signed-in user, billable and checkout URL.** The key hashes the default
+  guard's user (or "guest"), the billable the checkout was opened for ("new" for a signup) and
+  the route name plus parameters. Laravel keeps session data across `login()`, so the user is
+  part of the key: a logout and another login in the same browser never read the previous
+  person's draft. A page that is still open when another user signs in in another tab stops
+  writing and *drops* the draft on its next update — the safe direction on a shared machine.
+- **Input only, re-derived on resume.** Stored: the address fields (not while the billing step
+  is locked), plan, interval, addons, seats, the coupon *code*, the step, and app `customData`
+  keys listed in `checkout_draft_custom_data`. Never stored: amounts, the discount, the VIES
+  verdict, the billable id, `billing_locked`. On resume the step validators run in order
+  (`resumableStep()`), the VAT number is checked against VIES again, the coupon goes through
+  `applyCoupon()` as if typed, unsold addons are dropped, and the resume stops at the first
+  step that does not hold. A tampered session cannot price, unlock or re-target anything.
+- **`customData` is opt-in per key.** App steps may hold confirmation codes or things they
+  verify server-side; restoring those blindly would let a draft skip the check. Default `[]`:
+  the step is shown again, everything after it is still restored.
+- **A link that names another plan wins.** `?plan=` / `?interval=` that differ from the draft
+  are a new choice: applied, and the resume stops at the plan step so the customer sees it.
+  The same plan in the link is no new choice and resumes as far as the draft went.
+- **A locked billing step stays locked**, and its step selection is mount's own: the resume
+  never goes back to the billing step, and the draft's address fields are ignored.
+- **A signup left at Mollie resumes as the billable it created** (`adoptCreated()`): the
+  draft records the billable its checkout created; when the same signed-in user in the same
+  session comes back as that (authorized) billable, the draft moves to it. Nothing grants
+  access: the caller has already authorized the billable.
+- **Safe exit.** Refused authorization on mount → no draft read, none written. A billable
+  deleted or no longer authorized while the page is open → the draft is dropped on the next
+  update, and `submit()` answers as before (`error_no_billable` / 403) — nothing is re-created.
+  A signup draft whose created billable is gone → dropped, the checkout starts over.
+- **Expiry.** `checkout_draft_ttl_minutes` (default 1440) since the last change, sliding;
+  `0` switches drafts off. At most ten drafts per session. Dropped when the subscription
+  exists: the return page (`markActivated()`), a booking that completes without Mollie, and
+  the checkout redirecting a billable that already has one. A payment *created* is not the
+  end: a customer who cancels at Mollie lands back on the checkout and finds it as left.
+- **Known limit, unchanged:** an anonymous signup that is left at Mollie and comes back
+  without the app resolving the created billable is still a new signup on submit — as it was
+  without drafts. The draft does not reattach a billable the visitor cannot be authorized for.
+
+### Return page — what was decided
+
+- Decided on mount: landed → activated; something under way → poll; nothing → the new
+  `noSubscription` state ("No subscription has been taken out yet", button "Continue
+  subscription checkout") with no polling. "Under way" is `pending_first_payment_id`,
+  `activation_claim`, `activation_retries` or `upgrade_from_local_origin` — the same markers
+  `checkoutHasLanded()` / `WebhookSupport::activationCompleted()` already rely on. The webhook
+  keeps the pending marker on a failed payment until this page reported it, and an activation
+  whose retries are spent refunds the payment, so "nothing under way" really means no money
+  is waiting for a subscription.
+- **No visible billable at all** (neither authorized nor this browser's checkout stamp) is
+  the same state: there is no process this visitor may see, so the page claims none.
+- The one-time-order branch (`origin=products`) is untouched.
+
+### Confirm button — what was decided
+
+- `checkout::bookingPath()` mirrors `StartSubscriptionCheckout::handle()`'s order: access
+  grant → free plan → trial → zero amount (mandate) → payment, with the service's own coupon
+  source (form code, else session code). Each path has its own key (`confirm_and_pay`,
+  `confirm_start_trial`, `confirm_add_payment_method`, `confirm_activate_free`,
+  `confirm_activate_access`) and the two local paths their own notice instead of "you will be
+  redirected to Mollie".
+- `announcedTrialDays()` now asks the booking path instead of `trialApplies()` alone, so an
+  access grant on a plan with trial days, or a free plan with trial days, no longer
+  announces a trial the service will not start. `trialApplies()` keeps its meaning for the
+  coupon checks.
+- The German pay label stays "Bestätigen und bezahlen". Whether a trial that converts into a
+  paid subscription needs "zahlungspflichtig" wording on the button (§ 312j BGB) is the
+  consuming app's legal call; the keys are there to override.
+
+### Tests: red before, green after
+
+| Test | Against the unchanged components | With the change |
+|---|---|---|
+| `Feature/Checkout/CheckoutDraftTest` (22) | 19 red (nothing resumed; `draftKey` unknown); 3 green that pin unchanged guards | 22 green |
+| `Feature/Checkout/ConfirmButtonBookingPathTest` (9) | 9 red (`bookingPath()` missing, "Confirm and pay" on every path) | 9 green |
+| `Feature/Portal/ReturnWithoutCheckoutTest` (13) | 13 red (`noSubscription` unknown; the direct visit polls) | 13 green |
+| `Browser/Matrix/CheckoutOptionsMatrixTest`: draft (desktop/mobile × monthly/yearly), accounts apart, config keys, return page without payment, confirm labels (8) | 8 red (nothing resumed, page polls, "Confirm and pay" on the trial) | 8 green |
+| Browser regression: `CheckoutOptions`, `CheckoutOtherPaths`, `CheckoutSubscription` matrices, `CheckoutTest`, `TrialTest`, `CouponCheckoutTest`, `CouponCatalogCheckoutTest`, `CouponWindowMatrixTest` | — | 278 green |
+
+Open: nothing.

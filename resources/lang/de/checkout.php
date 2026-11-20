@@ -96,6 +96,12 @@ return [
     'trial_redirect_notice' => 'Nach der Bestätigung werden Sie zu Mollie weitergeleitet, um Ihre Zahlungsmethode zu hinterlegen. Während der Testphase erfolgt keine Abbuchung — die erste Zahlung wird am :date durchgeführt.',
     'full_coverage_redirect_notice' => 'Nach der Bestätigung werden Sie zu Mollie weitergeleitet, um Ihre Zahlungsmethode zu hinterlegen. Heute wird nichts abgebucht — Ihr Gutschein deckt die ersten Perioden, die erste Zahlung wird am :date durchgeführt.',
     'confirm_and_pay' => 'Bestätigen und bezahlen',
+    'confirm_start_trial' => 'Testphase starten und Zahlungsmethode hinterlegen',
+    'confirm_add_payment_method' => 'Bestätigen und Zahlungsmethode hinterlegen',
+    'confirm_activate_free' => 'Kostenlosen Plan aktivieren',
+    'confirm_activate_access' => 'Zugang aktivieren',
+    'free_activation_notice' => 'Nach der Bestätigung wird Ihr Plan sofort aktiviert. Es wird nichts abgebucht und keine Zahlungsmethode benötigt.',
+    'access_grant_notice' => 'Nach der Bestätigung wird Ihr Zugang sofort freigeschaltet — ohne Zahlung und ohne Zahlungsmethode.',
     'processing' => 'Wird verarbeitet…',
     'continue' => 'Weiter',
 

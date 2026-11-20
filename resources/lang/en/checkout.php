@@ -96,6 +96,12 @@ return [
     'trial_redirect_notice' => 'After confirming you will be redirected to Mollie to authorise your payment method. No charge during the trial — the first payment is taken on :date.',
     'full_coverage_redirect_notice' => 'After confirming you will be redirected to Mollie to authorise your payment method. Nothing is charged today — your coupon covers the first periods, and the first payment is taken on :date.',
     'confirm_and_pay' => 'Confirm and pay',
+    'confirm_start_trial' => 'Start trial and add payment method',
+    'confirm_add_payment_method' => 'Confirm and add payment method',
+    'confirm_activate_free' => 'Activate free plan',
+    'confirm_activate_access' => 'Activate access',
+    'free_activation_notice' => 'After confirming, your plan is activated right away. Nothing is charged and no payment method is needed.',
+    'access_grant_notice' => 'After confirming, your access is unlocked right away — no payment and no payment method needed.',
     'processing' => 'Processing…',
     'continue' => 'Continue',
 
