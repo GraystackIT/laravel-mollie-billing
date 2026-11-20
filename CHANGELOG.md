@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-20
+
 ### Added
 
 - **The checkout resumes an unfinished order.** Address, plan, interval, addons, seats, the
