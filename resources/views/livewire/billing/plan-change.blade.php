@@ -803,6 +803,12 @@ new class extends Component {
         }
     }
 
+    /** Field names in validation messages: the labels, not the property names. */
+    protected function validationAttributes(): array
+    {
+        return \GraystackIT\MollieBilling\Support\BillingFieldNames::attributes();
+    }
+
     public function saveBillingDetails(MollieCustomerResolver $customerResolver, PreviewService $previewService, VatCalculationService $vat): void
     {
         $billable = $this->resolveBillable();

@@ -34,6 +34,9 @@ return [
     'country' => 'Country',
     'address' => 'Address',
     'vat_number' => 'VAT number (optional)',
+    // Field names inside validation messages (BillingFieldNames)
+    'vat_number_attribute' => 'VAT number',
+    'interval_attribute' => 'Billing interval',
 
     // VAT validation
     'vat_checking' => 'Checking VAT number…',

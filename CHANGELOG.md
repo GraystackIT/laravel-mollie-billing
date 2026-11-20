@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Validation messages name the field by its label.** The checkout, the billing-data page,
+  the plan change and the dashboard's country fix said "company name muss ausgefüllt werden"
+  or "billing street …" — the property name. They now use the label the form shows
+  (`BillingFieldNames`), so an app's override of a label (e.g. "Name auf der Rechnung") is
+  the word in the message too. The VAT number gets its own name without "(optional)".
+
 ## [0.7.6] - 2026-11-20
 
 ### Fixed

@@ -34,6 +34,9 @@ return [
     'country' => 'Land',
     'address' => 'Adresse',
     'vat_number' => 'USt-IdNr. (optional)',
+    // Field names inside validation messages (BillingFieldNames)
+    'vat_number_attribute' => 'USt-IdNr.',
+    'interval_attribute' => 'Abrechnungsintervall',
 
     // VAT validation
     'vat_checking' => 'USt-IdNr. wird geprüft…',

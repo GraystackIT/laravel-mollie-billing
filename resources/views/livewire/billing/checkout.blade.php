@@ -129,6 +129,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     // Lifecycle
     // -------------------------------------------------------------------------
 
+    /** Field names in validation messages: the labels, not the property names. */
+    protected function validationAttributes(): array
+    {
+        return \GraystackIT\MollieBilling\Support\BillingFieldNames::attributes();
+    }
+
     public function mount(): void
     {
         $this->backUrl = Sanitize::backUrl(request()->query('back'));

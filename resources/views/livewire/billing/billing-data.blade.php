@@ -52,6 +52,12 @@ new class extends Component {
     /** Snapshot of the persisted country at mount time, used to detect dirty state. */
     public string $persistedCountry = '';
 
+    /** Field names in validation messages: the labels, not the property names. */
+    protected function validationAttributes(): array
+    {
+        return \GraystackIT\MollieBilling\Support\BillingFieldNames::attributes();
+    }
+
     public function mount(VatCalculationService $vat): void
     {
         $billable = $this->readableBillable();

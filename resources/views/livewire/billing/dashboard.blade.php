@@ -87,6 +87,17 @@ new class extends Component {
         $this->fixError = null;
     }
 
+    /** Field names in validation messages: the labels, not the property names. */
+    protected function validationAttributes(): array
+    {
+        return [
+            'fixStreet' => __('billing::portal.billing_data.street'),
+            'fixPostalCode' => __('billing::portal.billing_data.postal_code'),
+            'fixCity' => __('billing::portal.billing_data.city'),
+            'fixCountry' => __('billing::portal.billing_data.country'),
+        ];
+    }
+
     public function saveCountryFix(CountryMatchService $service): void
     {
         $this->fixError = null;

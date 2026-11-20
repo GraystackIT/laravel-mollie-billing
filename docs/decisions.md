@@ -4646,3 +4646,25 @@ Reproduced against the live test payment (`GetPaymentRequest`): status `open`, m
 | `CheckoutReentrancyTest` › sends a pending first payment without a checkout link to the return page | green (pins the unchanged branch) | green |
 | `ReturnWithoutCheckoutTest` › calls a first payment that stays open … abandoned | red (polls on) | green |
 | `ReturnWithoutCheckoutTest` › keeps waiting for a pending first payment | green (pins the unchanged branch) | green |
+
+## Validation messages use the form labels (20 November 2026)
+
+The billing forms validated without attribute names, so Laravel printed the property:
+"company name muss ausgefüllt werden" under "Name auf der Rechnung".
+
+- **One list, `Support\BillingFieldNames::attributes()`**, returned from
+  `validationAttributes()` by the checkout, billing-data and plan-change components (their
+  address properties share names). The dashboard's country fix (`fix*` properties) maps to its
+  own labels in place.
+- **The address fields reuse the label keys** (`billing::checkout.company_name`, `street`, …)
+  rather than separate attribute keys: an app that overrides a label gets the same word in the
+  message without overriding twice.
+- **The VAT number is the exception** (`vat_number_attribute`): its label carries
+  "(optional)", which reads wrong inside a sentence. `interval_attribute` exists because the
+  checkout has no label for the interval field.
+- Not done: errors stay under a field until the next "Next" re-validates it, as before — a
+  field fixed after the error still shows it until then.
+
+Tests: `Feature/Checkout/ValidationFieldNamesTest` (5) — 5 red against the unchanged
+components, 5 green with the change.
+
