@@ -174,7 +174,8 @@ it('invoices.seller — is the seller printed on the document', function (): voi
     $pdf = $probe->pdfFor(operationsConfigInvoice($billable), $billable);
 
     expect($pdf->seller->company)->toBe('Graystack IT GmbH')
-        ->and($pdf->seller->tax_number)->toBe('ATU12345678')
+        // A VAT ID kept in tax_number is printed as the labelled VAT ID, not bare.
+        ->and($pdf->seller->fields)->toBe(['VAT ID:' => 'ATU12345678'])
         ->and($pdf->seller->email)->toBe('billing@graystack.test')
         ->and($pdf->seller->address->city)->toBe('Wien');
 });

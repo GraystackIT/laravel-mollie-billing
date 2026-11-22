@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Services\Webhook;
 
+use Carbon\CarbonInterface;
+
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Events\OverageCharged;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
@@ -100,6 +102,13 @@ class SingleChargeHandler
         // which covers the case the pinning cannot: a country lookup that now says
         // zero-rated forces every line to 0 (deliberately — see createForPayment), so the
         // difference lands as an adjustment line rather than vanishing.
+        // Each overage line's usage period comes from the snapshot, matched by position —
+        // so before the reconciliation below, which may append an adjustment line and
+        // break that one-to-one correspondence.
+        if ($type === 'overage') {
+            $lineItems = $this->overageLinePeriods($payment, $billable, $lineItems);
+        }
+
         $chargedRate = $this->chargedVatRate($billable, $type);
         $lineItems = $this->pinVatRate($lineItems, $chargedRate);
 
@@ -111,7 +120,11 @@ class SingleChargeHandler
             $this->effectiveVatRate($billable, $chargedRate),
         );
 
-        $invoice = $this->salesInvoiceService->createForPayment($payment, $type, $lineItems, $billable);
+        [$periodStart, $periodEnd] = $type === 'overage'
+            ? $this->overageUsagePeriod($payment, $billable)
+            : [null, null];
+
+        $invoice = $this->salesInvoiceService->createForPayment($payment, $type, $lineItems, $billable, $periodStart, $periodEnd);
 
         if ($type === 'overage') {
             // Locked read-modify-write. `reserve()` serializes only per payment id, and
@@ -265,6 +278,104 @@ class SingleChargeHandler
      * carry no snapshot (the legacy mid-cycle types, and payments created before the
      * snapshot existed).
      */
+    /**
+     * The usage period of each line, from the snapshot of this payment's cycle.
+     *
+     * The payment's metadata carries the lines without their periods (Mollie caps it at
+     * 1024 bytes), the snapshot carries the same lines, in the same order, with them. A
+     * charge that collects a standing debt together with new overage has two periods,
+     * and each line is invoiced for its own. Lines are matched by position only when both
+     * lists have the same length; otherwise the invoice period covers them.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     * @return array<int, array<string, mixed>>
+     */
+    private function overageLinePeriods(object $payment, Billable $billable, array $lineItems): array
+    {
+        $snapshot = $this->overageSnapshotFor($payment, $billable);
+        $snapshotLines = array_values((array) ($snapshot['line_items'] ?? []));
+        $lineItems = array_values($lineItems);
+
+        if ($snapshotLines === [] || count($snapshotLines) !== count($lineItems)) {
+            return $lineItems;
+        }
+
+        foreach ($lineItems as $index => $line) {
+            $stamp = (array) ($snapshotLines[$index] ?? []);
+
+            if (! empty($stamp['period_start']) && ! empty($stamp['period_end']) && empty($line['period_start'])) {
+                $lineItems[$index]['period_start'] = (string) $stamp['period_start'];
+                $lineItems[$index]['period_end'] = (string) $stamp['period_end'];
+            }
+        }
+
+        return $lineItems;
+    }
+
+    /**
+     * The pending overage snapshot, when this payment belongs to its dunning cycle.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function overageSnapshotFor(object $payment, Billable $billable): ?array
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+        $snapshot = (array) ($meta['usage_overage'] ?? []);
+        $paymentId = (string) ($payment->id ?? '');
+        $cyclePaymentIds = (array) (($meta['usage_overage_counted_payments'] ?? [])['payment_ids'] ?? []);
+
+        $belongsToCycle = $paymentId !== ''
+            && (($snapshot['payment_id'] ?? null) === $paymentId || in_array($paymentId, $cyclePaymentIds, true));
+
+        return $belongsToCycle ? $snapshot : null;
+    }
+
+    /**
+     * The period the overage was used in — not the billable's period when the payment
+     * settles. The overage of a period is charged the day before the renewal; a SEPA
+     * payment settles days later, after the renewal has moved the period on, and a retry
+     * of a failed charge can be created in the next period altogether. Left to
+     * `createForPayment()`, both stated the new period.
+     *
+     * 1. The pending snapshot, when it belongs to this payment's cycle: it records the
+     *    period when the cycle starts (ChargeUsageOverageDirectly::persistPendingCharge()).
+     * 2. Otherwise — a payment from before the snapshot carried a period — the period the
+     *    payment was created in: one interval back from the current anchor if Mollie
+     *    created it before that anchor.
+     * 3. Otherwise null, and `createForPayment()` falls back to the billable's period.
+     *
+     * @return array{0:?CarbonInterface, 1:?CarbonInterface}
+     */
+    private function overageUsagePeriod(object $payment, Billable $billable): array
+    {
+        $snapshot = $this->overageSnapshotFor($payment, $billable) ?? [];
+
+        if (! empty($snapshot['period_start']) && ! empty($snapshot['period_end'])) {
+            try {
+                return [BillingTime::toUtc((string) $snapshot['period_start']), BillingTime::toUtc((string) $snapshot['period_end'])];
+            } catch (\Throwable) {
+                // Unreadable: fall through to the payment's creation time.
+            }
+        }
+
+        $anchor = $billable->getBillingPeriodStartsAt();
+        $createdAt = $payment->createdAt ?? null;
+
+        if ($anchor !== null && is_string($createdAt) && $createdAt !== '') {
+            try {
+                $created = BillingTime::toUtc($createdAt);
+            } catch (\Throwable) {
+                return [null, null];
+            }
+
+            if ($created->lessThan($anchor)) {
+                return [BillingTime::subInterval($anchor, $billable->getBillingSubscriptionInterval()), $anchor->copy()];
+            }
+        }
+
+        return [null, null];
+    }
+
     protected function chargedVatRate(Billable $billable, string $type): float
     {
         if ($type === 'overage') {

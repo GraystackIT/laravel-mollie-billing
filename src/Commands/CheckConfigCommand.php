@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Concerns\HasBilling;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\AuditCategory;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
+use GraystackIT\MollieBilling\Services\Billing\EInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingAuditMap;
 use GraystackIT\MollieBilling\Support\CountryResolver;
 use Illuminate\Console\Command;
@@ -426,13 +427,21 @@ class CheckConfigCommand extends Command
     private function validateSeller(string $scope): void
     {
         $seller = (array) config('mollie-billing.invoices.seller', []);
-        $required = ['company', 'email', 'tax_number'];
+        $required = ['company', 'email'];
 
         foreach ($required as $key) {
             if (empty($seller[$key])) {
                 $this->addWarning($scope, "invoices.seller.{$key} is empty — generated invoices will be incomplete.");
             }
         }
+
+        // § 14 (4) Nr. 2 UStG / § 11 (1) Z 3 lit. b UStG AT: the invoice states the
+        // seller's tax number or VAT ID. Either key satisfies it.
+        if (empty($seller['tax_number']) && empty($seller['vat_id'])) {
+            $this->addWarning($scope, 'invoices.seller.tax_number and invoices.seller.vat_id are both empty — generated invoices will be incomplete.');
+        }
+
+        $this->validateEInvoice($scope, $seller);
 
         $address = (array) ($seller['address'] ?? []);
         foreach (['street', 'city', 'postal_code', 'country'] as $key) {
@@ -442,6 +451,45 @@ class CheckConfigCommand extends Command
         }
 
         $this->validateSellerCountry($scope);
+    }
+
+    /**
+     * What the structured e-invoice needs beyond the readable PDF. A gap does not stop
+     * the PDF from being written; it leaves the XML incomplete or, for XRechnung,
+     * rejected by the receiving portal.
+     *
+     * @param  array<string, mixed>  $seller
+     */
+    private function validateEInvoice(string $scope, array $seller): void
+    {
+        if (! (bool) config('mollie-billing.invoices.e_invoice.enabled', true)) {
+            return;
+        }
+
+        $vatId = $seller['vat_id'] ?? null;
+        $taxNumber = $seller['tax_number'] ?? null;
+
+        if (empty($vatId) && ! (is_string($taxNumber) && EInvoiceService::looksLikeVatId($taxNumber))) {
+            $this->addWarning($scope, 'invoices.seller.vat_id is empty — the e-invoice cannot state the seller VAT ID (BT-31), which reverse-charge invoices require (BR-AE-02).');
+        }
+
+        if (is_string($vatId) && $vatId !== '' && ! EInvoiceService::looksLikeVatId($vatId)) {
+            $this->addWarning($scope, "invoices.seller.vat_id \"{$vatId}\" does not look like a VAT ID (country prefix followed by the number, e.g. DE123456789).");
+        }
+
+        $profile = strtolower(trim((string) config('mollie-billing.invoices.e_invoice.profile', 'en16931')));
+
+        if (! in_array($profile, ['en16931', 'xrechnung'], true)) {
+            $this->addWarning($scope, "invoices.e_invoice.profile \"{$profile}\" is not supported — 'en16931' is used. Supported: en16931, xrechnung.");
+        }
+
+        if ($profile === 'xrechnung') {
+            foreach (['name', 'phone', 'email'] as $key) {
+                if (empty($seller[$key])) {
+                    $this->addWarning($scope, "invoices.seller.{$key} is empty — XRechnung requires the seller contact (BR-DE-2, BR-DE-5 to BR-DE-7).");
+                }
+            }
+        }
     }
 
     /**

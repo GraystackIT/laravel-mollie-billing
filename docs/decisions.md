@@ -4668,3 +4668,142 @@ The billing forms validated without attribute names, so Laravel printed the prop
 Tests: `Feature/Checkout/ValidationFieldNamesTest` (5) — 5 red against the unchanged
 components, 5 green with the change.
 
+
+## E-invoice embedded in every invoice PDF (22 November 2026)
+
+Every stored invoice and credit note is a hybrid ZUGFeRD / Factur-X document: EN 16931 CII
+as `factur-x.xml` inside a PDF/A-3 (`EInvoiceService`, `horstoeko/invoicesuite`). On by
+default, off with `BILLING_E_INVOICE_ENABLED=false`. See `docs/e-invoicing.md`.
+
+### What was decided
+
+- **Hybrid, not a separate XML file.** § 14 UStG accepts ZUGFeRD from 2.0.1 in every profile
+  but MINIMUM and BASIC-WL, the customer keeps getting one readable PDF, and Austrian
+  businesses accept it. `en16931` is the default profile; `xrechnung` exists for German
+  public buyers.
+- **A failed e-invoice keeps the plain PDF** and logs at error level. Refusing the document
+  would leave a paid invoice without any document, which is worse until 2027; the cause is
+  almost always incomplete seller data, fixed by regenerating. The library's message bag is
+  treated as a failure, so a field the profile could not carry is never dropped silently.
+- **Built from the stored invoice.** VAT category from the invoice's own rates, country and
+  VIES validation (`vat_validation_id`), not the billable's current VAT number. Buyer name and
+  address still come from the billable, like the readable PDF; that is a known gap (no
+  snapshot), not introduced here.
+- **Credit note = type 381 with positive amounts**, the stored negative figures sign-flipped;
+  BT-25 names every invoice the lines' `parent_invoice_id` point at.
+- **A negative line has a negative quantity, never a negative price** (BR-27). A line whose net
+  is not quantity × unit price collapses to one unit, the same collapse the PDF makes.
+- **Category O (customer outside the EU):** no VAT IDs (BR-O-02), the seller is identified by
+  BT-29 (the tax number does not satisfy BR-CO-26), no rate on the line (BR-O-05) but 0 in the
+  breakdown (XRechnung BR-DE-14). invoicesuite drops a line tax without a rate, so the line is
+  built with 0 % and `EInvoiceService::render()` removes the rate from the XML.
+- **Payment means 68 (online payment service)** for every Mollie method. Card (54) and SEPA
+  direct debit (59) carry XRechnung rules (card number, creditor ID, mandate) we cannot fill
+  from Mollie's payment details.
+- **The issue date is the date the PDF prints** (`created_at`, UTC), not the billable's local
+  date: the two parts of a hybrid must not disagree.
+- **PDF in DejaVu Sans while e-invoicing is on**, because PDF/A-3 requires embedded fonts and
+  DOMPDF never embeds Helvetica. An app's own template font wins.
+- **`seller.vat_id` added; a VAT ID in `tax_number` keeps working.** The PDF prints `vat_id`
+  as a labelled field when it differs from `tax_number`.
+- **Zero-rated invoices print the reason** (reverse charge with the customer's VAT ID, outside
+  the EU, configured exemption) — the PDF had shown 0 % without one.
+- **The reverse-charge wording follows the seller's country, not the locale.** A German-language
+  invoice from Vienna quoted the German § 14a formula; Austrian law words it "Übergang der
+  Steuerschuld auf den Leistungsempfänger" (§ 11 Abs. 1a UStG 1994) and says "UID-Nummer".
+  Country keys (`…_at`) are looked up in the rendering locale only, never through the fallback
+  locale; `BILLING_REVERSE_CHARGE_TEXT` overrides everything. The note is the phrase alone —
+  no norm in brackets, no VAT ID appended — because both VAT IDs are printed, labelled, with
+  the parties; a longer note was read as misleading. No "§ 13b UStG" in the German
+  text: § 13b governs supplies whose place is in Germany, not a German seller's supply to
+  another EU country.
+- **invoicesuite is pinned to `^0.0.44`:** pre-1.0, and the user asked for it over
+  `horstoeko/zugferd`.
+
+- **PDF presentation, from the review of the sample invoices:** the service period is printed
+  per line from the stored period (the invoice's when a line has none), with the same inclusive
+  end date as the XML; dates follow the invoice locale (`d.m.Y` German, ISO in English) through
+  `invoices.date_format` for the duration of one render, restored afterwards; payment methods
+  use the portal's labels; both parties' VAT IDs and the seller's tax number are labelled
+  fields instead of the template's bare `tax_number`. The buyer's VAT ID is the invoice's own
+  VIES validation, so the buyer block and the reverse-charge note can no longer disagree.
+
+- **A product invoice states a delivery date, not a period.** `createForPayment()` stamps a
+  one-time order with the billable's subscription period (or a month from now) because refunds
+  locate lines by it, so that stored period would have been printed as "Leistungszeitraum" on a
+  product. `EInvoiceService::deliveryDate()` decides at render time instead — the stored data is
+  untouched: one-time orders, and credit notes whose parents are all one-time orders, state the
+  invoice date as "Leistungsdatum" (PDF) and BT-72 (XML). Overage keeps its period.
+- **Overage is invoiced for the period the usage was in.** Reproduced: charged on 31 October for
+  October, the SEPA payment settled on 3 November after the renewal had moved the anchor, and the
+  invoice said 1 November – 1 December. **Every line of the pending snapshot (`usage_overage`)
+  carries the period its usage was in** (`ChargeUsageOverageDirectly::stampUsagePeriods()`):
+  a line without one is new overage of the current period, a line with one keeps it — a retry
+  passes the snapshot's own lines, and a debt left standing by a failed cycle keeps September
+  when a later renewal or a plan change collects it together with October's overage. The
+  snapshot's `period_start`/`period_end` is the span of its lines. Not in the payment metadata:
+  Mollie caps it at 1024 bytes and the line items already fill it, so `createMolliePayment()`
+  strips the periods and `SingleChargeHandler` copies them back from the snapshot by position
+  (`overageLinePeriods()`; only when both lists have the same length) and books the invoice for
+  the span (`overageUsagePeriod()`). A payment that does not belong to the snapshot's cycle — in
+  flight across the upgrade — is dated by the period Mollie created it in, else the billable's
+  period as before. The periods are copied **before** the reconciliation: when the tax
+  treatment changed while a SEPA payment settled (a VAT number validated in between), the
+  reconciliation appends an adjustment line, the position match failed and every line got the
+  span (reproduced, `OverageInvoicePeriodTest`).
+- **Category O drops the VAT identifiers only when the document has O lines** (CodeRabbit). The
+  zero-rate category was decided by the buyer's country alone, so a non-EU country with a
+  configured rate (`additional_countries`, e.g. CH 8.1 %) — every line S — lost the seller's VAT
+  ID and broke BR-S-02. Reproduced, `EInvoiceTest`, and a `non-eu-taxed` KoSIT scenario.
+- **A retry of a cycle from before the upgrade keeps its period** (CodeRabbit). Its lines carry
+  no period, and the retry stamped them with the period it ran in; they now take the snapshot's
+  period, or the period the cycle started in (`withCyclePeriod()`). An unreadable line period no
+  longer sets or blocks the snapshot's span (`stampUsagePeriods()` parses each bound on its own).
+- **Category O never stands next to taxed lines** (CodeRabbit, BR-O-11 to BR-O-14). A taxed
+  non-EU country with one zero-rated line produced S and O on one document; the zero-rated line
+  is now exempt (E) with the configured exemption reason, on the PDF as in the XML.
+- **Service periods are UTC billing days** (CodeRabbit). They were converted into the billable's
+  timezone, against `docs/timezone.md`: a period ending at 00:00 UTC ended on 1 December in
+  Vienna and began on 31 October in New York. And the end is now the day before the next
+  period's first day whatever the hour — a boundary at 00:28 UTC (Mollie's charge time) or at
+  the hour of a first payment used to print the next period's first day. Reproduced for UTC,
+  Vienna, New York and an incidental hour.
+- **A credit note without a header period is dated by its lines** (CodeRabbit).
+  `createCreditNote()` stores the credited period on the lines only; the XML fell back to the
+  credit note's issue date as delivery date (December for a November subscription). The header
+  period is now the span of the line periods.
+- **The corrected invoices are loaded once per document.** `deliveryDate()` looked them up for
+  every line of a credit note — 100 lines, 100 identical queries (reproduced). The PDF resolves
+  the delivery date once before its line loop, and the XML loads the parents once for the
+  delivery date and BT-25: two lookups per document, independent of the number of lines.
+
+### Known limits, not changed here
+
+Found by a legal review of the invoice creation against § 14 UStG, § 11 UStG 1994 and
+Art. 226 VAT Directive; open, each needs its own decision:
+
+| Gap | Norm |
+|---|---|
+| No net/VAT summary per rate on the PDF, only per line plus one total | § 14 (4) Nr. 7/8 UStG |
+| Buyer and seller data are read live at render time; `regeneratePdf()` overwrites the archived file | § 14b UStG, GoBD, § 132 BAO |
+| Plan-change credit lines and the plan-switch document do not name the invoice they correct (number and date) | Art. 219 VAT Directive, § 31 (5) UStDV |
+| "Gutschrift" as the German title of a credit note (self-billing in § 14 (2) UStG) | BMF 25 Oct 2013 |
+| No VAT amount in EUR for a non-EUR invoice | Art. 230 VAT Directive |
+| A correction of an e-invoice is a credit note plus new invoice, not a type-384 document | BMF letter on e-invoicing |
+| XRechnung needs buyer city and postcode (BR-DE-8/9) | XRechnung CIUS |
+| The zero-rate category (AE/E/O) is decided from the *current* seller country when a document is (re)generated; a seller that moves its establishment would regenerate an old reverse-charge invoice as E (CodeRabbit). Same root cause as the live party data above — fixed together by snapshotting the parties and the tax treatment at issue | § 14b UStG, GoBD |
+| Austrian federal government needs ebInterface or PEPPOL BIS (not ZUGFeRD) | e-rechnung.gv.at |
+
+### Tests: red before, green after
+
+`Feature/Webhook/OverageInvoicePeriodTest` (5): late SEPA settlement, retry after the renewal,
+payment from before the upgrade — 3 red against the unchanged handler and service, green with the
+fix; a standing debt collected with new overage — red with one period for the snapshot (both
+lines September–November), green with a period per line; the control case (settled within its own
+period) passes all versions. `Feature/Invoice/EInvoiceTest` (16): schema-valid XML embedded as `factur-x.xml`, every VAT
+category, credit note, discount line, XRechnung, disabled and failing paths, embedded font,
+seller VAT ID on the PDF, PDF/XML date at midnight UTC (red with the billable-timezone date,
+green with the fix). `Feature/Commands/CheckConfigEInvoiceTest` (8). `EInvoiceKositTest`
+runs 11 shapes × 2 profiles through the KoSIT validator (EN 16931 + XRechnung 3.0.2): 22
+accepted. Before the category-O fixes it rejected the O documents (BR-O-05, BR-CO-26,
+BR-DE-14).

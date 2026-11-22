@@ -160,9 +160,10 @@ PDF invoices are generated locally via `elegantly/laravel-invoices` and stored o
 'invoices' => [
     'disk' => env('BILLING_INVOICE_DISK', 'local'),
     'locale' => env('BILLING_INVOICE_LOCALE'),   // null → app.fallback_locale
+    'date_format' => env('BILLING_INVOICE_DATE_FORMAT'), // null → per locale: d.m.Y (de), Y-m-d (en)
     'path' => 'billing/invoices',           // → {disk}/billing/invoices/{YYYY/MM}/{serial}.pdf
     'logo' => env('BILLING_INVOICE_LOGO'),
-    'seller' => [ /* company master data */ ],
+    'seller' => [ /* company master data, incl. tax_number and vat_id */ ],
     'serial_number' => [
         'format' => 'PP-YYCCCCCC',           // P=prefix, Y=year, C=counter (each character = one slot)
         'prefix' => [
@@ -172,8 +173,19 @@ PDF invoices are generated locally via `elegantly/laravel-invoices` and stored o
         ],
     ],
     'temporary_url_expiry' => 30,            // minutes (relevant for S3-compatible disks)
+    'e_invoice' => [
+        'enabled' => env('BILLING_E_INVOICE_ENABLED', true),
+        'profile' => env('BILLING_E_INVOICE_PROFILE', 'en16931'),   // or 'xrechnung'
+        'exemption_reason' => env('BILLING_E_INVOICE_EXEMPTION_REASON'),
+        'reverse_charge_text' => env('BILLING_REVERSE_CHARGE_TEXT'),
+        'font' => env('BILLING_E_INVOICE_FONT', 'DejaVu Sans'),
+    ],
 ],
 ```
+
+`e_invoice` embeds the structured EN 16931 invoice into every PDF (ZUGFeRD / Factur-X, or
+XRechnung). See [E-invoicing](e-invoicing.md) for the legal background, the field mapping and
+how to validate with KoSIT.
 
 Supported `logo` formats:
 

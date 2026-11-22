@@ -1,7 +1,33 @@
 # Upgrading — what an application has to change
 
-This page covers the step from **0.4.1 to the next release** (the `[Unreleased]` section of
-the [changelog](../CHANGELOG.md)). It is written for the application that *uses* the package:
+## From 0.8.x to 1.0.0
+
+No migration and no breaking API change. What an application should look at:
+
+- **Every invoice PDF is now an e-invoice** (ZUGFeRD / Factur-X, EN 16931): PDF/A-3 with
+  `factur-x.xml` attached. On by default; `BILLING_E_INVOICE_ENABLED=false` turns it off. See
+  [e-invoicing.md](e-invoicing.md).
+- **Set the seller's VAT ID** in `BILLING_SELLER_VAT_ID` (a VAT ID kept in
+  `BILLING_SELLER_TAX_NUMBER` keeps working) and run `php artisan billing:check-config`: it
+  reports what the e-invoice is missing.
+- **The PDF looks different:** rendered in DejaVu Sans (PDF/A needs embedded fonts; your own
+  `invoices.pdf.template_data.font` wins), a service period per line ("Leistungsdatum" for
+  products), dates in the invoice locale (`d.m.Y` in German, `BILLING_INVOICE_DATE_FORMAT`
+  overrides), labelled VAT IDs and tax number, payment methods in words, and the
+  reverse-charge statement in the seller country's wording (`BILLING_REVERSE_CHARGE_TEXT`
+  overrides). Re-publish translations if you published them: new keys under
+  `billing::portal.e_invoice.*`, `service_period`, `service_date`, `invoice_date_format`,
+  `payment_method.method.*`.
+- **Overage invoices state the period the usage was in**, also when a SEPA payment settles
+  after the renewal.
+- New dependency: `horstoeko/invoicesuite` (pinned to `^0.0.44`, pre-1.0).
+
+---
+
+The rest of this page covers the step from **0.4.1** onwards.
+
+This part covers the step from **0.4.1 to 0.8.x** (see the
+[changelog](../CHANGELOG.md)). It is written for the application that *uses* the package:
 what breaks if nothing is done, what behaves differently and deserves a look, and what is new
 and optional. The reasoning behind each change is in [decisions.md](decisions.md), mostly under
 "Third audit round".

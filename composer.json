@@ -30,10 +30,11 @@
     },
     "require": {
         "php": "^8.3",
-        "brick/money": "^0.11",
         "bavix/laravel-wallet": "^11.5|^12.0",
-        "elegantly/laravel-invoices": "^4.8",
+        "brick/money": "^0.11",
         "dragonmantank/cron-expression": "^3.4",
+        "elegantly/laravel-invoices": "^4.8",
+        "horstoeko/invoicesuite": "^0.0.44",
         "laravel/framework": "^12.0|^13.0",
         "laravel/prompts": "^0.3|^1.0",
         "livewire/flux": "^2.0",
@@ -73,6 +74,7 @@
         "test:browser:quick": "@php vendor/bin/pest --compact --configuration=phpunit.dusk.quick.xml",
         "test:coverage-claims": "@php vendor/bin/pest --compact tests/Feature/Coverage",
         "test:concurrency": "@php vendor/bin/pest --compact --configuration=phpunit.concurrency.xml",
+        "test:e-invoice": "@php vendor/bin/pest --compact tests/Feature/Invoice/EInvoiceKositTest.php",
         "test:concurrency:pgsql": [
             "@putenv BILLING_CONCURRENCY_DB=pgsql",
             "@php vendor/bin/pest --compact --configuration=phpunit.concurrency.xml"

@@ -262,6 +262,13 @@ return [
             'tests/Browser/Matrix/AdminBrandingMatrixTest.php::test_admin_routes_can_be_left_to_the_app',
         ],
     ],
+    'config:invoices.date_format' => [
+        'feature' => [
+            'tests/Feature/Invoice/EInvoiceTest.php::takes the PDF date format from BILLING_INVOICE_DATE_FORMAT when set',
+            'tests/Feature/Invoice/EInvoiceTest.php::prints the service period, German dates, the payment method in words and labelled tax numbers',
+        ],
+        'no_browser' => 'The date format inside the generated PDF; a browser downloads the file but cannot read inside it.',
+    ],
     'config:invoices.disk' => [
         'feature' => [
             'tests/Feature/Config/OperationsConfigKeysTest.php::invoices.disk and invoices.path — decide where an invoice PDF is written',
@@ -269,6 +276,19 @@ return [
         'browser' => [
             'tests/Browser/Matrix/AdminRefundMatrixTest.php::test_pdf_download_and_regeneration',
         ],
+    ],
+    'config:invoices.e_invoice' => [
+        'feature' => [
+            'tests/Feature/Invoice/EInvoiceTest.php::embeds a schema-valid EN 16931 invoice into the stored PDF',
+            'tests/Feature/Invoice/EInvoiceTest.php::stores a plain PDF when e-invoicing is disabled',
+            'tests/Feature/Invoice/EInvoiceTest.php::is on by default and switched off with BILLING_E_INVOICE_ENABLED=false',
+            'tests/Feature/Invoice/EInvoiceTest.php::produces a schema-valid XRechnung with a buyer reference and seller contact',
+            'tests/Feature/Invoice/EInvoiceTest.php::states a domestic zero-rated invoice as exempt, with the configured reason',
+            'tests/Feature/Invoice/EInvoiceTest.php::renders the e-invoice PDF in an embedded font',
+            'tests/Feature/Invoice/EInvoiceTest.php::takes the reverse-charge statement from BILLING_REVERSE_CHARGE_TEXT when set',
+            'tests/Feature/Invoice/EInvoiceTest.php::words the reverse-charge statement as Austrian law does for an Austrian seller',
+        ],
+        'no_browser' => 'The XML attached inside the generated PDF; a browser downloads the file but cannot read its attachments.',
     ],
     'config:invoices.locale' => [
         'feature' => [

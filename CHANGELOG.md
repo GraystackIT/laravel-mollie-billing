@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **An overage invoice states the period the usage was in.** The overage of a period is charged
+  the day before the renewal; a SEPA payment settles days later, after the renewal has moved the
+  period on, and the invoice read the period from the billable at that moment — October's usage
+  was invoiced as November's. The same happened to a retry created in the next period, and to a
+  standing debt collected at a later renewal. Every line of the pending snapshot now records the
+  period its usage was in and `SingleChargeHandler` books each line for its own period (the
+  invoice for their span); a payment in flight across the upgrade is dated by the period Mollie
+  created it in.
+
+### Added
+
+- **Every invoice PDF is an e-invoice.** The structured invoice (EN 16931, UN/CEFACT CII) is
+  embedded as `factur-x.xml` in a PDF/A-3: ZUGFeRD / Factur-X profile EN 16931 by default,
+  XRechnung 3 with `invoices.e_invoice.profile = xrechnung`. That is what § 14 UStG calls an
+  e-invoice (Germany: mandatory for B2B from 2027/2028); Austrian businesses accept the
+  hybrid. Built from the booked invoice by `EInvoiceService` (`horstoeko/invoicesuite`):
+  credit notes as type 381 with the invoice they correct, reverse charge as category AE with
+  both VAT IDs, customers outside the EU as O, other zero rates as E. If it cannot be built
+  the plain PDF is stored and the error logged. See `docs/e-invoicing.md`.
+- `invoices.seller.vat_id` (`BILLING_SELLER_VAT_ID`) for the seller's VAT ID; a VAT ID kept in
+  `tax_number` keeps working. `billing:check-config` reports the seller data the e-invoice
+  needs. A billable model can provide BT-10 (e.g. a Leitweg-ID) with `getBillingBuyerReference()`.
+
+### Changed
+
+- **A zero-rated invoice says why on its face.** Reverse-charge invoices print the statement
+  in the wording of the seller's country — Austria "Übergang der Steuerschuld auf den
+  Leistungsempfänger" (§ 11 (1a) UStG 1994), Germany and the rest of the EU
+  "Steuerschuldnerschaft des Leistungsempfängers" (§ 14a (5) UStG), English "Reverse
+  charge" — overridable with `BILLING_REVERSE_CHARGE_TEXT`; invoices to customers outside
+  the EU "not taxable in the seller's country". Before, the PDF showed 0 % VAT without a
+  reason.
+- **The invoice PDF states the service period** on every line ("Leistungszeitraum:
+  01.11.2026 – 30.11.2026", § 14 (4) Nr. 6 UStG / § 11 (1) Z 3 lit. d UStG 1994) — for a
+  product (one-time order) and its credit note the delivery date instead ("Leistungsdatum"),
+  also in the e-invoice (BT-72) — prints dates in
+  the invoice locale's format (`d.m.Y` in German; `BILLING_INVOICE_DATE_FORMAT` overrides),
+  names the payment method in words ("Kreditkarte" instead of "Creditcard"), and labels the
+  VAT IDs of both parties and the seller's tax number ("UID-Nr." for an Austrian seller,
+  "USt-IdNr." for a German one). The buyer's VAT ID is the one the invoice relied on.
+- While e-invoicing is on the PDF renders in DejaVu Sans, because PDF/A-3 needs embedded fonts
+  and DOMPDF never embeds Helvetica. `invoices.pdf.template_data.font` still wins.
+
 ## [0.8.0] - 2026-11-20
 
 ### Fixed

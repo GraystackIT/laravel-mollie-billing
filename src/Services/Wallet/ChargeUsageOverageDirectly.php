@@ -189,12 +189,116 @@ class ChargeUsageOverageDirectly
         // were deferred still has its units ON the wallet (its lines settle it), and those
         // are found there by the ordinary wallet pass — counting them here as well would
         // charge them twice.
-        return array_values(array_filter(
-            (array) ($meta[self::META_KEY]['line_items'] ?? []),
-            static fn ($line): bool => is_array($line)
-                && ($line['settles_wallet'] ?? true) === false
-                && (int) ($line['total_net'] ?? 0) > 0,
+        $snapshot = (array) ($meta[self::META_KEY] ?? []);
+
+        return array_values(array_map(
+            // A debt keeps the period it was used in when a later renewal collects it.
+            // Lines of a snapshot written before lines carried one take the snapshot's.
+            static fn (array $line): array => $line + array_filter([
+                'period_start' => $snapshot['period_start'] ?? null,
+                'period_end' => $snapshot['period_end'] ?? null,
+            ]),
+            array_filter(
+                (array) ($snapshot['line_items'] ?? []),
+                static fn ($line): bool => is_array($line)
+                    && ($line['settles_wallet'] ?? true) === false
+                    && (int) ($line['total_net'] ?? 0) > 0,
+            ),
         ));
+    }
+
+    /**
+     * Give every line without a usage period the current one, and return the lines with
+     * the span they cover.
+     *
+     * @param  array<int, array<string, mixed>>  $lineItems
+     * @return array{0: array<int, array<string, mixed>>, 1: ?string, 2: ?string}
+     */
+    private static function stampUsagePeriods(array $lineItems, ?string $currentStart, ?string $currentEnd): array
+    {
+        $start = null;
+        $end = null;
+
+        foreach ($lineItems as $index => $line) {
+            if (! is_array($line)) {
+                continue;
+            }
+
+            $line['period_start'] = ($line['period_start'] ?? null) ?: $currentStart;
+            $line['period_end'] = ($line['period_end'] ?? null) ?: $currentEnd;
+            $lineItems[$index] = $line;
+
+            // Each bound parsed on its own before it may set the span: an unreadable
+            // value neither enters the span nor blocks the other bound.
+            $lineStart = self::parsedPeriodBound($line['period_start']);
+            $lineEnd = self::parsedPeriodBound($line['period_end']);
+
+            if ($lineStart !== null && ($start === null || $lineStart->lessThan($start[1]))) {
+                $start = [(string) $line['period_start'], $lineStart];
+            }
+
+            if ($lineEnd !== null && ($end === null || $lineEnd->greaterThan($end[1]))) {
+                $end = [(string) $line['period_end'], $lineEnd];
+            }
+        }
+
+        return [$lineItems, $start[0] ?? null, $end[0] ?? null];
+    }
+
+    private static function parsedPeriodBound(mixed $value): ?\Carbon\CarbonInterface
+    {
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        try {
+            return BillingTime::toUtc($value);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * The lines of a retry, each with the period of the cycle it belongs to.
+     *
+     * A retry re-charges the snapshot's own lines, possibly after the renewal. Lines
+     * stamped by this version keep their period. A snapshot from before lines carried one
+     * gets the snapshot's period, or — older still — the period the cycle started in:
+     * one interval back from the current anchor when the cycle started before it. Without
+     * this, the retry stamped them with the period it happened to run in.
+     *
+     * @param  array<string, mixed>  $pending
+     * @param  array<int, array<string, mixed>>  $lineItems
+     * @return array<int, array<string, mixed>>
+     */
+    private function withCyclePeriod(Billable $billable, array $pending, array $lineItems): array
+    {
+        $periodStart = $pending['period_start'] ?? null;
+        $periodEnd = $pending['period_end'] ?? null;
+
+        if (! is_string($periodStart) || ! is_string($periodEnd) || $periodStart === '' || $periodEnd === '') {
+            $periodStart = $periodEnd = null;
+            $cycleStartedAt = self::parsedPeriodBound($pending['created_at'] ?? null);
+            $anchor = $billable->getBillingPeriodStartsAt();
+
+            if ($cycleStartedAt !== null && $anchor !== null && $cycleStartedAt->lessThan($anchor)) {
+                $periodStart = BillingTime::subInterval($anchor, $billable->getBillingSubscriptionInterval())->toIso8601String();
+                $periodEnd = BillingTime::toUtc($anchor)->toIso8601String();
+            }
+        }
+
+        if ($periodStart === null || $periodEnd === null) {
+            return $lineItems;
+        }
+
+        foreach ($lineItems as $index => $line) {
+            if (is_array($line) && empty($line['period_start']) && empty($line['period_end'])) {
+                $lineItems[$index]['period_start'] = $periodStart;
+                $lineItems[$index]['period_end'] = $periodEnd;
+            }
+        }
+
+        return $lineItems;
     }
 
     /**
@@ -611,7 +715,7 @@ class ChargeUsageOverageDirectly
         $lineItems = (array) ($pending['line_items'] ?? []);
 
         if ($lineItems !== []) {
-            return $this->charge($billable, $lineItems);
+            return $this->charge($billable, $this->withCyclePeriod($billable, (array) $pending, $lineItems));
         }
 
         return $this->chargeFromWallets($billable);
@@ -927,7 +1031,18 @@ class ChargeUsageOverageDirectly
         // JSON column — so a renewal webhook or a retry job that committed a different key
         // in between had its write reverted. `pending_refund_retries` is one of those keys,
         // and a resurrected refund line is a second payout to the customer.
-        $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId, $lineItems, $vat): array {
+        // Every line carries the period its usage was in. A line that has none yet is new
+        // overage of the current period; a line that has one keeps it — the retry of a
+        // cycle passes the snapshot's own lines, and a debt left standing by a failed
+        // cycle keeps the period it was used in when a later renewal collects it together
+        // with new overage. The snapshot's period is the span of its lines.
+        [$lineItems, $periodStart, $periodEnd] = self::stampUsagePeriods(
+            $lineItems,
+            $billable->getBillingPeriodStartsAt()?->toIso8601String(),
+            $billable->nextBillingDate()?->toIso8601String(),
+        );
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId, $lineItems, $vat, $periodStart, $periodEnd): array {
             $existing = (array) ($meta[self::META_KEY] ?? []);
 
             // A snapshot left behind by a cycle that gave up is a spent cycle, not this
@@ -963,6 +1078,15 @@ class ChargeUsageOverageDirectly
                 'vat_rate' => $vat['rate'],
                 'currency' => (string) config('mollie-billing.currency', 'EUR'),
                 'created_at' => $existing['created_at'] ?? BillingTime::nowUtc()->toIso8601String(),
+                // The period the usage was in, per line (see stampUsagePeriods()) and as
+                // their span. The invoice is written when the payment settles — days later
+                // for SEPA, after the renewal has moved the billable's period on — and read
+                // the period from the billable then, so October's usage was invoiced as
+                // November's. Kept here rather than in the payment's metadata, which Mollie
+                // caps at 1024 bytes and the line items already fill; SingleChargeHandler
+                // reads it from here.
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
             ];
             $meta['usage_overage_status'] = self::STATUS_PENDING;
 
@@ -1052,7 +1176,13 @@ class ChargeUsageOverageDirectly
                 'type' => 'overage',
                 'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
                 'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
-                'line_items' => $lineItems,
+                // Without the usage periods a retry or a recollection carries over from the
+                // snapshot: Mollie caps metadata at 1024 bytes, and the webhook reads the
+                // periods from the snapshot (SingleChargeHandler::overageLinePeriods()).
+                'line_items' => array_map(
+                    static fn ($line) => is_array($line) ? array_diff_key($line, ['period_start' => true, 'period_end' => true]) : $line,
+                    $lineItems,
+                ),
             ],
             sequenceType: 'recurring',
             mandateId: $billable->getMollieMandateId(),

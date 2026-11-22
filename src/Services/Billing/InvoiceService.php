@@ -40,6 +40,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Lang;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -861,13 +862,25 @@ class InvoiceService
         $locale = $this->pdfLocale($invoice);
 
         try {
-            $pdfContent = $this->withLocale($locale, fn (): ?string => $this->buildPdfInvoice($invoice, $billable)->getPdfOutput());
+            $pdfContent = $this->withLocale($locale, function () use ($invoice, $billable): ?string {
+                // The vendor template formats every date with `invoices.date_format`.
+                $previousFormat = config('invoices.date_format');
+                config()->set('invoices.date_format', $this->pdfDateFormat());
+
+                try {
+                    return $this->buildPdfInvoice($invoice, $billable)->getPdfOutput();
+                } finally {
+                    config()->set('invoices.date_format', $previousFormat);
+                }
+            });
 
             if ($pdfContent === null) {
                 Log::warning('PDF invoice generation returned null', ['invoice_id' => $invoice->id]);
 
                 return false;
             }
+
+            $pdfContent = $this->withLocale($locale, fn (): string => $this->attachEInvoice($pdfContent, $invoice, $billable));
 
             $disk = (string) config('mollie-billing.invoices.disk', 'local');
             $basePath = rtrim((string) config('mollie-billing.invoices.path', 'billing/invoices'), '/');
@@ -896,6 +909,38 @@ class InvoiceService
             ]);
 
             return false;
+        }
+    }
+
+    /**
+     * Turn the rendered PDF into a hybrid ZUGFeRD / Factur-X e-invoice (EN 16931 XML
+     * embedded in a PDF/A-3), see {@see EInvoiceService}.
+     *
+     * A failure here keeps the plain PDF rather than leaving the invoice without any
+     * document: the readable invoice is still a valid invoice to the customer, and a
+     * missing structured part is repaired by regenerating once the cause (typically
+     * incomplete seller data) is fixed. It is logged at error level because from 2027 a
+     * German B2B invoice without the structured part is not an e-invoice.
+     */
+    protected function attachEInvoice(string $pdf, BillingInvoice $invoice, Billable $billable): string
+    {
+        $eInvoice = app(EInvoiceService::class);
+
+        if (! $eInvoice->isEnabled()) {
+            return $pdf;
+        }
+
+        try {
+            return $eInvoice->embedIntoPdf($pdf, $invoice, $billable);
+        } catch (\Throwable $e) {
+            Log::error('E-invoice (ZUGFeRD) could not be embedded; the invoice PDF was stored without it', [
+                'invoice_id' => $invoice->id,
+                'serial_number' => $invoice->serial_number,
+                'exception' => $e::class,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $pdf;
         }
     }
 
@@ -1033,9 +1078,9 @@ class InvoiceService
                 state: $addressConfig['state'] ?? null,
                 country: CountryResolver::name($addressConfig['country'] ?? null),
             ),
-            tax_number: $sellerConfig['tax_number'] ?? null,
             email: $sellerConfig['email'] ?? null,
             phone: $sellerConfig['phone'] ?? null,
+            fields: $this->sellerTaxFields(),
         );
 
         $buyer = new Buyer(
@@ -1046,11 +1091,14 @@ class InvoiceService
                 postal_code: $billable->getBillingPostalCode(),
                 country: CountryResolver::name($billable->getBillingCountry()),
             ),
-            tax_number: $billable->vat_number ?? null,
             email: $billable->getBillingEmail(),
+            fields: $this->buyerTaxFields($invoice, $billable),
         );
 
         $isCredit = $invoice->invoice_kind === InvoiceKind::Refund;
+
+        // Once per document: for a credit note it looks up the invoices it corrects.
+        $deliveryDate = app(EInvoiceService::class)->deliveryDate($invoice);
 
         $items = [];
         foreach ((array) $invoice->line_items as $item) {
@@ -1068,8 +1116,15 @@ class InvoiceService
                 $netUnit = $lineNet;
             }
 
-            // Per-item billing_period or description only — no fallback to global period.
-            $description = $item['description'] ?? $item['billing_period'] ?? null;
+            // The line's own text, then its service period — the period is a mandatory
+            // statement, the text optional. Joined on one line: the template escapes
+            // the description and prints no line breaks.
+            $description = implode(' · ', array_filter([
+                is_string($item['description'] ?? $item['billing_period'] ?? null)
+                    ? trim((string) ($item['description'] ?? $item['billing_period']))
+                    : null,
+                $this->servicePeriodText($item, $invoice, $billable, $deliveryDate),
+            ])) ?: null;
 
             // Per-item VAT: line_item.vat_rate is the source of truth.
             $taxPercentage = (float) ($item['vat_rate'] ?? 0);
@@ -1112,6 +1167,25 @@ class InvoiceService
             ? e((string) $invoice->refund_reason_text)
             : null;
 
+        // A zero-rated supply has to say why on its face — for reverse charge the
+        // "Steuerschuldnerschaft des Leistungsempfängers" (§ 14a (5) UStG, § 11 (1a) UStG
+        // AT). The same text is the exemption reason in the embedded e-invoice XML.
+        $exemptionNote = app(EInvoiceService::class)->taxExemptionNote($invoice, $billable);
+        if ($exemptionNote !== null) {
+            $description = $description !== null
+                ? $description."\n\n".e($exemptionNote)
+                : e($exemptionNote);
+        }
+
+        // PDF/A-3 (the container of a ZUGFeRD invoice) requires every font to be embedded.
+        // DOMPDF never embeds its default Helvetica, so the e-invoice renders in DejaVu
+        // Sans, which ships with DOMPDF and is embedded as a subset. An app that set its
+        // own template font keeps it.
+        $templateData = (array) (config('invoices.pdf.template_data') ?? []);
+        if (app(EInvoiceService::class)->isEnabled() && empty($templateData['font'])) {
+            $templateData['font'] = (string) config('mollie-billing.invoices.e_invoice.font', 'DejaVu Sans');
+        }
+
         // Force the tax column on the PDF whenever at least one line has a
         // non-zero VAT rate. The library's default heuristic only shows it when
         // totalTaxAmount() > 0, which fails for credit notes (negative totals)
@@ -1142,6 +1216,7 @@ class InvoiceService
             description: $description,
             tax_label: $taxLabel,
             paymentInstructions: $paymentInstruction !== null ? [$paymentInstruction] : [],
+            templateData: $templateData,
             logo: $logo,
         ) extends PdfInvoice
         {
@@ -1156,6 +1231,106 @@ class InvoiceService
         $pdfInvoice->pinnedCurrency = $currency;
 
         return $pdfInvoice;
+    }
+
+    /**
+     * The seller's VAT ID and tax number, each with its label, in the wording of the
+     * seller's country ("UID-Nr." in Austria, "USt-IdNr." in Germany). The template
+     * printed `tax_number` bare, and a VAT ID kept in that key was indistinguishable
+     * from a tax number. § 14 (4) Nr. 2 UStG accepts either; § 11 (1) Z 3 lit. i
+     * UStG 1994 and every reverse-charge invoice need the VAT ID. Same pair as BT-31 /
+     * BT-32 in the embedded e-invoice.
+     *
+     * @return array<string, string>
+     */
+    private function sellerTaxFields(): array
+    {
+        $eInvoice = app(EInvoiceService::class);
+        $identifiers = $eInvoice->sellerIdentifiers();
+        $fields = [];
+
+        if ($identifiers['vat_id'] !== null) {
+            $fields[$eInvoice->sellerCountryText('seller_vat_id')] = $identifiers['vat_id'];
+        }
+
+        if ($identifiers['tax_number'] !== null) {
+            $fields[$eInvoice->sellerCountryText('seller_tax_number')] = $identifiers['tax_number'];
+        }
+
+        return $fields;
+    }
+
+    /**
+     * The buyer's VAT ID with its label: the number the invoice relied on (its own VIES
+     * validation) — the one the reverse-charge note names — falling back to the number on
+     * the billable for an invoice without a validation.
+     *
+     * @return array<string, string>
+     */
+    private function buyerTaxFields(BillingInvoice $invoice, Billable $billable): array
+    {
+        $eInvoice = app(EInvoiceService::class);
+        $vatId = $eInvoice->buyerVatId($invoice) ?? (trim((string) ($billable->vat_number ?? '')) ?: null);
+
+        return $vatId === null ? [] : [$eInvoice->sellerCountryText('seller_vat_id') => $vatId];
+    }
+
+    /**
+     * "Service period: 01.11.2026 – 30.11.2026" for a line, from its stored period (the
+     * invoice's when the line has none), with the inclusive end date the e-invoice states
+     * as BG-26. § 14 (4) Nr. 6 UStG / § 11 (1) Z 3 lit. d UStG 1994: the readable invoice
+     * names when the service was rendered.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function servicePeriodText(array $item, BillingInvoice $invoice, Billable $billable, ?\DateTimeInterface $deliveryDate): ?string
+    {
+        $format = $this->pdfDateFormat();
+
+        // A product is delivered once, on payment: "Leistungsdatum", not a period
+        // (see EInvoiceService::deliveryDate(), which the XML states as BT-72). Resolved
+        // once per document by the caller.
+        if ($deliveryDate !== null) {
+            return __('billing::portal.service_date', ['date' => $deliveryDate->format($format)]);
+        }
+
+        [$start, $end] = app(EInvoiceService::class)->servicePeriod(
+            $item['period_start'] ?? $invoice->period_start,
+            $item['period_end'] ?? $invoice->period_end,
+            $billable,
+        );
+
+        if ($start === null || $end === null) {
+            return null;
+        }
+
+        if ($start->format('Y-m-d') === $end->format('Y-m-d')) {
+            return __('billing::portal.service_date', ['date' => $start->format($format)]);
+        }
+
+        return __('billing::portal.service_period', [
+            'start' => $start->format($format),
+            'end' => $end->format($format),
+        ]);
+    }
+
+    /**
+     * Date format of the PDF: `invoices.date_format` (`BILLING_INVOICE_DATE_FORMAT`),
+     * else the rendering locale's (`d.m.Y` in German). The vendor template reads
+     * `invoices.date_format`, whose shipped default `Y-m-d` printed "2026-11-01" on a
+     * German invoice.
+     */
+    protected function pdfDateFormat(): string
+    {
+        $configured = config('mollie-billing.invoices.date_format');
+
+        if (is_string($configured) && trim($configured) !== '') {
+            return $configured;
+        }
+
+        $format = __('billing::portal.invoice_date_format');
+
+        return $format !== 'billing::portal.invoice_date_format' ? (string) $format : 'Y-m-d';
     }
 
     /**
@@ -1318,7 +1493,10 @@ class InvoiceService
         }
 
         $method = (string) $pmd['method'];
-        $methodLabel = ucfirst(str_replace('_', ' ', $method));
+        // "Kreditkarte" rather than "Creditcard": the portal's labels, the raw Mollie
+        // method id only for a method nobody translated.
+        $methodKey = 'billing::portal.payment_method.method.'.$method;
+        $methodLabel = Lang::has($methodKey) ? (string) __($methodKey) : ucfirst(str_replace('_', ' ', $method));
         $details = (array) ($pmd['details'] ?? []);
 
         $name = $isCredit

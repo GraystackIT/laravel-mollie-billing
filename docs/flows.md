@@ -44,7 +44,7 @@ diagram is *right* remains the author's job.
 15. [Cancellation, resubscribe, expiry](#15-cancellation-resubscribe-expiry)
 16. [Chargeback](#16-chargeback)
 17. [Webhook intake](#17-webhook-intake)
-18. [VAT and OSS](#18-vat-and-oss)
+18. [VAT and OSS](#18-vat-and-oss) — [18.1 Invoice document and e-invoice](#181-invoice-document-and-e-invoice)
 19. [Scheduled jobs](#19-scheduled-jobs)
 20. [Entry points and supporting classes](#20-entry-points-and-supporting-classes)
 
@@ -1007,10 +1007,10 @@ flowchart TD
     F --> H["night before the renewal, or before a cancelled subscription ends:<br/>PrepareUsageOverageJob cases A and B"]
     H --> I{"a charge already in flight"}
     I -->|"yes"| J["skipped, one overage charge at a time"]
-    I -->|"no"| K["ChargeUsageOverageDirectly handle<br/>lines from the negative wallets<br/>snapshot usage_overage, status pending"]
+    I -->|"no"| K["ChargeUsageOverageDirectly handle<br/>lines from the negative wallets<br/>snapshot usage_overage with the usage period, status pending"]
     K --> L["Mollie CreatePaymentRequest, recurring, type overage<br/>idempotency key on the dunning cycle"]
     L --> M{"webhook"}
-    M -->|"paid"| N["SingleChargeHandler paid<br/>invoice, units credited back to the wallet<br/>markers cleared, past due for debt released<br/>events OverageCharged, PaymentSucceeded, InvoiceAvailableNotification"]
+    M -->|"paid"| N["SingleChargeHandler paid<br/>invoice for the snapshot usage period, units credited back to the wallet<br/>markers cleared, past due for debt released<br/>events OverageCharged, PaymentSucceeded, InvoiceAvailableNotification"]
     M -->|"failed"| O["RetryUsageOverageChargeJob<br/>event OverageChargeFailed per failed payment"]
     O --> P{"3 payments of this cycle failed"}
     P -->|"no"| L
@@ -1026,6 +1026,13 @@ flowchart TD
 - **The sweep only creates the payment.** Wallet reset and period anchor belong to the
   renewal ([6](#6-renewal)); the renewal also charges whatever the sweep missed, and its
   reset preserves a debt that is still owed.
+- **The invoice states the period the usage was in**, not the billable's period when the payment
+  settles: every snapshot line carries its usage period from its first charge on, so a SEPA
+  payment that settles after the renewal, a retry created in the next period and a standing debt
+  collected later together with new overage are each invoiced line by line for the period they
+  charge. The payment's metadata carries the lines without periods (1024-byte cap); the webhook
+  takes them from the snapshot. A payment from before the upgrade is dated by Mollie's
+  `createdAt`.
 - **A create-payment call that never came back** leaves a snapshot without a payment id
   (`payment_unknown_at`). It is not retried blindly beyond Mollie's one-hour idempotency
   window; the cleanup job looks the payment up
@@ -1351,6 +1358,34 @@ flowchart TD
   reissue net out in the right quarter.
 - A visitor from a blocked country is shown `BlockedCountryController`'s page.
 
+### 18.1 Invoice document and e-invoice
+
+**Trigger:** every booked invoice and credit note (`InvoiceService::createForPayment()`,
+`createInvoice()`, `createCreditNote()` and the other writers, after `persistWithSerial()`),
+`InvoiceService::regeneratePdf()`, and `InvoiceDownloadController` when the stored PDF is
+missing.
+
+```mermaid
+flowchart TD
+    A["InvoiceService generateAndStorePdf<br/>locale pinned per invoice"] --> B["buildPdfInvoice<br/>readable PDF via DOMPDF,<br/>exemption note from EInvoiceService taxExemptionNote"]
+    B --> C{"invoices.e_invoice.enabled"}
+    C -->|"no"| G["plain PDF stored on invoices.disk"]
+    C -->|"yes"| D["InvoiceService attachEInvoice<br/>EInvoiceService embedIntoPdf"]
+    D --> E["EN 16931 CII from the stored invoice:<br/>profile en16931 ZUGFeRD or xrechnung,<br/>380 invoice or 381 credit note,<br/>VAT category S, AE, O or E"]
+    E --> F["PDF/A-3 with factur-x.xml attached"]
+    F --> H["hybrid PDF stored on invoices.disk"]
+    D -->|"throws: missing seller data, library error"| I["error logged,<br/>plain PDF stored instead"]
+    I --> G
+```
+
+- **Built from the stored invoice, not from the billable's current state** — the VAT
+  category comes from the invoice's own rates, country and VIES validation. Only the buyer's
+  name and address are read from the billable, as for the readable PDF.
+- **No Mollie call, no transaction:** the document is rendered after the invoice row is
+  committed (`deferDocument` for credit notes inside a refund).
+- The structured part is what makes the PDF an e-invoice under § 14 UStG; see
+  `docs/e-invoicing.md`.
+
 ---
 
 ## 19. Scheduled jobs
@@ -1418,6 +1453,7 @@ Supporting classes that appear in several flows:
 |---|---|
 | `InvoiceService` | every invoice, credit note, plan-switch invoice, prorata charge and refund line; `MollieSalesInvoiceService` is its deprecated alias |
 | `InvoiceNumberGenerator` | gap-free serial numbers per invoice kind |
+| `EInvoiceService` | the EN 16931 e-invoice (ZUGFeRD / XRechnung CII) embedded in every invoice PDF ([18.1](#181-invoice-document-and-e-invoice)) |
 | `WebhookSupport` | what the webhook handlers share: gate, claim, reconciliation, quota credit, activation reporting |
 | `FirstPaymentArtifacts` / `FirstPaymentCouponPricing` | book and price a first payment |
 | `MollieSubscriptionPatcher` | every PATCH and cancel of a Mollie subscription for future periods |

@@ -1006,6 +1006,7 @@ Detailed technical documentation is available in the [`docs/`](docs/) directory:
 - [Plan Changes](docs/plan-changes.md) — deferred upgrade flow, validation rules, events, extension points
 - [Subscription Lifecycle](docs/subscription-lifecycle.md) — states, transitions, service overview
 - [Lifecycle and Cleanup](docs/lifecycle-and-cleanup.md) — orphaned checkouts, billable deletion cascade, past-due auto-cancel, paid-without-billable reconciliation, mandate policy
+- [E-invoicing](docs/e-invoicing.md) — EN 16931 XML embedded in every invoice PDF (ZUGFeRD / Factur-X, optional XRechnung), VAT categories, validation with KoSIT
 - [VAT Handling](docs/vat-handling.md) — VAT calculation, VIES, OSS, country reconciliation, automatic resolution
 - [Notifications](docs/notifications.md) — recipient resolution, translation overrides, swapping notification classes with `useNotification()`
 - [Timezones](docs/timezone.md) — UTC persistence and computation, per-user portal timezone, UTC-rendered admin views
