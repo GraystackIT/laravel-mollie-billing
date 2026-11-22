@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-22
+
 ### Fixed
 
 - **An overage invoice states the period the usage was in.** The overage of a period is charged
