@@ -637,8 +637,11 @@ class MandateOnlyPaymentHandler
         // Recorded before the Mollie call, and reused by a retry of this activation: a retry
         // that adopts the subscription the first attempt created (its answer lost) runs
         // hours later, and a fresh clock read put the local trial end, the coupon window and
-        // the deferral that much after the start date Mollie holds. Only a boundary still
-        // ahead is reused; one that has passed cannot be a start date any more.
+        // the deferral that much after the start date Mollie holds. Reused while it is still
+        // ahead — to the moment, not the day: a boundary later today is still the one Mollie
+        // holds. One that has passed cannot be a start date any more; it cannot come up in
+        // practice, since the retry ladder (RetrySubscriptionActivationJob::backoff()) is
+        // spent within hours and a trial lasts at least a day.
         $meta = $billable->getBillingSubscriptionMeta();
         $recorded = $meta[self::TRIAL_ENDS_AT_META_KEY] ?? null;
         $trialEndsAt = null;
@@ -646,9 +649,7 @@ class MandateOnlyPaymentHandler
         if (ActivationRetry::resuming() && is_string($recorded) && $recorded !== '') {
             try {
                 $candidate = \Carbon\Carbon::parse($recorded)->setTimezone('UTC');
-                $trialEndsAt = $candidate->copy()->startOfDay()->greaterThan(BillingTime::nowUtc()->startOfDay())
-                    ? $candidate
-                    : null;
+                $trialEndsAt = $candidate->greaterThan(BillingTime::nowUtc()) ? $candidate : null;
             } catch (\Throwable) {
                 $trialEndsAt = null;
             }
@@ -715,6 +716,10 @@ class MandateOnlyPaymentHandler
         // promises — at full price beside it, the trial-end charge collected the full price
         // while the books promised the discount. And a retry that adopts the subscription
         // the first attempt created keeps that one's amount, which is the marker's too.
+        // The grant is counted below like a priced one (countRecurringGrant()): the first
+        // attempt returned before it got there.
+        $retainedCoupon = null;
+
         if ($pricedCoupon === null && ActivationRetry::resuming()) {
             $leftover = $this->couponService->getActiveRecurringCouponMarker($billable);
 
@@ -728,6 +733,15 @@ class MandateOnlyPaymentHandler
                     $addonCodes,
                 );
                 $recurringDiscountNet = max(0, $this->couponService->computeMarkerDiscount($billable, $orderNet, [], $trialEndsAt));
+                $leftoverCoupon = \GraystackIT\MollieBilling\Models\Coupon::query()->find((int) ($leftover['coupon_id'] ?? 0));
+
+                if ($leftoverCoupon !== null && $recurringDiscountNet > 0) {
+                    $retainedCoupon = [
+                        'coupon' => $leftoverCoupon,
+                        'discount_net' => $recurringDiscountNet,
+                        'order_amount_net' => $orderNet,
+                    ];
+                }
             }
         }
 
@@ -789,6 +803,8 @@ class MandateOnlyPaymentHandler
         if ($pricedCoupon !== null) {
             $this->stashTrialCoupon($billable, $pricedCoupon, $planCode, $interval, $addonCodes, $extraSeats);
             $this->countRecurringGrant($billable, $pricedCoupon, $planCode, $interval);
+        } elseif ($retainedCoupon !== null) {
+            $this->countRecurringGrant($billable, $retainedCoupon, $planCode, $interval);
         }
 
         $this->support->completeActivation(

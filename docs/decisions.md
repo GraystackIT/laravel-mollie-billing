@@ -1199,6 +1199,8 @@ own webhook branch for what the marker does with code that exists.
      the first attempt.** The marker it wrote stays, and Mollie is created at the amount the
      marker promises (`computeMarkerDiscount()` as of the trial end) — at full price beside
      it, the trial-end charge collected the full price while the books promised the discount.
+     The kept grant is counted on that retry (`countRecurringGrant()`), as a priced one is.
+     The recorded trial end is reused while it is still ahead to the moment, not the day.
    - **The window's start is kept in the marker (`window_from`)** and is what the move
      checks. Comparing ends was ambiguous: capped by the code's end date, a window started on
      a paid period and one measured from the trial end share their end. A marker written
