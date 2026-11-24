@@ -57,6 +57,28 @@ class SignupMatrixFakeWebhookController extends MollieWebhookController
     }
 }
 
+/** Mollie unreachable for both the charge date and the amount. */
+class SignupFailingPatcher extends SpyMollieSubscriptionPatcher
+{
+    public function setNextChargeDate(\GraystackIT\MollieBilling\Contracts\Billable $billable, \Carbon\CarbonInterface $target): void
+    {
+        throw new RuntimeException('Mollie unreachable (date)');
+    }
+
+    public function updateRecurringAmount(
+        \GraystackIT\MollieBilling\Contracts\Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        bool $intervalChanged = false,
+        int $couponDiscountNet = 0,
+        bool $forceResetStartDate = false,
+    ): void {
+        throw new RuntimeException('Mollie unreachable (amount)');
+    }
+}
+
 /** What the package told Mollie, recorded off the typed request objects. */
 class SignupMollieRecorder
 {
@@ -984,6 +1006,53 @@ it('Recurring on a trial signup: a trial extended past the code\'s own end retur
 
     expect(signupCouponLineNet($charge))->toBeNull()
         ->and((int) $charge->amount_net)->toBe(2000);
+});
+
+it('Recurring on a trial signup: a failed reset keeps the moved charge date for the retry', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYSHORT',
+        'name' => 'A quarter off, until day 20',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 3,
+        'max_redemptions_per_billable' => 3,
+        'valid_until' => BillingTime::nowUtc()->addDays(20),
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYSHORT', 'protrial');
+    paySignup();
+
+    // Both PATCHes of the extension fail: the moved charge date, then the reset to full price.
+    $this->app->bind(MollieSubscriptionPatcher::class, SignupFailingPatcher::class);
+
+    $newTrialEnd = BillingTime::nowUtc()->addDays(30);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $pending = $billable->refresh()->getBillingSubscriptionMeta()['pending_subscription_patch'] ?? null;
+
+    // One retry slot, both obligations: the reset must not drop the date.
+    expect($pending['reason'] ?? null)->toBe('recurring_coupon_expiry_reset')
+        ->and(\Carbon\Carbon::parse((string) ($pending['target'] ?? 'now'))->toDateString())->toBe($newTrialEnd->toDateString());
+
+    // Mollie is back; the retry applies the amount AND the date.
+    $this->app->bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class);
+    SpyMollieSubscriptionPatcher::$calls = [];
+
+    \GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob::dispatchSync(
+        $pending + ['billable_type' => $billable::class, 'billable_id' => $billable->getKey()],
+        (string) $pending['first_attempt_at'],
+    );
+
+    $calls = collect(SpyMollieSubscriptionPatcher::$calls);
+    $date = $calls->firstWhere(0, 'set_next_charge_date');
+
+    expect($calls->firstWhere(0, 'update')[3]['coupon_discount_net'] ?? null)->toBe(0)
+        ->and($date)->not->toBeNull()
+        ->and(\Carbon\Carbon::parse($date[3]['target'])->toDateString())->toBe($newTrialEnd->toDateString())
+        ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
 });
 
 it('SinglePayment on a trial signup: an activation that crosses midnight still moves with an extended trial', function (): void {

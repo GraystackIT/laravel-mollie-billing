@@ -137,6 +137,41 @@ it('adopts the subscription Mollie did create when only its answer was lost', fu
     longRunAssertRenewal($world, longRunRenew($world), '34.51');
 });
 
+it('keeps the trial end Mollie was given when a retried trial activation adopts its subscription', function (): void {
+    Carbon::setTestNow(Carbon::parse('2027-01-10 10:00:00', 'UTC'));
+    $billable = TestBillable::create(['name' => 'Trial Co', 'email' => uniqid('trial-').'@x.test', 'billing_country' => 'DE']);
+    $billable->forceFill(['mollie_customer_id' => 'cst_longrun'])->save();
+
+    $world = LongRunWorld::$current = new LongRunWorld($billable, 'monthly');
+    $world->loseAnswer[CreateSubscriptionRequest::class] = 1;
+    $world->payments['tr_lr_trial'] = LongRunPayment::make([
+        'id' => 'tr_lr_trial', 'status' => 'paid',
+        'amount' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'createdAt' => now()->toIso8601String(), 'paidAt' => now()->toIso8601String(),
+        'subscriptionId' => null, 'customerId' => 'cst_longrun', 'mandateId' => 'mdt_longrun', 'countryCode' => 'DE',
+        'metadata' => [
+            'type' => 'mandate_only',
+            'pending_subscription_plan_code' => 'pro',
+            'pending_subscription_interval' => 'monthly',
+            'pending_subscription_trial_days' => 14,
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+        ],
+    ]);
+
+    // Mollie created the subscription — trial end 24 January — but its answer was lost.
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_lr_trial'])->assertStatus(200);
+    expect($world->subscriptionsCreated)->toBe(1);
+
+    // The retry runs the next day and adopts that subscription. Its trial end is the one
+    // Mollie holds, not one read off the retry's clock.
+    activationRetryRun($world, '2027-01-11 09:00:00', 'tr_lr_trial');
+
+    expect($world->billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Trial)
+        ->and($world->subscriptionsCreated)->toBe(1)
+        ->and($world->billable->trial_ends_at->toDateString())->toBe('2027-01-24');
+});
+
 it('resumes an activation that died between the invoice and the Mollie subscription', function (): void {
     // An app listener on InvoiceCreated throws — events are the documented extension seam.
     $thrown = false;

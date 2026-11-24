@@ -1187,6 +1187,14 @@ own webhook branch for what the marker does with code that exists.
      move (by no longer matching) or caps it.
    - **"Next charge" names the free trial-end charge only up to that day.** After it, and
      before the nightly job converts the trial, the deferred paid charge is next.
+   From the CodeRabbit pass before merging:
+   - **A failed reset keeps the moved charge date.** The retry slot holds one obligation;
+     when the date PATCH and the reset both fail, the reset carries the date's `target` and
+     `RetrySubscriptionPatchJob` applies both. Overwritten, Mollie kept the earlier date.
+   - **A retried trial activation reuses the trial end of its first attempt**
+     (`subscription_meta.trial_activation_ends_at`, written before the Mollie call). A retry
+     that adopted the subscription the first attempt created read a fresh clock, hours or a
+     day after the start date Mollie held.
 
 `tests/Feature/Coupons/CouponSignupMatrixTest.php` (partial, 100 %, expired and deactivated
 code, each through the trial-end charge and the renewal after it),

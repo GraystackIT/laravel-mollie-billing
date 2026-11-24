@@ -378,14 +378,33 @@ class MollieSubscriptionPatcher
             ]);
 
             // The reset the renewal handler queues when a coupon expires: full price, marker
-            // cleared — finished by the retry chain.
+            // cleared — finished by the retry chain. The slot holds one retry, and the trial
+            // extension that got us here may have queued its own a moment ago: the moved
+            // charge date (`deferNextChargeDate()`). Overwritten, Mollie kept the old, earlier
+            // date while the customer was shown the new one — so its target rides along and
+            // the reset applies it too. Any other pending retry is left to finish first; the
+            // renewal handler resets an expired coupon on its own.
             $this->mutateBillingMeta($billable, function (array $meta) use ($couponId, $e): array {
-                $meta['pending_subscription_patch'] = [
+                $pending = $meta['pending_subscription_patch'] ?? null;
+                $target = null;
+
+                if (is_array($pending)) {
+                    if (($pending['reason'] ?? null) !== 'next_charge_date') {
+                        return $meta;
+                    }
+
+                    $target = $pending['target'] ?? null;
+                }
+
+                $meta['pending_subscription_patch'] = array_filter([
                     'reason' => 'recurring_coupon_expiry_reset',
                     'coupon_id' => $couponId,
-                    'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
+                    'target' => is_string($target) && $target !== '' ? $target : null,
+                    'first_attempt_at' => is_array($pending) && ! empty($pending['first_attempt_at'])
+                        ? $pending['first_attempt_at']
+                        : BillingTime::nowUtc()->toIso8601String(),
                     'last_error' => $e->getMessage(),
-                ];
+                ], static fn ($value): bool => $value !== null);
 
                 return $meta;
             });

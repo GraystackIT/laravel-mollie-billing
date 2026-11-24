@@ -32,6 +32,12 @@ use Illuminate\Support\Facades\Log;
 class MandateOnlyPaymentHandler
 {
     /**
+     * The trial end an activation in flight computed before its Mollie call, for a retry of
+     * it to reuse (activateTrialSubscriptionAfterMandate()). Removed once the trial runs.
+     */
+    public const TRIAL_ENDS_AT_META_KEY = 'trial_activation_ends_at';
+
+    /**
      * Subscription states a mandate-only activation may run from. `New` is the
      * regular first checkout; PastDue, Expired and a Cancelled subscription
      * whose grace period has run out are recovery checkouts — StartSubscriptionCheckout
@@ -622,18 +628,41 @@ class MandateOnlyPaymentHandler
             }
         }
 
-        $billable->forceFill([
-            'subscription_plan_code' => $planCode,
-            'subscription_interval' => SubscriptionInterval::from($interval),
-            'subscription_period_starts_at' => BillingTime::nowUtc(),
-        ])->save();
-
         // The trial end, once: the coupon window, Mollie's start date and `trial_ends_at`
         // must name the same moment. Each used to read the clock on its own — the window
         // before the Mollie call, `trial_ends_at` after it — and an activation that crossed
         // midnight measured them from different days, so a later trial extension no longer
         // recognised the window as the trial's and left it behind.
-        $trialEndsAt = BillingTime::nowUtc()->addDays($trialDays);
+        //
+        // Recorded before the Mollie call, and reused by a retry of this activation: a retry
+        // that adopts the subscription the first attempt created (its answer lost) runs
+        // hours later, and a fresh clock read put the local trial end, the coupon window and
+        // the deferral that much after the start date Mollie holds. Only a boundary still
+        // ahead is reused; one that has passed cannot be a start date any more.
+        $meta = $billable->getBillingSubscriptionMeta();
+        $recorded = $meta[self::TRIAL_ENDS_AT_META_KEY] ?? null;
+        $trialEndsAt = null;
+
+        if (ActivationRetry::resuming() && is_string($recorded) && $recorded !== '') {
+            try {
+                $candidate = \Carbon\Carbon::parse($recorded)->setTimezone('UTC');
+                $trialEndsAt = $candidate->copy()->startOfDay()->greaterThan(BillingTime::nowUtc()->startOfDay())
+                    ? $candidate
+                    : null;
+            } catch (\Throwable) {
+                $trialEndsAt = null;
+            }
+        }
+
+        $trialEndsAt ??= BillingTime::nowUtc()->addDays($trialDays);
+        $meta[self::TRIAL_ENDS_AT_META_KEY] = $trialEndsAt->toIso8601String();
+
+        $billable->forceFill([
+            'subscription_plan_code' => $planCode,
+            'subscription_interval' => SubscriptionInterval::from($interval),
+            'subscription_period_starts_at' => BillingTime::nowUtc(),
+            'subscription_meta' => $meta,
+        ])->save();
 
         // The marker BEFORE the Mollie call, and the discount passed into it: Mollie
         // collects every charge after the trial on its own, so a subscription created
@@ -728,6 +757,7 @@ class MandateOnlyPaymentHandler
         // full period quota and reported the un-granted remainder as consumption.
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['trial_quota'] = TrialQuota::marker($planCode, $interval, $trialDays, $trialQuota);
+        unset($meta[self::TRIAL_ENDS_AT_META_KEY]);
 
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::Trial,
