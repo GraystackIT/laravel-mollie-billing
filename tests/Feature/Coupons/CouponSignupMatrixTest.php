@@ -1037,7 +1037,14 @@ it('Recurring on a trial signup: a failed reset keeps the moved charge date for 
     expect($pending['reason'] ?? null)->toBe('recurring_coupon_expiry_reset')
         ->and(\Carbon\Carbon::parse((string) ($pending['target'] ?? 'now'))->toDateString())->toBe($newTrialEnd->toDateString());
 
-    // Mollie is back; the retry applies the amount AND the date.
+    // Before the retry runs, a later change moves the charge a week further out. Replaying
+    // the stored date would pull it back in front of that change.
+    $later = $newTrialEnd->copy()->addDays(7);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta['next_charge_date_override'] = $later->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    // Mollie is back; the retry applies the amount AND the date — the later one.
     $this->app->bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class);
     SpyMollieSubscriptionPatcher::$calls = [];
 
@@ -1051,7 +1058,7 @@ it('Recurring on a trial signup: a failed reset keeps the moved charge date for 
 
     expect($calls->firstWhere(0, 'update')[3]['coupon_discount_net'] ?? null)->toBe(0)
         ->and($date)->not->toBeNull()
-        ->and(\Carbon\Carbon::parse($date[3]['target'])->toDateString())->toBe($newTrialEnd->toDateString())
+        ->and(\Carbon\Carbon::parse($date[3]['target'])->toDateString())->toBe($later->toDateString())
         ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
 });
 
