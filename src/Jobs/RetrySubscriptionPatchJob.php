@@ -325,6 +325,21 @@ class RetrySubscriptionPatchJob implements ShouldQueue, ShouldBeUnique
             couponDiscountNet: 0,
         );
 
+        // A charge date that failed alongside the reset and rides in the same slot
+        // (MollieSubscriptionPatcher::resetCouponMissingCharge()). Absolute, so sending it
+        // again after a partial success is harmless — see applyNextChargeDate(). Never
+        // earlier than the date in force now: this chain backs off for up to a day, and a
+        // later change that moved the charge further out (a deferral, a period extension)
+        // must not be undone by replaying the older date — Mollie would charge early.
+        $target = (string) ($this->intentData['target'] ?? '');
+
+        if ($target !== '') {
+            $date = \Carbon\Carbon::parse($target)->setTimezone('UTC');
+            $inForce = \GraystackIT\MollieBilling\Support\ChargeDeferral::nextChargeDate($billable);
+
+            $patcher->setNextChargeDate($billable, $inForce !== null ? BillingTime::latest($date, $inForce) : $date);
+        }
+
         $coupons->clearActiveRecurringCouponMarker($billable);
     }
 

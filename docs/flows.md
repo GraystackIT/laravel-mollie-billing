@@ -262,9 +262,12 @@ flowchart TD
   turns `trial` into `active` (`TrialConverted`, `TrialConvertedNotification`).
 - **Coupons on a trial:** `recurring` → marker written before the subscription is created,
   so Mollie's amount is already discounted; a redemption with discount 0 occupies the
-  campaign slot. `single_payment` → refused by the checkout form on a trial signup; one that
-  arrives anyway is parked in `pending_first_charge_coupon` and only honoured by the
-  first charge if the amount Mollie collected reflects it.
+  campaign slot. `single_payment` → the same, as a marker of exactly one period
+  (`CouponService::applyFirstChargeMarkerFrom()`, `first_charge_only`): the charge at the
+  trial's end is the discounted one, and that renewal PATCHes Mollie back to the full
+  amount; at 100 % Mollie starts one period after the trial end. (A code parked in
+  `pending_first_charge_coupon` by an earlier release is still honoured by the first charge
+  if the amount Mollie collected reflects it.)
   `trial_extension` → redeemed here, once the Mollie subscription exists.
 - **Trial end is watched** by `ProcessTrialLifecycleJob`: `TrialEndingSoonNotification`
   ahead of the end; a trial without a mandate, or one whose first charge has not arrived
@@ -366,7 +369,10 @@ stackability (`CouponNotStackableException`), at most one `recurring` per apply 
 flowchart TD
     A["single_payment code"] --> B{"where is it entered"}
     B -->|"checkout"| C{"does a trial start"}
-    C -->|"yes"| D["refused at the form<br/>a trial has no first payment to discount"]
+    C -->|"yes"| D["discounts the charge at the trial end<br/>MandateOnlyPaymentHandler: applyFirstChargeMarkerFrom,<br/>a one-period marker first_charge_only, grant row with discount 0"]
+    D --> D2{"discount covers 100 percent"}
+    D2 -->|"no"| D3["Mollie subscription created at the DISCOUNTED amount<br/>trial-end renewal books the coupon line and the redemption,<br/>then PATCHes Mollie back to the full amount"]
+    D2 -->|"yes"| D4["Mollie subscription at the FULL amount<br/>start date one period after the trial end"]
     C -->|"no"| E{"discount covers 100 percent"}
     E -->|"no"| F["first payment reduced<br/>FirstPaymentHandler redeems against the first invoice"]
     E -->|"yes"| G["mandate-only checkout, flow 2<br/>0 EUR invoice, redeemed in MandateOnlyPaymentHandler"]
@@ -445,10 +451,12 @@ flowchart TD
     B -->|"dashboard, during a trial"| F["redeemed at once"]
     E --> G["HasBilling extendBillingTrialUntil<br/>trial_ends_at moved, event TrialExtended"]
     F --> G
-    G --> H{"source mollie"}
+    G --> G2["trial still running or past due, with a single_payment or recurring code none of whose charges is booked:<br/>CouponService moveTrialCouponMarkerTo<br/>its window of discounted charges and, at 100 percent, the deferral move to the new trial end"]
+    G2 --> H{"source mollie"}
     H -->|"yes"| I["MollieSubscriptionPatcher setNextChargeDate<br/>Mollie UpdateSubscriptionRequest with the new start date<br/>a charged subscription is replaced instead, 6.1"]
     H -->|"no"| J["local date only"]
-    I --> K["first charge at the extended trial end, full price<br/>no effect on later renewals"]
+    I --> I2["partial code ending before that charge:<br/>MollieSubscriptionPatcher resetCouponMissingCharge<br/>Mollie back to the full price, marker cleared"]
+    I2 --> K["first charge at the extended trial end, full price or discounted by a carried single_payment or recurring code<br/>no effect on later renewals"]
 ```
 
 ### 4.5 `access_grant`

@@ -10,9 +10,13 @@ use GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Jobs\PrepareUsageOverageJob;
+use GraystackIT\MollieBilling\Jobs\ProcessTrialLifecycleJob;
 use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionPatcher;
+use GraystackIT\MollieBilling\Services\Billing\NextChargeSummary;
 use GraystackIT\MollieBilling\Services\Billing\StartSubscriptionCheckout;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use GraystackIT\MollieBilling\Tests\Support\SpyMollieSubscriptionPatcher;
 use Illuminate\Support\Facades\Storage;
@@ -53,6 +57,28 @@ class SignupMatrixFakeWebhookController extends MollieWebhookController
     }
 }
 
+/** Mollie unreachable for both the charge date and the amount. */
+class SignupFailingPatcher extends SpyMollieSubscriptionPatcher
+{
+    public function setNextChargeDate(\GraystackIT\MollieBilling\Contracts\Billable $billable, \Carbon\CarbonInterface $target): void
+    {
+        throw new RuntimeException('Mollie unreachable (date)');
+    }
+
+    public function updateRecurringAmount(
+        \GraystackIT\MollieBilling\Contracts\Billable $billable,
+        string $planCode,
+        string $interval,
+        array $addons,
+        int $extraSeats,
+        bool $intervalChanged = false,
+        int $couponDiscountNet = 0,
+        bool $forceResetStartDate = false,
+    ): void {
+        throw new RuntimeException('Mollie unreachable (amount)');
+    }
+}
+
 /** What the package told Mollie, recorded off the typed request objects. */
 class SignupMollieRecorder
 {
@@ -62,10 +88,14 @@ class SignupMollieRecorder
     /** @var array<int, array<string, mixed>> */
     public static array $subscriptions = [];
 
+    /** Runs while Mollie "creates" a subscription — e.g. to let the clock pass midnight. */
+    public static ?\Closure $onCreateSubscription = null;
+
     public static function reset(): void
     {
         self::$payments = [];
         self::$subscriptions = [];
+        self::$onCreateSubscription = null;
     }
 
     public static function install(): void
@@ -86,6 +116,10 @@ class SignupMollieRecorder
             }
 
             if ($request instanceof CreateSubscriptionRequest) {
+                if (self::$onCreateSubscription !== null) {
+                    (self::$onCreateSubscription)();
+                }
+
                 $id = 'sub_signup_'.(count(self::$subscriptions) + 1);
                 self::$subscriptions[] = [
                     'id' => $id,
@@ -511,7 +545,7 @@ it('Recurring at 100% at signup: defers the first Mollie charge past the coupon,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trial signups — the coupon is stashed and priced at the FIRST CHARGE.
+// Trial signups — the coupon discounts the FIRST CHARGE, the one at the trial's end.
 // ─────────────────────────────────────────────────────────────────────────────
 
 it('SinglePayment on a trial signup: discounts the charge that ends the trial, not the one after', function (): void {
@@ -533,48 +567,238 @@ it('SinglePayment on a trial signup: discounts the charge that ends the trial, n
     paySignup();
 
     $billable->refresh();
+    $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+    // Nothing is charged during a trial. The grant is counted (a row without a discount,
+    // like a recurring code's on a trial) and the discount waits for the charge it is for.
     expect($billable->subscription_status)->toBe(SubscriptionStatus::Trial)
         ->and($billable->trial_ends_at->toDateString())->toBe(BillingTime::nowUtc()->addDays(14)->toDateString())
-        // Nothing is charged and nothing is redeemed during a trial — the coupon
-        // waits for the charge it is meant to discount.
         ->and(BillingInvoice::query()->count())->toBe(0)
-        ->and(CouponRedemption::query()->count())->toBe(0);
+        ->and(CouponRedemption::query()->count())->toBe(1)
+        ->and((int) CouponRedemption::query()->sole()->discount_amount_net)->toBe(0)
+        ->and($marker)->not->toBeNull()
+        ->and($marker['first_charge_only'] ?? null)->toBeTrue()
+        ->and($marker['discount_periods'] ?? null)->toBe(1)
+        ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey('pending_first_charge_coupon');
 
-    // Mollie's first charge is scheduled for the trial's end, at full price…
-    expect(SignupMollieRecorder::lastSubscription()['amount'])->toBe('23.80')
+    // Mollie's first charge is the one at the trial's end, and it is what Mollie holds as
+    // the recurring amount — so that amount is the discounted one. Created at the full
+    // price, the trial-end charge collected 23.80 and the code was never honoured.
+    expect(SignupMollieRecorder::lastSubscription()['amount'])->toBe('11.90')
         ->and(SignupMollieRecorder::lastSubscription()['start_date'])
         ->toBe(BillingTime::nowUtc()->addDays(14)->toDateString());
 
-    // …and that is the problem this case now pins. A Mollie subscription has one amount,
-    // so there is nowhere for a single-charge discount to live: the trial-end charge
-    // collects the full 23.80. The handler used to put a −10.00 coupon line on the invoice
-    // anyway, `reconcileWithPaidAmount()` cancelled it back out with a +10.00 adjustment
-    // (leaving net 2000 / gross 2380 — the customer saved nothing), `PaymentAmountMismatch`
-    // fired, and the coupon was redeemed regardless: a spent campaign slot and a redemption
-    // row claiming a discount nobody received.
-    //
-    // So the coupon is not applied when the collected amount does not reflect it, and stays
-    // spendable. Discounting the first charge after a trial needs Mollie to collect it as a
-    // payment of its own — see docs/coupons.md.
     $this->travel(14)->days();
-    $converting = renewSignup($billable, 'tr_signup_trial_end', '23.80');
+    $converting = renewSignup($billable, 'tr_signup_trial_end');
 
-    expect(signupCouponLineNet($converting))->toBeNull()
-        ->and((int) $converting->amount_net)->toBe(2000)
-        ->and((int) $converting->amount_gross)->toBe(2380)
-        ->and(CouponRedemption::query()->count())->toBe(0)
-        ->and($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Active);
+    $redemption = CouponRedemption::query()->latest('id')->first();
 
-    // And the code is still there to be used somewhere it can actually be honoured.
-    expect($billable->refresh()->getBillingSubscriptionMeta())
-        ->toHaveKey('pending_first_charge_coupon');
+    expect(signupCouponLineNet($converting))->toBe(-1000)
+        ->and((int) $converting->amount_net)->toBe(1000)
+        ->and((int) $converting->amount_gross)->toBe(1190)
+        ->and(CouponRedemption::query()->count())->toBe(2)
+        ->and((int) $redemption->discount_amount_net)->toBe(1000)
+        ->and((int) $redemption->invoice_id)->toBe((int) $converting->id)
+        ->and($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Active)
+        // The one application is spent: the marker is gone…
+        ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
 
-    $this->travel(30)->days();
+    // …and Mollie was PATCHed back to the full price by the same renewal.
+    $reset = collect(SpyMollieSubscriptionPatcher::$calls)->last(fn (array $c): bool => $c[0] === 'update');
+    expect($reset)->not->toBeNull()
+        ->and($reset[3]['coupon_discount_net'])->toBe(0);
+
+    $this->travel(1)->months();
     $renewal = renewSignup($billable, 'tr_signup_after_trial', '23.80');
 
     expect((int) $renewal->amount_net)->toBe(2000)
         ->and(signupCouponLineNet($renewal))->toBeNull()
-        ->and(CouponRedemption::query()->count())->toBe(0);
+        ->and(CouponRedemption::query()->count())->toBe(2);
+});
+
+it('SinglePayment at 100% on a trial signup: the period after the trial is free, then full price', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYFREE',
+        'name' => 'First paid month free',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYFREE', 'protrial');
+    paySignup();
+
+    // Mollie cannot hold an amount of 0: full price, and the first charge one period after
+    // the trial — the charge the coupon covers is never made.
+    $firstCharge = BillingTime::nowUtc()->addDays(14)->addMonthsNoOverflow(1);
+
+    expect($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Trial)
+        ->and(SignupMollieRecorder::lastSubscription()['amount'])->toBe('23.80')
+        ->and(SignupMollieRecorder::lastSubscription()['start_date'])->toBe($firstCharge->toDateString())
+        ->and(CouponRedemption::query()->count())->toBe(1);
+
+    // What the customer is shown is the charge they bought the code for: the one at the
+    // trial's end, on that day, at 0.00 — not "first charge a month later at full price",
+    // which is only how Mollie is made to skip it.
+    $trialEnd = BillingTime::nowUtc()->addDays(14);
+    $shown = app(NextChargeSummary::class)->for($billable->refresh());
+
+    expect($shown['state'])->toBe(NextChargeSummary::STATE_SCHEDULED)
+        ->and($shown['date']?->toDateString())->toBe($trialEnd->toDateString())
+        ->and($shown['discount_net'])->toBe(2000)
+        ->and($shown['discount_code'])->toBe('TRYFREE')
+        ->and($shown['gross'])->toBe(0)
+        ->and($shown['deferred'])->toBeFalse();
+
+    // Once that charge has passed, the next one is the deferred full-price charge.
+    $this->travelTo($trialEnd->copy()->addDay()->setTime(7, 0));
+    (new ProcessTrialLifecycleJob)->handle();
+    $after = app(NextChargeSummary::class)->for($billable->refresh());
+
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Active)
+        ->and($after['date']?->toDateString())->toBe($firstCharge->toDateString())
+        ->and($after['discount_net'])->toBe(0)
+        ->and($after['gross'])->toBe(2380);
+
+    $this->travelTo($firstCharge->copy()->setTime(7, 0));
+    $charge = renewSignup($billable, 'tr_signup_trial_free_period_end', '23.80');
+
+    expect((int) $charge->amount_net)->toBe(2000)
+        ->and(signupCouponLineNet($charge))->toBeNull()
+        ->and($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Active);
+});
+
+it('SinglePayment on a trial signup: is honoured after the code itself expired or was switched off', function (string $change): void {
+    $coupon = app(CouponService::class)->create([
+        'code' => 'TRYLATE',
+        'name' => 'A quarter off the first charge',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'valid_until' => BillingTime::nowUtc()->addDays(3),
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYLATE', 'protrial');
+    paySignup();
+
+    // The last day to redeem the code is not the day its discount ends: the customer
+    // redeemed it at signup, and the trial merely postpones the charge it discounts.
+    if ($change === 'deactivated') {
+        app(CouponService::class)->deactivate($coupon);
+    }
+
+    $this->travel(14)->days();
+    $converting = renewSignup($billable, 'tr_signup_trial_late');
+
+    expect(SignupMollieRecorder::lastSubscription()['amount'])->toBe('17.85')
+        ->and(signupCouponLineNet($converting))->toBe(-500)
+        ->and((int) $converting->amount_net)->toBe(1500);
+})->with(['expired' => ['expired'], 'deactivated' => ['deactivated']]);
+
+it('SinglePayment at 100% on a trial signup: switching the code off does not take the free charge back', function (): void {
+    $coupon = app(CouponService::class)->create([
+        'code' => 'TRYFREE',
+        'name' => 'First paid month free',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYFREE', 'protrial');
+    paySignup();
+
+    $trialEnd = BillingTime::nowUtc()->addDays(14);
+    $firstCharge = $trialEnd->copy()->addMonthsNoOverflow(1);
+
+    app(CouponService::class)->deactivate($coupon);
+    SpyMollieSubscriptionPatcher::$calls = [];
+
+    // The nightly pass ends the deferral of a fully covering RECURRING code that has been
+    // switched off. A first-payment code was redeemed and shown at signup; switching it off
+    // stops new redemptions and must not pull the full-price charge onto the trial's end.
+    $this->travel(1)->days();
+    PrepareUsageOverageJob::dispatchSync();
+
+    $billable->refresh();
+
+    expect($billable->getBillingSubscriptionMeta())->toHaveKey('active_recurring_coupon')
+        ->and(ChargeDeferral::until($billable)?->toDateString())->toBe($firstCharge->toDateString())
+        ->and(collect(SpyMollieSubscriptionPatcher::$calls)->where(0, 'update')->all())->toBe([]);
+
+    $shown = app(NextChargeSummary::class)->for($billable);
+    expect($shown['date']?->toDateString())->toBe($trialEnd->toDateString())
+        ->and($shown['gross'])->toBe(0);
+});
+
+it('SinglePayment on a trial signup: a trial extended past the window of the code still gets the discount', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYQUARTER',
+        'name' => 'A quarter off the first charge',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYQUARTER', 'protrial');
+    paySignup();
+
+    expect(SignupMollieRecorder::lastSubscription()['amount'])->toBe('17.85');
+
+    // Well past the window the code was given for the original trial end (trial end + one
+    // period): the first charge moves with the trial, and so does the discount on it.
+    $newTrialEnd = BillingTime::nowUtc()->addDays(60);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $marker = $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+
+    expect($marker)->not->toBeNull()
+        ->and(\Carbon\Carbon::parse($marker['valid_until'])->greaterThan($newTrialEnd))->toBeTrue();
+
+    // What Mollie is told on any change before the charge still carries the discount.
+    expect(app(CouponService::class)->computeMarkerDiscount($billable, 2000, [], $newTrialEnd))->toBe(500);
+
+    $this->travelTo($newTrialEnd->copy()->setTime(7, 0));
+    $converting = renewSignup($billable, 'tr_signup_trial_extended', '17.85');
+
+    expect(signupCouponLineNet($converting))->toBe(-500)
+        ->and((int) $converting->amount_net)->toBe(1500)
+        ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
+});
+
+it('SinglePayment at 100% on a trial signup: an extended trial moves the free charge and the paid one after it', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYFREE',
+        'name' => 'First paid month free',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYFREE', 'protrial');
+    paySignup();
+
+    $newTrialEnd = BillingTime::nowUtc()->addDays(30);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+    $billable->refresh();
+
+    // The free charge is the one at the (new) trial end; the first paid one a period after.
+    expect(ChargeDeferral::until($billable)?->toDateString())
+        ->toBe($newTrialEnd->copy()->addMonthsNoOverflow(1)->toDateString());
+
+    $shown = app(NextChargeSummary::class)->for($billable);
+    expect($shown['date']?->toDateString())->toBe($newTrialEnd->toDateString())
+        ->and($shown['discount_net'])->toBe(2000)
+        ->and($shown['gross'])->toBe(0);
 });
 
 it('Recurring on a trial signup: keeps discounting every charge after the trial', function (): void {
@@ -613,6 +837,364 @@ it('Recurring on a trial signup: keeps discounting every charge after the trial'
 
     expect((int) $second->amount_net)->toBe(1500)
         ->and(signupCouponLineNet($second))->toBe(-500);
+});
+
+it('Recurring on a trial signup: an extended trial keeps every discounted period', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYTWO',
+        'name' => 'A quarter off two charges',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 2,
+        'max_redemptions_per_billable' => 3,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYTWO', 'protrial');
+    paySignup();
+
+    // 46 days more: the first charge moves from day 14 to day 60. The two discounted charges
+    // are the first two there are — day 60 and a month later — not two months from day 14.
+    $newTrialEnd = BillingTime::nowUtc()->addDays(60);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $this->travelTo($newTrialEnd->copy()->setTime(7, 0));
+    $first = renewSignup($billable, 'tr_signup_two_first', '17.85');
+
+    $this->travelTo($newTrialEnd->copy()->addMonthsNoOverflow(1)->setTime(7, 0));
+    $second = renewSignup($billable, 'tr_signup_two_second', '17.85');
+
+    $this->travelTo($newTrialEnd->copy()->addMonthsNoOverflow(2)->setTime(7, 0));
+    $third = renewSignup($billable, 'tr_signup_two_third', '23.80');
+
+    expect(signupCouponLineNet($first))->toBe(-500)
+        ->and(signupCouponLineNet($second))->toBe(-500)
+        ->and((int) $second->amount_net)->toBe(1500)
+        ->and(signupCouponLineNet($third))->toBeNull()
+        ->and((int) $third->amount_net)->toBe(2000);
+});
+
+it('Recurring at 100% on a trial signup: an extended trial moves the free periods and the paid charge after them', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYFREE2',
+        'name' => 'Two months free',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+        'discount_periods' => 2,
+        'max_redemptions_per_billable' => 3,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYFREE2', 'protrial');
+    paySignup();
+
+    expect(ChargeDeferral::until($billable->refresh())?->toDateString())
+        ->toBe(BillingTime::nowUtc()->addDays(14)->addMonthsNoOverflow(2)->toDateString());
+
+    $newTrialEnd = BillingTime::nowUtc()->addDays(30);
+    $billable->extendBillingTrialUntil($newTrialEnd);
+
+    expect(ChargeDeferral::until($billable->refresh())?->toDateString())
+        ->toBe($newTrialEnd->copy()->addMonthsNoOverflow(2)->toDateString());
+});
+
+it('SinglePayment at 100% on a trial signup: an extended trial carries extension days given on top of the deferral', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYFREE',
+        'name' => 'First paid month free',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+    ]);
+    $extension = app(CouponService::class)->create([
+        'code' => 'PLUS10',
+        'name' => 'Ten more days',
+        'type' => CouponType::PeriodExtension,
+        'grant_duration_days' => 10,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYFREE', 'protrial');
+    paySignup();
+
+    $trialEnd = BillingTime::nowUtc()->addDays(14);
+
+    // Ten days appended to the deferred first paid charge.
+    app(CouponService::class)->validate('PLUS10', $billable->refresh(), []);
+    app(CouponService::class)->redeem($extension, $billable, []);
+
+    expect(ChargeDeferral::until($billable->refresh())?->toDateString())
+        ->toBe($trialEnd->copy()->addMonthsNoOverflow(1)->addDays(10)->toDateString());
+
+    // The trial moves 30 days; the free charge moves with it, and the paid one after it
+    // keeps the ten days on top — never inside the free window.
+    $newTrialEnd = $trialEnd->copy()->addDays(30);
+    $billable->extendBillingTrialUntil($newTrialEnd);
+
+    expect(ChargeDeferral::until($billable->refresh())?->toDateString())
+        ->toBe($newTrialEnd->copy()->addMonthsNoOverflow(1)->addDays(10)->toDateString());
+});
+
+it('SinglePayment on a trial signup: extending a trial whose first charge failed keeps the discount for it', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYHALF',
+        'name' => 'Half off the first charge',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYHALF', 'protrial');
+    paySignup();
+
+    // The charge at the trial's end failed: past due, the discounted charge never collected.
+    $this->travel(15)->days();
+    $billable->refresh()->forceFill(['subscription_status' => SubscriptionStatus::PastDue])->save();
+
+    // "Another six weeks to add a card": past the window the code had from the old trial end.
+    $newTrialEnd = BillingTime::nowUtc()->addDays(45);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $this->travelTo($newTrialEnd->copy()->setTime(7, 0));
+    $charge = renewSignup($billable, 'tr_signup_after_failed', '11.90');
+
+    expect(signupCouponLineNet($charge))->toBe(-1000)
+        ->and((int) $charge->amount_net)->toBe(1000);
+});
+
+it('Recurring on a trial signup: a trial extended past the code\'s own end returns Mollie to the full price', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYSHORT',
+        'name' => 'A quarter off, until day 20',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 3,
+        'max_redemptions_per_billable' => 3,
+        'valid_until' => BillingTime::nowUtc()->addDays(20),
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYSHORT', 'protrial');
+    paySignup();
+
+    expect(SignupMollieRecorder::lastSubscription()['amount'])->toBe('17.85');
+
+    SpyMollieSubscriptionPatcher::$calls = [];
+
+    // The first charge moves to day 30, after the code has ended: it discounts nothing,
+    // so Mollie must not keep collecting the discounted amount.
+    $newTrialEnd = BillingTime::nowUtc()->addDays(30);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $reset = collect(SpyMollieSubscriptionPatcher::$calls)->last(fn (array $c): bool => $c[0] === 'update');
+
+    expect($reset)->not->toBeNull()
+        ->and($reset[3]['coupon_discount_net'])->toBe(0)
+        ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
+
+    $this->travelTo($newTrialEnd->copy()->setTime(7, 0));
+    $charge = renewSignup($billable, 'tr_signup_short_first', '23.80');
+
+    expect(signupCouponLineNet($charge))->toBeNull()
+        ->and((int) $charge->amount_net)->toBe(2000);
+});
+
+it('Recurring on a trial signup: a failed reset keeps the moved charge date for the retry', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYSHORT',
+        'name' => 'A quarter off, until day 20',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 3,
+        'max_redemptions_per_billable' => 3,
+        'valid_until' => BillingTime::nowUtc()->addDays(20),
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYSHORT', 'protrial');
+    paySignup();
+
+    // Both PATCHes of the extension fail: the moved charge date, then the reset to full price.
+    $this->app->bind(MollieSubscriptionPatcher::class, SignupFailingPatcher::class);
+
+    $newTrialEnd = BillingTime::nowUtc()->addDays(30);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $pending = $billable->refresh()->getBillingSubscriptionMeta()['pending_subscription_patch'] ?? null;
+
+    // One retry slot, both obligations: the reset must not drop the date.
+    expect($pending['reason'] ?? null)->toBe('recurring_coupon_expiry_reset')
+        ->and(\Carbon\Carbon::parse((string) ($pending['target'] ?? 'now'))->toDateString())->toBe($newTrialEnd->toDateString());
+
+    // Before the retry runs, a later change moves the charge a week further out. Replaying
+    // the stored date would pull it back in front of that change.
+    $later = $newTrialEnd->copy()->addDays(7);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta['next_charge_date_override'] = $later->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    // Mollie is back; the retry applies the amount AND the date — the later one.
+    $this->app->bind(MollieSubscriptionPatcher::class, SpyMollieSubscriptionPatcher::class);
+    SpyMollieSubscriptionPatcher::$calls = [];
+
+    \GraystackIT\MollieBilling\Jobs\RetrySubscriptionPatchJob::dispatchSync(
+        $pending + ['billable_type' => $billable::class, 'billable_id' => $billable->getKey()],
+        (string) $pending['first_attempt_at'],
+    );
+
+    $calls = collect(SpyMollieSubscriptionPatcher::$calls);
+    $date = $calls->firstWhere(0, 'set_next_charge_date');
+
+    expect($calls->firstWhere(0, 'update')[3]['coupon_discount_net'] ?? null)->toBe(0)
+        ->and($date)->not->toBeNull()
+        ->and(\Carbon\Carbon::parse($date[3]['target'])->toDateString())->toBe($later->toDateString())
+        ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
+});
+
+it('Recurring: a window with a start of its own is not moved by a trial extension, even when its capped end matches', function (): void {
+    $this->travelTo(Carbon\Carbon::parse('2026-11-24 10:00:00', 'UTC'));
+
+    $coupon = app(CouponService::class)->create([
+        'code' => 'RUNNING',
+        'name' => 'A quarter off, until 23 January',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 3,
+        'max_redemptions_per_billable' => 3,
+        'valid_until' => Carbon\Carbon::parse('2027-01-23 10:00:00', 'UTC'),
+    ]);
+
+    $billable = signupBillable();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => \GraystackIT\MollieBilling\Enums\SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc(),
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_running', 'seat_count' => 1],
+        'mollie_mandate_id' => 'mdt_running',
+    ])->save();
+
+    // Its window starts today (24 Nov) and is capped by the code's end (23 Jan): charges on
+    // 24 Dec and 24 Jan are its cycle, so the first undiscounted one is 24 Jan.
+    app(CouponService::class)->applyRecurringMarker($coupon, $billable->refresh(), 2000, 'monthly');
+    $written = $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
+
+    // A trial set on top, ending 29 Nov: measured from there, the window also ends on the
+    // cap — the same end, a different start. Extended to 10 Dec.
+    $billable->forceFill(['subscription_status' => SubscriptionStatus::Trial, 'trial_ends_at' => BillingTime::nowUtc()->addDays(5)])->save();
+    $billable->refresh()->extendBillingTrialUntil(BillingTime::nowUtc()->addDays(16));
+
+    $marker = $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
+
+    expect($marker['valid_until'])->toBe($written['valid_until'])
+        ->and($marker['charge_resumes_at'])->toBe($written['charge_resumes_at']);
+});
+
+it('SinglePayment on a trial signup: an activation that crosses midnight still moves with an extended trial', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYQUARTER',
+        'name' => 'A quarter off the first charge',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+    ]);
+
+    $billable = signupBillable();
+
+    // The activation starts a second before midnight and Mollie answers after it.
+    $this->travelTo(BillingTime::nowUtc()->setTime(23, 59, 59));
+    SignupMollieRecorder::$onCreateSubscription = fn () => $this->travel(2)->seconds();
+
+    startSignup($billable, 'TRYQUARTER', 'protrial');
+    paySignup();
+
+    $newTrialEnd = BillingTime::nowUtc()->addDays(60);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $this->travelTo($newTrialEnd->copy()->setTime(7, 0));
+    $charge = renewSignup($billable, 'tr_signup_midnight', '17.85');
+
+    expect(signupCouponLineNet($charge))->toBe(-500);
+});
+
+it('Recurring on a trial signup: an extended trial keeps the window it was granted after the code\'s end date is edited', function (): void {
+    $coupon = app(CouponService::class)->create([
+        'code' => 'TRYTWO',
+        'name' => 'A quarter off two charges',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 2,
+        'max_redemptions_per_billable' => 3,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYTWO', 'protrial');
+    paySignup();
+
+    // An end date given to the offer later is a change of the offer, not of what a
+    // customer who already holds it was promised.
+    $coupon->forceFill(['valid_until' => BillingTime::nowUtc()->addDays(50)])->save();
+
+    $newTrialEnd = BillingTime::nowUtc()->addDays(60);
+    $billable->refresh()->extendBillingTrialUntil($newTrialEnd);
+
+    $this->travelTo($newTrialEnd->copy()->setTime(7, 0));
+    $first = renewSignup($billable, 'tr_signup_edited_first', '17.85');
+
+    $this->travelTo($newTrialEnd->copy()->addMonthsNoOverflow(1)->setTime(7, 0));
+    $second = renewSignup($billable, 'tr_signup_edited_second', '17.85');
+
+    expect(signupCouponLineNet($first))->toBe(-500)
+        ->and(signupCouponLineNet($second))->toBe(-500);
+});
+
+it('SinglePayment at 100% on a trial signup: the day after the trial shows the paid charge, not the passed free one', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'TRYFREE',
+        'name' => 'First paid month free',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+    ]);
+
+    $billable = signupBillable();
+
+    startSignup($billable, 'TRYFREE', 'protrial');
+    paySignup();
+
+    $trialEnd = BillingTime::nowUtc()->addDays(14);
+    $firstCharge = $trialEnd->copy()->addMonthsNoOverflow(1);
+
+    // On the trial's last day the free charge is today's.
+    $this->travelTo($trialEnd->copy()->addHours(3));
+    $onTheDay = app(NextChargeSummary::class)->for($billable->refresh());
+
+    expect($onTheDay['date']?->toDateString())->toBe($trialEnd->toDateString())
+        ->and($onTheDay['gross'])->toBe(0);
+
+    // A day later, before the nightly job has converted the trial: the free charge is
+    // behind the customer, the next one is the paid charge.
+    $this->travelTo($trialEnd->copy()->addDay()->setTime(1, 0));
+    $after = app(NextChargeSummary::class)->for($billable->refresh());
+
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Trial)
+        ->and($after['date']?->toDateString())->toBe($firstCharge->toDateString())
+        ->and($after['gross'])->toBe(2380);
 });
 
 it('auto-applied Recurring at 100% on a trial signup: waits for the later of the trial and the coupon', function (): void {

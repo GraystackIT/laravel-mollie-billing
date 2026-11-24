@@ -32,6 +32,12 @@ use Illuminate\Support\Facades\Log;
 class MandateOnlyPaymentHandler
 {
     /**
+     * The trial end an activation in flight computed before its Mollie call, for a retry of
+     * it to reuse (activateTrialSubscriptionAfterMandate()). Removed once the trial runs.
+     */
+    public const TRIAL_ENDS_AT_META_KEY = 'trial_activation_ends_at';
+
+    /**
      * Subscription states a mandate-only activation may run from. `New` is the
      * regular first checkout; PastDue, Expired and a Cancelled subscription
      * whose grace period has run out are recovery checkouts — StartSubscriptionCheckout
@@ -622,10 +628,41 @@ class MandateOnlyPaymentHandler
             }
         }
 
+        // The trial end, once: the coupon window, Mollie's start date and `trial_ends_at`
+        // must name the same moment. Each used to read the clock on its own — the window
+        // before the Mollie call, `trial_ends_at` after it — and an activation that crossed
+        // midnight measured them from different days, so a later trial extension no longer
+        // recognised the window as the trial's and left it behind.
+        //
+        // Recorded before the Mollie call, and reused by a retry of this activation: a retry
+        // that adopts the subscription the first attempt created (its answer lost) runs
+        // hours later, and a fresh clock read put the local trial end, the coupon window and
+        // the deferral that much after the start date Mollie holds. Reused while it is still
+        // ahead — to the moment, not the day: a boundary later today is still the one Mollie
+        // holds. One that has passed cannot be a start date any more; it cannot come up in
+        // practice, since the retry ladder (RetrySubscriptionActivationJob::backoff()) is
+        // spent within hours and a trial lasts at least a day.
+        $meta = $billable->getBillingSubscriptionMeta();
+        $recorded = $meta[self::TRIAL_ENDS_AT_META_KEY] ?? null;
+        $trialEndsAt = null;
+
+        if (ActivationRetry::resuming() && is_string($recorded) && $recorded !== '') {
+            try {
+                $candidate = \Carbon\Carbon::parse($recorded)->setTimezone('UTC');
+                $trialEndsAt = $candidate->greaterThan(BillingTime::nowUtc()) ? $candidate : null;
+            } catch (\Throwable) {
+                $trialEndsAt = null;
+            }
+        }
+
+        $trialEndsAt ??= BillingTime::nowUtc()->addDays($trialDays);
+        $meta[self::TRIAL_ENDS_AT_META_KEY] = $trialEndsAt->toIso8601String();
+
         $billable->forceFill([
             'subscription_plan_code' => $planCode,
             'subscription_interval' => SubscriptionInterval::from($interval),
             'subscription_period_starts_at' => BillingTime::nowUtc(),
+            'subscription_meta' => $meta,
         ])->save();
 
         // The marker BEFORE the Mollie call, and the discount passed into it: Mollie
@@ -650,8 +687,61 @@ class MandateOnlyPaymentHandler
                     // deferred the charge to 62 days after the signup — 48 days after the
                     // trial, on a day off the cycle — and a partial code behind a long
                     // trial could end before its last promised charge.
-                    BillingTime::nowUtc()->addDays($trialDays),
+                    $trialEndsAt,
                 );
+            }
+        }
+
+        // A first-payment coupon discounts the first charge — on a trial, the one at its
+        // end. Mollie collects that charge from the subscription's recurring amount, so the
+        // discount goes there for one period (CouponService::applyFirstChargeMarkerFrom()),
+        // the same way and for the same reason as a recurring code's above. At 100 %
+        // CreateSubscription keeps the full price and starts one period after the trial.
+        if ($pricedCoupon !== null && $pricedCoupon['coupon']->type === CouponType::SinglePayment) {
+            $recurringDiscountNet = max(0, (int) $pricedCoupon['discount_net']);
+
+            if ($recurringDiscountNet > 0) {
+                $this->couponService->applyFirstChargeMarkerFrom(
+                    $pricedCoupon['coupon'],
+                    $billable,
+                    (int) $pricedCoupon['order_amount_net'],
+                    $interval,
+                    $trialEndsAt,
+                );
+            }
+        }
+
+        // A retry whose coupon could not be priced again (switched off since, say) finds the
+        // marker the first attempt granted. Mollie is created at the amount that marker
+        // promises — at full price beside it, the trial-end charge collected the full price
+        // while the books promised the discount. And a retry that adopts the subscription
+        // the first attempt created keeps that one's amount, which is the marker's too.
+        // The grant is counted below like a priced one (countRecurringGrant()): the first
+        // attempt returned before it got there.
+        $retainedCoupon = null;
+
+        if ($pricedCoupon === null && ActivationRetry::resuming()) {
+            $leftover = $this->couponService->getActiveRecurringCouponMarker($billable);
+
+            if (is_array($leftover) && ! \GraystackIT\MollieBilling\Services\Billing\PlanWaiver::isWaiver($leftover)) {
+                $orderNet = SubscriptionAmount::net(
+                    $this->catalog,
+                    $billable,
+                    $planCode,
+                    $interval,
+                    $this->catalog->includedSeats($planCode) + $extraSeats,
+                    $addonCodes,
+                );
+                $recurringDiscountNet = max(0, $this->couponService->computeMarkerDiscount($billable, $orderNet, [], $trialEndsAt));
+                $leftoverCoupon = \GraystackIT\MollieBilling\Models\Coupon::query()->find((int) ($leftover['coupon_id'] ?? 0));
+
+                if ($leftoverCoupon !== null && $recurringDiscountNet > 0) {
+                    $retainedCoupon = [
+                        'coupon' => $leftoverCoupon,
+                        'discount_net' => $recurringDiscountNet,
+                        'order_amount_net' => $orderNet,
+                    ];
+                }
             }
         }
 
@@ -664,6 +754,7 @@ class MandateOnlyPaymentHandler
                 'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
                 'trial_days' => $trialDays,
+                'trial_ends_at' => $trialEndsAt,
             ]);
         } catch (\Throwable $e) {
             Log::error('CreateSubscription during trial activation failed', [
@@ -701,16 +792,19 @@ class MandateOnlyPaymentHandler
         // full period quota and reported the un-granted remainder as consumption.
         $meta = $billable->getBillingSubscriptionMeta();
         $meta['trial_quota'] = TrialQuota::marker($planCode, $interval, $trialDays, $trialQuota);
+        unset($meta[self::TRIAL_ENDS_AT_META_KEY]);
 
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::Trial,
-            'trial_ends_at' => BillingTime::nowUtc()->addDays($trialDays),
+            'trial_ends_at' => $trialEndsAt,
             'subscription_meta' => $meta,
         ])->save();
 
         if ($pricedCoupon !== null) {
             $this->stashTrialCoupon($billable, $pricedCoupon, $planCode, $interval, $addonCodes, $extraSeats);
             $this->countRecurringGrant($billable, $pricedCoupon, $planCode, $interval);
+        } elseif ($retainedCoupon !== null) {
+            $this->countRecurringGrant($billable, $retainedCoupon, $planCode, $interval);
         }
 
         $this->support->completeActivation(
@@ -746,7 +840,12 @@ class MandateOnlyPaymentHandler
         string $planCode,
         string $interval,
     ): void {
-        if ($pricedCoupon['coupon']->type !== CouponType::Recurring) {
+        // A first-payment coupon carried over the trial is a grant of the same kind: its
+        // marker is set, and its one application is booked by the trial-end charge.
+        $carriedOver = $pricedCoupon['coupon']->type === CouponType::SinglePayment
+            && (int) $pricedCoupon['discount_net'] > 0;
+
+        if ($pricedCoupon['coupon']->type !== CouponType::Recurring && ! $carriedOver) {
             return;
         }
 
@@ -803,13 +902,12 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        // A first-payment coupon is carried over the trial as a one-period marker, also
+        // written before CreateSubscription. It used to be parked here in
+        // `pending_first_charge_coupon` while Mollie was created at the full price, so the
+        // trial-end charge collected the full price and the code was never honoured. The
+        // renewal handler still reads that slot for trials started before.
         if ($coupon->type === CouponType::SinglePayment) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['pending_first_charge_coupon'] = [
-                'code' => (string) $coupon->code,
-            ];
-            $billable->forceFill(['subscription_meta' => $meta])->save();
-
             return;
         }
 

@@ -60,7 +60,7 @@ User -> StartSubscriptionCheckout -> Mollie first payment
 
 ### Trial Flow
 
-A trial starts when the chosen `(planCode, interval)` carries a positive `trial_days` value in the catalog, the order costs something, and the billable does **not** yet have a Mollie mandate. The trial is decided *before* the zero-amount branch, so it wins over a coupon that covers the whole first payment — otherwise the confirm step announced a trial and a first-charge date, and the customer got an Active subscription with no trial and the coupon spent on the period that was meant to be free. The checkout does not accept a `single_payment` coupon on a trial signup at all (there is no first payment for it to discount; see [coupons.md](coupons.md)); a `recurring` one is applied by the trial path as before. Trials only fire on a fresh checkout — `ChangePlan`, `EnableAddon`, and other plan-change services never start or extend trials.
+A trial starts when the chosen `(planCode, interval)` carries a positive `trial_days` value in the catalog, the order costs something, and the billable does **not** yet have a Mollie mandate. The trial is decided *before* the zero-amount branch, so it wins over a coupon that covers the whole first payment — otherwise the confirm step announced a trial and a first-charge date, and the customer got an Active subscription with no trial and the coupon spent on the period that was meant to be free. A `single_payment` coupon on a trial signup discounts the charge at the trial's end, the first one there is; a `recurring` one discounts the charges from the trial's end on (see [coupons.md](coupons.md)). Trials only fire on a fresh checkout — `ChangePlan`, `EnableAddon`, and other plan-change services never start or extend trials.
 
 ```
 User -> StartSubscriptionCheckout (catalog->trialDays() > 0, no mandate yet)
@@ -68,12 +68,16 @@ User -> StartSubscriptionCheckout (catalog->trialDays() > 0, no mandate yet)
     -> Mollie hosted page captures mandate
       -> Webhook: handleMandateOnlyPaid -> activateSubscriptionAfterMandate
         -> activateTrialSubscriptionAfterMandate
-          -> CreateSubscription::handle() with trial_days
-            -> Mollie subscription with startDate = now + trial_days, full plan amount
-            -> Local: status=trial, trial_ends_at=now+trial_days, source=mollie
-          -> Stash coupon (if any) for the first paid charge:
-              Recurring -> apply marker via CouponService::applyRecurringMarker()
-              SinglePayment -> park in subscription_meta.pending_first_charge_coupon
+          -> trial end computed once: now + trial_days
+          -> Coupon marker (if any), BEFORE the Mollie call, its window from the trial end:
+              Recurring -> CouponService::applyRecurringMarkerFrom()
+              SinglePayment -> one-period marker via CouponService::applyFirstChargeMarkerFrom()
+                               (discounts the trial-end charge only)
+          -> CreateSubscription::handle() with trial_ends_at
+            -> Mollie subscription at the discounted amount, startDate = trial end
+               (a coupon covering everything: full amount, startDate = the first charge
+                it no longer covers — one period after the trial for a SinglePayment code)
+            -> Local: status=trial, trial_ends_at, source=mollie
           -> Hydrate wallet aliquot: ceil(included * trial_days / intervalDays)
           -> TrialStarted event
 ```
@@ -85,7 +89,7 @@ Key properties:
 - **Seats and addons are free during the trial.** Everything the current plan allows is part of what is being tried: no prorata charge, no credit when it is removed again, and the trial keeps running. Mollie is PATCHed to the new amount, so the first real charge collects it. See [plan-changes.md](plan-changes.md#nothing-is-prorated-during-a-trial).
 - **A plan or interval change mid-trial ends the trial**, and the wallets then get the full period quota that charge paid for — the same refill the first recurring payment does. See [usage-billing.md](usage-billing.md#a-trial-is-credited-a-prorated-quota); a plan change that leaves the trial running rebalances against the recorded grant instead.
 - **The date the checkout names is the date Mollie charges on.** The confirm step prints `firstChargeDate()` of the checkout component: the trial's end, or — when a `recurring` coupon covers the whole order — the first regular charge that coupon no longer covers, counted in billing periods from the trial end where there is one (`CouponService::recurringChargeResumesAt()`, the same value `CreateSubscription` sends as the start date). It used to print the trial's end regardless.
-- **Mollie's first real charge** fires at `startDate = now + trial_days`. When that webhook arrives, `handleSubscriptionPaymentPaid` flips status from `trial` to `active`, consumes any parked SinglePayment coupon (discounts the line items + creates a redemption), and lets the recurring marker apply for the first time.
+- **Mollie's first real charge** fires at `startDate = now + trial_days`. When that webhook arrives, `handleSubscriptionPaymentPaid` flips status from `trial` to `active` and lets the coupon marker apply for the first time (coupon line + redemption); a SinglePayment code's one-period marker is then spent, and Mollie is PATCHed back to the full price. A SinglePayment coupon parked in `pending_first_charge_coupon` by an earlier release is still consumed there.
 - **Trials never repeat for a returning customer**. Once `mollie_mandate_id` is set, the trial branch is skipped — even on a fresh checkout — and the customer pays the full first period.
 
 If the trial expires without a successful first charge (mandate failure, mandate revoked, customer never paid), `ProcessTrialLifecycleJob` flips the billable to `past_due` **and stamps `past_due_since`**, dispatches `TrialExpired`, and notifies via `TrialExpiredNotification`. `RequireActiveSubscription` then routes the user back to checkout.

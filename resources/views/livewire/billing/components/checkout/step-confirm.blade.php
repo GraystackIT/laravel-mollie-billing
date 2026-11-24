@@ -18,6 +18,15 @@
      recurring coupon that is later than the trial's end. --}}
 @php($firstCharge = $this->firstChargeDate())
 @php($trialFirstChargeDate = $trialDays > 0 && $firstCharge !== null ? $firstCharge->translatedFormat('d. M Y') : null)
+{{-- A first-payment coupon that covers the whole charge at the trial's end: that charge
+     is still the first one, on the trial's last day — it just costs nothing. Said in so
+     many words, because "the first payment is taken on …" over a total of 0.00 reads as
+     a contradiction. --}}
+@php($trialFirstChargeCovered = $trialFirstChargeDate !== null
+    && $applied_coupon !== null
+    && (int) ($applied_coupon['discount_net'] ?? 0) > 0
+    && (int) $totals['gross'] === 0
+    && $firstCharge->isSameDay(\GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays($trialDays)))
 
 @if ($trialDays > 0)
     <flux:callout icon="sparkles" color="lime" inline class="mt-4">
@@ -203,6 +212,8 @@
         <span dusk="confirm-booking-notice">{{ __('billing::checkout.access_grant_notice') }}</span>
     @elseif ($bookingPath === 'free')
         <span dusk="confirm-booking-notice">{{ __('billing::checkout.free_activation_notice') }}</span>
+    @elseif ($trialFirstChargeCovered)
+        <span dusk="confirm-first-charge">{{ __('billing::checkout.trial_covered_redirect_notice', ['date' => $trialFirstChargeDate, 'amount' => $money(0)]) }}</span>
     @elseif ($trialDays > 0 && $trialFirstChargeDate !== null)
         <span dusk="confirm-first-charge">{{ __('billing::checkout.trial_redirect_notice', ['date' => $trialFirstChargeDate]) }}</span>
     @elseif ($firstCharge !== null)

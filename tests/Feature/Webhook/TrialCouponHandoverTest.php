@@ -90,7 +90,7 @@ function dispatchTrialMandateWebhook(TestBillable $billable, string $couponCode)
         ->assertStatus(200);
 }
 
-it('parks a SinglePayment coupon in subscription_meta on trial activation', function (): void {
+it('carries a SinglePayment coupon over the trial as a one-period marker', function (): void {
     Coupon::create([
         'code' => 'TRIAL10',
         'name' => 'Trial 10',
@@ -106,12 +106,19 @@ it('parks a SinglePayment coupon in subscription_meta on trial activation', func
 
     expect($billable->subscription_status)->toBe(SubscriptionStatus::Trial);
 
-    $slot = $billable->getBillingSubscriptionMeta()['pending_first_charge_coupon'] ?? null;
-    expect($slot)->not->toBeNull();
-    expect($slot['code'])->toBe('TRIAL10');
+    // The discount of the charge at the trial's end, held where Mollie's amount is priced
+    // from — one period, starting at the trial's end.
+    $marker = $billable->getBillingSubscriptionMeta()['active_recurring_coupon'] ?? null;
+    expect($marker)->not->toBeNull()
+        ->and($marker['code'])->toBe('TRIAL10')
+        ->and($marker['first_charge_only'])->toBeTrue()
+        ->and($marker['discount_periods'])->toBe(1)
+        ->and(\Illuminate\Support\Carbon::parse($marker['charge_resumes_at'])->toDateString())
+        ->toBe(\GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays(14)->addMonthNoOverflow()->toDateString());
 
-    // Recurring marker is NOT set for SinglePayment coupons
-    expect($billable->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
+    // No longer parked: the slot it used to wait in was never honoured, because Mollie
+    // collected the full price at the trial's end.
+    expect($billable->getBillingSubscriptionMeta())->not->toHaveKey('pending_first_charge_coupon');
 });
 
 it('sets the active_recurring_coupon marker for a Recurring coupon on trial activation', function (): void {

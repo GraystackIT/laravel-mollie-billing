@@ -318,6 +318,100 @@ class MollieSubscriptionPatcher
     }
 
     /**
+     * Return Mollie to the full price when the next charge has moved past the end of a
+     * partial coupon's window — a trial extended beyond the code's own end date.
+     *
+     * Mollie holds the discounted amount from the moment such a coupon is granted, and
+     * returns to the full price only through the renewal that books the coupon's last
+     * application. A charge moved out of the window gets no application, so nothing ever
+     * reset it: Mollie collected the discounted amount, the invoice reconciled down to it
+     * and reported a payment mismatch — for a charge the books price in full. A coupon that
+     * covers everything is left alone: Mollie holds the full price there, and the charge
+     * date (`deferNextChargeDate()` takes the later of the two) is what decides.
+     */
+    public function resetCouponMissingCharge(Billable $billable, \Carbon\CarbonInterface $chargeAt): void
+    {
+        if (! $billable instanceof Model
+            || $billable->getBillingSubscriptionSource() !== \GraystackIT\MollieBilling\Enums\SubscriptionSource::Mollie->value
+        ) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $marker = $meta['active_recurring_coupon'] ?? null;
+        $base = is_array($marker) ? (int) ($marker['base_amount_net'] ?? 0) : 0;
+
+        if (! is_array($marker) || PlanWaiver::isWaiver($marker) || self::markerCoveredItsBase($marker) || $base <= 0) {
+            return;
+        }
+
+        $coupons = app(CouponService::class);
+
+        if ($coupons->computeMarkerDiscount($billable, $base, [], $chargeAt) > 0) {
+            return;
+        }
+
+        $planCode = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
+
+        if ($planCode === '' || $interval === '') {
+            return;
+        }
+
+        $couponId = (int) ($marker['coupon_id'] ?? 0);
+
+        try {
+            $this->updateRecurringAmount(
+                billable: $billable,
+                planCode: $planCode,
+                interval: $interval,
+                addons: $billable->getActiveBillingAddonCodes(),
+                extraSeats: $billable->getExtraBillingSeats(),
+                couponDiscountNet: 0,
+            );
+
+            $coupons->clearActiveRecurringCouponMarker($billable);
+        } catch (\Throwable $e) {
+            Log::warning('Could not return Mollie to the full price for a coupon the next charge has left behind — queued for retry', [
+                'billable' => $billable->getKey(),
+                'error' => $e->getMessage(),
+            ]);
+
+            // The reset the renewal handler queues when a coupon expires: full price, marker
+            // cleared — finished by the retry chain. The slot holds one retry, and the trial
+            // extension that got us here may have queued its own a moment ago: the moved
+            // charge date (`deferNextChargeDate()`). Overwritten, Mollie kept the old, earlier
+            // date while the customer was shown the new one — so its target rides along and
+            // the reset applies it too. Any other pending retry is left to finish first; the
+            // renewal handler resets an expired coupon on its own.
+            $this->mutateBillingMeta($billable, function (array $meta) use ($couponId, $e): array {
+                $pending = $meta['pending_subscription_patch'] ?? null;
+                $target = null;
+
+                if (is_array($pending)) {
+                    if (($pending['reason'] ?? null) !== 'next_charge_date') {
+                        return $meta;
+                    }
+
+                    $target = $pending['target'] ?? null;
+                }
+
+                $meta['pending_subscription_patch'] = array_filter([
+                    'reason' => 'recurring_coupon_expiry_reset',
+                    'coupon_id' => $couponId,
+                    'target' => is_string($target) && $target !== '' ? $target : null,
+                    'first_attempt_at' => is_array($pending) && ! empty($pending['first_attempt_at'])
+                        ? $pending['first_attempt_at']
+                        : BillingTime::nowUtc()->toIso8601String(),
+                    'last_error' => $e->getMessage(),
+                ], static fn ($value): bool => $value !== null);
+
+                return $meta;
+            });
+        }
+    }
+
+    /**
      * End a deferral whose coupon has been switched off, and report whether there was one.
      *
      * Deactivating a recurring coupon ends its discount "on the next renewal" — that is
@@ -343,7 +437,16 @@ class MollieSubscriptionPatcher
         $meta = $billable->getBillingSubscriptionMeta();
         $marker = $meta['active_recurring_coupon'] ?? null;
 
-        if (! is_array($marker) || PlanWaiver::isWaiver($marker) || empty($marker['valid_until'])) {
+        // A first-payment coupon carried over a trial is not a campaign either: it was
+        // redeemed and shown at signup, and switching the code off afterwards stops new
+        // redemptions only — the same rule `CouponService::isMarkerStillRedeemable()`
+        // applies on the renewal path. Ending its deferral here pulled the full-price
+        // charge onto the trial's end, the very charge the customer was promised free.
+        if (! is_array($marker)
+            || PlanWaiver::isWaiver($marker)
+            || CouponService::isFirstChargeOnly($marker)
+            || empty($marker['valid_until'])
+        ) {
             return false;
         }
 

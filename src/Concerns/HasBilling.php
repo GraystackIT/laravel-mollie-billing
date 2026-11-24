@@ -751,6 +751,14 @@ trait HasBilling
 
         $previous = $this->trial_ends_at;
         $newEnd = $previous && $previous->isAfter($until) ? $previous : $until;
+        // Read before the flip below: whether the charges a coupon carried over the trial is
+        // for may still be ahead. A running trial, or one whose first charge failed (past
+        // due) — CouponService::moveTrialCouponMarkerTo() itself refuses a coupon that has
+        // already discounted a charge, or whose window did not start at this trial's end.
+        $couponChargesMayBeAhead = $previous !== null && (
+            ($this->subscription_status === SubscriptionStatus::Trial && $previous->isFuture())
+            || $this->subscription_status === SubscriptionStatus::PastDue
+        );
 
         $this->forceFill(['trial_ends_at' => $newEnd])->save();
 
@@ -776,11 +784,30 @@ trait HasBilling
 
         $changed = $previous === null || ! $previous->equalTo($newEnd);
 
+        // A coupon carried over the trial discounts the charges from its end on, and those
+        // have just moved: so does the coupon's window — and, at 100 %, the deferral that
+        // skips the covered charges, before the PATCH below reads it.
+        if ($changed && $couponChargesMayBeAhead) {
+            app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)
+                ->moveTrialCouponMarkerTo($this, $previous, $newEnd);
+        }
+
         if ($changed && $this->getBillingSubscriptionSource() === SubscriptionSource::Mollie->value) {
             // After the caller's transaction, not inside it: a TrialExtension coupon calls
             // this from `CouponService::redeem()`, and a throw after the PATCH rolled back
             // the redemption and `trial_ends_at` while Mollie held the later charge date.
             app(MollieSubscriptionPatcher::class)->deferNextChargeDate($this, $newEnd);
+
+            // A partial coupon whose own end the charge has now moved past discounts nothing
+            // any more, while Mollie still holds the discounted amount. Also after commit:
+            // it is a Mollie call.
+            $chargeAt = \GraystackIT\MollieBilling\Support\BillingTime::latest(
+                $newEnd,
+                \GraystackIT\MollieBilling\Support\ChargeDeferral::until($this) ?? $newEnd,
+            );
+            \Illuminate\Support\Facades\DB::afterCommit(
+                fn () => app(MollieSubscriptionPatcher::class)->resetCouponMissingCharge($this, $chargeAt),
+            );
         }
 
         event(new TrialExtended($this, $previous, $newEnd));

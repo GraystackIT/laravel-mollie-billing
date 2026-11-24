@@ -237,7 +237,8 @@ class StartSubscriptionCheckout
         // the coupon spent on the period that was supposed to be free. What the coupon
         // then does is the trial path's own, documented rule (docs/coupons.md): a
         // Recurring one sets its marker and defers Mollie's start date to the later of
-        // trial end and coupon end; a SinglePayment one is parked, not consumed.
+        // trial end and coupon end; a SinglePayment one discounts the charge at the
+        // trial's end (one period's marker — at 100 % Mollie starts a period later).
         $trialDays = $this->catalog->trialDays($request['plan_code'], $request['interval']);
         if ($trialDays > 0
             && ! $billable->hasMollieMandate()

@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **A first-payment (`single_payment`) coupon is accepted on a checkout that starts a trial**,
+  partial discounts as well as 100 %. It discounts the charge at the trial's end: the trial
+  activation carries it over as a one-period `active_recurring_coupon` marker
+  (`first_charge_only`), so Mollie's subscription is created at the discounted amount and the
+  trial-end renewal PATCHes it back to the full price; at 100 % Mollie keeps the full price and
+  starts one period after the trial, while the confirm step and "Next charge" show the charge
+  at the trial's end, at 0.00. An extended trial moves the discount to its new end, and the
+  nightly pass no longer ends the free charge of a code switched off after signup.
+  The code's own `valid_until` and deactivating it after
+  signup do not take the discount back. The checkout used to refuse such a code
+  (`coupon_not_with_trial`, translation removed), because it was parked while Mollie collected
+  the full price at the trial's end.
+
+### Fixed
+
+- **A trial extended while a `recurring` coupon waits for the charges after it moves the
+  coupon as well.** Its window stayed on the original trial end, so the extension ate
+  discounted periods: a two-period code discounted one charge, and at 100 % the first paid
+  charge kept its old date. Every promised discounted charge now follows the new trial end
+  (`CouponService::moveTrialCouponMarkerTo()`), and at 100 % so does the first paid charge —
+  with any period-extension days given on top of it. A past-due trial (first charge failed)
+  moves its coupon as well.
+- **A trial extended past a partial recurring coupon's own end date returns Mollie to the
+  full price.** Mollie went on collecting the discounted amount for a charge the coupon no
+  longer covered, and the renewal reported a payment mismatch.
+- A trial activation that crossed midnight measured the coupon window and `trial_ends_at`
+  from different days.
+
 ## [1.0.0] - 2026-11-22
 
 ### Fixed

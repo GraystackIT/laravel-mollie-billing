@@ -614,7 +614,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
-        if ($this->couponCannotDiscountTrial($coupon) || $this->couponNeedsExistingSubscription($coupon)) {
+        if ($this->couponNeedsExistingSubscription($coupon)) {
             return;
         }
 
@@ -935,7 +935,16 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         if ($code !== '' && $subtotal > 0 && (int) ($this->applied_coupon['discount_net'] ?? 0) >= $subtotal) {
             $coupon = Coupon::query()->whereRaw('UPPER(code) = ?', [strtoupper($code)])->first();
 
-            if ($coupon !== null && $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
+            // A first-payment code covers one charge and is shown on it: on a trial, the
+            // charge at its end, which the confirm step names as due on that day and as
+            // costing nothing — exactly like a partial code, only at 0.00. That Mollie,
+            // unable to hold 0, starts one period later is how the free charge is carried
+            // out, not a later first charge (CouponService::applyFirstChargeMarkerFrom()).
+            if ($coupon !== null && $coupon->type !== \GraystackIT\MollieBilling\Enums\CouponType::Recurring) {
+                $coupon = null;
+            }
+
+            if ($coupon !== null) {
                 $afterCoupon = MollieBilling::coupons()->recurringChargeResumesAt($coupon, $this->interval, $date ?? $now);
 
                 if ($afterCoupon !== null) {
@@ -1558,12 +1567,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return;
         }
 
-        if ($this->couponCannotDiscountTrial($coupon)) {
-            $this->couponError = __('billing::checkout.coupon_not_with_trial');
-
-            return;
-        }
-
         if ($this->couponEndsBeforeFirstCharge($coupon)) {
             $this->couponError = __('billing::checkout.coupon_ends_before_first_charge');
 
@@ -1743,12 +1746,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             return 'requires_trial';
         }
 
-        if ($this->couponCannotDiscountTrial($coupon)) {
-            $this->applied_coupon = null;
-
-            return 'not_with_trial';
-        }
-
         // Same as applyCoupon(): a plan with a trial picked after the code was applied, or
         // a page left open until the trial outlasts the code, must not carry a discount the
         // first charge will not have.
@@ -1780,25 +1777,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::TrialExtension
             ? max(0, (int) ($coupon->trial_extension_days ?? 0))
             : 0;
-    }
-
-    /**
-     * A SinglePayment coupon on a checkout that starts a trial.
-     *
-     * The trial wins over any coupon (StartSubscriptionCheckout decides it first), and a
-     * trial collects no first payment — Mollie's charge at the trial's end is the
-     * subscription's one recurring amount, which has nowhere to carry a one-charge
-     * discount (docs/coupons.md). Accepting the code here showed a reduced total next to
-     * a first-charge date on which the full price was then collected. Refused instead, so
-     * what the confirm step shows is what is charged; the code stays unspent.
-     *
-     * A Recurring coupon is different and stays allowed: its discount lives on the Mollie
-     * subscription itself, so the trial-end charge really is the discounted one.
-     */
-    private function couponCannotDiscountTrial(Coupon $coupon): bool
-    {
-        return $coupon->type === \GraystackIT\MollieBilling\Enums\CouponType::SinglePayment
-            && $this->trialApplies($this->plan_code, $this->interval);
     }
 
     /**
@@ -1903,7 +1881,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             'min_order_not_met' => __('billing::checkout.coupon_min_order'),
             'requires_billable' => __('billing::checkout.coupon_requires_billable'),
             'requires_trial' => __('billing::checkout.coupon_requires_trial'),
-            'not_with_trial' => __('billing::checkout.coupon_not_with_trial'),
             'recurring_conflict' => __('billing::checkout.coupon_recurring_conflict'),
             'requires_active_subscription' => __('billing::checkout.coupon_requires_active_subscription'),
             'ends_before_first_charge' => __('billing::checkout.coupon_ends_before_first_charge'),
