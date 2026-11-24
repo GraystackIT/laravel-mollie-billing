@@ -710,6 +710,27 @@ class MandateOnlyPaymentHandler
             }
         }
 
+        // A retry whose coupon could not be priced again (switched off since, say) finds the
+        // marker the first attempt granted. Mollie is created at the amount that marker
+        // promises — at full price beside it, the trial-end charge collected the full price
+        // while the books promised the discount. And a retry that adopts the subscription
+        // the first attempt created keeps that one's amount, which is the marker's too.
+        if ($pricedCoupon === null && ActivationRetry::resuming()) {
+            $leftover = $this->couponService->getActiveRecurringCouponMarker($billable);
+
+            if (is_array($leftover) && ! \GraystackIT\MollieBilling\Services\Billing\PlanWaiver::isWaiver($leftover)) {
+                $orderNet = SubscriptionAmount::net(
+                    $this->catalog,
+                    $billable,
+                    $planCode,
+                    $interval,
+                    $this->catalog->includedSeats($planCode) + $extraSeats,
+                    $addonCodes,
+                );
+                $recurringDiscountNet = max(0, $this->couponService->computeMarkerDiscount($billable, $orderNet, [], $trialEndsAt));
+            }
+        }
+
         try {
             $this->support->createSubscription($this->createSubscription, $billable, [
                 'plan_code' => $planCode,

@@ -1633,20 +1633,7 @@ class CouponService
 
         // Measured from the trial end it is moved away from? Otherwise its window has a
         // start of its own, and an extended trial does not move it.
-        $previousDay = $this->recurringAnchorDay($billable, $interval, $previousTrialEnd);
-        $previousValidUntil = $this->recurringMarkerValidUntilOnCycle($view, $interval, $previousTrialEnd, $previousDay);
-
-        try {
-            $writtenValidUntil = ! empty($marker['valid_until'])
-                ? Carbon::parse((string) $marker['valid_until'])->setTimezone('UTC')
-                : null;
-        } catch (\Throwable) {
-            return;
-        }
-
-        if ($previousValidUntil === null || $writtenValidUntil === null
-            || ! Carbon::instance($previousValidUntil)->setTimezone('UTC')->isSameDay($writtenValidUntil)
-        ) {
+        if (! $this->windowStartsAt($marker, $view, $billable, $interval, $previousTrialEnd)) {
             return;
         }
 
@@ -1684,9 +1671,58 @@ class CouponService
 
         $marker['valid_until'] = Carbon::instance($validUntil)->setTimezone('UTC')->toIso8601String();
         $marker['charge_resumes_at'] = $resumesAt->toIso8601String();
+        // The new start, so a second extension recognises the window as the trial's again.
+        $marker['window_from'] = Carbon::instance($trialEnd)->setTimezone('UTC')->toIso8601String();
         $meta['active_recurring_coupon'] = $marker;
 
         $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Whether a coupon window starts at `$start`.
+     *
+     * A marker that keeps its start (`window_from`) is asked directly. One written before the
+     * start was kept is judged by its end, and only where the end identifies the start: the
+     * window recomputed from `$start` WITHOUT the code's end date must end on the stored day.
+     * A window capped by the code's end date is shared by every start whose uncapped window
+     * reaches past that date, so a capped legacy marker is not moved — and for a capped window
+     * a move would at most re-anchor the cycle the first full-price charge falls on.
+     *
+     * @param  array<string, mixed>  $marker
+     */
+    private function windowStartsAt(array $marker, Coupon $view, Billable $billable, string $interval, CarbonInterface $start): bool
+    {
+        if (! empty($marker['window_from'])) {
+            try {
+                return Carbon::parse((string) $marker['window_from'])->setTimezone('UTC')
+                    ->isSameDay(Carbon::instance($start)->setTimezone('UTC'));
+            } catch (\Throwable) {
+                return false;
+            }
+        }
+
+        try {
+            $written = ! empty($marker['valid_until'])
+                ? Carbon::parse((string) $marker['valid_until'])->setTimezone('UTC')
+                : null;
+        } catch (\Throwable) {
+            return false;
+        }
+
+        if ($written === null) {
+            return false;
+        }
+
+        $uncapped = clone $view;
+        $uncapped->valid_until = null;
+        $recomputed = $this->recurringMarkerValidUntilOnCycle(
+            $uncapped,
+            $interval,
+            $start,
+            $this->recurringAnchorDay($billable, $interval, $start),
+        );
+
+        return $recomputed !== null && Carbon::instance($recomputed)->setTimezone('UTC')->isSameDay($written);
     }
 
     /**
@@ -1836,6 +1872,11 @@ class CouponService
             'coupon_valid_until' => $coupon->valid_until !== null
                 ? Carbon::instance($coupon->valid_until)->setTimezone('UTC')->toIso8601String()
                 : null,
+            // Where the window starts — the trial end for a trial signup, now otherwise.
+            // The window's end alone does not say: capped by the code's end date, windows
+            // with different starts share it. moveTrialCouponMarkerTo() moves only a window
+            // that starts at the trial end being replaced.
+            'window_from' => Carbon::instance($from)->setTimezone('UTC')->toIso8601String(),
         ];
     }
 

@@ -1195,6 +1195,16 @@ own webhook branch for what the marker does with code that exists.
      (`subscription_meta.trial_activation_ends_at`, written before the Mollie call). A retry
      that adopted the subscription the first attempt created read a fresh clock, hours or a
      day after the start date Mollie held.
+   - **A retried trial activation whose coupon can no longer be priced keeps the grant of
+     the first attempt.** The marker it wrote stays, and Mollie is created at the amount the
+     marker promises (`computeMarkerDiscount()` as of the trial end) — at full price beside
+     it, the trial-end charge collected the full price while the books promised the discount.
+   - **The window's start is kept in the marker (`window_from`)** and is what the move
+     checks. Comparing ends was ambiguous: capped by the code's end date, a window started on
+     a paid period and one measured from the trial end share their end. A marker written
+     before the start was kept is moved only when its end identifies the start (the window
+     recomputed without the code's end date ends on the stored day). After a move the new
+     trial end is the start, so a second extension moves it again.
 
 `tests/Feature/Coupons/CouponSignupMatrixTest.php` (partial, 100 %, expired and deactivated
 code, each through the trial-end charge and the renewal after it),

@@ -172,6 +172,51 @@ it('keeps the trial end Mollie was given when a retried trial activation adopts 
         ->and($world->billable->trial_ends_at->toDateString())->toBe('2027-01-24');
 });
 
+it('keeps a trial coupon granted by the first attempt when its pricing fails on the retry', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'HALF',
+        'name' => 'Half off the first charge',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+    ]);
+
+    Carbon::setTestNow(Carbon::parse('2027-01-10 10:00:00', 'UTC'));
+    $billable = TestBillable::create(['name' => 'Trial Co', 'email' => uniqid('trial-').'@x.test', 'billing_country' => 'DE']);
+    $billable->forceFill(['mollie_customer_id' => 'cst_longrun'])->save();
+
+    $world = LongRunWorld::$current = new LongRunWorld($billable, 'monthly');
+    $world->refuse[CreateSubscriptionRequest::class] = 1;
+    $world->payments['tr_lr_trial'] = LongRunPayment::make([
+        'id' => 'tr_lr_trial', 'status' => 'paid',
+        'amount' => (object) ['value' => '0.00', 'currency' => 'EUR'],
+        'createdAt' => now()->toIso8601String(), 'paidAt' => now()->toIso8601String(),
+        'subscriptionId' => null, 'customerId' => 'cst_longrun', 'mandateId' => 'mdt_longrun', 'countryCode' => 'DE',
+        'metadata' => [
+            'type' => 'mandate_only',
+            'pending_subscription_plan_code' => 'pro',
+            'pending_subscription_interval' => 'monthly',
+            'pending_subscription_trial_days' => 14,
+            'pending_subscription_coupon_code' => 'HALF',
+            'billable_type' => $billable->getMorphClass(),
+            'billable_id' => (string) $billable->getKey(),
+        ],
+    ]);
+
+    // The first attempt grants the coupon (its marker) and then fails at Mollie.
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_lr_trial'])->assertStatus(200);
+    expect($billable->fresh()->getBillingSubscriptionMeta())->toHaveKey('active_recurring_coupon');
+
+    // Switched off before the retry: pricing it again fails. The grant stands, and Mollie
+    // must be created at the amount it promises — not at the full price beside it.
+    Coupon::query()->where('code', 'HALF')->update(['active' => false]);
+    activationRetryRun($world, '2027-01-10 10:05:00', 'tr_lr_trial');
+
+    expect($world->billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Trial)
+        ->and($world->billable->getBillingSubscriptionMeta())->toHaveKey('active_recurring_coupon')
+        ->and($world->heldValue)->toBe('17.25');
+});
+
 it('resumes an activation that died between the invoice and the Mollie subscription', function (): void {
     // An app listener on InvoiceCreated throws — events are the documented extension seam.
     $thrown = false;

@@ -1062,6 +1062,47 @@ it('Recurring on a trial signup: a failed reset keeps the moved charge date for 
         ->and($billable->refresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
 });
 
+it('Recurring: a window with a start of its own is not moved by a trial extension, even when its capped end matches', function (): void {
+    $this->travelTo(Carbon\Carbon::parse('2026-11-24 10:00:00', 'UTC'));
+
+    $coupon = app(CouponService::class)->create([
+        'code' => 'RUNNING',
+        'name' => 'A quarter off, until 23 January',
+        'type' => CouponType::Recurring,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 25,
+        'discount_periods' => 3,
+        'max_redemptions_per_billable' => 3,
+        'valid_until' => Carbon\Carbon::parse('2027-01-23 10:00:00', 'UTC'),
+    ]);
+
+    $billable = signupBillable();
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Mollie,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'pro',
+        'subscription_interval' => \GraystackIT\MollieBilling\Enums\SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc(),
+        'subscription_meta' => ['mollie_subscription_id' => 'sub_running', 'seat_count' => 1],
+        'mollie_mandate_id' => 'mdt_running',
+    ])->save();
+
+    // Its window starts today (24 Nov) and is capped by the code's end (23 Jan): charges on
+    // 24 Dec and 24 Jan are its cycle, so the first undiscounted one is 24 Jan.
+    app(CouponService::class)->applyRecurringMarker($coupon, $billable->refresh(), 2000, 'monthly');
+    $written = $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
+
+    // A trial set on top, ending 29 Nov: measured from there, the window also ends on the
+    // cap — the same end, a different start. Extended to 10 Dec.
+    $billable->forceFill(['subscription_status' => SubscriptionStatus::Trial, 'trial_ends_at' => BillingTime::nowUtc()->addDays(5)])->save();
+    $billable->refresh()->extendBillingTrialUntil(BillingTime::nowUtc()->addDays(16));
+
+    $marker = $billable->refresh()->getBillingSubscriptionMeta()['active_recurring_coupon'];
+
+    expect($marker['valid_until'])->toBe($written['valid_until'])
+        ->and($marker['charge_resumes_at'])->toBe($written['charge_resumes_at']);
+});
+
 it('SinglePayment on a trial signup: an activation that crosses midnight still moves with an extended trial', function (): void {
     app(CouponService::class)->create([
         'code' => 'TRYQUARTER',

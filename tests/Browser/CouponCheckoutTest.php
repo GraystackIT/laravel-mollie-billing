@@ -229,6 +229,11 @@ class CouponCheckoutTest extends BrowserTestCase
             ->and($billable->refresh()->subscription_status)->toBe(SubscriptionStatus::Active)
             ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon');
 
+        // …and Mollie collects the full price from the next charge on: the same renewal
+        // PATCHed the subscription back. Left at 25.88, every later charge stayed discounted.
+        $subscriptionId = (string) $billable->getBillingSubscriptionMeta()['mollie_subscription_id'];
+        expect(DB::table('fake_mollie_subscriptions')->where('id', $subscriptionId)->value('amount_value'))->toBe('34.51');
+
         $this->browse(function (Browser $browser) use ($billable): void {
             $this->actAs($browser, $billable, '/billing')->waitForText('Pro', 10);
             $this->shot($browser, '25 %: Dashboard nach der ersten Abbuchung');
