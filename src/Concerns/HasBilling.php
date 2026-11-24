@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Support\BillingAuditEntry;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ContainsSearch;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use GraystackIT\MollieBilling\Support\TrialQuota;
 use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
@@ -150,11 +151,11 @@ trait HasBilling
     {
         // Case-insensitive on every driver (Postgres LIKE is not), and `%` / `_` in the term
         // are characters, not wildcards — a search for "%" matched every billable.
-        $like = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], mb_strtolower($term)).'%';
+        $like = ContainsSearch::pattern($query, $term);
 
         return $query->where(function (Builder $q) use ($like): void {
-            $q->whereRaw("lower(name) like ? escape '!'", [$like])
-              ->orWhereRaw("lower(email) like ? escape '!'", [$like]);
+            $q->whereRaw('lower(name) '.ContainsSearch::SQL, [$like])
+              ->orWhereRaw('lower(email) '.ContainsSearch::SQL, [$like]);
         });
     }
 

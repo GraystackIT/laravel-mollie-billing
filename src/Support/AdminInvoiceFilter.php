@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Str;
 
 /**
  * The filter of the admin's invoice list, shared by the screen and the ZIP export so the
@@ -142,13 +143,11 @@ final class AdminInvoiceFilter
      * The admin's free-text search over invoices and credit notes — also used by the refunds
      * list, so both find the same documents.
      *
-     * - Serial number and Mollie payment id: substring, case-insensitive on every driver
-     *   (Postgres LIKE is case-sensitive; `lower()` on both sides makes "re-2026" find
-     *   "RE-2026"). `%` and `_` in the term are characters, not wildcards; `!` is the escape
-     *   character because a backslash means different things to the three drivers' string
-     *   literals.
+     * - Serial number and Mollie payment id: substring, case-insensitive on every driver,
+     *   `%` and `_` taken literally ({@see ContainsSearch}).
      * - Billable id: exact, and only when the term has the shape of the configured key type
-     *   — a uuid or bigint column compared with "acme" is a type error on Postgres.
+     *   — a uuid or bigint column compared with "acme", or with a number past the bigint
+     *   range, is a type error on Postgres.
      * - The billable's own `billableSearch` scope (name, email, or whatever the app defines).
      *
      * @param  Builder<BillingInvoice>  $query
@@ -160,11 +159,11 @@ final class AdminInvoiceFilter
             return;
         }
 
-        $like = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], mb_strtolower($search)).'%';
+        $like = ContainsSearch::pattern($query, $search);
 
         $query->where(function (Builder $w) use ($like, $search): void {
-            $w->whereRaw("lower(serial_number) like ? escape '!'", [$like])
-                ->orWhereRaw("lower(mollie_payment_id) like ? escape '!'", [$like]);
+            $w->whereRaw('lower(serial_number) '.ContainsSearch::SQL, [$like])
+                ->orWhereRaw('lower(mollie_payment_id) '.ContainsSearch::SQL, [$like]);
 
             if (self::looksLikeBillableKey($search)) {
                 $w->orWhere('billable_id', $search);
@@ -179,10 +178,28 @@ final class AdminInvoiceFilter
     private static function looksLikeBillableKey(string $term): bool
     {
         return match (config('mollie-billing.billable_key_type', 'uuid')) {
-            'int' => preg_match('/^\d{1,19}\z/', $term) === 1,
-            'ulid' => \Illuminate\Support\Str::isUlid($term),
-            default => \Illuminate\Support\Str::isUuid($term),
+            'int' => self::fitsBigint($term),
+            'ulid' => Str::isUlid($term),
+            default => Str::isUuid($term),
         };
+    }
+
+    /** Digits within a signed 64-bit integer — compared as strings, never cast. */
+    private static function fitsBigint(string $term): bool
+    {
+        if (preg_match('/^\d+\z/', $term) !== 1) {
+            return false;
+        }
+
+        $digits = ltrim($term, '0');
+        if ($digits === '') {
+            return true;
+        }
+
+        $max = (string) PHP_INT_MAX;
+
+        return strlen($digits) < strlen($max)
+            || (strlen($digits) === strlen($max) && strcmp($digits, $max) <= 0);
     }
 
     /**

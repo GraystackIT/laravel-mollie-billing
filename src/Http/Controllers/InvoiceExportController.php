@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Http\Controllers;
 
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceArchiveService;
 use GraystackIT\MollieBilling\Support\AdminInvoiceFilter;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\LazyCollection;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -21,15 +23,25 @@ class InvoiceExportController extends Controller
         abort_unless(InvoiceArchiveService::isAvailable(), 501, __('billing::admin.invoices.export.unavailable'));
 
         $filter = AdminInvoiceFilter::fromArray($request->query());
-        $count = $filter->query()->count();
+        $max = InvoiceArchiveService::maxInvoices();
 
-        abort_if($count === 0, 404, __('billing::admin.invoices.export.empty'));
-        abort_if($count > InvoiceArchiveService::maxInvoices(), 422, __('billing::admin.invoices.export.too_many', [
-            'max' => InvoiceArchiveService::maxInvoices(),
-        ]));
+        // The selection is fixed once, one past the cap: a renewal booked while the archive
+        // is being built must neither push it past export_max nor slip into it unannounced.
+        $ids = $filter->query()->orderBy('id')->limit($max + 1)->pluck('id');
 
-        // Paged by id so a year of invoices is never held in memory at once.
-        $path = $archive->build($filter->query()->lazyById(100));
+        abort_if($ids->isEmpty(), 404, __('billing::admin.invoices.export.empty'));
+        abort_if($ids->count() > $max, 422, __('billing::admin.invoices.export.too_many', ['max' => $max]));
+
+        // Loaded a page at a time so a year of invoices is never held in memory at once.
+        $invoices = LazyCollection::make(function () use ($ids) {
+            foreach ($ids->chunk(100) as $page) {
+                foreach (BillingInvoice::query()->whereKey($page->values()->all())->orderBy('id')->get() as $invoice) {
+                    yield $invoice;
+                }
+            }
+        });
+
+        $path = $archive->build($invoices);
 
         return response()
             ->download($path, $filter->archiveName(), ['Content-Type' => 'application/zip'])

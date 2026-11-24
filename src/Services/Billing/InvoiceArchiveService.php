@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
+use League\Flysystem\FilesystemException;
 use RuntimeException;
 use ZipArchive;
 
@@ -29,6 +31,16 @@ class InvoiceArchiveService
      * stored, so the next export of the same range gets further.
      */
     public const MAX_REGENERATIONS = 25;
+
+    /**
+     * How long an export skips an invoice whose regeneration just failed. Without it, the
+     * same unrenderable invoices at the head of the range used up the budget on every
+     * export, and the regenerable ones behind them were never reached. Named in
+     * MISSING.txt meanwhile; a single download still tries at once.
+     */
+    public const FAILED_REGENERATION_TTL_SECONDS = 600;
+
+    private const FAILED_REGENERATION_KEY = 'billing:invoice-export-regeneration-failed:';
 
     public function __construct(private readonly InvoiceService $invoices) {}
 
@@ -82,9 +94,15 @@ class InvoiceArchiveService
             foreach ($invoices as $invoice) {
                 if ($this->invoices->hasStoredPdf($invoice)) {
                     $stored = $invoice;
+                } elseif (Cache::has(self::FAILED_REGENERATION_KEY.$invoice->id)) {
+                    $stored = null;
                 } elseif ($regenerations < self::MAX_REGENERATIONS) {
                     $regenerations++;
                     $stored = $this->invoices->ensureStoredPdf($invoice);
+
+                    if ($stored === null) {
+                        Cache::put(self::FAILED_REGENERATION_KEY.$invoice->id, true, self::FAILED_REGENERATION_TTL_SECONDS);
+                    }
                 } else {
                     $deferred[] = $this->describe($invoice);
 
@@ -157,7 +175,14 @@ class InvoiceArchiveService
             return $disk->path($invoice->pdf_path);
         }
 
-        $stream = $disk->readStream($invoice->pdf_path);
+        // A disk configured with `throw => true` throws where others return null; either way
+        // it is this one document that is missing, not the archive.
+        try {
+            $stream = $disk->readStream($invoice->pdf_path);
+        } catch (FilesystemException) {
+            return null;
+        }
+
         if (! is_resource($stream)) {
             return null;
         }
@@ -221,8 +246,15 @@ class InvoiceArchiveService
         $name = $invoice->pdfFilename();
 
         // Two documents without a serial cannot collide (the id is in the name), but two
-        // serials that slug to the same string can.
-        return isset($names[$name]) ? substr($name, 0, -4).'-'.$invoice->id.'.pdf' : $name;
+        // serials that slug to the same string can — and the suffixed name can be another
+        // serial's own ("RE/26" with id 3 is "re-26-3.pdf", as is serial "RE-26-3"). addFile()
+        // overwrites by default, so a taken name would silently replace that document.
+        $base = substr($name, 0, -4);
+        for ($n = 0; isset($names[$name]); $n++) {
+            $name = $base.'-'.$invoice->id.($n === 0 ? '' : '-'.$n).'.pdf';
+        }
+
+        return $name;
     }
 
     private function describe(BillingInvoice $invoice): string

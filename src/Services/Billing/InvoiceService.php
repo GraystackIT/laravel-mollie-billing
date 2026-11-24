@@ -1113,7 +1113,18 @@ class InvoiceService
 
     private static function pdfIsStored(BillingInvoice $invoice): bool
     {
-        return $invoice->hasPdf() && Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path);
+        if (! $invoice->hasPdf()) {
+            return false;
+        }
+
+        // A disk that is no longer configured (renamed or removed in a disk migration) holds
+        // nothing: missing, so it is regenerated onto the current disk instead of every
+        // download failing on Storage::disk(). Errors of a configured disk still surface.
+        if (! is_array(config('filesystems.disks.'.$invoice->pdf_disk))) {
+            return false;
+        }
+
+        return Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path);
     }
 
     /**

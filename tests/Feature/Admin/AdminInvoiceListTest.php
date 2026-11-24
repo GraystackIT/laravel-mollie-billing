@@ -669,3 +669,182 @@ it('regenerates at most MAX_REGENERATIONS missing PDFs per export and names the 
         ->and($entries)->not->toHaveKey(InvoiceArchiveService::MISSING_FILE)
         ->and($entries)->toHaveCount($max + 3);
 });
+
+// ── CodeRabbit review ────────────────────────────────────────────────────────
+
+/** An InvoiceService whose regeneration writes a PDF to the local disk, or fails for the given serials. */
+function invoiceListRegeneratingService(array $failing = []): \GraystackIT\MollieBilling\Services\Billing\InvoiceService
+{
+    $stub = new class (app(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class), app(\GraystackIT\MollieBilling\Services\Billing\InvoiceNumberGenerator::class)) extends \GraystackIT\MollieBilling\Services\Billing\InvoiceService
+    {
+        /** @var list<string> */
+        public array $failing = [];
+
+        /** @var list<string> */
+        public array $attempts = [];
+
+        public function regeneratePdf(BillingInvoice $invoice): bool
+        {
+            $this->attempts[] = (string) $invoice->serial_number;
+
+            if (in_array($invoice->serial_number, $this->failing, true)) {
+                throw new RuntimeException('cannot render '.$invoice->serial_number);
+            }
+
+            $path = 'billing/invoices/regen-'.$invoice->id.'.pdf';
+            Storage::disk('local')->put($path, '%PDF-1.4 regenerated '.$invoice->serial_number);
+            $invoice->forceFill(['pdf_disk' => 'local', 'pdf_path' => $path])->save();
+
+            return true;
+        }
+    };
+    $stub->failing = $failing;
+    app()->instance(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class, $stub);
+
+    return $stub;
+}
+
+it('reaches a regenerable PDF behind unrenderable ones on the next export', function (): void {
+    $max = InvoiceArchiveService::MAX_REGENERATIONS;
+    $failing = array_map(fn (int $i): string => sprintf('RE-BAD-%03d', $i), range(1, $max + 1));
+    $stub = invoiceListRegeneratingService($failing);
+
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    foreach ($failing as $serial) {
+        invoiceListInvoice($b, '2026-10-01 10:00:00', $serial, withPdf: false);
+    }
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-GOOD', withPdf: false);
+
+    $export = function () {
+        $response = $this->actingAs(new InvoiceListAdminUser)->get(route('billing.admin.invoices.export'));
+
+        return invoiceListZip(file_get_contents($response->baseResponse->getFile()->getPathname()));
+    };
+
+    $export();
+    expect($stub->attempts)->toHaveCount($max)->not->toContain('RE-GOOD');
+
+    // The failed ones are not retried at once: the budget goes to the rest.
+    $stub->attempts = [];
+    $entries = $export();
+
+    expect($stub->attempts)->toBe([$failing[$max], 'RE-GOOD'])
+        ->and($entries)->toHaveKey('re-good.pdf')
+        ->and($entries[InvoiceArchiveService::MISSING_FILE])->toContain($failing[0])->toContain($failing[$max]);
+});
+
+it('compares the billable id only when the number fits a bigint', function (): void {
+    config()->set('mollie-billing.billable_key_type', 'int');
+
+    $sql = fn (string $term): string => (new AdminInvoiceFilter(search: $term))->query()->toSql();
+
+    expect($sql((string) PHP_INT_MAX))->toContain('"billable_id" = ?')
+        ->and($sql('9223372036854775808'))->not->toContain('"billable_id" = ?')
+        ->and($sql('9999999999999999999'))->not->toContain('"billable_id" = ?');
+});
+
+it('names a PDF a remote disk refuses to read in MISSING.txt and still exports the rest', function (): void {
+    config()->set('filesystems.disks.remote', ['driver' => 's3', 'throw' => true]);
+
+    $whole = '%PDF-1.4 whole document';
+    $remote = Mockery::mock(\Illuminate\Filesystem\FilesystemAdapter::class);
+    $remote->shouldReceive('exists')->andReturnTrue();
+    $remote->shouldReceive('readStream')->andReturnUsing(function (string $path) use ($whole) {
+        if ($path === 'unreadable.pdf') {
+            throw \League\Flysystem\UnableToReadFile::fromLocation($path, 'access denied');
+        }
+
+        $stream = fopen('php://memory', 'w+b');
+        fwrite($stream, $whole);
+        rewind($stream);
+
+        return $stream;
+    });
+    $remote->shouldReceive('size')->andReturn(strlen($whole));
+    Storage::set('remote', $remote);
+
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-WHOLE', withPdf: false)
+        ->forceFill(['pdf_disk' => 'remote', 'pdf_path' => 'whole.pdf'])->save();
+    invoiceListInvoice($b, '2026-10-02 10:00:00', 'RE-UNREADABLE', withPdf: false)
+        ->forceFill(['pdf_disk' => 'remote', 'pdf_path' => 'unreadable.pdf'])->save();
+
+    $response = $this->actingAs(new InvoiceListAdminUser)->get(route('billing.admin.invoices.export'));
+    $response->assertOk();
+    $entries = invoiceListZip(file_get_contents($response->baseResponse->getFile()->getPathname()));
+
+    expect(array_keys($entries))->toBe([InvoiceArchiveService::MISSING_FILE, 're-whole.pdf'])
+        ->and($entries[InvoiceArchiveService::MISSING_FILE])->toContain('RE-UNREADABLE');
+});
+
+it('finds a name with umlauts by its own spelling on SQLite', function (): void {
+    $b = invoiceListBillable('MÜLLER GmbH', 'office@mueller.test');
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RÉ-0001');
+
+    $serials = fn (string $term): array => (new AdminInvoiceFilter(search: $term))->query()->pluck('serial_number')->all();
+
+    expect($serials('MÜLLER'))->toBe(['RÉ-0001'])
+        ->and($serials('RÉ-0001'))->toBe(['RÉ-0001'])
+        ->and(TestBillable::query()->billableSearch('MÜLLER')->count())->toBe(1);
+});
+
+it('never lets one PDF overwrite another under a suffixed name', function (): void {
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    // Created first (lowest id), renamed below to the name the third one will be suffixed to.
+    $taken = invoiceListInvoice($b, '2026-10-01 10:00:00', 'PLACEHOLDER');
+    invoiceListInvoice($b, '2026-10-01 11:00:00', 'RE/26');
+    $third = invoiceListInvoice($b, '2026-10-01 12:00:00', 'RE-26');
+    $taken->forceFill(['serial_number' => 'RE-26-'.$third->id])->save();
+
+    $response = $this->actingAs(new InvoiceListAdminUser)->get(route('billing.admin.invoices.export'));
+    $entries = invoiceListZip(file_get_contents($response->baseResponse->getFile()->getPathname()));
+
+    expect($entries)->toHaveCount(3)
+        ->and(array_values($entries))->toContain('%PDF-1.4 PLACEHOLDER', '%PDF-1.4 RE/26', '%PDF-1.4 RE-26');
+});
+
+it('builds the archive from the invoices selected when the export was asked for', function (): void {
+    config()->set('mollie-billing.invoices.export_max', 2);
+
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-1');
+    invoiceListInvoice($b, '2026-10-02 10:00:00', 'RE-2');
+
+    // A renewal booked while the archive is being built.
+    $this->app->bind(InvoiceArchiveService::class, fn ($app) => new class ($app->make(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class), $b) extends InvoiceArchiveService
+    {
+        public function __construct(\GraystackIT\MollieBilling\Services\Billing\InvoiceService $invoices, private readonly TestBillable $billable)
+        {
+            parent::__construct($invoices);
+        }
+
+        public function build(iterable $invoices): string
+        {
+            invoiceListInvoice($this->billable, '2026-10-03 10:00:00', 'RE-LATE');
+
+            return parent::build($invoices);
+        }
+    });
+
+    $response = $this->actingAs(new InvoiceListAdminUser)->get(route('billing.admin.invoices.export'));
+    $entries = invoiceListZip(file_get_contents($response->baseResponse->getFile()->getPathname()));
+
+    expect(array_keys($entries))->toBe(['re-1.pdf', 're-2.pdf']);
+});
+
+it('regenerates a PDF whose disk is no longer configured instead of failing on it', function (): void {
+    invoiceListRegeneratingService();
+
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    $invoice = invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-MOVED', withPdf: false);
+    $invoice->forceFill(['pdf_disk' => 'retired-disk', 'pdf_path' => 'billing/invoices/old.pdf'])->save();
+
+    $service = app(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class);
+
+    expect($service->hasStoredPdf($invoice))->toBeFalse()
+        ->and($service->ensureStoredPdf($invoice)?->pdf_disk)->toBe('local');
+
+    $this->actingAs(new InvoiceListAdminUser)
+        ->get(route('billing.admin.invoice.download', $invoice))
+        ->assertOk();
+});

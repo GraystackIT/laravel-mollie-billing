@@ -4915,3 +4915,35 @@ and failed there.
   export now; the rest is listed in `MISSING.txt` with "export again to continue", and since
   what was rendered is stored, repeated exports complete the range.
 
+
+### CodeRabbit review of the invoice list (24 November 2026)
+
+Eight findings, all reproduced and fixed; each fix has a test that failed with that fix
+taken back.
+
+- **Failed regenerations used up every export's budget** — the same unrenderable invoices at
+  the head of the range took the 25 attempts each time, so the regenerable ones behind them
+  were never reached and "export again to continue" was false. A failed regeneration is now
+  remembered for `InvoiceArchiveService::FAILED_REGENERATION_TTL_SECONDS` (600): exports name
+  it in `MISSING.txt` without attempting or counting it. The bound per request stays.
+- **Billable id past the bigint range** — `9999999999999999999` had the shape of an `int`
+  key and was compared with a Postgres `bigint` column, a conversion error. Now compared as
+  a string against `PHP_INT_MAX` first; out of range, only the text branches search.
+- **A read error of one remote PDF dropped the whole archive** — a disk with
+  `throw => true` throws from `readStream()`. That `FilesystemException` now makes that
+  invoice missing, not the export.
+- **SQLite folds ASCII only** — `mb_strtolower("MÜLLER")` is "müller", SQLite's `lower()`
+  gives "mÜller", so the exact spelling no longer found itself. `Support\ContainsSearch`
+  folds the term the way the driver folds the column (`strtolower` on SQLite) — as before
+  the review, "müller" does not find "MÜLLER" there; Postgres and MySQL fold Unicode.
+- **A suffixed file name could be another serial's own** — "RE/26" with id 3 became
+  "re-26-3.pdf", the name of serial "RE-26-3", and `addFile()` overwrites. The suffix is now
+  extended until the name is free.
+- **The export cap did not bound the export** — counted once, then queried again in pages,
+  so invoices booked meanwhile slipped in, past `export_max`. The ids are now selected once
+  (one past the cap) and only they are built.
+- **An invoice on a disk that is no longer configured could never be regenerated** —
+  `Storage::disk()` threw before the regeneration. An unconfigured `pdf_disk` now counts as
+  a missing PDF; errors of a configured disk still surface.
+- **`BillingTime::toUtc()` kept a named zone** — "2026-11-24 16:03:00 Europe/Vienna" stayed
+  16:03 and `formatUtc()` labelled it UTC. The fallback now converts to UTC (15:03).

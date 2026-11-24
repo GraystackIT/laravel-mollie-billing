@@ -1402,13 +1402,14 @@ flowchart TD
     B --> C{"how many match"}
     C -->|"none"| D["404"]
     C -->|"more than invoices.export_max"| E["422, narrow the range"]
-    C -->|"otherwise"| F["InvoiceArchiveService build<br/>paged by id"]
+    C -->|"otherwise"| F["InvoiceArchiveService build<br/>the ids selected once, loaded in pages"]
     F --> K{"PDF on its disk<br/>InvoiceService hasStoredPdf"}
     K -->|"yes"| H
+    K -->|"no, its regeneration failed<br/>within FAILED_REGENERATION_TTL_SECONDS"| I
     K -->|"no, within MAX_REGENERATIONS (25)"| G["InvoiceService ensureStoredPdf"]
     K -->|"no, over the limit"| L["named in MISSING.txt:<br/>export the range again to continue"]
     G -->|"stored"| H["PDF added under its download file name<br/>remote copy checked against its size"]
-    G -->|"cannot be regenerated"| I["named in MISSING.txt inside the archive"]
+    G -->|"cannot be regenerated:<br/>remembered for FAILED_REGENERATION_TTL_SECONDS"| I["named in MISSING.txt inside the archive"]
     L --> J
     H --> J["ZIP streamed, temporary file deleted after sending"]
     I --> J
@@ -1416,13 +1417,20 @@ flowchart TD
 
 - **The archive holds exactly what the list shows:** both build their query from one
   `AdminInvoiceFilter`, in UTC days like the whole admin panel, which labels every time
-  it shows as UTC.
+  it shows as UTC. The controller selects the ids once, at most one past
+  `invoices.export_max`, so an invoice booked while the archive is built neither pushes it
+  past the cap nor slips in.
 - **Never silently incomplete:** an invoice whose PDF cannot be produced, arrived
-  truncated from a remote disk, or was over the regeneration limit is listed in
-  `MISSING.txt`, not dropped.
+  truncated from a remote disk, could not be read there, or was over the regeneration limit
+  is listed in `MISSING.txt`, not dropped. Two serials that slug to one file name never
+  overwrite each other in the archive.
 - **Bounded work per request:** at most `InvoiceArchiveService::MAX_REGENERATIONS` missing
   PDFs are rendered per export, so an export after a disk migration does not run into the
-  web server's timeout; what was rendered is stored, and the next export gets further.
+  web server's timeout; what was rendered is stored, and the next export gets further. An
+  invoice whose regeneration failed is skipped (and named) by exports for
+  `InvoiceArchiveService::FAILED_REGENERATION_TTL_SECONDS`, so a head of unrenderable
+  invoices cannot use up the budget of every export and hide the regenerable ones behind
+  it. A single download still tries at once.
 - **A failed export leaves nothing behind:** the half-built archive is discarded before its
   temporary file is deleted (ZipArchive's destructor would otherwise write it back).
 

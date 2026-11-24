@@ -126,3 +126,11 @@ it('toUtc converts an offset-bearing string to the equivalent UTC moment', funct
     expect($result->getTimezone()->getName())->toBe('UTC');
     expect($result->format('Y-m-d H:i:s'))->toBe('2026-05-02 21:30:00');
 });
+
+it('toUtc converts a string carrying a zone name, so formatUtc labels the right moment', function (): void {
+    $result = BillingTime::toUtc('2026-11-24 16:03:00 Europe/Vienna');
+
+    expect($result->getTimezone()->getName())->toBe('UTC')
+        ->and($result->format('Y-m-d H:i'))->toBe('2026-11-24 15:03')
+        ->and(BillingTime::formatUtc('2026-11-24 16:03:00 Europe/Vienna'))->toBe('2026-11-24 15:03 UTC');
+});

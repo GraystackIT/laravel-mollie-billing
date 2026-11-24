@@ -128,5 +128,10 @@ it('searches invoices on PostgreSQL by any text, case-insensitively, whatever th
         ->and(invoiceSearchSerials('S_2'))->toBe(['GS_2026_0001'])
         ->and(invoiceSearchSerials('%'))->toBe([]);
 
+    if ($keyType === 'int') {
+        // Past the bigint range: text to search, not an id to compare (a conversion error).
+        expect(invoiceSearchSerials('9999999999999999999'))->toBe([]);
+    }
+
     expect(BillingInvoice::query()->count())->toBe(3);
 })->with(['int', 'uuid']);

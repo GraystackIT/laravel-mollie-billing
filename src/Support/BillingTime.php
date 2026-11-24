@@ -194,7 +194,9 @@ class BillingTime
             return \Carbon\Carbon::parse($value)->setTimezone('UTC');
         }
 
-        return \Carbon\Carbon::parse($value, 'UTC');
+        // A zone *name* in the string ("… Europe/Vienna") is not matched above and wins over
+        // the default zone here, so the result is converted, not just labelled.
+        return \Carbon\Carbon::parse($value, 'UTC')->setTimezone('UTC');
     }
 
     private static function configuredTimezone(): string
