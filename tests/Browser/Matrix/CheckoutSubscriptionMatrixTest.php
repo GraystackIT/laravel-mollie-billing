@@ -146,8 +146,9 @@ class CheckoutSubscriptionMatrixTest extends BrowserTestCase
             $refused = $this->cmRefusedCoupon($couponState);
             $typed = $refused['code'];
         } elseif ($couponState === 'single-on-trial') {
-            $refused = ['code' => $this->cmCoupon('single-percent')['code'], 'message' => __('billing::checkout.coupon_not_with_trial')];
-            $typed = $refused['code'];
+            // A first-payment code on a trial discounts the charge at the trial's end.
+            $coupon = $this->cmCoupon('single-percent');
+            $typed = $coupon['code'];
         } elseif ($couponState === 'stacked') {
             $coupon = $this->cmCoupon('single-percent');
             $typed = $coupon['code'];
@@ -176,7 +177,9 @@ class CheckoutSubscriptionMatrixTest extends BrowserTestCase
         // The dated coupon runs for another 100 days: it still covers the next monthly
         // charge, but not the next yearly one — that subscription is created at full price.
         $endsBeforeNextCharge = $couponState === 'recurring-date' && $interval === 'yearly';
-        $recurringDiscounted = $coupon !== null && $coupon['recurring'] && ! $coupon['full'] && ! $endsBeforeNextCharge;
+        // A first-payment code on a trial is held by Mollie's recurring amount for the one
+        // charge it discounts — the trial-end charge, which is the renewal checked below.
+        $recurringDiscounted = $coupon !== null && ($coupon['recurring'] || $couponState === 'single-on-trial') && ! $coupon['full'] && ! $endsBeforeNextCharge;
         $deferred = $coupon !== null && $coupon['recurring'] && $coupon['full'];
         $subscriptionGross = $recurringDiscounted ? self::cmGross($discounted, $rate) : $fullGross;
         $subscriptionNet = $recurringDiscounted ? $net - $discount : $net;

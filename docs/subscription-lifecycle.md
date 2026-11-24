@@ -73,7 +73,8 @@ User -> StartSubscriptionCheckout (catalog->trialDays() > 0, no mandate yet)
             -> Local: status=trial, trial_ends_at=now+trial_days, source=mollie
           -> Stash coupon (if any) for the first paid charge:
               Recurring -> apply marker via CouponService::applyRecurringMarker()
-              SinglePayment -> park in subscription_meta.pending_first_charge_coupon
+              SinglePayment -> one-period marker via CouponService::applyFirstChargeMarkerFrom()
+                               (discounts the trial-end charge only)
           -> Hydrate wallet aliquot: ceil(included * trial_days / intervalDays)
           -> TrialStarted event
 ```

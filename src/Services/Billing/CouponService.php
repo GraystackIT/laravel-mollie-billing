@@ -744,11 +744,18 @@ class CouponService
             // this coupon's marker. Without that, the same flag let a billable that never
             // had a grant skip both caps and — with `skip_marker` omitted — write itself a
             // fresh one past an exhausted campaign.
+            //
+            // A first-payment coupon carried over a trial is the one other grant a renewal
+            // applies: its marker was written by the trial signup, which also counted the
+            // grant, and the charge at the trial's end is the one application it was given.
             $liveMarker = $this->getActiveRecurringCouponMarker($billable);
             $isRenewal = ($context['renewal'] ?? false) === true
-                && $coupon->type === CouponType::Recurring
                 && $liveMarker !== null
-                && (int) ($liveMarker['coupon_id'] ?? 0) === (int) $coupon->id;
+                && (int) ($liveMarker['coupon_id'] ?? 0) === (int) $coupon->id
+                && (
+                    $coupon->type === CouponType::Recurring
+                    || ($coupon->type === CouponType::SinglePayment && self::isFirstChargeOnly($liveMarker))
+                );
 
             if (! $isRenewal) {
                 if (
@@ -796,6 +803,11 @@ class CouponService
                     }
                     if (isset($context['invoice_id'])) {
                         $redemption->invoice_id = (int) $context['invoice_id'];
+                    }
+                    // The trial-end charge of a code carried over a trial: the grant row
+                    // the signup wrote is the redemption, this one its application.
+                    if ($isRenewal) {
+                        $redemption->grant_applied_snapshot = ['mode' => 'recurring_renewal'];
                     }
                     break;
 
@@ -1509,6 +1521,231 @@ class CouponService
     }
 
     /**
+     * Carry a first-payment (`single_payment`) coupon over a trial: the discount lands on
+     * the first charge, at the trial's end, and on no other.
+     *
+     * A trial collects no first payment, and Mollie's charge at the trial's end is the
+     * subscription's recurring amount — so the only place a one-charge discount can live is
+     * the recurring amount itself, for exactly one period. That is what a `recurring` marker
+     * with one period describes, and everything that prices, defers, resets and books such a
+     * marker already exists: Mollie is created at the discounted amount (or, at 100 %, with
+     * its start date one period past the trial), the first renewal books the discount line
+     * and the redemption, and the same renewal PATCHes Mollie back to the full price.
+     *
+     * The marker is the coupon's {@see firstChargeView()} plus `first_charge_only`, which
+     * keeps the parts of the recurring rules that do not fit a promise already made at
+     * signup from applying to it — see {@see isFirstChargeOnly()}.
+     */
+    public function applyFirstChargeMarkerFrom(
+        Coupon $coupon,
+        Billable $billable,
+        int $baseAmountNet,
+        string $interval,
+        CarbonInterface $lifetimeFrom,
+    ): void {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $marker = $this->recurringMarkerFor($this->firstChargeView($coupon), $billable, $baseAmountNet, $interval, $lifetimeFrom);
+        $marker['first_charge_only'] = true;
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $meta['active_recurring_coupon'] = $marker;
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Move a coupon carried over a trial onto a new trial end.
+     *
+     * A trial signup's coupon discounts the charges after the trial, and its window — one
+     * period for a first-payment code, `discount_periods` for a recurring one — was measured
+     * from the trial end it was written for. A trial extended past part of that window lost
+     * the discounted charges it overlapped: a first-payment code expired before the charge it
+     * was for, a two-period code discounted one, and an amount PATCH in between (a seat bought
+     * during the trial) sent Mollie the full price already. The promise is "the first N
+     * charges", and those move with the trial — so the window does, and at 100 % the deferral
+     * that skips those charges does as well: it was the window's end, and is moved only while
+     * it still is (anything else that deferred the charge stands).
+     *
+     * A recurring code's own `valid_until` still caps the window, as it did when the marker
+     * was written. A plan waiver is not touched: it is a gift that ends on a day.
+     *
+     * Only for a marker none of whose discounted charges has been booked — a trial whose
+     * first charge failed (past due) still has all of them ahead — and only for one whose
+     * window was measured from the trial end it replaces (`$previousTrialEnd`): a code whose
+     * discount was already running when the trial was set (redeemed on a paid period, say)
+     * has its own start, and keeps it.
+     */
+    public function moveTrialCouponMarkerTo(Billable $billable, CarbonInterface $previousTrialEnd, CarbonInterface $trialEnd): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $marker = $meta['active_recurring_coupon'] ?? null;
+        $interval = (string) ($billable->getBillingSubscriptionInterval() ?? '');
+
+        if (! is_array($marker) || PlanWaiver::isWaiver($marker) || $interval === '') {
+            return;
+        }
+
+        if (self::isFirstChargeOnly($marker)) {
+            // One period, without the code's own end date — what the marker was written from
+            // (firstChargeView()), independent of later edits of the code.
+            $view = new Coupon;
+            $view->discount_periods = 1;
+            $view->valid_until = null;
+        } else {
+            $couponId = (int) ($marker['coupon_id'] ?? 0);
+            $coupon = $couponId > 0 ? Coupon::query()->find($couponId) : null;
+
+            if ($coupon === null || $coupon->type !== CouponType::Recurring) {
+                return;
+            }
+
+            // The number of charges and the end date this grant was given, kept with it
+            // (recurringMarkerFor()) — not what the offer says now. A marker written before
+            // the end date was kept reads the code's.
+            $view = clone $coupon;
+
+            if (array_key_exists('discount_periods', $marker)) {
+                $view->discount_periods = $marker['discount_periods'] !== null ? (int) $marker['discount_periods'] : null;
+            }
+
+            if (array_key_exists('coupon_valid_until', $marker)) {
+                try {
+                    $view->valid_until = $marker['coupon_valid_until'] !== null
+                        ? Carbon::parse((string) $marker['coupon_valid_until'])
+                        : null;
+                } catch (\Throwable) {
+                    return;
+                }
+            }
+        }
+
+        // A discounted charge already booked: the window has begun, and is not the trial's
+        // to move any more.
+        if ($this->markerHasBookedApplication($marker, $billable)) {
+            return;
+        }
+
+        // Measured from the trial end it is moved away from? Otherwise its window has a
+        // start of its own, and an extended trial does not move it.
+        $previousDay = $this->recurringAnchorDay($billable, $interval, $previousTrialEnd);
+        $previousValidUntil = $this->recurringMarkerValidUntilOnCycle($view, $interval, $previousTrialEnd, $previousDay);
+
+        try {
+            $writtenValidUntil = ! empty($marker['valid_until'])
+                ? Carbon::parse((string) $marker['valid_until'])->setTimezone('UTC')
+                : null;
+        } catch (\Throwable) {
+            return;
+        }
+
+        if ($previousValidUntil === null || $writtenValidUntil === null
+            || ! Carbon::instance($previousValidUntil)->setTimezone('UTC')->isSameDay($writtenValidUntil)
+        ) {
+            return;
+        }
+
+        $day = $this->recurringAnchorDay($billable, $interval, $trialEnd);
+        $validUntil = $this->recurringMarkerValidUntilOnCycle($view, $interval, $trialEnd, $day);
+        $resumesAt = $validUntil !== null
+            ? $this->recurringChargeResumesAt($view, $interval, $trialEnd, $day)
+            : null;
+
+        // A window without an end (an open-ended recurring code) has nothing to move.
+        if ($validUntil === null || $resumesAt === null) {
+            return;
+        }
+
+        $previousResumesAt = self::markerChargeResumesAt($marker);
+        $storedDeferral = $meta[ChargeDeferral::META_KEY] ?? null;
+
+        // The deferral moves by as much as the window did, wherever it stood from the window's
+        // end on: days appended to it (a period extension during the trial) stay on top. Left
+        // where it was, it fell inside the moved window and Mollie collected the full price
+        // for a charge still promised free. A deferral ending before the window is not this
+        // coupon's and stands.
+        if ($previousResumesAt !== null && is_string($storedDeferral) && $storedDeferral !== '') {
+            try {
+                $stored = Carbon::parse($storedDeferral)->setTimezone('UTC');
+
+                if (! $stored->copy()->startOfDay()->lessThan($previousResumesAt->copy()->startOfDay())) {
+                    $shifted = $stored->copy()->addSeconds($resumesAt->getTimestamp() - $previousResumesAt->getTimestamp());
+                    $meta[ChargeDeferral::META_KEY] = BillingTime::latest($shifted, $resumesAt)->toIso8601String();
+                }
+            } catch (\Throwable) {
+                // An unreadable stored date is left as it is.
+            }
+        }
+
+        $marker['valid_until'] = Carbon::instance($validUntil)->setTimezone('UTC')->toIso8601String();
+        $marker['charge_resumes_at'] = $resumesAt->toIso8601String();
+        $meta['active_recurring_coupon'] = $marker;
+
+        $billable->forceFill(['subscription_meta' => $meta])->save();
+    }
+
+    /**
+     * Whether this grant has discounted a charge yet: a redemption row with a discount, of
+     * its coupon, written since the grant (loosened by a minute — a coupon's first row is
+     * written a moment before its marker, see isMarkerStillRedeemable()). The zero-discount
+     * grant row a trial signup writes does not count.
+     *
+     * @param  array<string, mixed>  $marker
+     */
+    private function markerHasBookedApplication(array $marker, Model $billable): bool
+    {
+        $couponId = (int) ($marker['coupon_id'] ?? 0);
+
+        if ($couponId <= 0) {
+            return false;
+        }
+
+        $since = $this->markerAppliedAt($marker);
+
+        return CouponRedemption::query()
+            ->where('coupon_id', $couponId)
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->whereNull('revoked_at')
+            ->where('discount_amount_net', '>', 0)
+            ->when($since !== null, fn ($q) => $q->where('applied_at', '>=', $since->copy()->subMinute()))
+            ->exists();
+    }
+
+    /**
+     * A first-payment coupon seen as the one-period recurring discount it becomes on a
+     * trial signup — for the arithmetic only (window, resume date), never saved.
+     *
+     * One period, and no end date: a `single_payment` code's `valid_until` is the last day
+     * it may be *redeemed*, not the day its discount stops. The customer redeemed it at
+     * signup; the trial ending after that day must not take the discount back.
+     */
+    public function firstChargeView(Coupon $coupon): Coupon
+    {
+        $view = clone $coupon;
+        $view->discount_periods = 1;
+        $view->valid_until = null;
+
+        return $view;
+    }
+
+    /**
+     * Whether a marker carries a first-payment coupon over a trial
+     * ({@see applyFirstChargeMarkerFrom()}).
+     *
+     * @param  array<string, mixed>  $marker
+     */
+    public static function isFirstChargeOnly(array $marker): bool
+    {
+        return ($marker['first_charge_only'] ?? false) === true;
+    }
+
+    /**
      * @param  ?string  $interval  The interval the discount will actually run at. Pass it
      *                             whenever the billable's own interval is about to change
      *                             — see the lifetime computation below.
@@ -1592,6 +1829,13 @@ class CouponService
             // Absent on markers written before 17 November 2026: those keep the date they
             // were given (`valid_until + 1 day`), nothing running is moved.
             'charge_resumes_at' => $chargeResumesAt?->toIso8601String(),
+            // The code's own end date as it capped this window, kept like `discount_periods`:
+            // the window is moved with a trial extension (moveTrialCouponMarkerTo()), and a
+            // date the operator gives the offer later must not cap — or, by no longer matching,
+            // stop — the move of a grant made before it.
+            'coupon_valid_until' => $coupon->valid_until !== null
+                ? Carbon::instance($coupon->valid_until)->setTimezone('UTC')->toIso8601String()
+                : null,
         ];
     }
 
@@ -1897,7 +2141,12 @@ class CouponService
         // once the tenant has bought extras on top — otherwise the next renewal charged
         // the plan in full and, with `on_expiry = end`, cancelled the subscription.
         // Taking a gift back is `revokeGrant()`.
-        if (! $coupon->active && ! PlanWaiver::isWaiver($marker)) {
+        //
+        // A first-payment coupon carried over a trial is not a campaign running on either:
+        // it is the discount the customer was shown and accepted at signup, deferred only
+        // because the trial collects nothing. Switching the code off afterwards stops new
+        // redemptions, as it does for a first payment that was collected at once.
+        if (! $coupon->active && ! PlanWaiver::isWaiver($marker) && ! self::isFirstChargeOnly($marker)) {
             return false;
         }
 

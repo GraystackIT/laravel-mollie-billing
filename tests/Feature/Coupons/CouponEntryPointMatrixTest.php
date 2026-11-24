@@ -89,9 +89,9 @@ function entryMatrixApply(string $place, string $code): ?string
         MollieBilling::resolveBillableUsing(fn () => $fresh->fresh());
 
         return Livewire::test('mollie-billing::checkout')
-            // Pro starts with a trial, which a trial extension needs and a first-payment
-            // discount cannot be combined with (`coupon_not_with_trial`): that one is
-            // tried on the plan without a trial.
+            // Pro starts with a trial, which a trial extension needs. A first-payment
+            // discount is tried on the plan without a trial, where it reduces the payment
+            // made at checkout (on a trial it discounts the trial-end charge instead).
             ->set('plan_code', $code === 'T-SINGLE' ? 'max' : 'pro')
             ->set('interval', 'monthly')
             ->set('coupon_input', $code)

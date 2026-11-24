@@ -22,9 +22,11 @@ use Mollie\Laravel\Facades\Mollie;
 // `trial_days`. Status Active at once, coupon redeemed against the period that was supposed
 // to be the free trial, first full-price charge at now + 1 interval.
 //
-// The trial now wins. And because a trial collects no first payment, the form no longer
-// accepts a SinglePayment coupon on a trial signup at all — it used to show a reduced total
-// next to a first-charge date on which the full price was then collected.
+// The trial now wins. A SinglePayment coupon then discounts the first charge there is — the
+// one at the trial's end (CouponService::applyFirstChargeMarkerFrom()). For a while the form
+// refused such a code on a trial signup, because Mollie collected the full price at the
+// trial's end and the reduced total shown was not what was charged; it is accepted again
+// now that the trial-end charge really is the discounted one.
 
 beforeEach(function (): void {
     MollieBilling::authUsing(fn (): bool => true);
@@ -148,7 +150,7 @@ it('still routes a full-coverage coupon to the coupon flow when no trial can sta
         ->and($captured[0])->not->toHaveKey('pending_subscription_trial_days');
 });
 
-it('does not accept a first-payment coupon on a checkout that starts a trial', function (): void {
+it('accepts a first-payment coupon on a checkout that starts a trial, priced for the charge at its end', function (): void {
     app(CouponService::class)->create([
         'code' => 'HALFOFF',
         'name' => 'Half off',
@@ -164,15 +166,52 @@ it('does not accept a first-payment coupon on a checkout that starts a trial', f
         ->call('applyCoupon');
 
     expect($component->instance()->trialApplies('solo', 'monthly'))->toBeTrue()
-        ->and($component->get('applied_coupon'))->toBeNull()
-        ->and($component->get('couponError'))->toBe(__('billing::checkout.coupon_not_with_trial'));
+        ->and($component->get('couponError'))->toBeNull()
+        ->and($component->get('applied_coupon')['discount_net'] ?? null)->toBe(500)
+        ->and($component->instance()->bookingPath())->toBe('trial');
 
-    // The total the confirm step shows is the one Mollie collects at the trial's end.
+    // The total the confirm step shows is the one Mollie collects at the trial's end: half
+    // of 10.00 plus 20 % AT VAT — and that charge is on the trial's last day.
     $totals = $component->instance()->totals(app(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class));
-    expect($totals['gross'])->toBe(1200);
+    expect($totals['gross'])->toBe(600)
+        ->and($component->instance()->firstChargeDate()?->toDateString())
+        ->toBe(\GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays(14)->toDateString());
 });
 
-it('accepts the same coupon where no trial starts, and drops it when the selection moves onto one', function (): void {
+it('names the trial end as the first charge for a first-payment coupon that covers it all, at 0.00', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'FIRSTFREE',
+        'name' => 'First paid month free',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 100,
+    ]);
+
+    trialCheckoutBillable();
+
+    $component = trialCheckoutForm()
+        ->set('coupon_input', 'FIRSTFREE')
+        ->call('applyCoupon');
+
+    $trialEnd = \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->addDays(14);
+    $totals = $component->instance()->totals(app(\GraystackIT\MollieBilling\Services\Vat\VatCalculationService::class));
+
+    // The charge the code is for is the one at the trial's end; the customer is shown it
+    // there, costing nothing — like a partial code, only at 0.00. Naming the day Mollie
+    // first collects (a period later) read as a first charge postponed at full price.
+    expect($component->get('couponError'))->toBeNull()
+        ->and($component->instance()->bookingPath())->toBe('trial')
+        ->and($totals['gross'])->toBe(0)
+        ->and($component->instance()->firstChargeDate()?->toDateString())->toBe($trialEnd->toDateString());
+
+    $component->set('step', $component->instance()->customStepCount() + 4)
+        ->assertSee(__('billing::checkout.trial_covered_redirect_notice', [
+            'date' => $trialEnd->translatedFormat('d. M Y'),
+            'amount' => \GraystackIT\MollieBilling\Support\BillingMoney::format(0),
+        ]), false);
+});
+
+it('keeps a first-payment coupon when the selection moves onto a plan with a trial', function (): void {
     app(CouponService::class)->create([
         'code' => 'HALFOFF',
         'name' => 'Half off',
@@ -192,8 +231,30 @@ it('accepts the same coupon where no trial starts, and drops it when the selecti
 
     $component->set('interval', 'monthly');
 
-    expect($component->get('applied_coupon'))->toBeNull()
-        ->and($component->get('couponError'))->toBe(__('billing::checkout.coupon_not_with_trial'));
+    expect($component->get('couponError'))->toBeNull()
+        ->and($component->get('applied_coupon')['discount_net'] ?? null)->toBe(500);
+});
+
+it('submits a trial with a first-payment coupon as a trial', function (): void {
+    app(CouponService::class)->create([
+        'code' => 'HALFOFF',
+        'name' => 'Half off',
+        'type' => CouponType::SinglePayment,
+        'discount_type' => DiscountType::Percentage,
+        'discount_value' => 50,
+    ]);
+
+    trialCheckoutBillable();
+    $captured = captureMandatePayment();
+
+    trialCheckoutForm()
+        ->set('coupon_input', 'HALFOFF')
+        ->call('applyCoupon')
+        ->call('submit');
+
+    expect($captured->count())->toBe(1)
+        ->and($captured[0]['pending_subscription_trial_days'] ?? null)->toBe(14)
+        ->and($captured[0]['pending_subscription_coupon_code'] ?? null)->toBe('HALFOFF');
 });
 
 it('submits a trial with a recurring coupon as a trial', function (): void {

@@ -129,6 +129,26 @@ class NextChargeSummary
         // `pending()`, not `until()`: on the day of a deferred charge, before Mollie's
         // charge has arrived, the charge is today — not the trial end or a period end.
         $deferredUntil = ChargeDeferral::pending($billable);
+        $marker = $this->coupons->getActiveRecurringCouponMarker($billable);
+
+        // A first-payment coupon on a trial pays the charge at the trial's end, and that is
+        // the charge the customer is shown: on that day, discounted — at 100 %, for 0.00.
+        // The deferral it leaves when it covers everything is only how Mollie, unable to
+        // hold 0, skips that charge; naming its date instead read as "the first charge is a
+        // month later, at full price", which is not what the customer bought. Up to and
+        // including the trial's last day: after it, and before the nightly job has converted
+        // the trial, the free charge is behind the customer and the deferred one is next.
+        $trialEnd = $billable->getBillingTrialEndsAt();
+
+        if ($status === SubscriptionStatus::Trial
+            && is_array($marker)
+            && CouponService::isFirstChargeOnly($marker)
+            && $trialEnd !== null
+            && ! BillingTime::toUtc($trialEnd)->startOfDay()->lessThan(BillingTime::nowUtc()->startOfDay())
+        ) {
+            $deferredUntil = null;
+        }
+
         $date = $this->chargeDate($billable, $status, $deferredUntil);
 
         $addons = $billable->getActiveBillingAddonCodes();
@@ -152,7 +172,6 @@ class NextChargeSummary
 
         // The discount AS OF the charge. A coupon that runs out before the date is not
         // on the charge; a fully covering one is exactly why the date lies beyond it.
-        $marker = $this->coupons->getActiveRecurringCouponMarker($billable);
         $discount = $date !== null
             ? $this->coupons->computeMarkerDiscount($billable, $catalogNet, [], $date)
             : $this->coupons->computeMarkerDiscount($billable, $catalogNet);

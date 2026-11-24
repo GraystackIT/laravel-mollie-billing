@@ -628,6 +628,13 @@ class MandateOnlyPaymentHandler
             'subscription_period_starts_at' => BillingTime::nowUtc(),
         ])->save();
 
+        // The trial end, once: the coupon window, Mollie's start date and `trial_ends_at`
+        // must name the same moment. Each used to read the clock on its own — the window
+        // before the Mollie call, `trial_ends_at` after it — and an activation that crossed
+        // midnight measured them from different days, so a later trial extension no longer
+        // recognised the window as the trial's and left it behind.
+        $trialEndsAt = BillingTime::nowUtc()->addDays($trialDays);
+
         // The marker BEFORE the Mollie call, and the discount passed into it: Mollie
         // collects every charge after the trial on its own, so a subscription created
         // at full price charges full price forever — while our marker keeps promising
@@ -650,7 +657,26 @@ class MandateOnlyPaymentHandler
                     // deferred the charge to 62 days after the signup — 48 days after the
                     // trial, on a day off the cycle — and a partial code behind a long
                     // trial could end before its last promised charge.
-                    BillingTime::nowUtc()->addDays($trialDays),
+                    $trialEndsAt,
+                );
+            }
+        }
+
+        // A first-payment coupon discounts the first charge — on a trial, the one at its
+        // end. Mollie collects that charge from the subscription's recurring amount, so the
+        // discount goes there for one period (CouponService::applyFirstChargeMarkerFrom()),
+        // the same way and for the same reason as a recurring code's above. At 100 %
+        // CreateSubscription keeps the full price and starts one period after the trial.
+        if ($pricedCoupon !== null && $pricedCoupon['coupon']->type === CouponType::SinglePayment) {
+            $recurringDiscountNet = max(0, (int) $pricedCoupon['discount_net']);
+
+            if ($recurringDiscountNet > 0) {
+                $this->couponService->applyFirstChargeMarkerFrom(
+                    $pricedCoupon['coupon'],
+                    $billable,
+                    (int) $pricedCoupon['order_amount_net'],
+                    $interval,
+                    $trialEndsAt,
                 );
             }
         }
@@ -664,6 +690,7 @@ class MandateOnlyPaymentHandler
                 'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
                 'trial_days' => $trialDays,
+                'trial_ends_at' => $trialEndsAt,
             ]);
         } catch (\Throwable $e) {
             Log::error('CreateSubscription during trial activation failed', [
@@ -704,7 +731,7 @@ class MandateOnlyPaymentHandler
 
         $billable->forceFill([
             'subscription_status' => SubscriptionStatus::Trial,
-            'trial_ends_at' => BillingTime::nowUtc()->addDays($trialDays),
+            'trial_ends_at' => $trialEndsAt,
             'subscription_meta' => $meta,
         ])->save();
 
@@ -746,7 +773,12 @@ class MandateOnlyPaymentHandler
         string $planCode,
         string $interval,
     ): void {
-        if ($pricedCoupon['coupon']->type !== CouponType::Recurring) {
+        // A first-payment coupon carried over the trial is a grant of the same kind: its
+        // marker is set, and its one application is booked by the trial-end charge.
+        $carriedOver = $pricedCoupon['coupon']->type === CouponType::SinglePayment
+            && (int) $pricedCoupon['discount_net'] > 0;
+
+        if ($pricedCoupon['coupon']->type !== CouponType::Recurring && ! $carriedOver) {
             return;
         }
 
@@ -803,13 +835,12 @@ class MandateOnlyPaymentHandler
             return;
         }
 
+        // A first-payment coupon is carried over the trial as a one-period marker, also
+        // written before CreateSubscription. It used to be parked here in
+        // `pending_first_charge_coupon` while Mollie was created at the full price, so the
+        // trial-end charge collected the full price and the code was never honoured. The
+        // renewal handler still reads that slot for trials started before.
         if ($coupon->type === CouponType::SinglePayment) {
-            $meta = $billable->getBillingSubscriptionMeta();
-            $meta['pending_first_charge_coupon'] = [
-                'code' => (string) $coupon->code,
-            ];
-            $billable->forceFill(['subscription_meta' => $meta])->save();
-
             return;
         }
 

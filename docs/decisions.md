@@ -1078,7 +1078,7 @@ component and this service, both of which are closed to a billable with a subscr
 
 `tests/Feature/Checkout/FreePlanIgnoresSessionCouponTest.php`.
 
-### The trial wins over a coupon, and a first-payment coupon is not accepted on a trial signup
+### The trial wins over a coupon (a first-payment coupon then discounts the trial-end charge)
 
 `handle()` tested `amount_gross === 0` before the trial branch, so a coupon covering the
 whole first payment dropped `trial_days`: the confirm step had announced "14 days free, first
@@ -1104,6 +1104,94 @@ and coupon end. The customer is charged later than announced, never earlier, and
 shown (0) is what is collected until then.
 
 `tests/Feature/Checkout/TrialWinsOverFullCoverageCouponTest.php`.
+
+**Superseded on 24 November 2026: a first-payment coupon is accepted on a trial signup** —
+partial discounts as well as 100 %. Refusing it left no way to give "a trial, then x % off
+the first charge". The trial still wins; the coupon then discounts the first charge there
+is, the one at the trial's end.
+
+That charge is collected from the Mollie subscription's recurring amount, so the discount
+goes there for exactly one period: `CouponService::applyFirstChargeMarkerFrom()` writes an
+`active_recurring_coupon` marker from the coupon's `firstChargeView()` (`discount_periods`
+1, no end date) with `first_charge_only`, before `CreateSubscription` — the trial path of a
+`recurring` code, unchanged. Everything downstream already handled a one-period recurring
+marker on a trial: Mollie created at the discounted amount, or at 100 % at the full amount
+with its start date one period after the trial end; the trial-end renewal books the coupon
+line and the redemption, finds the marker expired for the next charge and PATCHes Mollie
+back. The rejected alternative — collect the trial-end charge as a payment of our own and
+start the subscription a period later — needs a scheduled charge, its own dunning and its
+own webhook branch for what the marker does with code that exists.
+
+*Judgement calls:*
+
+1. **The code's `valid_until` does not end the discount**, unlike a `recurring` code's.
+   For a first-payment code it is the last day to *redeem* it, and the customer redeemed it
+   at signup; a code valid for three more days on a 14-day trial would otherwise discount
+   nothing. `firstChargeView()` drops it from the arithmetic.
+2. **Deactivating the code does not withdraw it** (`isMarkerStillRedeemable()` exempts
+   `first_charge_only`, as it does a plan waiver). Deactivation stops new redemptions; a
+   first payment collected at once is not taken back either.
+3. **`redeem(renewal: true)` accepts a `single_payment` coupon only with its own
+   `first_charge_only` marker.** The renewal exemption from the caps was restricted to
+   `recurring` so the flag could not buy a second redemption; the marker is the proof the
+   grant exists, as it is for a recurring one. The row is marked `recurring_renewal`, so it
+   is not counted as a second redemption by the per-billable limit.
+4. **At 100 % there is no redemption row carrying the discount** — no charge is made for
+   the free period, exactly as with a fully covering `recurring` code. The grant row (discount
+   0) is the record.
+5. **`pending_first_charge_coupon` is no longer written**, but the renewal handler still reads
+   it: a trial started by an earlier release keeps the behaviour it was started with.
+6. **At 100 % the customer is shown the charge at the trial's end, at 0.00** — on the confirm
+   step (`firstChargeDate()`, notice `trial_covered_redirect_notice`) and in "Next charge"
+   (`NextChargeSummary` ignores the deferral during the trial when the marker is
+   `first_charge_only`). The deferred Mollie start one period later is how a free charge is
+   carried out, not a later first charge: naming that date read as "first charge postponed,
+   at full price", the opposite of what the code gives. Once the trial is over the deferred
+   full-price charge is the next one shown. No invoice is written for the free trial-end
+   charge, as for any charge Mollie never makes.
+7. **The nightly pass leaves a switched-off first-payment code alone.**
+   `MollieSubscriptionPatcher::endDeferralOfDeactivatedCoupon()` ends the deferral of a fully
+   covering coupon that has been deactivated — right for a `recurring` campaign, wrong for
+   this: it pulled the full price (23.80) onto the trial's end, the charge promised free. It
+   skips a `first_charge_only` marker, as `isMarkerStillRedeemable()` does on the renewal path.
+8. **A trial extension moves the code with it — a `recurring` one too.** The marker's window
+   was measured from the trial end it was written for. Extended past it, a first-payment
+   code expired before its charge, a two-period recurring code discounted one charge, a
+   100 % recurring code started charging the old date (fewer free periods), and an amount
+   PATCH in between (a seat during the trial) sent Mollie the full price.
+   `extendBillingTrialUntil()` calls `CouponService::moveTrialCouponMarkerTo()` while the
+   trial is still running: the window starts at the new trial end with the number of
+   charges the grant was given, a recurring code's own `valid_until` still capping it, and
+   at 100 % the stored deferral moves with it while it is still the window's own end. Not
+   after the trial: charges the code was for have then been made (or, at 100 %, skipped).
+   A plan waiver is not moved; it ends on a day. Nor is a code whose window was not measured
+   from the trial end being replaced (its discount was already running when the trial was
+   set): the move recomputes the window from the old trial end first and acts only on a match.
+   Refinements from review (each with a test that failed before it):
+   - **The deferral moves by the window's shift, not only when it sat on the window's end.**
+     Days a period extension appended to it during the trial stay on top; left behind, the
+     deferral fell inside the moved window and Mollie charged full price for a free charge.
+   - **A past-due trial is moved too.** Its first charge failed, so no discounted charge was
+     booked; "another week to add a card" must not cost the discount. The guard is "no
+     redemption with a discount for this grant yet", not the status alone.
+   - **A partial code the moved charge has left behind returns Mollie to the full price**
+     (`MollieSubscriptionPatcher::resetCouponMissingCharge()`, after commit) — a recurring
+     code whose own `valid_until` falls before the new trial end. Mollie went on collecting
+     the discounted amount, and the invoice reconciled down with a payment mismatch. This was
+     so before the move existed; a fully covering code is left to the charge date.
+   - **The trial end is read once at activation.** The window, Mollie's start date and
+     `trial_ends_at` each read the clock; an activation crossing midnight measured them from
+     different days and the move no longer recognised the window as the trial's.
+   - **The code's end date is kept with the grant** (`coupon_valid_until` in the marker), as
+     `discount_periods` is. A date the operator gives the offer later no longer stops the
+     move (by no longer matching) or caps it.
+   - **"Next charge" names the free trial-end charge only up to that day.** After it, and
+     before the nightly job converts the trial, the deferred paid charge is next.
+
+`tests/Feature/Coupons/CouponSignupMatrixTest.php` (partial, 100 %, expired and deactivated
+code, each through the trial-end charge and the renewal after it),
+`tests/Feature/Checkout/TrialWinsOverFullCoverageCouponTest.php`,
+`tests/Feature/Webhook/TrialCouponHandoverTest.php`.
 
 ### A mandate-holding trial is left alone for 14 days, not forever
 
@@ -2653,8 +2741,8 @@ the feature suite and in the browser.
 - **A subscription checkout takes exactly one coupon.** Once one is applied the field is
   gone, so stacking cannot even be attempted in the browser.
 - **A code on a free order is ignored, not refused, and not spent.**
-- **A first-payment coupon on a trial is refused** (`coupon_not_with_trial`): the trial
-  collects no first payment the coupon could discount.
+- **A first-payment coupon on a trial discounts the trial-end charge** (until 24 November
+  2026 it was refused with `coupon_not_with_trial` — see "The trial wins over a coupon").
 - **100 % recurring coupon:** Mollie cannot hold a subscription of 0, so it holds the full
   price and its start date is moved past the coupon. The browser matrix asserts amount and
   start date and does not force a "renewal" Mollie would not make; the feature matrix
