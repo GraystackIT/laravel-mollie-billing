@@ -189,6 +189,13 @@ new class extends Component {
             ? $rows->paginate(25, ['*'], 'page', null, array_sum(array_column($totals, 'count')))
             : $rows->paginate(25);
 
+        // A page past the last one (a kept URL, a list that shrank) would show the empty
+        // state while invoices match, with no way back but changing a filter: show the last.
+        if ($invoices->isEmpty() && $invoices->total() > 0 && $invoices->currentPage() > 1) {
+            $this->setPage($invoices->lastPage());
+            $invoices = $rows->paginate(25, ['*'], 'page', $invoices->lastPage(), $invoices->total());
+        }
+
         $count = $invoices->total();
 
         return [

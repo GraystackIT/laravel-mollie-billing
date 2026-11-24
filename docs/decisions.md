@@ -5041,9 +5041,11 @@ taken back.
   `throw => true` throws from `readStream()`. That `FilesystemException` now makes that
   invoice missing, not the export.
 - **SQLite folds ASCII only** — `mb_strtolower("MÜLLER")` is "müller", SQLite's `lower()`
-  gives "mÜller", so the exact spelling no longer found itself. `Support\ContainsSearch`
-  folds the term the way the driver folds the column (`strtolower` on SQLite) — as before
-  the review, "müller" does not find "MÜLLER" there; Postgres and MySQL fold Unicode.
+  gives "mÜller", so the exact spelling no longer found itself. A second pass found the same
+  kind of mismatch on Postgres (simple case mapping keeps a final "Σ" as "σ", PHP gives
+  "ς"). `Support\ContainsSearch` therefore never folds in PHP: the SQL is
+  `lower(column) like lower(?) escape '!'`, both sides folded by the same database. As
+  before the review, "müller" does not find "MÜLLER" on SQLite; README says so.
 - **A suffixed file name could be another serial's own** — "RE/26" with id 3 became
   "re-26-3.pdf", the name of serial "RE-26-3", and `addFile()` overwrites. The suffix is now
   extended until the name is free.
@@ -5055,3 +5057,15 @@ taken back.
   a missing PDF; errors of a configured disk still surface.
 - **`BillingTime::toUtc()` kept a named zone** — "2026-11-24 16:03:00 Europe/Vienna" stayed
   16:03 and `formatUtc()` labelled it UTC. The fallback now converts to UTC (15:03).
+
+Second pass over the merged branch, four more, each with a test that failed without its fix:
+
+- **Empty local PDF packed as delivered** — an interrupted write leaves a zero-byte file
+  that `exists()` reports; the local branch now requires a non-empty file, like the remote
+  branch already did.
+- **An existence check that throws dropped the archive** — S3 can throw
+  `UnableToCheckFileExistence` from `hasStoredPdf()`. Any `FilesystemException` while
+  getting one document now makes that invoice missing; only writing the archive is fatal.
+- **A page past the last one showed the empty state** while invoices matched, with no way
+  back but changing a filter. The list now shows the last page instead.
+- **README promised case-insensitivity on every database** — qualified for SQLite.

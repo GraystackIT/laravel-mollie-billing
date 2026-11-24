@@ -159,7 +159,7 @@ final class AdminInvoiceFilter
             return;
         }
 
-        $like = ContainsSearch::pattern($query, $search);
+        $like = ContainsSearch::pattern($search);
 
         $query->where(function (Builder $w) use ($like, $search): void {
             $w->whereRaw('lower(serial_number) '.ContainsSearch::SQL, [$like])

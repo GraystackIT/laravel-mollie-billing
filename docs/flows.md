@@ -1429,8 +1429,9 @@ flowchart TD
   `invoices.export_max`, so an invoice booked while the archive is built neither pushes it
   past the cap nor slips in.
 - **Never silently incomplete:** an invoice whose PDF cannot be produced, arrived
-  truncated from a remote disk, could not be read there, or was over the regeneration limit
-  is listed in `MISSING.txt`, not dropped. Two serials that slug to one file name never
+  truncated from a remote disk, is empty, could not be checked or read on its disk, or was
+  over the regeneration limit is listed in `MISSING.txt`, not dropped; only failing to
+  write the archive itself fails the export. Two serials that slug to one file name never
   overwrite each other in the archive.
 - **Bounded work per request:** at most `InvoiceArchiveService::MAX_REGENERATIONS` missing
   PDFs are rendered per export, so an export after a disk migration does not run into the

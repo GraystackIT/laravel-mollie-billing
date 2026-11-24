@@ -92,20 +92,17 @@ class InvoiceArchiveService
 
         try {
             foreach ($invoices as $invoice) {
-                if ($this->invoices->hasStoredPdf($invoice)) {
-                    $stored = $invoice;
-                } elseif (Cache::has(self::FAILED_REGENERATION_KEY.$invoice->id)) {
-                    $stored = null;
-                } elseif ($regenerations < self::MAX_REGENERATIONS) {
-                    $regenerations++;
-                    $stored = $this->invoices->ensureStoredPdf($invoice);
+                // A storage error of one document (an S3 existence check, a read) makes that
+                // invoice missing, not the archive; only writing the archive stays fatal.
+                try {
+                    $stored = $this->storedDocument($invoice, $regenerations, $deferred);
+                } catch (FilesystemException) {
+                    $missing[] = $this->describe($invoice);
 
-                    if ($stored === null) {
-                        Cache::put(self::FAILED_REGENERATION_KEY.$invoice->id, true, self::FAILED_REGENERATION_TTL_SECONDS);
-                    }
-                } else {
-                    $deferred[] = $this->describe($invoice);
+                    continue;
+                }
 
+                if ($stored === false) {
                     continue;
                 }
 
@@ -115,8 +112,8 @@ class InvoiceArchiveService
                     continue;
                 }
 
-                $name = $this->uniqueName($stored, $names);
                 $source = $this->localPathOf($stored, $copies);
+                $name = $this->uniqueName($stored, $names);
 
                 if ($source === null || ! $zip->addFile($source, $name)) {
                     $missing[] = $this->describe($stored);
@@ -162,6 +159,38 @@ class InvoiceArchiveService
     }
 
     /**
+     * The invoice with its PDF on a disk, null when it cannot be had, false when it was not
+     * attempted (over MAX_REGENERATIONS; added to $deferred).
+     *
+     * @param  list<string>  $deferred
+     */
+    private function storedDocument(BillingInvoice $invoice, int &$regenerations, array &$deferred): BillingInvoice|false|null
+    {
+        if ($this->invoices->hasStoredPdf($invoice)) {
+            return $invoice;
+        }
+
+        if (Cache::has(self::FAILED_REGENERATION_KEY.$invoice->id)) {
+            return null;
+        }
+
+        if ($regenerations >= self::MAX_REGENERATIONS) {
+            $deferred[] = $this->describe($invoice);
+
+            return false;
+        }
+
+        $regenerations++;
+        $stored = $this->invoices->ensureStoredPdf($invoice);
+
+        if ($stored === null) {
+            Cache::put(self::FAILED_REGENERATION_KEY.$invoice->id, true, self::FAILED_REGENERATION_TTL_SECONDS);
+        }
+
+        return $stored;
+    }
+
+    /**
      * A path on this machine holding the PDF: the file itself on a local disk, a temporary
      * copy of it on any other.
      *
@@ -172,7 +201,11 @@ class InvoiceArchiveService
         $disk = Storage::disk($invoice->pdf_disk);
 
         if (config("filesystems.disks.{$invoice->pdf_disk}.driver") === 'local') {
-            return $disk->path($invoice->pdf_path);
+            $local = $disk->path($invoice->pdf_path);
+
+            // An interrupted write can leave an empty file that exists() still reports;
+            // as an empty PDF in the archive it would look delivered.
+            return is_file($local) && filesize($local) > 0 ? $local : null;
         }
 
         // A disk configured with `throw => true` throws where others return null; either way

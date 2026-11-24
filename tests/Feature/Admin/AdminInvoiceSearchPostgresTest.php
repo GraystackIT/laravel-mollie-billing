@@ -85,7 +85,11 @@ function invoiceSearchRow(mixed $billableId, string $serial, ?string $payment = 
 /** @return list<string> */
 function invoiceSearchSerials(string $term): array
 {
-    return (new AdminInvoiceFilter(search: $term))->query()->orderBy('serial_number')->pluck('serial_number')->all();
+    // Sorted here, byte-wise: the database's collation orders "ΟΣ" differently.
+    $serials = (new AdminInvoiceFilter(search: $term))->query()->pluck('serial_number')->all();
+    sort($serials, SORT_STRING);
+
+    return $serials;
 }
 
 afterEach(function (): void {
@@ -115,23 +119,27 @@ it('searches invoices on PostgreSQL by any text, case-insensitively, whatever th
     invoiceSearchRow($acmeId, 'RE-2026-0001', 'tr_AbC123');
     invoiceSearchRow($globexId, 'RE-2026-0002');
     invoiceSearchRow($globexId, 'GS_2026_0001');
+    invoiceSearchRow($globexId, 'ΟΣ-0001');
 
     // Text, not an id: answered, not a 500.
     expect(invoiceSearchSerials('re-2026'))->toBe(['RE-2026-0001', 'RE-2026-0002'])
         ->and(invoiceSearchSerials('tr_abc'))->toBe(['RE-2026-0001'])
         // The billable's own search, by name.
         ->and(invoiceSearchSerials('acme'))->toBe(['RE-2026-0001'])
-        ->and(invoiceSearchSerials('BILLING@GLOBEX'))->toBe(['GS_2026_0001', 'RE-2026-0002'])
+        ->and(invoiceSearchSerials('BILLING@GLOBEX'))->toBe(['GS_2026_0001', 'RE-2026-0002', 'ΟΣ-0001'])
         // The exact id still finds the billable's invoices.
-        ->and(invoiceSearchSerials((string) $globexId))->toBe(['GS_2026_0001', 'RE-2026-0002'])
+        ->and(invoiceSearchSerials((string) $globexId))->toBe(['GS_2026_0001', 'RE-2026-0002', 'ΟΣ-0001'])
         // `_` and `%` are characters, not wildcards.
         ->and(invoiceSearchSerials('S_2'))->toBe(['GS_2026_0001'])
-        ->and(invoiceSearchSerials('%'))->toBe([]);
+        ->and(invoiceSearchSerials('%'))->toBe([])
+        // Folded by Postgres on both sides: PHP's mb_strtolower() turns a final "Σ" into
+        // "ς", Postgres' lower() into "σ".
+        ->and(invoiceSearchSerials('ΟΣ'))->toBe(['ΟΣ-0001']);
 
     if ($keyType === 'int') {
         // Past the bigint range: text to search, not an id to compare (a conversion error).
         expect(invoiceSearchSerials('9999999999999999999'))->toBe([]);
     }
 
-    expect(BillingInvoice::query()->count())->toBe(3);
+    expect(BillingInvoice::query()->count())->toBe(4);
 })->with(['int', 'uuid']);

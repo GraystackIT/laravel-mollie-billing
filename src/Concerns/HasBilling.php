@@ -151,7 +151,7 @@ trait HasBilling
     {
         // Case-insensitive on every driver (Postgres LIKE is not), and `%` / `_` in the term
         // are characters, not wildcards — a search for "%" matched every billable.
-        $like = ContainsSearch::pattern($query, $term);
+        $like = ContainsSearch::pattern($term);
 
         return $query->where(function (Builder $q) use ($like): void {
             $q->whereRaw('lower(name) '.ContainsSearch::SQL, [$like])

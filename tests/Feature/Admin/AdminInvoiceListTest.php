@@ -848,3 +848,49 @@ it('regenerates a PDF whose disk is no longer configured instead of failing on i
         ->get(route('billing.admin.invoice.download', $invoice))
         ->assertOk();
 });
+
+it('names an empty PDF on a local disk in MISSING.txt instead of packing it', function (): void {
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-WHOLE');
+    $empty = invoiceListInvoice($b, '2026-10-02 10:00:00', 'RE-EMPTY');
+    // What an interrupted write leaves behind.
+    Storage::disk('local')->put($empty->pdf_path, '');
+
+    $response = $this->actingAs(new InvoiceListAdminUser)->get(route('billing.admin.invoices.export'));
+    $entries = invoiceListZip(file_get_contents($response->baseResponse->getFile()->getPathname()));
+
+    expect(array_keys($entries))->toBe([InvoiceArchiveService::MISSING_FILE, 're-whole.pdf'])
+        ->and($entries[InvoiceArchiveService::MISSING_FILE])->toContain('RE-EMPTY');
+});
+
+it('names a PDF whose existence the disk cannot check in MISSING.txt and still exports the rest', function (): void {
+    config()->set('filesystems.disks.remote', ['driver' => 's3', 'throw' => true]);
+
+    $remote = Mockery::mock(\Illuminate\Filesystem\FilesystemAdapter::class);
+    $remote->shouldReceive('exists')->andThrow(\League\Flysystem\UnableToCheckFileExistence::forLocation('x.pdf'));
+    Storage::set('remote', $remote);
+
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-LOCAL');
+    invoiceListInvoice($b, '2026-10-02 10:00:00', 'RE-REMOTE', withPdf: false)
+        ->forceFill(['pdf_disk' => 'remote', 'pdf_path' => 'x.pdf'])->save();
+
+    $response = $this->actingAs(new InvoiceListAdminUser)->get(route('billing.admin.invoices.export'));
+    $response->assertOk();
+    $entries = invoiceListZip(file_get_contents($response->baseResponse->getFile()->getPathname()));
+
+    expect(array_keys($entries))->toBe([InvoiceArchiveService::MISSING_FILE, 're-local.pdf'])
+        ->and($entries[InvoiceArchiveService::MISSING_FILE])->toContain('RE-REMOTE');
+});
+
+it('shows the last page instead of the empty state for a page past the end', function (): void {
+    $b = invoiceListBillable('Acme', 'acme@example.com');
+    invoiceListInvoice($b, '2026-10-01 10:00:00', 'RE-1');
+    invoiceListInvoice($b, '2026-10-02 10:00:00', 'RE-2');
+
+    $component = Livewire::withQueryParams(['page' => 3])->test('mollie-billing::admin.invoices.index');
+
+    expect(invoiceListSerials($component))->toBe(['RE-2', 'RE-1'])
+        ->and($component->viewData('invoices')->currentPage())->toBe(1)
+        ->and($component->viewData('count'))->toBe(2);
+});
