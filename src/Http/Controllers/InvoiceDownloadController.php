@@ -10,10 +10,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 
 class InvoiceDownloadController extends Controller
@@ -45,47 +42,20 @@ class InvoiceDownloadController extends Controller
 
         abort_unless($isAdmin || $isAuthorizedTenant, 403);
 
-        // The DB may reference a PDF that no longer exists on the disk (bucket
-        // switched, database copied between environments, blob deleted), or carry no
-        // pointer at all — which is what `generateAndStorePdf()` leaves behind when a
-        // render fails, a state its own comment calls a compliance problem. Both are
-        // regenerable, so both take the same path; a `hasPdf()` guard before this block
-        // 404ed the second case forever, for an invoice the customer had paid.
-        if (! $invoice->hasPdf() || ! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
-            // Serialised per invoice: a double-click (or several tabs) would
-            // otherwise regenerate the same PDF concurrently, and each run deletes
-            // the file the other just wrote.
-            $lock = Cache::lock('billing:invoice-pdf-regenerate:'.$invoice->id, 30);
+        // A missing document — no pointer, or a pointer to a file that is gone — is
+        // regenerated rather than refused; a `hasPdf()` guard here 404ed an invoice whose
+        // render had failed forever, for an invoice the customer had paid.
+        $invoice = app(InvoiceService::class)->ensureStoredPdf($invoice);
 
-            try {
-                $lock->block(15);
-
-                // The winner may already have rebuilt it while we waited.
-                $invoice = $invoice->fresh() ?? $invoice;
-
-                if (! $invoice->hasPdf() || ! Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path)) {
-                    app(InvoiceService::class)->regeneratePdf($invoice);
-                }
-            } catch (\Throwable $e) {
-                Log::warning('Invoice PDF missing on disk and could not be regenerated', [
-                    'invoice_id' => $invoice->id,
-                    'disk' => $invoice->pdf_disk,
-                    'path' => $invoice->pdf_path,
-                    'error' => $e->getMessage(),
-                ]);
-            } finally {
-                $lock->release();
-            }
-
-            $invoice = $invoice->fresh();
-
-            abort_unless($invoice instanceof BillingInvoice && $invoice->hasPdf(), 404);
-            abort_unless(Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path), 404);
-        }
+        abort_unless($invoice instanceof BillingInvoice, 404);
 
         /** @var \Illuminate\Filesystem\FilesystemAdapter $disk */
         $disk = Storage::disk($invoice->pdf_disk);
-        $filename = Str::slug($invoice->serial_number ?? 'invoice-'.$invoice->id).'.pdf';
+        $filename = $invoice->pdfFilename();
+
+        // The admin's "view" route asks for the document in the browser tab instead of
+        // as a download; every other route keeps the attachment it always sent.
+        $inline = ($request->route()?->defaults['disposition'] ?? null) === 'inline';
 
         // S3-compatible disks: generate a temporary URL and redirect.
         // Local disks also have temporaryUrl() but it generates a signed route
@@ -95,7 +65,10 @@ class InvoiceDownloadController extends Controller
         if ($driver !== 'local' && method_exists($disk, 'temporaryUrl')) {
             try {
                 $expiry = (int) config('mollie-billing.invoices.temporary_url_expiry', 30);
-                $url = $disk->temporaryUrl($invoice->pdf_path, now()->addMinutes($expiry));
+                $options = $inline
+                    ? ['ResponseContentDisposition' => 'inline; filename="'.$filename.'"', 'ResponseContentType' => 'application/pdf']
+                    : [];
+                $url = $disk->temporaryUrl($invoice->pdf_path, now()->addMinutes($expiry), $options);
 
                 return redirect($url);
             } catch (\RuntimeException) {
@@ -104,6 +77,10 @@ class InvoiceDownloadController extends Controller
         }
 
         // Local disk or fallback: stream the file directly.
+        if ($inline) {
+            return $disk->response($invoice->pdf_path, $filename, ['Content-Type' => 'application/pdf']);
+        }
+
         return $disk->download($invoice->pdf_path, $filename);
     }
 }

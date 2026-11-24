@@ -233,7 +233,7 @@ new class extends Component {
         }
 
         $this->flash = __('billing::admin.billables.subscription.flash.trial_extended', [
-            'date' => $until->format('Y-m-d H:i'),
+            'date' => BillingTime::formatUtc($until),
         ]);
         $this->reset('trialUntil');
     }
@@ -440,13 +440,13 @@ new class extends Component {
                         @endif
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.trial_ends')" mono>
-                        {{ BillingTime::displayUtc($b->trial_ends_at)?->format('Y-m-d H:i') ?? '—' }}
+                        <x-mollie-billing::admin.time :at="$b->trial_ends_at" />
                         @if ($b->trial_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->trial_ends_at->diffForHumans() }}</flux:text>
                         @endif
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.subscription_ends')" mono>
-                        {{ BillingTime::displayUtc($b->subscription_ends_at)?->format('Y-m-d H:i') ?? '—' }}
+                        <x-mollie-billing::admin.time :at="$b->subscription_ends_at" />
                         @if ($b->subscription_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->subscription_ends_at->diffForHumans() }}</flux:text>
                         @endif
@@ -495,7 +495,7 @@ new class extends Component {
                                 type="date"
                                 wire:model="trialUntil"
                                 :min="BillingTime::nowUtc()->addDay()->format('Y-m-d')"
-                                :label="__('billing::admin.billables.subscription.extend_trial_label')"
+                                :label="__('billing::admin.billables.subscription.extend_trial_label').' (UTC)'"
                                 :description="__('billing::admin.billables.subscription.extend_trial_description')"
                                 class="flex-1"
                             />
@@ -560,7 +560,7 @@ new class extends Component {
                                 $obstacleKey = 'billing::admin.balance_charges.obstacle.'.($charge['obstacle'] ?? '');
                             @endphp
                             <flux:table.row :key="$charge['key']" dusk="balance-charge-row-{{ $charge['status'] }}">
-                                <flux:table.cell class="tabular-nums">{{ $charge['at'] ? BillingTime::displayUtc(\Carbon\Carbon::parse($charge['at']))?->format('Y-m-d H:i') : '—' }}</flux:table.cell>
+                                <flux:table.cell class="tabular-nums"><x-mollie-billing::admin.time :at="$charge['at']" /></flux:table.cell>
                                 <flux:table.cell>{{ \Illuminate\Support\Facades\Lang::has($reasonKey) ? __($reasonKey) : $charge['reason'] }}</flux:table.cell>
                                 <flux:table.cell align="end" class="tabular-nums">{{ \GraystackIT\MollieBilling\Support\BillingMoney::format($charge['amount_gross'], $charge['currency']) }}</flux:table.cell>
                                 <flux:table.cell>
@@ -634,7 +634,7 @@ new class extends Component {
                 @if ($waiver !== null)
                     <flux:callout icon="gift" color="teal" inline>
                         {{ __('billing::admin.billables.subscription.free_time.waiver_running', [
-                            'until' => BillingTime::displayUtc(\Carbon\Carbon::parse((string) $waiver['valid_until']))?->format('Y-m-d'),
+                            'until' => BillingTime::formatUtc((string) $waiver['valid_until'], 'Y-m-d'),
                             'on_expiry' => __('billing::admin.grants.on_expiry.'.PlanWaiver::normalizeOnExpiry($waiver['on_expiry'] ?? null)),
                         ]) }}
                     </flux:callout>
@@ -711,7 +711,7 @@ new class extends Component {
                                     </div>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">
-                                    {{ BillingTime::displayUtc($g->applied_at)?->format('Y-m-d H:i') }}
+                                    <x-mollie-billing::admin.time :at="$g->applied_at" />
                                     <flux:text size="xs" class="text-zinc-500">{{ $g->applied_at?->diffForHumans() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">{{ $g->grant_days_added ?? '—' }}</flux:table.cell>

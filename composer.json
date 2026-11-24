@@ -45,7 +45,8 @@
         "symfony/http-foundation": "^7.0|^8.0"
     },
     "suggest": {
-        "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license."
+        "livewire/flux-pro": "Required to render the bundled customer portal, checkout and admin panel Blade views (^2.0). Install separately with your Flux Pro license.",
+        "ext-zip": "Required for the ZIP export of the admin invoice list."
     },
     "require-dev": {
         "league/flysystem-aws-s3-v3": "^3.35",

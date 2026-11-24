@@ -326,6 +326,12 @@ return [
             'tests/Browser/Matrix/AdminRefundMatrixTest.php::test_refund_from_the_invoice_tab',
         ],
     ],
+    'config:invoices.export_max' => [
+        'feature' => [
+            'tests/Feature/Admin/AdminInvoiceListTest.php::refuses an empty export and one above invoices.export_max',
+        ],
+        'no_browser' => 'A cap the browser suite never reaches with its handful of invoices; the disabled button is decided by the count the feature test asserts, and the 422 behind it by the same test.',
+    ],
     'config:invoices.temporary_url_expiry' => [
         'feature' => [
             'tests/Feature/Config/OperationsConfigKeysTest.php::invoices.temporary_url_expiry — is how long a signed download link of a remote disk lives',
@@ -656,6 +662,22 @@ return [
             'tests/Browser/Matrix/AdminListsMatrixTest.php::test_past_due_list_sorts_and_retries_the_open_overage_charge',
         ],
     ],
+    'action:admin.invoices.index@applyPreset' => [
+        'feature' => ['tests/Feature/Admin/AdminInvoiceListTest.php::sets the range from the quick filters, and clears it when the active one is clicked again'],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable'],
+    ],
+    'action:admin.invoices.index@clearFilters' => [
+        'feature' => ['tests/Feature/Admin/AdminInvoiceListTest.php::filters by type, status and search, and clears every filter at once'],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable'],
+    ],
+    'action:admin.invoices.index@openDetail' => [
+        'feature' => ['tests/Feature/Admin/AdminInvoiceListTest.php::opens the detail of an invoice with its PDF links and the way to its billable'],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable'],
+    ],
+    'action:admin.invoices.index@sort' => [
+        'feature' => ['tests/Feature/Admin/AdminInvoiceListTest.php::sorts the invoice list by an allowed column and ignores any other'],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable'],
+    ],
     'action:admin.refunds.index@openDetail' => [
         'feature' => [
             'tests/Feature/Admin/OperationsAdminActionsTest.php::refunds: the list really orders by the chosen column',
@@ -751,6 +773,24 @@ return [
         'browser' => [
             'tests/Browser/Matrix/AdminRefundMatrixTest.php::test_pdf_download_and_regeneration',
         ],
+    ],
+    'screen:billing.admin.invoice.view' => [
+        'feature' => ['tests/Feature/Admin/AdminInvoiceListTest.php::shows a PDF in the browser on the view route and sends it as an attachment on download'],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable'],
+    ],
+    'screen:billing.admin.invoices.export' => [
+        'feature' => [
+            'tests/Feature/Admin/AdminInvoiceListTest.php::exports exactly the filtered invoices as a ZIP of their PDFs',
+            'tests/Feature/Admin/AdminInvoiceListTest.php::regenerates a missing PDF for the export and names the one it cannot',
+        ],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable'],
+    ],
+    'screen:billing.admin.invoices.index' => [
+        'feature' => [
+            'tests/Feature/Admin/AdminInvoiceListTest.php::lists every invoice across billables, newest first',
+            'tests/Feature/Admin/AdminInvoiceListTest.php::filters by an inclusive date range, in UTC while no admin timezone is set',
+        ],
+        'browser' => ['tests/Browser/Matrix/AdminListsMatrixTest.php::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable', 'tests/Browser/AdminPanelTest.php::test_walks_the_admin_screens'],
     ],
     'screen:billing.admin.mismatches.index' => [
         'feature' => [

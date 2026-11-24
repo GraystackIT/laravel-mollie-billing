@@ -4807,3 +4807,111 @@ green with the fix). `Feature/Commands/CheckConfigEInvoiceTest` (8). `EInvoiceKo
 runs 11 shapes × 2 profiles through the KoSIT validator (EN 16931 + XRechnung 3.0.2): 22
 accepted. Before the category-O fixes it rejected the O documents (BR-O-05, BR-CO-26,
 BR-DE-14).
+
+## Admin invoice list with date filter and ZIP export (24 November 2026)
+
+The admin panel had invoices only per billable (the invoices tab) and credit notes only in
+the refunds list. `billing/admin/invoices` now lists every invoice and credit note, filtered
+by an issue-date range (with quick filters this/last month, this/last year), type, status and
+search; each row opens a detail, shows the PDF in the browser, downloads it, and leads to its
+billable; the filtered list exports as one ZIP of the PDFs. Flow: `docs/flows.md` § 18.2.
+
+### What was decided
+
+- **Dates are UTC days, both ends inclusive, matched against `created_at`, and the panel says
+  so.** A review raised that an operator in Vienna saw an invoice of 31 October 23:30 UTC —
+  their 1 November — under October. Following the operator's timezone in the invoice list
+  was built and then withdrawn by the maintainer: the admin panel works in UTC everywhere,
+  so that it is unambiguous — identical to the database, the logs and Mollie — and one
+  screen in another zone would make every comparison between screens a conversion. What
+  was missing was not the conversion but the label: the header now carries "All times in
+  UTC" on every admin page, every time is printed with "UTC"
+  (`<x-mollie-billing::admin.time>`, `BillingTime::formatUtc()`), date inputs say "(UTC)",
+  and `AdminUtcLabelGuardTest` fails on a view that prints a bare time. The issue date is
+  `created_at`, not the service period: an accountant exports "what was invoiced in
+  October". The upper bound is `< next day 00:00`, not `<= 23:59:59`, which loses rows with
+  fractional seconds.
+- **The list is served by an index on `(created_at, id)`, and a render counts once.**
+  Found in review: every existing index starts with the billable, so the global list scanned
+  and sorted the whole table — validated at 500 000 rows; with the index the first page reads
+  25 rows. The count and the sums per currency are one grouped query whose count is handed
+  to the paginator as its total (it no longer counts again), and they are kept in the
+  component between renders: sorting, paging and opening a detail do not change them. They
+  are recomputed when the filter changes, or after 60 seconds so a list left open catches
+  up with new invoices.
+- **One filter object for the screen and the export** (`AdminInvoiceFilter`). The export is a
+  plain GET link carrying the filter as query string — the archive holds exactly what the
+  list shows, and a filtered list is bookmarkable (the component's filter properties are
+  `#[Url]`). A range entered backwards is swapped, not treated as empty; an unknown type or
+  status is no filter, not an empty list.
+- **Credit notes are in the list and the archive**, with their negative amounts; the totals
+  per currency therefore show what was really billed. They can be filtered out by type.
+- **The ZIP is built synchronously, capped by `invoices.export_max` (1000).** A queued job with
+  a download page (like the OSS export) would be the answer for very large archives; for the
+  month or year an operator exports, one request is simpler and immediate. Above the cap the
+  button is disabled and the route answers 422.
+- **A PDF that is missing is regenerated, one that cannot be is named in `MISSING.txt`.** The
+  regeneration that `InvoiceDownloadController` did inline moved to
+  `InvoiceService::ensureStoredPdf()`, so download, view and export share the lock and the
+  behaviour. An archive that silently lacks an invoice would look complete to the accountant.
+- **File names inside the ZIP are the single download's** (`BillingInvoice::pdfFilename()`,
+  the slugged serial), so the same document has the same name wherever it is fetched from.
+  A `/` or `\` in the serial becomes `-` before slugging (`RE/26/0001` → `re-26-0001.pdf`):
+  `Str::slug()` alone dropped it, which gave `re260001.pdf` — unreadable, and two serials
+  differing only in where the slash sits collided. This also changes the name of the single
+  download, which only ever affected the suggested file name, never a stored path.
+- **"View" is the download controller with `disposition=inline`** on an admin-only route
+  (`billing.admin.invoice.view`), not a second controller: authorisation, regeneration and the
+  signed-URL path for remote disks stay in one place.
+- **`ext-zip` is suggested, not required.** Without it the export button is disabled with the
+  reason, the route answers 501, and the rest of the package is unaffected.
+
+### Tests
+
+`Feature/Admin/AdminInvoiceListTest` (18): range boundaries to the second, presets including
+the 31st-of-the-month overflow, type/status/search, sorting, detail, the ZIP's exact content,
+regeneration and `MISSING.txt`, the cap, the admin gate, inline vs attachment, file names.
+Review fixes, each red before and green after: on a Vienna server, 31 October 23:30 UTC
+stays October in list and export and is printed "… 23:30 UTC"; `AdminUtcLabelGuardTest`
+(red against the admin views before they were labelled); the query plan reads `billing_invoices_created_at_id_index` with no
+temporary sort (red without the migration); one aggregate per render and none on
+sort/page/detail (red with the paginator counting on its own).
+`Browser/Matrix/AdminListsMatrixTest::test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable`
+clicks the quick filters, opens a bookmarked range, fetches the ZIP and the inline PDF, and
+follows the row's action menu to the billable.
+
+### Code review of the invoice list (24 November 2026)
+
+Six findings; each fix has a test that was run against the code with that fix taken back
+and failed there.
+
+- **Search on PostgreSQL** — reported as a 500 for any text, because `billable_id LIKE` on
+  a bigint/uuid column. **Refuted as stated:** reproduced on PostgreSQL 18 with both key
+  types; Laravel's Postgres grammar casts the column to text for `like`, so the query runs.
+  **What was real:** Postgres `LIKE` is case-sensitive, so "re-2026" did not find
+  "RE-2026", "tr_abc" not "tr_AbC123", and — through `HasBilling::scopeBillableSearch()` —
+  "acme" not "Acme GmbH"; and `%`/`_` in the term were wildcards ("%" matched everything).
+  Now `AdminInvoiceFilter::applySearch()` (shared with the refunds list, which had the same
+  query) compares `lower(…) like ? escape '!'` on serial and payment id and matches the
+  billable id **exactly**, and only when the term has the shape of the configured key type;
+  the default billable search scope does the same for name and email. `!` is the escape
+  character because a backslash means different things in the three drivers' string
+  literals. `AdminInvoiceSearchPostgresTest` runs against a real Postgres (skipped without
+  one).
+- **Half-built ZIP left in the temp directory** after a failed export — ZipArchive's
+  destructor wrote it back to the path just unlinked. The archive is now discarded
+  (`unchangeAll()` + `close()`) before the unlink.
+- **Truncated remote PDF packed as if complete** — the copied byte count is now compared with
+  the file's size on the disk; a short copy (or a failed `fopen`) goes to `MISSING.txt`.
+- **Kept count used as the paginator's total** — a cached 0 made `paginate()` skip the row
+  query, an empty list for up to a minute while invoices existed. The kept count is handed
+  over only in the render that computed it; otherwise the paginator counts itself. Still one
+  aggregate per render; the count shown and the export button follow the paginator.
+- **Date with a trailing newline** — `$` matched before it and `createFromFormat()` threw.
+  Now `\z` and a caught parse error. In a standard app `TrimStrings` strips it from the
+  request first, so this was reachable mainly through other callers of the filter.
+- **Export cap counted rows, not work** — after a disk migration an export rendered every
+  missing PDF in one request. At most `InvoiceArchiveService::MAX_REGENERATIONS` (25) per
+  export now; the rest is listed in `MISSING.txt` with "export again to continue", and since
+  what was rendered is stored, repeated exports complete the range.
+

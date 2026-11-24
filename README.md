@@ -652,7 +652,7 @@ The admin panel never reads the `name` / `email` columns directly — every bill
 
 ### Admin search & sort on custom columns
 
-Display goes through `getBillingName()` / `getBillingEmail()`, but the admin listings also *search* and *sort* by name and email — and a query can't call a PHP accessor. When your display name or contact email lives on a different column (or behind a relation), point the three search/sort scopes at the right place. They default to the `name` and `email` columns, so a User-as-billable setup needs no override:
+Display goes through `getBillingName()` / `getBillingEmail()`, but the admin listings also *search* and *sort* by name and email — and a query can't call a PHP accessor. When your display name or contact email lives on a different column (or behind a relation), point the three search/sort scopes at the right place. They default to the `name` and `email` columns — case-insensitively on every database, with `%` and `_` in the term taken literally — so a User-as-billable setup needs no override. An override decides its own matching; on PostgreSQL, `LIKE` is case-sensitive, so compare `lower(…)` (or use `ilike`) if "acme" should find "Acme":
 
 ```php
 use GraystackIT\MollieBilling\Concerns\HasBilling;

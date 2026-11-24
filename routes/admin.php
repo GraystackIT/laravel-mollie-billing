@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use GraystackIT\MollieBilling\Http\Controllers\BillingAdminController;
 use GraystackIT\MollieBilling\Http\Controllers\InvoiceDownloadController;
+use GraystackIT\MollieBilling\Http\Controllers\InvoiceExportController;
 use GraystackIT\MollieBilling\Http\Controllers\OssExportDownloadController;
 use GraystackIT\MollieBilling\Http\Middleware\AuthorizeBillingAdmin;
 use GraystackIT\MollieBilling\Http\Middleware\BlockRestrictedCountries;
@@ -19,6 +20,13 @@ Route::middleware(['web', BlockRestrictedCountries::class, AuthorizeBillingAdmin
         // tenant. The controller honours both tenant and admin auth paths.
         Route::get('invoices/{invoice}/download', InvoiceDownloadController::class)
             ->name('invoice.download');
+        // The same document in the browser tab instead of as an attachment.
+        Route::get('invoices/{invoice}/view', InvoiceDownloadController::class)
+            ->defaults('disposition', 'inline')->name('invoice.view');
+        Route::get('invoices', [BillingAdminController::class, 'show'])
+            ->defaults('screen', 'invoices.index')->name('invoices.index');
+        Route::get('invoices/export', InvoiceExportController::class)
+            ->name('invoices.export');
         Route::get('coupons', [BillingAdminController::class, 'show'])
             ->defaults('screen', 'coupons.index')->name('coupons.index');
         Route::get('coupons/create', [BillingAdminController::class, 'show'])

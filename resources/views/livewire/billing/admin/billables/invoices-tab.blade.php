@@ -444,7 +444,7 @@ new class extends Component {
                                 $partiallyRefunded = $refundable && $effectiveRefundedNet > 0 && ! $fullyRefunded;
                             @endphp
                             <flux:table.row :key="$inv->id">
-                                <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($inv->created_at)->format('Y-m-d H:i') }}</flux:table.cell>
+                                <flux:table.cell><x-mollie-billing::admin.time :at="$inv->created_at" /></flux:table.cell>
                                 <flux:table.cell class="font-mono text-sm">{{ $inv->serial_number ?? '—' }}</flux:table.cell>
                                 <flux:table.cell><x-mollie-billing::admin.enum-badge :value="$inv->invoice_kind" /></flux:table.cell>
                                 <flux:table.cell align="end">

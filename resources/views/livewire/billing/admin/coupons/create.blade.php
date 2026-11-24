@@ -289,11 +289,11 @@ new class extends Component {
 
         <x-mollie-billing::admin.section :title="__('billing::admin.coupons.create.validity_title')" :description="__('billing::admin.coupons.create.validity_description')">
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4 md:items-start">
-                <x-mollie-billing::admin.labelled :label="__('billing::admin.coupons.create.valid_from')" :info="__('billing::admin.coupons.create.info.valid_from')">
+                <x-mollie-billing::admin.labelled :label="__('billing::admin.coupons.create.valid_from').' (UTC)'" :info="__('billing::admin.coupons.create.info.valid_from')">
                     <flux:input type="datetime-local" wire:model="valid_from" :placeholder="__('billing::admin.coupons.create.valid_from_placeholder')" />
                 </x-mollie-billing::admin.labelled>
                 <x-mollie-billing::admin.labelled
-                    :label="__('billing::admin.coupons.create.valid_until')"
+                    :label="__('billing::admin.coupons.create.valid_until').' (UTC)'"
                     :info="$type === 'recurring' ? __('billing::admin.coupons.create.info.valid_until_recurring') : __('billing::admin.coupons.create.info.valid_until')"
                 >
                     <flux:input type="datetime-local" wire:model="valid_until" :placeholder="__('billing::admin.coupons.create.valid_until_placeholder')" />

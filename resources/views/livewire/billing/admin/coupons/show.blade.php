@@ -133,7 +133,7 @@ new class extends Component {
             />
             <x-mollie-billing::admin.stat
                 :label="__('billing::admin.coupons.show.valid_until')"
-                :value="BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d') ?? __('billing::admin.coupons.show.no_expiry')"
+                :value="BillingTime::formatUtc($coupon->valid_until, 'Y-m-d') ?? __('billing::admin.coupons.show.no_expiry')"
                 icon="calendar"
                 :tone="$isExpired ? 'danger' : null"
                 :hint="$coupon->valid_until ? $coupon->valid_until->diffForHumans() : null"
@@ -242,10 +242,10 @@ new class extends Component {
         <x-mollie-billing::admin.section :title="__('billing::admin.coupons.show.validity_title')">
             <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
                 <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.valid_from_utc')" mono>
-                    {{ BillingTime::displayUtc($coupon->valid_from)?->format('Y-m-d H:i') ?? __('billing::admin.coupons.show.immediately') }}
+                    <x-mollie-billing::admin.time :at="$coupon->valid_from" :empty="__('billing::admin.coupons.show.immediately')" />
                 </x-mollie-billing::admin.detail>
                 <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.valid_until_utc')" mono>
-                    {{ BillingTime::displayUtc($coupon->valid_until)?->format('Y-m-d H:i') ?? __('billing::admin.coupons.show.no_expiry') }}
+                    <x-mollie-billing::admin.time :at="$coupon->valid_until" :empty="__('billing::admin.coupons.show.no_expiry')" />
                 </x-mollie-billing::admin.detail>
                 <x-mollie-billing::admin.detail :label="__('billing::admin.coupons.show.redemptions')" mono>
                     {{ $coupon->redemptions_count }}{{ $coupon->max_redemptions ? ' / '.$coupon->max_redemptions : ' / ∞' }}
@@ -288,7 +288,7 @@ new class extends Component {
                     <flux:table.rows>
                         @foreach ($redemptions as $r)
                             <flux:table.row :key="$r->id">
-                                <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($r->applied_at)?->format('Y-m-d H:i') }}</flux:table.cell>
+                                <flux:table.cell><x-mollie-billing::admin.time :at="$r->applied_at" /></flux:table.cell>
                                 <flux:table.cell variant="strong" class="font-mono">{{ class_basename($r->billable_type) }}#{{ $r->billable_id }}</flux:table.cell>
                                 <flux:table.cell align="end">
                                     <x-mollie-billing::admin.money :cents="$r->discount_amount_net ?? 0" :currency="$coupon->currency" />

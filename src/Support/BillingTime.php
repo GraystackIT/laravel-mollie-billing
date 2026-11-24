@@ -60,6 +60,25 @@ class BillingTime
     }
 
     /**
+     * A moment as the admin panel writes it: in UTC, and saying so — "2026-11-24 15:03 UTC".
+     *
+     * The admin panel works in UTC throughout (forensic parity with the database, the logs
+     * and Mollie's events), and a bare "15:03" next to an operator's own wall clock invites
+     * reading it as local time. Every time the panel shows therefore carries the zone: in
+     * markup through `<x-mollie-billing::admin.time>`, in text (a flash message, a
+     * translation placeholder, an attribute) through this. Strings without an offset are
+     * read as UTC ({@see toUtc()}).
+     */
+    public static function formatUtc(CarbonInterface|string|null $dt, string $format = 'Y-m-d H:i'): ?string
+    {
+        if ($dt === null || $dt === '') {
+            return null;
+        }
+
+        return self::toUtc($dt)->format($format).' UTC';
+    }
+
+    /**
      * A billing DAY for the portal: a charge date, a period boundary, the end of a
      * subscription, a trial or a gift. Shown as the calendar day the package computes it
      * on — in UTC — whatever the billable's timezone, and never as an instant converted

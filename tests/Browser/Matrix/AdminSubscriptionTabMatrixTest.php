@@ -135,7 +135,7 @@ class AdminSubscriptionTabMatrixTest extends BrowserTestCase
 
             match ($action) {
                 'extendTrial' => $this->submitForm($browser, 'extendTrial', ['trialUntil' => $trialUntil->format('Y-m-d')], [],
-                    __('billing::admin.billables.subscription.flash.trial_extended', ['date' => $trialUntil->format('Y-m-d H:i')])),
+                    __('billing::admin.billables.subscription.flash.trial_extended', ['date' => \GraystackIT\MollieBilling\Support\BillingTime::formatUtc($trialUntil)])),
                 'extendSubscription' => $this->submitForm($browser, 'extendSubscription', [], ['extendDays' => '14'],
                     __('billing::admin.billables.subscription.flash.extended_days', ['count' => 14])),
                 'giveFreePlanPeriods' => $this->submitForm($browser, 'giveFreePlanPeriods', [], ['freePeriods' => '2'],

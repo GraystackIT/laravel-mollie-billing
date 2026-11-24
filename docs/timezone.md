@@ -6,7 +6,7 @@ How the package handles dates and times — persistence, computation, customer-p
 - **Computation:** all internal calculations (period math, OSS quarter boundaries, trial / cancel / coupon logic, job cutoffs) are performed in **UTC**.
 - **Portal display:** in the billable's timezone — overridable per app/user via `getBillingTimezone()`. Without an override the default `mollie-billing.billing_timezone` (default `UTC`) is used.
 - **Billing days are the exception:** a charge date, a period boundary, the end of a subscription, a trial or a gift is shown as the UTC calendar day the package computes it on, in every timezone (`BillingTime::billingDay()`). Mollie charges on a date, at an hour nobody chooses (measured 00:28 UTC); converted, the same charge moved by a day for a customer west of UTC depending on which instant it was anchored on. Moments — an invoice, a usage booking, a purchase — stay in the billable's timezone.
-- **Admin display:** **always UTC**, identical to the database values and to logs / Mollie events.
+- **Admin display:** **always UTC**, identical to the database values and to logs / Mollie events — every time shown, every date filter (the invoice list's range and its quick filters this/last month, this/last year included) and every date input. **And it says so:** the header of every admin page carries an "All times in UTC" badge, every time is printed with its "UTC" label (`<x-mollie-billing::admin.time>` in markup, `BillingTime::formatUtc()` in text), and date inputs are labelled "(UTC)". `tests/Feature/Admin/AdminUtcLabelGuardTest.php` fails on an admin view that prints a time without it. An invoice of 31 October 23:30 UTC is October in the admin panel, whatever the operator's wall clock says.
 
 ## Independence from `app.timezone`
 
@@ -72,10 +72,12 @@ use GraystackIT\MollieBilling\Support\BillingTime;
 
 `display(?CarbonInterface $dt, ?Billable $billable = null)` returns a clone in the billable's timezone. Without a `$billable`, `mollie-billing.billing_timezone` is used.
 
-### Admin (UTC)
+### Admin (UTC, labelled)
 
 ```blade
-{{ BillingTime::displayUtc($invoice->created_at)->format('Y-m-d H:i') }} UTC
+<x-mollie-billing::admin.time :at="$invoice->created_at" />               {{-- 2026-11-24 15:03 UTC --}}
+<x-mollie-billing::admin.time :at="$coupon->valid_until" format="Y-m-d" />
+{{ __('…', ['date' => BillingTime::formatUtc($until)]) }}                {{-- where only text fits --}}
 ```
 
 `displayUtc(?CarbonInterface $dt)` returns a clone in UTC, regardless of config or billable. This way an admin sees the same value in every list and detail tab as in the database row, the Mollie dashboard, and the logs.

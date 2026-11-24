@@ -239,7 +239,7 @@ new class extends Component {
                                     <flux:table.cell class="font-mono">{{ $r->tax_country_user ?? '—' }}</flux:table.cell>
                                     <flux:table.cell class="font-mono">{{ $r->tax_country_payment ?? '—' }}</flux:table.cell>
                                     <flux:table.cell class="font-mono">{{ $r->tax_country_ip ?? '—' }}</flux:table.cell>
-                                    <flux:table.cell class="text-sm text-zinc-500">{{ $r->notified_at?->format('Y-m-d H:i') ?? '—' }}</flux:table.cell>
+                                    <flux:table.cell class="text-sm text-zinc-500"><x-mollie-billing::admin.time :at="$r->notified_at" /></flux:table.cell>
                                     <flux:table.cell>
                                         <flux:button size="xs" icon="check" wire:click="openResolve({{ $r->id }})">{{ __('billing::admin.mismatches.resolve') }}</flux:button>
                                     </flux:table.cell>
@@ -297,7 +297,7 @@ new class extends Component {
                                     </flux:table.cell>
                                     <flux:table.cell class="font-mono">{{ $r->chosen_country ?? '—' }}</flux:table.cell>
                                     <flux:table.cell class="text-sm text-zinc-500">
-                                        {{ $r->resolved_at?->format('Y-m-d H:i') ?? '—' }}
+                                        <x-mollie-billing::admin.time :at="$r->resolved_at" />
                                         @if ($r->resolved_by_user_id)
                                             <div class="text-xs text-zinc-400">{{ __('billing::admin.mismatches.by_user', ['id' => $r->resolved_by_user_id]) }}</div>
                                         @else

@@ -106,7 +106,7 @@ new class extends Component {
 
                             <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
                                 @if ($occurredAt)
-                                    <span class="tabular-nums">{{ BillingTime::displayUtc($occurredAt)->format('Y-m-d H:i') }}</span>
+                                    <x-mollie-billing::admin.time :at="$occurredAt" />
                                     ·
                                 @endif
                                 {{ $entry->causerLabel() }}

@@ -158,7 +158,7 @@ new class extends Component {
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->getBillingEmail() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell class="tabular-nums">
-                                    {{ BillingTime::displayUtc($b->updated_at)?->format('Y-m-d H:i') }}
+                                    <x-mollie-billing::admin.time :at="$b->updated_at" />
                                     <flux:text size="xs" class="text-zinc-500">{{ $b->updated_at?->diffForHumans() }}</flux:text>
                                 </flux:table.cell>
                                 <flux:table.cell>

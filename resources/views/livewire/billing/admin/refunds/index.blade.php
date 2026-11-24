@@ -70,17 +70,8 @@ new class extends Component {
             ->where('invoice_kind', InvoiceKind::Refund)
             ->with('billable');
 
-        if ($this->search !== '') {
-            $term = '%'.$this->search.'%';
-            $search = $this->search;
-            $q->where(function ($w) use ($term, $search) {
-                $w->where('billable_id', 'like', $term)
-                    ->orWhere('serial_number', 'like', $term)
-                    ->orWhereHasMorph('billable', '*', function ($mq) use ($search) {
-                        $mq->billableSearch($search);
-                    });
-            });
-        }
+        // The invoice list's search: case-insensitive on every driver, exact on the id.
+        \GraystackIT\MollieBilling\Support\AdminInvoiceFilter::applySearch($q, $this->search);
 
         $sortBy = in_array($this->sortBy, self::ALLOWED_SORTS, true) ? $this->sortBy : 'created_at';
 
@@ -150,7 +141,7 @@ new class extends Component {
                             $billableLabel = $billable ? ($billable->getBillingName() ?: $billableEmail ?: null) : null;
                         @endphp
                         <flux:table.row :key="$n->id">
-                            <flux:table.cell class="tabular-nums">{{ BillingTime::displayUtc($n->created_at)->format('Y-m-d H:i') }}</flux:table.cell>
+                            <flux:table.cell><x-mollie-billing::admin.time :at="$n->created_at" /></flux:table.cell>
                             <flux:table.cell class="font-mono text-sm">
                                 {{ $n->serial_number ?? '—' }}
                             </flux:table.cell>
@@ -264,7 +255,7 @@ new class extends Component {
                                 </span>
                             </div>
                             <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-amber-800/70 dark:text-amber-300/70">
-                                <span class="tabular-nums">{{ BillingTime::displayUtc($detail->created_at)->format('Y-m-d · H:i') }} UTC</span>
+                                <x-mollie-billing::admin.time :at="$detail->created_at" format="Y-m-d · H:i" />
                                 @if ($vatAbs > 0)
                                     <span class="text-amber-300 dark:text-amber-600/60">·</span>
                                     {{-- Plain strings via the shared formatter — the
@@ -340,7 +331,7 @@ new class extends Component {
                                             @endif
                                             @if ($parent->created_at)
                                                 <span class="text-zinc-300 dark:text-zinc-600">·</span>
-                                                <span class="tabular-nums">{{ BillingTime::displayUtc($parent->created_at)->format('Y-m-d') }}</span>
+                                                <x-mollie-billing::admin.time :at="$parent->created_at" format="Y-m-d" />
                                             @endif
                                         </div>
                                     @else

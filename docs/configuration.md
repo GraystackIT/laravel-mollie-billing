@@ -173,6 +173,7 @@ PDF invoices are generated locally via `elegantly/laravel-invoices` and stored o
         ],
     ],
     'temporary_url_expiry' => 30,            // minutes (relevant for S3-compatible disks)
+    'export_max' => env('BILLING_INVOICE_EXPORT_MAX', 1000), // cap of one ZIP export in the admin invoice list
     'e_invoice' => [
         'enabled' => env('BILLING_E_INVOICE_ENABLED', true),
         'profile' => env('BILLING_E_INVOICE_PROFILE', 'en16931'),   // or 'xrechnung'
@@ -197,6 +198,8 @@ Supported `logo` formats:
 Serial numbers are issued atomically by `InvoiceNumberGenerator`: the number is allocated and the row inserted inside one transaction, so two concurrent webhooks cannot mint the same serial.
 
 `invoices.locale` pins the language a PDF renders in. This matters because `InvoiceDownloadController` regenerates a PDF whose stored file has gone missing — without a pinned locale that regeneration follows whatever locale the triggering request ran in, so a German invoice re-downloaded from the admin panel came back with English labels and `€1,234.56`, permanently overwriting the archived document. Each invoice also stores its own `locale`, which wins over the config value; rows created before that column existed fall back to it.
+
+`invoices.export_max` caps one ZIP export from the admin's invoice list (`billing/admin/invoices`). The archive is built inside the request — every PDF read from the disk, a missing one regenerated — so the cap keeps an "all invoices" export from running into the web server's timeout; above it the button is disabled and the route answers 422, and the operator narrows the date range. The export needs the PHP `zip` extension.
 
 ### IP geolocation
 

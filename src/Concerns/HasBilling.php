@@ -148,9 +148,13 @@ trait HasBilling
      */
     public function scopeBillableSearch(Builder $query, string $term): Builder
     {
-        return $query->where(function (Builder $q) use ($term): void {
-            $q->where('name', 'like', '%'.$term.'%')
-              ->orWhere('email', 'like', '%'.$term.'%');
+        // Case-insensitive on every driver (Postgres LIKE is not), and `%` / `_` in the term
+        // are characters, not wildcards — a search for "%" matched every billable.
+        $like = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], mb_strtolower($term)).'%';
+
+        return $query->where(function (Builder $q) use ($like): void {
+            $q->whereRaw("lower(name) like ? escape '!'", [$like])
+              ->orWhereRaw("lower(email) like ? escape '!'", [$like]);
         });
     }
 

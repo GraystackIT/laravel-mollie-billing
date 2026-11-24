@@ -32,6 +32,7 @@ class AdminPanelTest extends BrowserTestCase
                 'billing/admin/billables' => 'Billables-Liste',
                 'billing/admin/coupons' => 'Coupon-Verwaltung',
                 'billing/admin/mismatches' => 'Country-Mismatches',
+                'billing/admin/invoices' => 'Rechnungen',
                 'billing/admin/refunds' => 'Erstattungen',
                 'billing/admin/past-due' => 'Past-Due-Übersicht',
                 'billing/admin/bulk' => 'Bulk-Aktionen',

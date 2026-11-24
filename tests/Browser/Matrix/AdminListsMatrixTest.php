@@ -507,6 +507,92 @@ class AdminListsMatrixTest extends BrowserTestCase
         });
     }
 
+    // ── Invoices ────────────────────────────────────────────────────────────
+
+    public function test_invoice_list_filters_by_range_exports_a_zip_and_leads_to_the_billable(): void
+    {
+        $acme = $this->opsSubscriber('starter');
+        $globex = $this->opsSubscriber('pro');
+
+        $current = $this->opsRenew($acme, '11.78');
+        $older = $this->opsRenew($globex, '34.51');
+
+        // One invoice into last month, so the quick filters have something to tell apart.
+        $lastMonth = \GraystackIT\MollieBilling\Support\BillingTime::nowUtc()->startOfMonth()->subMonthNoOverflow()->addDays(4)->setTime(10, 0);
+        DB::table('billing_invoices')->where('id', $older->id)->update(['created_at' => $lastMonth->format('Y-m-d H:i:s')]);
+
+        $expected = function (?string $preset): array {
+            [$from, $to] = $preset !== null ? \GraystackIT\MollieBilling\Support\AdminInvoiceFilter::presetRange($preset) : [null, null];
+
+            return (new \GraystackIT\MollieBilling\Support\AdminInvoiceFilter($from, $to))->query()
+                ->orderByDesc('created_at')->orderByDesc('id')
+                ->get()->map(fn (BillingInvoice $i) => $i->serial_number ?? '#'.$i->id)->all();
+        };
+
+        expect($expected('last_month'))->toBe([$older->serial_number])
+            ->and($expected('this_month'))->toContain($current->serial_number);
+
+        $this->browse(function (Browser $browser) use ($acme, $current, $older, $expected, $lastMonth): void {
+            $this->loginAdmin($browser);
+            $browser->visit('/billing/admin/invoices')->waitForText((string) $current->serial_number, 15)->pause(500);
+
+            $serials = fn (): array => $this->column($browser, 1);
+
+            expect($serials())->toBe($expected(null));
+            // Every time says it is UTC, and so does the header.
+            $browser->assertSee($lastMonth->format('Y-m-d').' 10:00 UTC')
+                ->assertSee(__('billing::admin.utc.badge'));
+            $this->shot($browser, 'Invoices');
+
+            $browser->click('[dusk="invoice-preset-last_month"]')->pause(900);
+            expect($serials())->toBe($expected('last_month'));
+
+            $browser->click('[dusk="invoice-preset-this_month"]')->pause(900);
+            expect($serials())->toBe($expected('this_month'));
+            $this->shot($browser, 'Invoices: this month');
+
+            // The filter is in the URL: a bookmarked range opens as it was left.
+            [$from, $to] = \GraystackIT\MollieBilling\Support\AdminInvoiceFilter::presetRange('last_month');
+            $browser->visit('/billing/admin/invoices?from='.$from.'&to='.$to)->waitForText((string) $older->serial_number, 15)->pause(500);
+            expect($serials())->toBe([$older->serial_number]);
+
+            // The export link carries that range and answers with a ZIP.
+            $href = (string) $browser->attribute('[dusk="invoice-export"]', 'href');
+            expect($href)->toContain('from='.$from)->toContain('to='.$to);
+
+            $zip = $this->opsFetch($browser, $href);
+            expect($zip['status'])->toBe(200)
+                ->and($zip['type'])->toContain('zip')
+                ->and($zip['head'])->toStartWith('PK');
+
+            $this->clickWire($browser, '[wire\\:click="clearFilters"]');
+            $browser->pause(900);
+            expect($serials())->toBe($expected(null));
+
+            $this->clickWire($browser, '[wire\\:click="sort(\'amount_gross\')"]');
+            $browser->pause(900);
+            expect($serials()[0])->not->toBe($older->serial_number);
+
+            // The detail, and its PDF shown in the browser rather than downloaded.
+            $this->clickWire($browser, 'button[wire\\:click="openDetail('.$current->id.')"]');
+            $browser->waitForText(__('billing::admin.invoices.detail.date'), 15)->pause(300);
+            expect($this->opsSeesMoney($browser, (int) $current->amount_gross))->toBeTrue();
+            $this->shot($browser, 'Invoice detail');
+
+            $view = $this->opsFetch($browser, route('billing.admin.invoice.view', ['invoice' => $current]));
+            expect($view['status'])->toBe(200)
+                ->and($view['type'])->toContain('pdf')
+                ->and($view['head'])->toStartWith('%PDF');
+
+            // The row's action menu leads to the billable the invoice belongs to.
+            $browser->visit('/billing/admin/invoices')->waitForText((string) $current->serial_number, 15)->pause(500);
+            $this->clickWire($browser, '[dusk="invoice-actions-'.$current->id.'"]');
+            $browser->waitFor('[dusk="invoice-billable-'.$current->id.'"]', 10);
+            $this->clickWire($browser, '[dusk="invoice-billable-'.$current->id.'"]');
+            $browser->waitForLocation('/billing/admin/billables/'.$acme->getKey(), 15);
+        });
+    }
+
     // ── Country mismatches ──────────────────────────────────────────────────
 
     /**

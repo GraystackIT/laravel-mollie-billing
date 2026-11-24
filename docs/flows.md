@@ -44,7 +44,7 @@ diagram is *right* remains the author's job.
 15. [Cancellation, resubscribe, expiry](#15-cancellation-resubscribe-expiry)
 16. [Chargeback](#16-chargeback)
 17. [Webhook intake](#17-webhook-intake)
-18. [VAT and OSS](#18-vat-and-oss) — [18.1 Invoice document and e-invoice](#181-invoice-document-and-e-invoice)
+18. [VAT and OSS](#18-vat-and-oss) — [18.1 Invoice document and e-invoice](#181-invoice-document-and-e-invoice), [18.2 Admin invoice list and ZIP export](#182-admin-invoice-list-and-zip-export)
 19. [Scheduled jobs](#19-scheduled-jobs)
 20. [Entry points and supporting classes](#20-entry-points-and-supporting-classes)
 
@@ -1385,6 +1385,46 @@ flowchart TD
   committed (`deferDocument` for credit notes inside a refund).
 - The structured part is what makes the PDF an e-invoice under § 14 UStG; see
   `docs/e-invoicing.md`.
+- **A missing document is regenerated on demand** by `InvoiceService::ensureStoredPdf()` —
+  no pointer, or a pointer to a file that is gone — serialised per invoice by a cache lock.
+  Both readers go through it: `InvoiceDownloadController` (download, and the admin's
+  inline view) and `InvoiceArchiveService`.
+
+### 18.2 Admin invoice list and ZIP export
+
+**Trigger:** the admin's invoice list (`billing/admin/invoices`), its quick filters (this
+or last month, this or last year) and its "Export as ZIP" link. Read-only: nothing is
+booked, Mollie is not called.
+
+```mermaid
+flowchart TD
+    A["admin invoice list<br/>AdminInvoiceFilter: UTC days, inclusive,<br/>type, status, search"] -->|"Export as ZIP link,<br/>same filter as query string"| B["InvoiceExportController"]
+    B --> C{"how many match"}
+    C -->|"none"| D["404"]
+    C -->|"more than invoices.export_max"| E["422, narrow the range"]
+    C -->|"otherwise"| F["InvoiceArchiveService build<br/>paged by id"]
+    F --> K{"PDF on its disk<br/>InvoiceService hasStoredPdf"}
+    K -->|"yes"| H
+    K -->|"no, within MAX_REGENERATIONS (25)"| G["InvoiceService ensureStoredPdf"]
+    K -->|"no, over the limit"| L["named in MISSING.txt:<br/>export the range again to continue"]
+    G -->|"stored"| H["PDF added under its download file name<br/>remote copy checked against its size"]
+    G -->|"cannot be regenerated"| I["named in MISSING.txt inside the archive"]
+    L --> J
+    H --> J["ZIP streamed, temporary file deleted after sending"]
+    I --> J
+```
+
+- **The archive holds exactly what the list shows:** both build their query from one
+  `AdminInvoiceFilter`, in UTC days like the whole admin panel, which labels every time
+  it shows as UTC.
+- **Never silently incomplete:** an invoice whose PDF cannot be produced, arrived
+  truncated from a remote disk, or was over the regeneration limit is listed in
+  `MISSING.txt`, not dropped.
+- **Bounded work per request:** at most `InvoiceArchiveService::MAX_REGENERATIONS` missing
+  PDFs are rendered per export, so an export after a disk migration does not run into the
+  web server's timeout; what was rendered is stored, and the next export gets further.
+- **A failed export leaves nothing behind:** the half-built archive is discarded before its
+  temporary file is deleted (ZipArchive's destructor would otherwise write it back).
 
 ---
 
@@ -1443,7 +1483,8 @@ Controllers — none of them books anything itself:
 | `BillingPortalController` | renders the portal pages: checkout, dashboard, plan, seats, addons, products, usage, invoices, billing data, return. The Livewire components on them call the services above. |
 | `BillingAdminController` | renders the admin panel shell |
 | `PromotionController` | auto-apply coupon link → session → checkout |
-| `InvoiceDownloadController` | serves an invoice or credit-note PDF from the configured disk |
+| `InvoiceDownloadController` | serves an invoice or credit-note PDF from the configured disk — as an attachment, or inline on the admin's view route |
+| `InvoiceExportController` | the admin's ZIP export of the filtered invoice list ([18.2](#182-admin-invoice-list-and-zip-export)) |
 | `OssExportDownloadController` | serves a generated OSS export |
 | `BlockedCountryController` | the page a blocked country is shown |
 
@@ -1453,6 +1494,7 @@ Supporting classes that appear in several flows:
 |---|---|
 | `InvoiceService` | every invoice, credit note, plan-switch invoice, prorata charge and refund line; `MollieSalesInvoiceService` is its deprecated alias |
 | `InvoiceNumberGenerator` | gap-free serial numbers per invoice kind |
+| `InvoiceArchiveService` | packs invoice PDFs into the admin's ZIP export ([18.2](#182-admin-invoice-list-and-zip-export)) |
 | `EInvoiceService` | the EN 16931 e-invoice (ZUGFeRD / XRechnung CII) embedded in every invoice PDF ([18.1](#181-invoice-document-and-e-invoice)) |
 | `WebhookSupport` | what the webhook handlers share: gate, claim, reconciliation, quota credit, activation reporting |
 | `FirstPaymentArtifacts` / `FirstPaymentCouponPricing` | book and price a first payment |

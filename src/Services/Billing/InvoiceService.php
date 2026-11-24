@@ -1060,6 +1060,63 @@ class InvoiceService
     }
 
     /**
+     * The invoice with its PDF on the disk, regenerated first when it is not there; null
+     * when it could not be.
+     *
+     * The DB may reference a PDF that no longer exists on the disk (bucket switched,
+     * database copied between environments, blob deleted), or carry no pointer at all —
+     * which is what `generateAndStorePdf()` leaves behind when a render fails. Both are
+     * regenerable, so both take the same path. Shared by the single download and the
+     * admin's ZIP export, so a document is never served from one and missing in the other.
+     */
+    public function ensureStoredPdf(BillingInvoice $invoice): ?BillingInvoice
+    {
+        if (self::pdfIsStored($invoice)) {
+            return $invoice;
+        }
+
+        // Serialised per invoice: a double-click (or several tabs, or an export running
+        // next to a download) would otherwise regenerate the same PDF concurrently, and
+        // each run deletes the file the other just wrote.
+        $lock = Cache::lock('billing:invoice-pdf-regenerate:'.$invoice->id, 30);
+
+        try {
+            $lock->block(15);
+
+            // The winner may already have rebuilt it while we waited.
+            $invoice = $invoice->fresh() ?? $invoice;
+
+            if (! self::pdfIsStored($invoice)) {
+                $this->regeneratePdf($invoice);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Invoice PDF missing on disk and could not be regenerated', [
+                'invoice_id' => $invoice->id,
+                'disk' => $invoice->pdf_disk,
+                'path' => $invoice->pdf_path,
+                'error' => $e->getMessage(),
+            ]);
+        } finally {
+            $lock->release();
+        }
+
+        $invoice = $invoice->fresh();
+
+        return $invoice instanceof BillingInvoice && self::pdfIsStored($invoice) ? $invoice : null;
+    }
+
+    /** Whether the invoice's PDF is on its disk right now — what ensureStoredPdf() would not have to regenerate. */
+    public function hasStoredPdf(BillingInvoice $invoice): bool
+    {
+        return self::pdfIsStored($invoice);
+    }
+
+    private static function pdfIsStored(BillingInvoice $invoice): bool
+    {
+        return $invoice->hasPdf() && Storage::disk($invoice->pdf_disk)->exists($invoice->pdf_path);
+    }
+
+    /**
      * Build a PdfInvoice value object from BillingInvoice data for PDF rendering.
      */
     protected function buildPdfInvoice(BillingInvoice $invoice, Billable $billable): PdfInvoice

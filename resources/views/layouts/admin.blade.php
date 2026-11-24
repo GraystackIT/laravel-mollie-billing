@@ -55,6 +55,12 @@
             @livewire($headerComponent, [], key('billing-header-'.$i))
         @endforeach
 
+        {{-- The whole panel works in UTC; said once here for every page, and again on every
+             time it shows (<x-mollie-billing::admin.time>). --}}
+        <flux:tooltip :content="__('billing::admin.utc.tooltip', ['now' => \GraystackIT\MollieBilling\Support\BillingTime::formatUtc(\GraystackIT\MollieBilling\Support\BillingTime::nowUtc())])">
+            <flux:badge size="sm" color="zinc" icon="clock" class="me-2" dusk="admin-utc">{{ __('billing::admin.utc.badge') }}</flux:badge>
+        </flux:tooltip>
+
         <flux:dropdown position="bottom" align="end">
             <flux:button variant="ghost" size="sm" icon="sun" icon:variant="mini" x-bind:icon="$flux.appearance === 'dark' ? 'moon' : ($flux.appearance === 'light' ? 'sun' : 'computer-desktop')" :aria-label="__('billing::admin.theme.toggle')" />
             <flux:menu>
@@ -77,6 +83,7 @@
             <flux:navlist.item icon="calendar" href="{{ route(BillingRoute::admin('scheduled_changes.index')) }}" :current="$currentRoute === BillingRoute::admin('scheduled_changes.index')">{{ __('billing::admin.nav.scheduled_changes') }}</flux:navlist.item>
             <flux:navlist.item icon="exclamation-triangle" href="{{ route(BillingRoute::admin('past_due.index')) }}" :current="$currentRoute === BillingRoute::admin('past_due.index')">{{ __('billing::admin.nav.past_due') }}</flux:navlist.item>
             <flux:navlist.item icon="globe-europe-africa" href="{{ route(BillingRoute::admin('mismatches.index')) }}" :current="$currentRoute === BillingRoute::admin('mismatches.index')">{{ __('billing::admin.nav.mismatches') }}</flux:navlist.item>
+            <flux:navlist.item icon="document-text" href="{{ route(BillingRoute::admin('invoices.index')) }}" :current="$currentRoute === BillingRoute::admin('invoices.index')">{{ __('billing::admin.nav.invoices') }}</flux:navlist.item>
             <flux:navlist.item icon="arrow-uturn-left" href="{{ route(BillingRoute::admin('refunds.index')) }}" :current="$currentRoute === BillingRoute::admin('refunds.index')">{{ __('billing::admin.nav.refunds') }}</flux:navlist.item>
             <flux:navlist.item icon="document-arrow-down" href="{{ route(BillingRoute::admin('oss.index')) }}" :current="$currentRoute === BillingRoute::admin('oss.index')">{{ __('billing::admin.nav.oss') }}</flux:navlist.item>
             <flux:navlist.item icon="bolt" href="{{ route(BillingRoute::admin('bulk.index')) }}" :current="$currentRoute === BillingRoute::admin('bulk.index')">{{ __('billing::admin.nav.bulk') }}</flux:navlist.item>

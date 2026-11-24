@@ -167,9 +167,9 @@ new class extends Component {
                             </flux:table.cell>
                             <flux:table.cell class="text-sm text-zinc-500">
                                 @if ($latest?->completed_at)
-                                    {{ $latest->completed_at->format('Y-m-d H:i') }} UTC
+                                    <x-mollie-billing::admin.time :at="$latest->completed_at" />
                                 @elseif ($latest)
-                                    <span class="text-zinc-400">{{ $latest->created_at->format('Y-m-d H:i') }} UTC</span>
+                                    <span class="text-zinc-400"><x-mollie-billing::admin.time :at="$latest->created_at" /></span>
                                 @else
                                     <span class="text-zinc-400">{{ __('billing::admin.oss.never') }}</span>
                                 @endif
@@ -236,13 +236,10 @@ new class extends Component {
                                     </flux:badge>
                                 </flux:table.cell>
                                 <flux:table.cell class="text-sm text-zinc-500">
-                                    {{ $entry->created_at->format('Y-m-d H:i') }} UTC
+                                    <x-mollie-billing::admin.time :at="$entry->created_at" />
                                 </flux:table.cell>
                                 <flux:table.cell class="text-sm text-zinc-500">
-                                    {{ $entry->completed_at?->format('Y-m-d H:i') ?? '—' }}
-                                    @if ($entry->completed_at)
-                                        <span class="text-xs text-zinc-400">UTC</span>
-                                    @endif
+                                    <x-mollie-billing::admin.time :at="$entry->completed_at" />
                                 </flux:table.cell>
                                 <flux:table.cell class="text-sm font-mono text-zinc-500">
                                     {{ $entry->rows_count ?? '—' }}

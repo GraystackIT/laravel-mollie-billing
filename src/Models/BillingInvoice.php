@@ -389,6 +389,19 @@ class BillingInvoice extends Model
         return $this->pdf_path !== null;
     }
 
+    /**
+     * The file name the PDF is delivered under — singly and inside the admin's ZIP export.
+     *
+     * Slashes and backslashes become dashes before slugging: `Str::slug()` drops them, which
+     * turned `RE/26/0001` into an unreadable `re260001.pdf`.
+     */
+    public function pdfFilename(): string
+    {
+        $serial = $this->serial_number ?? 'invoice-'.$this->id;
+
+        return \Illuminate\Support\Str::slug(str_replace(['/', '\\'], '-', $serial)).'.pdf';
+    }
+
     public function getDownloadUrl(): ?string
     {
         // Deliberately NOT gated on `hasPdf()`. A render that failed — a transient disk

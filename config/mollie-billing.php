@@ -185,6 +185,11 @@ return [
         // Temporary URL expiry in minutes (for S3-compatible disks).
         'temporary_url_expiry' => 30,
 
+        // Most invoices one ZIP export from the admin invoice list may hold. The archive
+        // is built inside the request, so this keeps an "everything" export from running
+        // into the web server's timeout; narrow the date range to export more.
+        'export_max' => (int) env('BILLING_INVOICE_EXPORT_MAX', 1000),
+
         // Structured e-invoice (EN 16931) embedded in every invoice PDF as ZUGFeRD /
         // Factur-X (PDF/A-3 with factur-x.xml). This is what makes the PDF an
         // e-invoice under § 14 UStG (Germany: mandatory to issue B2B from 2027/2028)
