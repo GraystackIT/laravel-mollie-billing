@@ -55,6 +55,7 @@ function staleProrataBillable(int $ageDays, array $pendingOverrides = []): TestB
         'subscription_interval' => SubscriptionInterval::Monthly,
         'subscription_meta' => [
             'pending_plan_change' => ['plan_code' => 'business', 'interval' => 'monthly'],
+            'prorata_pending_payment_id' => 'tr_stale',
             'pending_prorata_change' => array_merge([
                 'charge_payment_id' => 'tr_stale',
                 'created_at' => BillingTime::nowUtc()->subDays($ageDays)->toIso8601String(),
@@ -272,5 +273,47 @@ it('drops only the cleaned payment\'s change, never one that took its place mean
     expect($meta['pending_prorata_change']['charge_payment_id'] ?? null)->toBe('tr_other')
         ->and($meta['prorata_pending_payment_id'] ?? null)->toBe('tr_other')
         ->and($meta['pending_plan_change']['plan_code'] ?? null)->toBe('enterprise')
-        ->and($meta['orphaned_prorata_payment']['payment_id'] ?? null)->toBe('tr_stale');
+        // Not reported from here either: a change is only replaced after it was withdrawn,
+        // and the withdrawal records a payment it could not cancel itself
+        // (UpdateSubscription::cancelPendingPlanChange()); a paid one it refuses to withdraw.
+        ->and($meta['orphaned_prorata_payment'] ?? null)->toBeNull();
+    Notification::assertNothingSent();
+});
+
+it('does not report a change the webhook finished while Mollie was asked', function (): void {
+    Notification::fake();
+    $b = staleProrataBillable(2);
+
+    Mollie::shouldReceive('send')
+        ->withArgs(fn ($req) => $req instanceof GetPaymentRequest)
+        ->andReturnUsing(function () use ($b) {
+            // The webhook's run completes and clears the waiting change.
+            $b->refresh()->forceFill(['subscription_meta' => ['seat_count' => 1]])->save();
+
+            return (object) ['status' => 'paid', 'id' => 'tr_stale'];
+        });
+
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    expect($b->fresh()->getBillingSubscriptionMeta())->toBe(['seat_count' => 1]);
+    Notification::assertNothingSent();
+});
+
+it('does not alert a second time when Mollie is unreachable for a run the webhook already reported', function (): void {
+    Notification::fake();
+    Mollie::shouldReceive('send')
+        ->withArgs(fn ($req) => $req instanceof GetPaymentRequest)
+        ->andThrow(new RuntimeException('Mollie down'));
+
+    $b = staleProrataBillable(9, ['progress' => [
+        'anchor' => null,
+        'started_at' => BillingTime::nowUtc()->subHour()->toIso8601String(),
+        'done' => ['invoiced'],
+        'interrupted_reported_at' => BillingTime::nowUtc()->subHour()->toIso8601String(),
+    ]]);
+
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    expect($b->fresh()->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null)->toBeNull();
+    Notification::assertNothingSent();
 });

@@ -108,8 +108,14 @@ noted there and charged as the next step, outside it; each refund line gets its 
 part of its Mollie idempotency key — stored before Mollie is asked, and a line whose token
 is on a credit note or in `pending_refund_retries` is not paid again. The period anchor is
 compared once more right before the switch, so a renewal booked while the run paid out is
-not overwritten (narrowed, not closed: the renewal handler takes no lock to share). The
-change events are built from what the switch wrote, stored with it.
+not overwritten (narrowed, not closed: the renewal handler takes no lock to share), and
+before the first step that moves money; the switch also requires the subscription to still
+run. A rebalance that throws is not caught: the transaction takes it back with its record.
+A shortfall `UndercollectionCharge` claimed in this run without an outcome is handed to the
+operators, not asked of Mollie again — its idempotency key is kept for an hour only. The
+PATCH is not made exactly-once; it sets absolute values derived from the change, so a
+repeat sets the same target. The change events are built from what the switch wrote,
+stored with it.
 `tests/Feature/Webhook/ProrataChargeResumeTest.php` crashes after every step.
 
 ### Activation is two-phase

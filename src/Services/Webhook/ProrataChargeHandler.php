@@ -72,6 +72,8 @@ class ProrataChargeHandler
 
     protected const INTERRUPTED_SUBSCRIPTION_ENDED = 'subscription_ended';
 
+    protected const INTERRUPTED_SHORTFALL_UNSETTLED = 'shortfall_unsettled';
+
     /**
      * Subscription states a deferred prorata change may still be applied to.
      *
@@ -337,8 +339,7 @@ class ProrataChargeHandler
         }
 
         if ($chargeInvoice !== null && ! in_array(self::STEP_SWITCHED, $done, true)
-            && array_key_exists('anchor', $progress)
-            && $progress['anchor'] !== $billable->getBillingPeriodStartsAt()?->toIso8601String()
+            && $this->periodMovedForRun($billable, $progress)
         ) {
             $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_RENEWAL_BOOKED, $done, $progress, $pendingPlanChange);
 
@@ -450,6 +451,16 @@ class ProrataChargeHandler
             $this->markStep($billable, $paymentId, $done, self::STEP_ANNOUNCED);
         }
 
+        // The first step that moves money. A renewal booked while the invoice was rendered
+        // or announced moved the period this run was decided in; nothing has moved yet, so
+        // the run stops here rather than credit or charge for a period that has ended.
+        $billable->refresh();
+        if (! in_array(self::STEP_SWITCHED, $done, true) && $this->periodMovedForRun($billable, $progress)) {
+            $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_RENEWAL_BOOKED, $done, $progress, $pendingPlanChange);
+
+            return;
+        }
+
         if ($wasTrial && ! in_array(self::STEP_WALLET, $done, true) && ! in_array(self::STEP_TRIAL_OVERAGE, $done, true)) {
             // The trial's own overage is collected first, exactly as the ordinary renewal
             // does it — and while the billable is still on the plan it was consumed on, so
@@ -497,23 +508,21 @@ class ProrataChargeHandler
                     // that followed.
                     $this->support->creditPeriodQuota($billable, $newPlanCode, $newIntervalCode, 'subscription_trial_conversion');
                 } elseif ($planOrIntervalChanged) {
-                    try {
-                        $deferredOverage = $this->walletAdjuster->adjust(
-                            $billable,
-                            $oldPlan,
-                            $oldInterval,
-                            $newPlanCode,
-                            $newIntervalCode,
-                            $oldPeriodStart,
-                            $oldPeriodEnd,
-                            deferOverageCharge: true,
-                        );
-                    } catch (\Throwable $e) {
-                        Log::warning('Wallet adjust during prorata charge phase 2 failed', [
-                            'billable' => $billable->getKey(),
-                            'error' => $e->getMessage(),
-                        ]);
-                    }
+                    // Not caught: a rebalance that throws part-way holds what it could not
+                    // resolve only in memory. Caught and recorded as done, the wallets it had
+                    // reset stayed reset and that overage was never charged. Thrown, the
+                    // transaction takes the partial rebalance back with the record, and the
+                    // next delivery tries again (or, past its window, the operators are told).
+                    $deferredOverage = $this->walletAdjuster->adjust(
+                        $billable,
+                        $oldPlan,
+                        $oldInterval,
+                        $newPlanCode,
+                        $newIntervalCode,
+                        $oldPeriodStart,
+                        $oldPeriodEnd,
+                        deferOverageCharge: true,
+                    );
                 }
 
                 $this->markStep($billable, $paymentId, $done, self::STEP_WALLET, ['deferred_overage' => $deferredOverage]);
@@ -542,6 +551,16 @@ class ProrataChargeHandler
         // this runs only when the change opens no new period, the recomposition below only
         // when it does — and each moves money, so each is a step of its own.
         if (! in_array(self::STEP_SPANNED_RENEWAL, $done, true)) {
+            // UndercollectionCharge claims a case before it asks Mollie, so a run that died in
+            // between left a claim with no outcome, and settle() now answers "already handled"
+            // for a balance nobody charged. Asking Mollie again is only safe within the hour
+            // its idempotency key is kept; the operators settle it instead.
+            if ($this->unsettledShortfallClaimsOfRun($billable, $progress) !== []) {
+                $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_SHORTFALL_UNSETTLED, $done, $progress, $pendingPlanChange);
+
+                return;
+            }
+
             if (! $startsNewPeriod && $planOrIntervalChanged && $this->periodMovedSince($billable, $pending)) {
                 $this->support->safely(
                     fn () => $this->settlePeriodTheChangeLandsIn($billable, $pending, $oldPlan),
@@ -589,10 +608,16 @@ class ProrataChargeHandler
             // payment's earlier period over the one the renewal booked. None of this run's
             // own steps moves it. (It narrows the window; the renewal handler takes no lock
             // this check could share.)
-            if (array_key_exists('anchor', $progress)
-                && $progress['anchor'] !== $billable->getBillingPeriodStartsAt()?->toIso8601String()
-            ) {
+            if ($this->periodMovedForRun($billable, $progress)) {
                 $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_RENEWAL_BOOKED, $done, $progress, $pendingPlanChange);
+
+                return;
+            }
+
+            // And the subscription has to still run: a cancellation while this run was under
+            // way must not get the new plan written onto it.
+            if (! in_array($billable->getBillingSubscriptionStatus(), self::APPLICABLE_STATES, true)) {
+                $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_SUBSCRIPTION_ENDED, $done, $progress, $pendingPlanChange);
 
                 return;
             }
@@ -1013,6 +1038,43 @@ class ProrataChargeHandler
         });
     }
 
+    /** Whether the period this run was decided in has ended since — a renewal moved it. */
+    protected function periodMovedForRun(Billable $billable, array $progress): bool
+    {
+        return array_key_exists('anchor', $progress)
+            && $progress['anchor'] !== $billable->getBillingPeriodStartsAt()?->toIso8601String();
+    }
+
+    /**
+     * Shortfall cases this run claimed (since it started) without an outcome recorded.
+     *
+     * @param  array<string, mixed>  $progress
+     * @return list<string>
+     */
+    protected function unsettledShortfallClaimsOfRun(Billable $billable, array $progress): array
+    {
+        $startedAt = is_string($progress['started_at'] ?? null) ? $progress['started_at'] : null;
+
+        if ($startedAt === null) {
+            return [];
+        }
+
+        $since = Carbon::parse($startedAt);
+        $keys = [];
+
+        foreach ((array) ($billable->getBillingSubscriptionMeta()[\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::META_KEY] ?? []) as $key => $case) {
+            if (! is_array($case) || isset($case['outcome']) || ! is_string($case['claimed_at'] ?? null)) {
+                continue;
+            }
+
+            if (Carbon::parse($case['claimed_at'])->greaterThanOrEqualTo($since)) {
+                $keys[] = (string) $key;
+            }
+        }
+
+        return $keys;
+    }
+
     /**
      * Note something in the progress without recording a step.
      *
@@ -1196,6 +1258,10 @@ class ProrataChargeHandler
             self::INTERRUPTED_NO_PROGRESS => [
                 'Prorata charge not resumed — its run died before steps were recorded, reconcile it by hand',
                 'A paid plan change was interrupted after its invoice was written, by a version that did not record its steps, so it cannot be resumed safely — the payment is booked; check what was done (wallet, refunds, plan) and finish or refund it by hand',
+            ],
+            self::INTERRUPTED_SHORTFALL_UNSETTLED => [
+                'Prorata charge not resumed — the balance of the period it landed in was claimed but never charged, reconcile it by hand',
+                'A paid plan change was interrupted while the balance of the billing period it landed in was being charged; whether Mollie created that payment is unknown — the change payment is booked; check Mollie for the balance payment, then finish the change by hand',
             ],
             self::INTERRUPTED_SUBSCRIPTION_ENDED => [
                 'Prorata charge not resumed — the subscription ended after its run died, reconcile it by hand',

@@ -297,17 +297,22 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 }
 
                 $dropped = false;
-                $this->mutateBillingMeta($billable, function (array $current) use ($paymentId, &$dropped): ?array {
-                    if (self::runMayStillFinish($current['pending_prorata_change'] ?? null, $paymentId)) {
+                $alreadyReported = false;
+                $this->mutateBillingMeta($billable, function (array $current) use ($paymentId, &$dropped, &$alreadyReported): ?array {
+                    $waiting = $current['pending_prorata_change'] ?? null;
+
+                    if (! self::isWaitingFor($waiting, $paymentId) || self::runMayStillFinish($waiting, $paymentId)) {
                         return null;
                     }
 
                     $dropped = true;
+                    $alreadyReported = ! empty($waiting['progress']['interrupted_reported_at']);
 
                     return self::withoutPendingChange($current, $paymentId, 'Payment outcome unknown — Mollie unreachable');
                 });
 
-                if (! $dropped) {
+                // The webhook already told the operators about this run; once is enough.
+                if (! $dropped || $alreadyReported) {
                     return;
                 }
 
@@ -359,7 +364,12 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             // the meta — its context is written before its invoice — must not lose its change.
             $dropped = false;
             $this->mutateBillingMeta($billable, function (array $current) use ($orphan, $paymentId, &$dropped): ?array {
-                if (self::runMayStillFinish($current['pending_prorata_change'] ?? null, $paymentId)) {
+                $waiting = $current['pending_prorata_change'] ?? null;
+
+                // Gone or another payment's by now: the webhook finished the change while
+                // Mollie was asked, or it was withdrawn (which records its own orphan). Either
+                // way there is nothing unfinished to report for this payment.
+                if (! self::isWaitingFor($waiting, $paymentId) || self::runMayStillFinish($waiting, $paymentId)) {
                     return null;
                 }
 
@@ -521,6 +531,12 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         }
 
         return $startedAt->greaterThan(BillingTime::nowUtc()->subHours(self::RESUME_WINDOW_HOURS));
+    }
+
+    /** Whether the waiting change is still the one for this payment. */
+    private static function isWaitingFor(mixed $pending, string $paymentId): bool
+    {
+        return is_array($pending) && (string) ($pending['charge_payment_id'] ?? '') === $paymentId;
     }
 
     /** {@see runMayStillFinish()}, logged. */

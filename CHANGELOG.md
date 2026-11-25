@@ -21,8 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   found the invoice skipped the payment as done: a run that died in between (a fatal, PHP's
   time limit) left the customer charged, the change unapplied and Mollie on the old amount.
   Each completed step is now recorded under `pending_prorata_change.progress`, and the next
-  delivery resumes after the last one, so wallet credits, refund lines and the PATCH run
-  exactly once. If a renewal was booked before the re-delivery, the subscription has ended,
+  delivery resumes after the last one. Wallet credits commit together with their record and
+  each refund line keeps its Mollie idempotency token, so neither is repeated; the PATCH sets
+  absolute values derived from the change, so a repeated one sets the same target. If a renewal was booked before the re-delivery, the subscription has ended,
   or the run predates the recorded steps, it is not resumed and the operators get an
   `AdminPlanChangeFailedNotification` instead, once. `CleanupStalePendingProrataChangeJob`
   leaves a run that can still be resumed alone for 48 hours from its start.

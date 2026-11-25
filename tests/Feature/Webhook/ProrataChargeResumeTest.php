@@ -597,3 +597,88 @@ it('renders the document again on the next delivery when the first render failed
     expect(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeTrue()
         ->and(resumeOutcome($billable)['plan'])->toBe('enterprise');
 });
+
+it('stops before moving any money when a renewal was booked while the invoice was announced', function (): void {
+    operatorsTold();
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['announced'] = function (TestBillable $b): void {
+        $b->newQuery()->whereKey($b->getKey())->update(['subscription_period_starts_at' => now('UTC')->addDay()]);
+    };
+    World::settle($billable);
+
+    expect($this->events['WalletCredited'] ?? 0)->toBe(0)
+        ->and(resumeOutcome($billable)['interval'])->toBe('monthly');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'renewal_booked');
+});
+
+it('does not write the new plan onto a subscription cancelled while the run was under way', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['refunds'] = function (TestBillable $b): void {
+        $b->newQuery()->whereKey($b->getKey())->update(['subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled->value]);
+    };
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'subscription_ended');
+});
+
+it('hands a balance claimed but never charged by an earlier attempt to the operators', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    // The attempt dies inside UndercollectionCharge::settle(), after its claim.
+    CrashingProrataChargeHandler::$crashAfter = 'wallet_overage';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta[\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::META_KEY]['plan_change_renewal:1'] = [
+        'shortfall_net' => 1000,
+        'claimed_at' => now('UTC')->toIso8601String(),
+    ];
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'shortfall_unsettled');
+});
+
+/** Throws on its first rebalance, part-way. */
+final class FlakyWalletAdjuster extends \GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster
+{
+    public static int $calls = 0;
+
+    public function adjust(Billable $billable, string $oldPlan, string $oldInterval, string $newPlan, string $newInterval, ?\Carbon\CarbonInterface $oldPeriodStart = null, ?\Carbon\CarbonInterface $oldPeriodEnd = null, bool $deferOverageCharge = false): array
+    {
+        if (++self::$calls === 1) {
+            throw new RuntimeException('rebalance failed part-way');
+        }
+
+        return parent::adjust($billable, $oldPlan, $oldInterval, $newPlan, $newInterval, $oldPeriodStart, $oldPeriodEnd, $deferOverageCharge);
+    }
+}
+
+it('does not record a rebalance that failed, so the next delivery runs it', function (): void {
+    FlakyWalletAdjuster::$calls = 0;
+    $this->app->bind(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class, FlakyWalletAdjuster::class);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    World::settle($billable, expectHttp: 500);
+    World::settle($billable);
+
+    expect(FlakyWalletAdjuster::$calls)->toBe(2)
+        ->and(resumeOutcome($billable)['plan'])->toBe('enterprise')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([]);
+});
