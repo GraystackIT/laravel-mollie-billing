@@ -155,6 +155,30 @@ it('records why the refund was reduced', function (): void {
         ->and($note['cappedRefundNet'])->toBe(800);
 });
 
+it('keeps the refund token of a line it caps', function (): void {
+    // The token is part of the refund's Mollie idempotency key and what a resumed run finds
+    // the line by on the credit note; the capped copy used to get a fresh one.
+    $billable = bookkeepingBillable();
+    $invoice = bookkeepingInvoice($billable, net: 2000, refundedNet: 1200);
+    $line = bookkeepingRefundLine($invoice, 1450);
+    $line->refundToken = 'tok-capped';
+
+    $keys = [];
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(function (?string $key) use (&$keys) {
+        $keys[] = $key;
+
+        return Mollie::getFacadeRoot();
+    });
+    Mollie::shouldReceive('send')->andReturn((object) ['id' => 're_clamped']);
+
+    app(InvoiceService::class)->createRefund($billable, [$line], 'Plan change refund');
+
+    $item = collect(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->sole()->line_items)->first();
+
+    expect($item['refund_token'] ?? null)->toBe('tok-capped')
+        ->and(collect($keys)->filter()->contains(fn (string $k): bool => str_ends_with($k, ':tok-capped')))->toBeTrue();
+});
+
 it('leaves an unclamped refund exactly as composed', function (): void {
     $billable = bookkeepingBillable();
     $invoice = bookkeepingInvoice($billable, net: 2000);

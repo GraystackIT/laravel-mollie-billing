@@ -28,6 +28,7 @@ $fMode = $actions.'enum PlanChangeMode / config plan_change_mode';
 $fPending = $actions.'action plan-change@cancelPendingChange';
 $fPendingPaid = $actions.'action plan-change@cancelPendingChange: a change whose payment has already settled';
 $fPendingOutcome = $actions.'UpdateSubscription::tryCancelPendingPlanChange';
+$fPendingNothing = 'tests/Feature/Webhook/ProrataChargeResumeTest.php::cancelling after the change went through';
 $fPlanCoupons = $actions.'actions plan-change@applyCoupon, @removeCoupon, @canAddMoreCoupons';
 $fAddress = $actions.'actions plan-change@openEditBillingModal, @saveBillingDetails';
 $fLocal = $actions.'actions plan-change@applyChange, @backToPlanSelection, @confirmAndPay';
@@ -101,6 +102,7 @@ return [
     // The screen tells these apart only by its toast, which no browser test reads yet.
     'enum:PendingChangeCancelOutcome.Cancelled' => ['feature' => [$fPendingOutcome], 'no_browser' => 'only the toast differs from Cleared'],
     'enum:PendingChangeCancelOutcome.Cleared' => ['feature' => [$fPendingOutcome, $fPending], 'no_browser' => 'only the toast differs from Cancelled'],
+    'enum:PendingChangeCancelOutcome.NothingPending' => ['feature' => [$fPendingNothing], 'no_browser' => 'needs the webhook to finish between render and click; the screen shows only the render\'s own toast'],
     'enum:PendingChangeCancelOutcome.AlreadyPaid' => ['feature' => [$fPendingPaid], 'no_browser' => 'needs a prorata charge that settles before the click; the screen shows only a toast'],
     'action:plan-change@applyCoupon' => ['feature' => [$fPlanCoupons], 'browser' => [$bForm]],
     'action:plan-change@removeCoupon' => ['feature' => [$fPlanCoupons], 'browser' => [$bForm]],

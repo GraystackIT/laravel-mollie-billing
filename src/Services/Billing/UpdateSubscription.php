@@ -1473,8 +1473,28 @@ class UpdateSubscription
             return PendingChangeCancelOutcome::Cleared;
         }
 
+        $billable->refresh();
         $meta = $billable->getBillingSubscriptionMeta();
-        $paymentId = (string) ($meta['prorata_pending_payment_id'] ?? '');
+
+        // Nothing waits any more: the webhook carried the change out (or it failed) while
+        // the page was open. Clearing "it" here and saying "cancelled" told the customer a
+        // change was called off that is in force.
+        if (empty($meta['pending_plan_change']) && empty($meta['pending_prorata_change'])) {
+            return PendingChangeCancelOutcome::NothingPending;
+        }
+
+        // The switch removes `prorata_pending_payment_id` in the same save as it writes the
+        // new plan; the run then still has steps to go (coupons, the Mollie PATCH) and its
+        // waiting change names the payment.
+        $paymentId = (string) ($meta['prorata_pending_payment_id'] ?? '')
+            ?: (string) ($meta['pending_prorata_change']['charge_payment_id'] ?? '');
+
+        // A run that has booked the payment is under way, or was interrupted and is the
+        // operators' — either way the money is in. Clearing its waiting change stopped it
+        // part-way (no PATCH: Mollie went on charging the old amount for the new plan).
+        if ($paymentId !== '' && \GraystackIT\MollieBilling\Models\BillingInvoice::query()->where('mollie_payment_id', $paymentId)->exists()) {
+            return PendingChangeCancelOutcome::AlreadyPaid;
+        }
 
         $cancelled = false;
         $orphanReason = null;
@@ -1563,6 +1583,35 @@ class UpdateSubscription
         $pending = $billable->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
 
         if (! is_array($pending) || (string) ($pending['charge_payment_id'] ?? '') !== $paymentId) {
+            return false;
+        }
+
+        // The payment's run has booked it: it is under way, or was interrupted and reported.
+        // Withdrawn now, its re-delivery found the invoice and nothing waiting and kept the
+        // money in silence — the customer charged for a change they were told is off, with
+        // whatever the run had already done left standing. Not withdrawn; the operators are
+        // told the customer gave the change up.
+        if (\GraystackIT\MollieBilling\Models\BillingInvoice::query()->where('mollie_payment_id', $paymentId)->exists()) {
+            Log::warning('Waiting change not withdrawn — its payment is already booked and its run under way', [
+                'billable' => $billable->getKey(),
+                'payment_id' => $paymentId,
+            ]);
+
+            $admins = \GraystackIT\MollieBilling\Facades\MollieBilling::notifyAdmin();
+            $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+            if ($admins !== []) {
+                \Illuminate\Support\Facades\Notification::send($admins, \GraystackIT\MollieBilling\Facades\MollieBilling::resolveNotification(
+                    \GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification::class,
+                    'A scheduled change was given up while its payment was already booked and being carried out — it was not withdrawn; check whether the change went through and refund or reverse it by hand',
+                    [
+                        'payment_id' => $paymentId,
+                        'billable_id' => $billable->getKey(),
+                        'progress' => $pending['progress'] ?? null,
+                    ],
+                ));
+            }
+
             return false;
         }
 

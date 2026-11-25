@@ -116,8 +116,21 @@ run. A rebalance that throws is not caught: the transaction takes it back with i
 A shortfall `UndercollectionCharge` claimed in this run without an outcome is handed to the
 operators, not asked of Mollie again — its idempotency key is kept for an hour only. Refunds an
 earlier attempt sent without booking an answer are not sent again either: those lines go to
-the operators (`refunds_unknown`). A step whose record is refused because the waiting change
-is gone stops the run. The
+the operators (`refunds_unknown`), nor the overage an attempt asked Mollie for (`overage_unknown`), nor
+the period a change landed in once an attempt started settling it — a balance claimed or
+the superseded renewal refunded (`shortfall_unsettled`). A step whose record is refused
+because the waiting change is gone stops the run. Each report carries what the run recorded
+(refund lines and tokens, deferred overage, unsettled claims), and the clean-up keeps it in
+`orphaned_prorata_payment.progress`, because it is the operator's only copy.
+
+Once a run has booked its payment, the customer can no longer cancel the change and a
+scheduled change can no longer withdraw it — both cleared the waiting change from under a
+run that was under way, which then never patched Mollie, or kept the money in silence on
+the next delivery. The cancel answers "already paid"; the withdrawal tells the operators.
+A cancel when nothing waits any more answers `NothingPending`, and the plan page then says
+what did happen. A change the clean-up gives up with its payment collected (or unknown) is
+`plan_change_unfinished` to the plan page, not `plan_change_failed_at`: that one says "the
+payment failed, try again", and a second try charged twice. The
 PATCH is not made exactly-once; it sets absolute values derived from the change, so a
 repeat sets the same target. The change events are built from what the switch wrote,
 stored with it.

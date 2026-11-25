@@ -783,3 +783,204 @@ it('keeps a credit and what follows it when a WalletCredited listener throws', f
         ->and(resumeOutcome($billable)['waiting'])->toBe([])
         ->and($billable->refresh()->remainingBillingQuota('tokens'))->toBe(1000);
 });
+
+/** Counts what it is asked to charge. */
+final class CountingWalletAdjuster extends \GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster
+{
+    public static int $charges = 0;
+
+    public function chargeDeferredOverage(Billable $billable, array $overageLineItems): void
+    {
+        self::$charges++;
+        parent::chargeDeferredOverage($billable, $overageLineItems);
+    }
+}
+
+it('does not charge a plan change\'s overage again that an earlier attempt sent to Mollie', function (): void {
+    operatorsTold();
+    CountingWalletAdjuster::$charges = 0;
+    $this->app->bind(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class, CountingWalletAdjuster::class);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    // The rebalance left overage; the attempt asked Mollie for it and died before its record.
+    CrashingProrataChargeHandler::$crashBefore = 'wallet_overage';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta['pending_prorata_change']['progress']['deferred_overage'] = [['type' => 'tokens', 'quantity' => 97, 'unit_price_net' => 2]];
+    $meta['pending_prorata_change']['progress']['wallet_overage_started_at'] = now('UTC')->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(CountingWalletAdjuster::$charges)->toBe(0)
+        ->and(resumeOutcome($billable)['plan'])->toBe('pro');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'overage_unknown'
+            && ($n->context['deferred_overage'][0]['quantity'] ?? null) === 97);
+});
+
+it('does not settle the period a change landed in again once an attempt started it', function (): void {
+    // Either direction: a balance claimed, or the superseded renewal partly refunded —
+    // SupersededRenewalRefund keeps no record of its own to recognise a repeat by.
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashAfter = 'wallet_overage';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta['pending_prorata_change']['progress']['spanned_renewal_attempted_at'] = now('UTC')->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro')
+        ->and(World::$refunds)->toBe([]);
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'shortfall_unsettled');
+});
+
+it('does not hold a run up over a refund line there was nothing to pay on', function (): void {
+    // A coupon-covered line never reaches a credit note; it is not "unknown".
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'refunds';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $lines = $meta['pending_prorata_change']['progress']['refund_lines'];
+    $covered = $lines[0];
+    $covered['is_coupon_covered'] = true;
+    $covered['amount_net'] = 0;
+    $covered['amount_vat'] = 0;
+    $covered['amount_gross'] = 0;
+    $covered['refund_token'] = 'covered-line';
+    $meta['pending_prorata_change']['progress']['refund_lines'][] = $covered;
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toMatchArray([
+        'plan' => 'enterprise',
+        'waiting' => [],
+        'refunds' => ['tr_cm_renewal_2' => ['40.64']],
+    ]);
+});
+
+/** Fails the first charge invoice write. */
+final class FlakyInvoiceWriteService extends \GraystackIT\MollieBilling\Services\Billing\InvoiceService
+{
+    public static bool $fail = true;
+
+    public function createInvoice(Billable $billable, \GraystackIT\MollieBilling\Enums\InvoiceKind $kind, ?string $molliePaymentId, ?string $mollieSubscriptionId, array $lineItems, ?\Carbon\CarbonInterface $periodStart = null, ?\Carbon\CarbonInterface $periodEnd = null, ?string $currency = null, bool $deferDocument = false): \GraystackIT\MollieBilling\Models\BillingInvoice
+    {
+        if (self::$fail && $molliePaymentId !== null && str_starts_with($molliePaymentId, 'tr_cm_') && ! str_contains($molliePaymentId, 'renewal')) {
+            self::$fail = false;
+
+            throw new RuntimeException('lock wait timeout');
+        }
+
+        return parent::createInvoice($billable, $kind, $molliePaymentId, $mollieSubscriptionId, $lineItems, $periodStart, $periodEnd, $currency, $deferDocument);
+    }
+}
+
+it('lets Mollie deliver again when the charge invoice could not be written', function (): void {
+    // Bound before the world is built: its renewal goes through the webhook, and the route
+    // keeps the controller — and with it the handler and its services — from then on.
+    FlakyInvoiceWriteService::$fail = true;
+    $this->app->bind(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class, FlakyInvoiceWriteService::class);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    World::settle($billable, expectHttp: 500);
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('enterprise')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([]);
+});
+
+it('refuses to withdraw a change whose payment its run has already booked, and tells the operators', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    crashOnceAfter('refunds');
+    World::settle($billable, expectHttp: 500);
+
+    $withdrawn = app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
+        ->withdrawPendingChangeForPayment($billable->refresh(), $paymentId);
+
+    expect($withdrawn)->toBeFalse()
+        ->and(resumeOutcome($billable)['waiting'])->toContain('pending_prorata_change');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => str_contains($n->reason, 'not withdrawn'));
+
+    // The run is still the webhook's to finish.
+    World::settle($billable);
+    expect(resumeOutcome($billable)['plan'])->toBe('enterprise');
+});
+
+it('does not cancel a change whose run is past its switch, so the run still patches Mollie', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    crashOnceAfter('switched');
+    World::settle($billable, expectHttp: 500);
+
+    expect(app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)->tryCancelPendingPlanChange($billable->refresh()))
+        ->toBe(\GraystackIT\MollieBilling\Enums\PendingChangeCancelOutcome::AlreadyPaid);
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toMatchArray(['plan' => 'enterprise', 'waiting' => [], 'held' => 24000]);
+});
+
+it('cancelling after the change went through cancels nothing and says nothing of the sort', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    World::settle($billable);
+
+    expect(app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)->tryCancelPendingPlanChange($billable->refresh()))
+        ->toBe(\GraystackIT\MollieBilling\Enums\PendingChangeCancelOutcome::NothingPending)
+        ->and(resumeOutcome($billable)['plan'])->toBe('enterprise');
+});
+
+it('keeps what an interrupted run recorded in the operators\' report and in the clean-up\'s record', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    crashOnceAfter('refunds');
+    World::settle($billable, expectHttp: 500);
+    World::renew($billable);
+    World::settle($billable);
+
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'renewal_booked'
+            && ! empty($n->context['refund_lines']) && ! empty($n->context['refund_lines'][0]['refund_token']));
+
+    World::$paymentStatus[$paymentId] = 'paid';
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    expect($billable->refresh()->getBillingSubscriptionMeta()['orphaned_prorata_payment']['progress']['refund_lines'][0]['refund_token'] ?? null)
+        ->not->toBeNull();
+});
+
+it('shows a change the clean-up gave up with its payment collected as unfinished, never as a failed payment', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['plan_change_unfinished'] = ['at' => now('UTC')->toIso8601String(), 'payment' => 'paid'];
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    MollieBilling::resolveBillableUsing(fn () => TestBillable::query()->find($billable->getKey()));
+    MollieBilling::authUsing(fn (): bool => true);
+
+    \Livewire\Livewire::test('mollie-billing::plan-change')
+        ->assertSee(__('billing::portal.flash.plan_change_unfinished_paid'))
+        ->assertDontSee(__('billing::portal.flash.plan_change_failed'));
+});

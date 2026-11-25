@@ -21,14 +21,20 @@ enum PendingChangeCancelOutcome: string
     case Cleared = 'cleared';
 
     /**
-     * Refused: the payment has already been paid or authorized, so the change stays and is
-     * applied by its webhook. Clearing it would leave the customer charged for nothing.
+     * Refused: the payment has already been paid or authorized, or its run has booked it, so
+     * the change stays. Clearing it would leave the customer charged for nothing.
      */
     case AlreadyPaid = 'already_paid';
 
-    /** Whether the waiting change is gone. */
+    /**
+     * Nothing was waiting any more when the cancel arrived — the webhook had carried the
+     * change out, or it had failed. Nothing was cancelled.
+     */
+    case NothingPending = 'nothing_pending';
+
+    /** Whether this cancel withdrew a waiting change. */
     public function withdrawn(): bool
     {
-        return $this !== self::AlreadyPaid;
+        return $this === self::Cancelled || $this === self::Cleared;
     }
 }

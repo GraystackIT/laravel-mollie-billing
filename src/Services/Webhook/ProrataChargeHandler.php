@@ -76,6 +76,8 @@ class ProrataChargeHandler
 
     protected const INTERRUPTED_REFUNDS_UNKNOWN = 'refunds_unknown';
 
+    protected const INTERRUPTED_OVERAGE_UNKNOWN = 'overage_unknown';
+
     /**
      * Subscription states a deferred prorata change may still be applied to.
      *
@@ -393,7 +395,11 @@ class ProrataChargeHandler
                     'payment_id' => (string) $payment->id,
                     'error' => $e->getMessage(),
                 ]);
-                return;
+
+                // Rethrown: the webhook answers 500 and Mollie delivers again, and the next
+                // run starts over. Answered 200, nothing re-delivered the payment and the
+                // paid change waited for the clean-up to drop it.
+                throw $e;
             }
 
             $this->markStep($billable, $paymentId, $done, self::STEP_INVOICED);
@@ -542,7 +548,18 @@ class ProrataChargeHandler
         if (! in_array(self::STEP_WALLET_OVERAGE, $done, true)) {
             $deferred = array_values((array) ($progress['deferred_overage'] ?? []));
 
+            // An earlier attempt asked Mollie for this overage and died before recording it.
+            // Asked again, the units are either restored onto the wallet while that payment
+            // is in flight (and charged again at the period end) or charged a second time
+            // once it has settled. Not asked again — the operators look it up.
+            if ($deferred !== [] && ! empty($progress['wallet_overage_started_at'])) {
+                $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_OVERAGE_UNKNOWN, $done, $progress, $pendingPlanChange);
+
+                return;
+            }
+
             if ($deferred !== []) {
+                $this->noteProgress($billable, $paymentId, ['wallet_overage_started_at' => BillingTime::nowUtc()->toIso8601String()]);
                 $this->walletAdjuster->chargeDeferredOverage($billable, $deferred);
             }
 
@@ -564,9 +581,12 @@ class ProrataChargeHandler
             // between left a claim with no outcome, and settle() now answers "already handled"
             // for a balance nobody charged. Asking Mollie again is only safe within the hour
             // its idempotency key is kept; the operators settle it instead.
-            if (! empty($progress['spanned_renewal_attempted_at'])
-                && $this->unsettledShortfallClaimsOfRun($billable, $progress) !== []
-            ) {
+            // An earlier attempt started settling the period this change landed in and died
+            // before recording it. Neither side is safe to run again: the balance it may have
+            // claimed (UndercollectionCharge claims before it asks Mollie, and its key lasts
+            // an hour) or the renewal it may have refunded (SupersededRenewalRefund holds no
+            // record of its own). The operators settle it.
+            if (! empty($progress['spanned_renewal_attempted_at'])) {
                 $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_SHORTFALL_UNSETTLED, $done, $progress, $pendingPlanChange);
 
                 return;
@@ -1260,7 +1280,10 @@ class ProrataChargeHandler
 
         return array_values(array_filter(
             $lines,
-            static fn (ProrataLine $l): bool => $l->refundToken === null || ! isset($settled[$l->refundToken]),
+            // A line createRefund() skips (coupon-covered, or nothing to return) never
+            // reaches a credit note; it is settled by being nothing to pay.
+            static fn (ProrataLine $l): bool => ! $l->isCouponCovered && $l->amountGross < 0
+                && ($l->refundToken === null || ! isset($settled[$l->refundToken])),
         ));
     }
 
@@ -1320,6 +1343,14 @@ class ProrataChargeHandler
             'period_now' => $billable->getBillingPeriodStartsAt()?->toIso8601String(),
             'subscription_status' => $billable->getBillingSubscriptionStatus()->value,
             'intended_plan_change' => $pendingPlanChange,
+            // What the operator needs to settle it by hand — and the only copy, once the
+            // clean-up has dropped the waiting change.
+            'refund_lines' => $progress['refund_lines'] ?? null,
+            'refunds_started_at' => $progress['refunds_started_at'] ?? null,
+            'deferred_overage' => $progress['deferred_overage'] ?? null,
+            'wallet_overage_started_at' => $progress['wallet_overage_started_at'] ?? null,
+            'spanned_renewal_attempted_at' => $progress['spanned_renewal_attempted_at'] ?? null,
+            'unsettled_claims' => $this->unsettledShortfallClaimsOfRun($billable, $progress),
         ];
 
         [$log, $reason] = match ($why) {
@@ -1332,8 +1363,12 @@ class ProrataChargeHandler
                 'A paid plan change was interrupted while its refunds were being paid out; whether Mollie paid the lines not on a credit note is unknown — the change payment is booked; check the refunds in Mollie, then finish the change by hand',
             ],
             self::INTERRUPTED_SHORTFALL_UNSETTLED => [
-                'Prorata charge not resumed — the balance of the period it landed in was claimed but never charged, reconcile it by hand',
-                'A paid plan change was interrupted while the balance of the billing period it landed in was being charged; whether Mollie created that payment is unknown — the change payment is booked; check Mollie for the balance payment, then finish the change by hand',
+                'Prorata charge not resumed — the period it landed in was being settled when its run died, reconcile it by hand',
+                'A paid plan change was interrupted while the billing period it landed in was being settled (a balance charged, or the renewal partly refunded); whether that reached Mollie is unknown — the change payment is booked; check Mollie for the balance payment or the renewal refund (see unsettled_claims), then finish the change by hand',
+            ],
+            self::INTERRUPTED_OVERAGE_UNKNOWN => [
+                'Prorata charge not resumed — the overage its rebalance left was being charged when its run died, reconcile it by hand',
+                'A paid plan change was interrupted while the usage overage it left was being charged; whether Mollie created that payment is unknown — the change payment is booked; check Mollie and the wallets (see deferred_overage), then finish the change by hand',
             ],
             self::INTERRUPTED_SUBSCRIPTION_ENDED => [
                 'Prorata charge not resumed — the subscription ended after its run died, reconcile it by hand',

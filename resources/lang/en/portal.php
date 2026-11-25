@@ -460,6 +460,8 @@ return [
         'pending_change_cancelled' => 'The pending plan change has been cancelled.',
         'pending_change_already_paid' => 'The payment for this change has already gone through, so it can no longer be cancelled.',
         'plan_change_failed' => 'Your plan upgrade could not be completed because the payment failed. Please try again or update your payment method.',
+        'plan_change_unfinished_paid' => 'Your payment for the plan change has been received, but the change could not be completed automatically. We are taking care of it and will get back to you — please do not start the change again.',
+        'plan_change_unfinished_unknown' => 'Your plan change could not be completed, and the status of its payment is still being checked. We will get back to you — please do not start the change again.',
         'billing_details_saved' => 'Billing details saved.',
         'force_charge_no_longer_needed' => 'Nothing to charge — your subscription is no longer past due. Reload the page to see its current state.',
         'force_charge_scheduled' => 'Mollie will charge your payment method shortly.',

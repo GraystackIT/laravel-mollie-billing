@@ -85,8 +85,10 @@ it('records an orphan and alerts when the charge was paid but no webhook arrived
     expect($meta['pending_prorata_change'] ?? null)->toBeNull()
         ->and($meta['pending_plan_change'] ?? null)->toBeNull()
         ->and($meta['prorata_pending_payment_id'] ?? null)->toBeNull()
-        // …and the plan page reads the change as failed, not as applied.
-        ->and($meta['plan_change_failed_at'] ?? null)->not->toBeNull()
+        // …and the plan page names it as unfinished — not as applied, and not as a failed
+        // payment to try again: the payment was collected.
+        ->and($meta['plan_change_unfinished']['payment'] ?? null)->toBe('paid')
+        ->and($meta['plan_change_failed_at'] ?? null)->toBeNull()
         // …and the money is on record instead of vanishing.
         ->and($meta['orphaned_prorata_payment']['payment_id'] ?? null)->toBe('tr_stale')
         ->and($meta['orphaned_prorata_payment']['prorata_charge_lines'] ?? null)->not->toBeNull();

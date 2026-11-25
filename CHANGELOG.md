@@ -28,7 +28,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   before its switch, a renewal was booked or the subscription ended; when it predates the
   recorded steps; or when an earlier attempt left refunds or a period balance with Mollie
   whose outcome was never booked. `WalletCredited` is now dispatched after the commit, and a listener that throws is
-  reported instead of failing the caller. `CleanupStalePendingProrataChangeJob`
+  reported instead of failing the caller.
+- **A pending change can no longer be cancelled or withdrawn once its payment is booked.**
+  Cancelling then answers "already gone through"; withdrawing a scheduled change tells the
+  operators instead. Cancelling when the change had just gone through says nothing false
+  (`PendingChangeCancelOutcome::NothingPending`). A change the clean-up gives up with its
+  payment collected is shown as unfinished, not as a failed payment to retry.
+- A capped refund line keeps its refund token, so its retry is recognised and not paid again. `CleanupStalePendingProrataChangeJob`
   leaves a run that can still be resumed alone for 48 hours from its start.
 - **`CleanupStalePendingProrataChangeJob` really unblocks the customer.** For a paid charge
   whose change never arrived (and when Mollie stays unreachable) it dropped only

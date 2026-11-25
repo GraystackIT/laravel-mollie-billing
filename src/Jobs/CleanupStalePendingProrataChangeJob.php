@@ -308,7 +308,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                     $dropped = true;
                     $alreadyReported = ! empty($waiting['progress']['interrupted_reported_at']);
 
-                    return self::withoutPendingChange($current, $paymentId, 'Payment outcome unknown — Mollie unreachable');
+                    return self::withoutPendingChange($current, $paymentId, 'unknown');
                 });
 
                 // The webhook already told the operators about this run; once is enough.
@@ -358,6 +358,9 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 'pending_plan_change' => $meta['pending_plan_change']
                     ?? (is_array($progress['pending_plan_change'] ?? null) ? $progress['pending_plan_change'] : null),
                 'prorata_charge_lines' => $pending['charge_lines'] ?? null,
+                // Everything the run recorded (refund lines and tokens, deferred overage, steps
+                // done): the operator's only copy once the waiting change is dropped.
+                'progress' => $progress !== [] ? $progress : null,
             ];
 
             // Asked again under the row lock: a webhook run that started after this job read
@@ -374,7 +377,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 }
 
                 $dropped = true;
-                $current = self::withoutPendingChange($current, $paymentId, 'Payment received, change not completed');
+                $current = self::withoutPendingChange($current, $paymentId, 'paid');
                 $current['orphaned_prorata_payment'] = $orphan;
 
                 return $current;
@@ -473,7 +476,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
      * @param  array<string, mixed>  $meta
      * @return array<string, mixed>
      */
-    private static function withoutPendingChange(array $meta, string $paymentId, string $failedReason): array
+    private static function withoutPendingChange(array $meta, string $paymentId, string $unfinished): array
     {
         // Only this payment's: a change withdrawn while this job ran may have made room for
         // another one, and that one's markers name its own payment.
@@ -488,11 +491,15 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         if (($marker === '' || $marker === $paymentId) && isset($meta['pending_plan_change'])) {
             unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
 
-            // A plan change that never switched is a failed one to the plan page, which
+            // A plan change that never switched has to be named on the plan page, which
             // otherwise reads "pending → gone" as the webhook having applied it and
-            // congratulates the customer on a change they did not get.
-            $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
-            $meta['plan_change_failed_reason'] = $failedReason;
+            // congratulates the customer on a change they did not get. Not as a failed one,
+            // though: `plan_change_failed_at` says "the payment failed, try again", and the
+            // payment was collected (or its outcome is unknown) — a second try charged twice.
+            $meta['plan_change_unfinished'] = [
+                'at' => BillingTime::nowUtc()->toIso8601String(),
+                'payment' => $unfinished,
+            ];
         } elseif ($marker === '' || $marker === $paymentId) {
             unset($meta['prorata_pending_payment_id']);
         }

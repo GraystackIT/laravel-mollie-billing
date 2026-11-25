@@ -433,6 +433,13 @@ new class extends Component {
             return;
         }
 
+        // Nothing was waiting any more: the webhook had already carried the change out (or
+        // it failed). No toast of its own — the render below sees pending → gone and says
+        // which, "plan changed" or "failed", instead of a "cancelled" that is untrue.
+        if ($outcome === \GraystackIT\MollieBilling\Enums\PendingChangeCancelOutcome::NothingPending) {
+            return;
+        }
+
         if (! $outcome->withdrawn()) {
             // The payment has already been collected: the change stays. Usually its webhook
             // applies it, but not always (a run that could not be resumed is with the
@@ -919,6 +926,7 @@ new class extends Component {
         $scheduledChange = null;
         $pendingPlanChange = null;
         $planChangeFailed = null;
+        $planChangeUnfinished = null;
 
         if ($billable) {
             $meta = $billable->getBillingSubscriptionMeta();
@@ -945,9 +953,20 @@ new class extends Component {
                 }
             }
 
+            // Given up by the clean-up with the payment collected (or its outcome unknown):
+            // neither applied nor failed. Shown for a week; the operators have been told.
+            $unfinished = is_array($meta['plan_change_unfinished'] ?? null) ? $meta['plan_change_unfinished'] : null;
+            if ($unfinished !== null && ! empty($unfinished['at'])
+                && \Carbon\Carbon::parse((string) $unfinished['at'])->isAfter(BillingTime::nowUtc()->subDays(7))
+            ) {
+                $planChangeUnfinished = ($unfinished['payment'] ?? 'paid') === 'unknown' ? 'unknown' : 'paid';
+            }
+
             // Detect pending → resolved transition (webhook applied the change).
             if ($this->wasPending && $pendingPlanChange === null) {
-                if ($planChangeFailed) {
+                if ($planChangeUnfinished !== null) {
+                    $this->toast(__('billing::portal.flash.plan_change_unfinished_'.$planChangeUnfinished), 'warning');
+                } elseif ($planChangeFailed) {
                     $this->toast(__('billing::portal.flash.plan_change_failed'), 'danger');
                 } else {
                     $this->toast(__('billing::portal.flash.plan_changed'), 'success');
@@ -968,6 +987,7 @@ new class extends Component {
             'scheduledChange' => $scheduledChange,
             'pendingPlanChange' => $pendingPlanChange,
             'planChangeFailed' => $planChangeFailed,
+            'planChangeUnfinished' => $planChangeUnfinished,
             'reverseCharge' => $reverseCharge,
             'showNetAndGross' => \GraystackIT\MollieBilling\Support\BillingPriceDisplay::forBillable($billable),
             'displayCountry' => $displayCountry,
@@ -1057,6 +1077,12 @@ new class extends Component {
     @endif
 
     <x-mollie-billing::change-notices :billable="$billable" />
+
+    @if ($planChangeUnfinished)
+        <flux:callout variant="warning" icon="exclamation-triangle" dusk="plan-change-unfinished">
+            {{ __('billing::portal.flash.plan_change_unfinished_'.$planChangeUnfinished) }}
+        </flux:callout>
+    @endif
 
     @if ($planChangeFailed)
         <flux:callout variant="danger" icon="exclamation-triangle">

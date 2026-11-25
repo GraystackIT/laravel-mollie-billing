@@ -2625,6 +2625,11 @@ class InvoiceService
             direction: $line->direction,
         );
 
+        // The capped line is the same refund: it keeps the token that is part of its Mollie
+        // idempotency key. A fresh one sent a retried refund under a new key — paid again —
+        // and left nothing on the credit note to recognise the line by.
+        $capped->refundToken = $line->refundToken;
+
         $capped->refundCapNote = [
             'alreadyRefundedNet' => (int) $original->effectiveRefundedNet(),
             'originalAmountNet' => (int) $original->amount_net,

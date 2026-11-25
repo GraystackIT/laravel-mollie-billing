@@ -460,6 +460,8 @@ return [
         'pending_change_cancelled' => 'Die ausstehende Planänderung wurde abgebrochen.',
         'pending_change_already_paid' => 'Die Zahlung für diese Änderung ist bereits eingegangen – sie kann nicht mehr abgebrochen werden.',
         'plan_change_failed' => 'Dein Plan-Upgrade konnte nicht durchgeführt werden, da die Zahlung fehlgeschlagen ist. Bitte versuche es erneut oder aktualisiere deine Zahlungsmethode.',
+        'plan_change_unfinished_paid' => 'Deine Zahlung für die Planänderung ist eingegangen, die Änderung konnte aber nicht automatisch abgeschlossen werden. Wir kümmern uns darum und melden uns – bitte starte die Änderung nicht erneut.',
+        'plan_change_unfinished_unknown' => 'Deine Planänderung konnte nicht abgeschlossen werden, und der Stand der Zahlung ist noch offen. Wir prüfen das und melden uns – bitte starte die Änderung nicht erneut.',
         'billing_details_saved' => 'Rechnungsdaten gespeichert.',
         'force_charge_no_longer_needed' => 'Es ist nichts einzuziehen — Ihr Abo ist nicht mehr überfällig. Laden Sie die Seite neu, um den aktuellen Stand zu sehen.',
         'force_charge_scheduled' => 'Mollie bucht in Kürze von deinem Zahlungsmittel ab.',
