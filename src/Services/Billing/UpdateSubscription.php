@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
+use GraystackIT\MollieBilling\Enums\PendingChangeCancelOutcome;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
@@ -1440,7 +1441,9 @@ class UpdateSubscription
      * Mollie still allows it (some methods like PayPal report isCancelable=false — those
      * expire on their own), then clears the local pending state.
      *
-     * Returns true if the Mollie payment was cancelled via API, false otherwise.
+     * Returns true if the Mollie payment was cancelled via API, false otherwise. A caller
+     * that has to tell the customer what happened needs {@see tryCancelPendingPlanChange()}:
+     * false covers both "cleared" and "refused, the change stays".
      *
      * Three outcomes, because "we cleared the local state" is only safe for one of them:
      *
@@ -1457,8 +1460,17 @@ class UpdateSubscription
      */
     public function cancelPendingPlanChange(Billable $billable): bool
     {
+        return $this->tryCancelPendingPlanChange($billable) === PendingChangeCancelOutcome::Cancelled;
+    }
+
+    /**
+     * {@see cancelPendingPlanChange()}, reporting which of its outcomes it reached — the
+     * portal must not confirm a cancel that was refused because the payment had settled.
+     */
+    public function tryCancelPendingPlanChange(Billable $billable): PendingChangeCancelOutcome
+    {
         if (! ($billable instanceof Model)) {
-            return false;
+            return PendingChangeCancelOutcome::Cleared;
         }
 
         $meta = $billable->getBillingSubscriptionMeta();
@@ -1482,7 +1494,7 @@ class UpdateSubscription
                         'status' => $status,
                     ]);
 
-                    return false;
+                    return PendingChangeCancelOutcome::AlreadyPaid;
                 }
 
                 if (($payment->isCancelable ?? false) === true) {
@@ -1510,7 +1522,7 @@ class UpdateSubscription
 
         $this->clearPendingPlanChange($billable);
 
-        return $cancelled;
+        return $cancelled ? PendingChangeCancelOutcome::Cancelled : PendingChangeCancelOutcome::Cleared;
     }
 
     /**

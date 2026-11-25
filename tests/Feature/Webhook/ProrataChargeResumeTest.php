@@ -1,0 +1,785 @@
+<?php
+
+declare(strict_types=1);
+
+use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Jobs\CleanupStalePendingProrataChangeJob;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\MollieBilling;
+use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
+use GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge;
+use GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler;
+use GraystackIT\MollieBilling\Testing\TestBillable;
+use GraystackIT\MollieBilling\Tests\Support\ChangeMatrixWorld as World;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Notifications\AnonymousNotifiable;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Notification;
+
+/*
+ * A prorata charge whose webhook run dies part-way is finished by the next delivery.
+ *
+ * The invoice is the first thing the run writes, and "an invoice exists for this payment"
+ * used to end every later delivery: a run that died after it — a fatal, PHP's time limit,
+ * hit in production rendering the e-invoice — left the paid change unapplied for good.
+ * Now the steps that are done are recorded, and a re-delivery picks the run up after the
+ * last of them. Several of them move money, so the result has to be exactly that of an
+ * uninterrupted run: one invoice, one credit, one refund, one PATCH, every event once.
+ *
+ * Each case crashes once right after the named step (an exception escaping the handler
+ * answers 500, as a fatal leaves Mollie without an answer), then lets Mollie re-deliver.
+ */
+
+final class CrashingProrataChargeHandler extends ProrataChargeHandler
+{
+    public static ?string $crashAfter = null;
+
+    /** Dies with the step done but not yet recorded. */
+    public static ?string $crashBefore = null;
+
+    /** @var array<string, \Closure> Something that happens from outside right after a step is recorded. */
+    public static array $afterStep = [];
+
+    protected function markStep(Billable $billable, string $paymentId, array &$done, string $step, array $extra = []): void
+    {
+        if ($step === self::$crashBefore) {
+            self::$crashBefore = null;
+
+            throw new RuntimeException("simulated crash before recording {$step}");
+        }
+
+        parent::markStep($billable, $paymentId, $done, $step, $extra);
+
+        if (isset(self::$afterStep[$step])) {
+            $hook = self::$afterStep[$step];
+            unset(self::$afterStep[$step]);
+            $hook($billable);
+        }
+
+        if ($step === self::$crashAfter) {
+            self::$crashAfter = null;
+
+            throw new RuntimeException("simulated crash after {$step}");
+        }
+    }
+}
+
+final class CrashingUndercollectionCharge extends UndercollectionCharge
+{
+    public static bool $armed = false;
+
+    public function configurationLeft(Billable $billable, string $planBefore): void
+    {
+        if (self::$armed) {
+            self::$armed = false;
+
+            throw new RuntimeException('simulated crash after switched');
+        }
+
+        parent::configurationLeft($billable, $planBefore);
+    }
+}
+
+beforeEach(function (): void {
+    World::boot();
+    CrashingProrataChargeHandler::$crashAfter = null;
+    CrashingProrataChargeHandler::$crashBefore = null;
+    CrashingProrataChargeHandler::$afterStep = [];
+    CrashingUndercollectionCharge::$armed = false;
+    $this->app->bind(ProrataChargeHandler::class, CrashingProrataChargeHandler::class);
+
+    $this->events = [];
+    Event::listen('GraystackIT\\MollieBilling\\Events\\*', function (string $name): void {
+        $short = class_basename($name);
+        $this->events[$short] = ($this->events[$short] ?? 0) + 1;
+    });
+});
+
+/** Arrange for the run to die once, right after `$step` (or, for 'switched', between the switch and its events). */
+function crashOnceAfter(string $step): void
+{
+    if ($step === 'wallet') {
+        // Recorded inside the transaction that credits the wallets; "died after it" is
+        // a death after that commit, i.e. before the next step is recorded.
+        CrashingProrataChargeHandler::$crashBefore = 'wallet_overage';
+
+        return;
+    }
+
+    if ($step !== 'switched') {
+        CrashingProrataChargeHandler::$crashAfter = $step === 'none' ? null : $step;
+
+        return;
+    }
+
+    // The switch is written together with its progress, in one save; the first thing
+    // after it that can die is announcing it.
+    CrashingUndercollectionCharge::$armed = true;
+    app()->bind(UndercollectionCharge::class, CrashingUndercollectionCharge::class);
+}
+
+/** Deliver the pending charge — first into the crash, then again as Mollie would. */
+function settleThroughCrash(TestBillable $billable, string $step): void
+{
+    crashOnceAfter($step);
+    // Only what the charge's own deliveries announce.
+    test()->events = [];
+
+    if ($step === 'none') {
+        World::settle($billable);
+
+        return;
+    }
+
+    World::settle($billable, expectHttp: 500);
+    expect($billable->refresh()->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null)->not->toBeNull();
+
+    World::settle($billable);
+}
+
+/** @return array<string, mixed> */
+function resumeOutcome(TestBillable $billable): array
+{
+    $billable->refresh();
+
+    return [
+        'plan' => $billable->getBillingSubscriptionPlanCode(),
+        'interval' => $billable->getBillingSubscriptionInterval(),
+        'status' => $billable->getBillingSubscriptionStatus()->value,
+        'seats' => $billable->getBillingSeatCount(),
+        'waiting' => array_values(array_intersect(
+            ['pending_prorata_change', 'pending_plan_change', 'prorata_pending_payment_id'],
+            array_keys($billable->getBillingSubscriptionMeta()),
+        )),
+        'invoices' => BillingInvoice::query()->orderBy('id')->get()
+            ->map(fn (BillingInvoice $i): array => [$i->invoice_kind->value, (int) $i->amount_gross])->all(),
+        'refunds' => array_map(
+            fn (array $refunds): array => array_map(fn (object $r): string => $r->amount->value, $refunds),
+            World::$refunds,
+        ),
+        'held' => World::heldGross(),
+    ];
+}
+
+$steps = ['none', 'invoiced', 'document', 'document_announced', 'announced', 'wallet', 'wallet_overage', 'spanned_renewal', 'refunds', 'switched', 'events', 'coupons', 'patched'];
+
+it('finishes an upgrade whose run died, exactly as an uninterrupted run would', function (string $step): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    settleThroughCrash($billable, $step);
+
+    expect(resumeOutcome($billable))->toBe([
+        'plan' => 'enterprise',
+        'interval' => 'monthly',
+        'status' => 'active',
+        'seats' => 2,
+        'waiting' => [],
+        // The renewal that paid the period, the charge, and the credit note for the
+        // unused share of the renewal — each once.
+        'invoices' => [['subscription', 6000], ['subscription', 16258], ['refund', -4064]],
+        'refunds' => ['tr_cm_renewal_2' => ['40.64']],
+        'held' => 24000,
+    ])->and($this->events)->toMatchArray([
+        'InvoiceCreated' => 1,
+        'PaymentSucceeded' => 1,
+        'PlanChanged' => 1,
+        'SubscriptionUpdated' => 1,
+    ]);
+})->with($steps);
+
+it('finishes a trial conversion whose run died, crediting the new period once', function (string $step): void {
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', ['tokens' => 100]);
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+
+    settleThroughCrash($billable, $step);
+
+    expect(resumeOutcome($billable))->toBe([
+        'plan' => 'pro',
+        'interval' => 'yearly',
+        // Read from the progress on the resumed run: after the switch the billable is no
+        // longer in its trial, and the run still has to treat it as the conversion it is.
+        'status' => 'active',
+        'seats' => 2,
+        'waiting' => [],
+        'invoices' => [['subscription', 60000]],
+        'refunds' => [],
+        'held' => 60000,
+    ])->and($billable->getBillingSubscriptionMeta()['trial_converted_at'] ?? null)->not->toBeNull()
+        ->and($this->events)->toMatchArray([
+            'InvoiceCreated' => 1,
+            'PaymentSucceeded' => 1,
+            'WalletCredited' => 1,
+            'PlanChanged' => 1,
+            'SubscriptionUpdated' => 1,
+        ]);
+})->with([...$steps, 'trial_overage']);
+
+it('still swallows a re-delivery once the run has finished', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    $paymentId = (string) $billable->refresh()->getBillingSubscriptionMeta()['prorata_pending_payment_id'];
+    $value = (string) World::$payments[$paymentId]['value'];
+
+    World::settle($billable);
+    $after = resumeOutcome($billable);
+    $this->events = [];
+
+    World::deliver($billable, $paymentId, 'paid', $value, World::$payments[$paymentId]['metadata'] ?? ['type' => 'prorata_charge']);
+
+    expect(resumeOutcome($billable))->toBe($after)
+        ->and($this->events['PaymentSucceeded'] ?? 0)->toBe(0);
+});
+
+it('keeps a converted trial\'s cadence when it dies right after the invoice and again after the switch', function (): void {
+    // The first run dies with the invoice written and nothing recorded after it; the
+    // second dies once the trial is already over. The third must still treat the charge
+    // as the conversion it is — which it can only learn from what was noted before the
+    // invoice — and move Mollie's first charge a full period out, as an uninterrupted
+    // run does (2026-02-05).
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'invoiced';
+    World::settle($billable, expectHttp: 500);
+    expect(BillingInvoice::query()->count())->toBe(1);
+
+    crashOnceAfter('switched');
+    World::settle($billable, expectHttp: 500);
+    expect($billable->refresh()->getBillingSubscriptionStatus()->value)->toBe('active');
+
+    World::settle($billable);
+
+    expect((string) World::$heldStartDate)->toBe('2026-02-05')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and($billable->getBillingSubscriptionPlanCode())->toBe('enterprise')
+        ->and(BillingInvoice::query()->count())->toBe(1);
+});
+
+it('does not resume a run when a renewal was booked after it died, and tells the operators', function (): void {
+    // The refund for the old period is out; then the old monthly cadence renews before
+    // Mollie re-delivers. Everything the finished steps did was for the period that has
+    // just ended — carrying on would book the switch on top of a renewal nobody credits.
+    Notification::fake();
+    MollieBilling::notifyAdminUsing(fn (): array => [new AnonymousNotifiable]);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+
+    crashOnceAfter('refunds');
+    World::settle($billable, expectHttp: 500);
+    World::renew($billable);
+    $afterRenewal = resumeOutcome($billable);
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toBe($afterRenewal)
+        ->and($afterRenewal['interval'])->toBe('monthly')
+        ->and($afterRenewal['waiting'])->toContain('pending_prorata_change');
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+
+    // A later delivery of the same payment does not tell them again…
+    World::settle($billable);
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+
+    // …and neither does the daily clean-up, which unblocks the customer: the payment is
+    // booked and reported, the change is not coming.
+    $paymentId = (string) $billable->refresh()->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
+    World::$paymentStatus[$paymentId] = 'paid';
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    expect(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and($billable->getBillingSubscriptionMeta()['orphaned_prorata_payment']['reason'] ?? null)
+        ->toBe('charge paid and booked, but its plan change was never completed');
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+});
+
+/** The pending charge's payment id and what Mollie would deliver for it. */
+function pendingCharge(TestBillable $billable): array
+{
+    $paymentId = (string) $billable->refresh()->getBillingSubscriptionMeta()['pending_prorata_change']['charge_payment_id'];
+
+    return [$paymentId, (string) World::$payments[$paymentId]['value'], World::$payments[$paymentId]['metadata'] ?? ['type' => 'prorata_charge']];
+}
+
+function operatorsTold(): void
+{
+    Notification::fake();
+    MollieBilling::notifyAdminUsing(fn (): array => [new AnonymousNotifiable]);
+}
+
+it('does not run a change again from the start when its run recorded no steps, and tells the operators', function (): void {
+    // A run on the version before steps were recorded: invoice written, refund lines paid
+    // out, then it died. Resumed from nothing, the refunds would be paid a second time.
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    crashOnceAfter('refunds');
+    World::settle($billable, expectHttp: 500);
+
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    unset($meta['pending_prorata_change']['progress']);
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+    $before = resumeOutcome($billable);
+
+    World::settle($billable);
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toBe($before)
+        ->and($before['refunds'])->toBe(['tr_cm_renewal_2' => ['40.64']])
+        ->and($before['waiting'])->toContain('pending_prorata_change');
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'no_progress');
+});
+
+it('leaves a run waiting to be resumed to the next delivery, even when its change is days old', function (): void {
+    // With SEPA the change is days old when its webhook first arrives; the clean-up keys on
+    // that age and dropped the change — the re-delivery then skipped the payment.
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    $this->travel(3)->days();
+    crashOnceAfter('invoiced');
+    World::settle($billable, expectHttp: 500);
+
+    World::$paymentStatus[$paymentId] = 'paid';
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+    expect(resumeOutcome($billable)['waiting'])->toContain('pending_prorata_change');
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('enterprise')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and(resumeOutcome($billable)['held'])->toBe(24000);
+});
+
+it('drops a run nobody resumed once the window is over, and says the payment is booked', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    crashOnceAfter('switched');
+    World::settle($billable, expectHttp: 500);
+
+    $this->travel(CleanupStalePendingProrataChangeJob::RESUME_WINDOW_HOURS + 1)->hours();
+    World::$paymentStatus[$paymentId] = 'paid';
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    expect(resumeOutcome($billable)['waiting'])->toBe([]);
+    // Past the switch the top-level `pending_plan_change` is gone; what was intended is
+    // still named, from the progress.
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => str_contains($n->reason, 'its invoice exists')
+            && ($n->context['intended_plan_change']['plan_code'] ?? null) === 'enterprise'
+            && in_array('switched', $n->context['completed_steps'], true));
+});
+
+it('resumes a change that named no payment, once the payment it was accepted for is written in', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId, $value, $metadata] = pendingCharge($billable);
+
+    $meta = $billable->getBillingSubscriptionMeta();
+    $meta['pending_prorata_change']['charge_payment_id'] = '';
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    crashOnceAfter('wallet');
+    World::deliver($billable, $paymentId, 'paid', $value, $metadata, expectHttp: 500);
+    World::deliver($billable, $paymentId, 'paid', $value, $metadata);
+
+    expect(resumeOutcome($billable))->toMatchArray([
+        'plan' => 'enterprise',
+        'waiting' => [],
+        'invoices' => [['subscription', 6000], ['subscription', 16258], ['refund', -4064]],
+        'refunds' => ['tr_cm_renewal_2' => ['40.64']],
+        'held' => 24000,
+    ]);
+});
+
+it('tells the operators at once when the subscription ended before a run could be resumed', function (): void {
+    // Refund lines are out already, so returning the whole payment on top would return
+    // more than was taken; what is owed is for an operator to settle — told now, once.
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    crashOnceAfter('refunds');
+    World::settle($billable, expectHttp: 500);
+    $billable->forceFill(['subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled])->save();
+
+    World::settle($billable);
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro')
+        ->and(resumeOutcome($billable)['refunds'])->toBe(['tr_cm_renewal_2' => ['40.64']]);
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'subscription_ended'
+            && $n->context['completed_steps'] === ['invoiced', 'document', 'document_announced', 'announced', 'wallet', 'wallet_overage', 'spanned_renewal', 'refunds']);
+});
+
+it('keeps trying to tell the operators until it has — the note follows the send', function (): void {
+    // Noted before the send, an admin resolver (or a send) that threw left the note
+    // behind, and the re-delivery and the clean-up both kept quiet for good.
+    Notification::fake();
+    $attempts = 0;
+    MollieBilling::notifyAdminUsing(function () use (&$attempts): array {
+        if (++$attempts === 1) {
+            throw new RuntimeException('admin lookup failed');
+        }
+
+        return [new AnonymousNotifiable];
+    });
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+    crashOnceAfter('refunds');
+    World::settle($billable, expectHttp: 500);
+    World::renew($billable);
+
+    World::settle($billable, expectHttp: 500);
+    Notification::assertNothingSent();
+
+    World::settle($billable);
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+
+    World::settle($billable);
+    Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
+});
+
+/** A billable whose app scope finds nothing without a tenant context — as in a webhook. */
+class TenantScopedResumeBillable extends TestBillable
+{
+    protected $table = 'test_billables';
+
+    public function applyBillingScope(\Illuminate\Database\Eloquent\Builder $query): void
+    {
+        $query->whereRaw('1 = 0');
+    }
+}
+
+it('stores the charge invoice\'s PDF for a billable the app scopes by tenant', function (string $step): void {
+    // The webhook resolves the billable scope-free; reading it back through the invoice's
+    // relation applies the app's scope, finds nothing without a tenant, and the invoice was
+    // left without a document while the change went through.
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    Relation::morphMap([TestBillable::class => TenantScopedResumeBillable::class]);
+
+    try {
+        settleThroughCrash($billable, $step);
+    } finally {
+        Relation::morphMap([], false);
+    }
+
+    expect(resumeOutcome($billable)['plan'])->toBe('enterprise')
+        ->and(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeTrue();
+})->with(['uninterrupted' => ['none'], 'died before the document' => ['invoiced']]);
+
+it('credits a converted trial\'s quota once when the run dies inside the wallet step', function (): void {
+    // The credit and the record of it commit together. A run that dies before the commit
+    // leaves neither; the next delivery credits once — a rollover wallet adds to its
+    // balance, so a credit kept without its record was paid twice.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', ['tokens' => 100]);
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+    config()->set('mollie-billing-plans.usage_types', ['tokens' => ['rollover' => true]]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+    $before = $billable->refresh()->remainingBillingQuota('tokens');
+
+    // Credited, not yet recorded.
+    CrashingProrataChargeHandler::$crashBefore = 'wallet';
+    $this->events = [];
+    World::settle($billable, expectHttp: 500);
+    // Rolled back with its record — and never announced.
+    expect($billable->refresh()->remainingBillingQuota('tokens'))->toBe($before)
+        ->and($this->events['WalletCredited'] ?? 0)->toBe(0);
+
+    World::settle($billable);
+    expect($this->events['WalletCredited'] ?? 0)->toBe(1);
+
+    expect(resumeOutcome($billable)['interval'])->toBe('yearly')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and($billable->refresh()->remainingBillingQuota('tokens'))->toBe(1000);
+});
+
+it('does not pay a refund line again when the run died after paying it and before recording it', function (): void {
+    // The line's token is stored before Mollie is asked and found on the credit note
+    // afterwards; a fresh token on the re-delivery was a second payout.
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'refunds';
+    World::settle($billable, expectHttp: 500);
+    expect(World::$refunds)->toBe(['tr_cm_renewal_2' => World::$refunds['tr_cm_renewal_2']])
+        ->and(count(World::$refunds['tr_cm_renewal_2']))->toBe(1);
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toMatchArray([
+        'plan' => 'enterprise',
+        'waiting' => [],
+        'invoices' => [['subscription', 6000], ['subscription', 16258], ['refund', -4064]],
+        'refunds' => ['tr_cm_renewal_2' => ['40.64']],
+    ]);
+});
+
+it('does not switch over a renewal booked while the run was paying out', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['refunds'] = function (TestBillable $b): void {
+        $b->newQuery()->whereKey($b->getKey())->update(['subscription_period_starts_at' => now('UTC')->addDay()]);
+    };
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro')
+        ->and(resumeOutcome($billable)['waiting'])->toContain('pending_prorata_change');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'renewal_booked');
+});
+
+it('announces the change from what the switch made of it, not from a row emptied since', function (): void {
+    $billable = World::subscription('none', 'pro', 2, addons: ['storage']);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    crashOnceAfter('switched');
+    World::settle($billable, expectHttp: 500);
+    $this->events = [];
+
+    // The expiry pass empties the plan-scoped fields before the re-delivery.
+    $billable->forceFill(['active_addon_codes' => []])->save();
+    World::settle($billable);
+
+    expect($this->events['AddonDisabled'] ?? 0)->toBe(0)
+        ->and($this->events['PlanChanged'] ?? 0)->toBe(1);
+});
+
+/** Fails to render the first document it is asked for. */
+final class FlakyDocumentInvoiceService extends \GraystackIT\MollieBilling\Services\Billing\InvoiceService
+{
+    public static bool $fail = true;
+
+    public function storeInvoiceDocument(\GraystackIT\MollieBilling\Models\BillingInvoice $invoice, Billable $billable): bool
+    {
+        if (self::$fail) {
+            self::$fail = false;
+
+            return false;
+        }
+
+        return parent::storeInvoiceDocument($invoice, $billable);
+    }
+}
+
+it('renders the document again on the next delivery when the first render failed', function (): void {
+    FlakyDocumentInvoiceService::$fail = true;
+    $this->app->bind(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class, FlakyDocumentInvoiceService::class);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    // The render fails, the run goes on and then dies before it is through.
+    CrashingProrataChargeHandler::$crashAfter = 'announced';
+    World::settle($billable, expectHttp: 500);
+    expect(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeFalse();
+
+    World::settle($billable);
+
+    expect(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeTrue()
+        ->and(resumeOutcome($billable)['plan'])->toBe('enterprise');
+});
+
+it('stops before moving any money when a renewal was booked while the invoice was announced', function (): void {
+    operatorsTold();
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['announced'] = function (TestBillable $b): void {
+        $b->newQuery()->whereKey($b->getKey())->update(['subscription_period_starts_at' => now('UTC')->addDay()]);
+    };
+    World::settle($billable);
+
+    expect($this->events['WalletCredited'] ?? 0)->toBe(0)
+        ->and(resumeOutcome($billable)['interval'])->toBe('monthly');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'renewal_booked');
+});
+
+it('does not write the new plan onto a subscription cancelled while the run was under way', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['refunds'] = function (TestBillable $b): void {
+        $b->newQuery()->whereKey($b->getKey())->update(['subscription_status' => \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled->value]);
+    };
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'subscription_ended');
+});
+
+it('hands a balance this run claimed but never charged to the operators, and lets an unrelated one be', function (bool $ofThisRun): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    // The attempt dies inside UndercollectionCharge::settle(), after its claim — or a claim
+    // of some other case happens to stand open on the billable.
+    CrashingProrataChargeHandler::$crashAfter = 'wallet_overage';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $reason = $ofThisRun
+        ? \GraystackIT\MollieBilling\Events\RenewalUndercollected::REASON_PLAN_CHANGE_SPANNED_RENEWAL
+        : 'some_other_case';
+    $meta[\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::META_KEY][$reason.':1'] = [
+        'shortfall_net' => 1000,
+        'claimed_at' => now('UTC')->toIso8601String(),
+    ];
+    if ($ofThisRun) {
+        $meta['pending_prorata_change']['progress']['spanned_renewal_attempted_at'] = now('UTC')->toIso8601String();
+    }
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe($ofThisRun ? 'pro' : 'enterprise');
+
+    if ($ofThisRun) {
+        Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+            fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'shortfall_unsettled');
+    } else {
+        Notification::assertNothingSent();
+    }
+})->with(['claimed by this run' => [true], 'another case' => [false]]);
+
+it('does not send refunds again whose outcome an earlier attempt never booked', function (): void {
+    // The attempt asked Mollie and died before the credit note: whether those lines were
+    // paid is unknown, and the idempotency key protects them only for an hour.
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashAfter = 'spanned_renewal';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta['pending_prorata_change']['progress']['refunds_started_at'] = now('UTC')->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(World::$refunds)->toBe([])
+        ->and(resumeOutcome($billable)['plan'])->toBe('pro');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'refunds_unknown');
+});
+
+it('redeems the change\'s coupon once, even when the run died after redeeming it', function (): void {
+    // Each code commits on its own and the step is recorded after the last one; a run that
+    // died in between redeemed the code again on the next delivery.
+    app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->create([
+        'code' => 'ONCE10', 'name' => 'ONCE10', 'type' => \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+        'discount_type' => \GraystackIT\MollieBilling\Enums\DiscountType::Percentage, 'discount_value' => 10,
+        'max_redemptions_per_billable' => 5,
+    ]);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise', 'coupon_codes' => ['ONCE10']], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'coupons';
+    World::settle($billable, expectHttp: 500);
+    expect(\GraystackIT\MollieBilling\Models\CouponRedemption::query()->count())->toBe(1);
+
+    $errors = [];
+    Event::listen(\Illuminate\Log\Events\MessageLogged::class, function ($e) use (&$errors): void {
+        if ($e->level === 'error') {
+            $errors[] = $e->message;
+        }
+    });
+
+    World::settle($billable);
+
+    // Not tried again either — a second redeem() of a recurring code throws, and that was
+    // logged as a redemption that "needs a human".
+    expect(\GraystackIT\MollieBilling\Models\CouponRedemption::query()->count())->toBe(1)
+        ->and($errors)->toBe([])
+        ->and(resumeOutcome($billable)['waiting'])->toBe([]);
+});
+
+it('stops a run whose waiting change was given up under it', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['announced'] = function (TestBillable $b): void {
+        $meta = $b->refresh()->getBillingSubscriptionMeta();
+        unset($meta['pending_prorata_change']);
+        $b->forceFill(['subscription_meta' => $meta])->save();
+    };
+    World::settle($billable, expectHttp: 500);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro')
+        ->and(World::$refunds)->toBe([]);
+});
+
+/** Throws on its first rebalance, part-way. */
+final class FlakyWalletAdjuster extends \GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster
+{
+    public static int $calls = 0;
+
+    public function adjust(Billable $billable, string $oldPlan, string $oldInterval, string $newPlan, string $newInterval, ?\Carbon\CarbonInterface $oldPeriodStart = null, ?\Carbon\CarbonInterface $oldPeriodEnd = null, bool $deferOverageCharge = false): array
+    {
+        if (++self::$calls === 1) {
+            throw new RuntimeException('rebalance failed part-way');
+        }
+
+        return parent::adjust($billable, $oldPlan, $oldInterval, $newPlan, $newInterval, $oldPeriodStart, $oldPeriodEnd, $deferOverageCharge);
+    }
+}
+
+it('does not record a rebalance that failed, so the next delivery runs it', function (): void {
+    FlakyWalletAdjuster::$calls = 0;
+    $this->app->bind(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class, FlakyWalletAdjuster::class);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    World::settle($billable, expectHttp: 500);
+    World::settle($billable);
+
+    expect(FlakyWalletAdjuster::$calls)->toBe(2)
+        ->and(resumeOutcome($billable)['plan'])->toBe('enterprise')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([]);
+});
+
+it('keeps a credit and what follows it when a WalletCredited listener throws', function (): void {
+    // After the commit, a throwing listener used to escape the caller's transaction call
+    // — past UpdateSubscription's overage charge, which then never ran.
+    Event::listen(\GraystackIT\MollieBilling\Events\WalletCredited::class, function (): void {
+        throw new RuntimeException('listener down');
+    });
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['interval'])->toBe('yearly')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and($billable->refresh()->remainingBillingQuota('tokens'))->toBe(1000);
+});

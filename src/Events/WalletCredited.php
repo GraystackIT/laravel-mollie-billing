@@ -8,6 +8,10 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
+/**
+ * Dispatched once the credit has committed, with a listener's failure reported rather than
+ * propagated — see WalletUsageService::credit().
+ */
 class WalletCredited
 {
     use Dispatchable;

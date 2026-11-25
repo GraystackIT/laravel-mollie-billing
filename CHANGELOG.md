@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Cancel pending change" no longer confirms a cancel that did not happen.** Once the
+  prorata payment has been paid or authorized, `cancelPendingPlanChange()` deliberately keeps
+  the change for its webhook to apply, but the plan-change screen toasted "cancelled" anyway
+  and the notice stayed. It now says the payment has already gone through and the change will
+  be applied. A cancel that did go through no longer adds a "plan changed" toast either.
+  The new `UpdateSubscription::tryCancelPendingPlanChange()` returns a
+  `PendingChangeCancelOutcome` (`Cancelled`, `Cleared`, `AlreadyPaid`); the bool of
+  `cancelPendingPlanChange()` is unchanged.
+- **A paid plan change survives a webhook run that dies part-way.** `ProrataChargeHandler`
+  writes the charge invoice first and applies the change after it, and a re-delivery that
+  found the invoice skipped the payment as done: a run that died in between (a fatal, PHP's
+  time limit) left the customer charged, the change unapplied and Mollie on the old amount.
+  Each completed step is now recorded under `pending_prorata_change.progress`, and the next
+  delivery resumes after the last one. Wallet credits commit together with their record and
+  each refund line keeps its Mollie idempotency token, so neither is repeated; the PATCH sets
+  absolute values derived from the change, so a repeated one sets the same target. A run is
+  not carried on — the operators get one `AdminPlanChangeFailedNotification` instead — when,
+  before its switch, a renewal was booked or the subscription ended; when it predates the
+  recorded steps; or when an earlier attempt left refunds or a period balance with Mollie
+  whose outcome was never booked. `WalletCredited` is now dispatched after the commit, and a listener that throws is
+  reported instead of failing the caller. `CleanupStalePendingProrataChangeJob`
+  leaves a run that can still be resumed alone for 48 hours from its start.
+- **`CleanupStalePendingProrataChangeJob` really unblocks the customer.** For a paid charge
+  whose change never arrived (and when Mollie stays unreachable) it dropped only
+  `pending_prorata_change`; `pending_plan_change` and `prorata_pending_payment_id` stayed,
+  so every further plan change was refused and the portal kept announcing a change waiting
+  for its payment. It also says "booked" rather than "no invoice exists" when the payment's
+  invoice is there, and does not alert again when the webhook already did.
+- **The e-invoice no longer scans every class the app has.** `horstoeko/invoicesuite`
+  discovers its document providers and validators by loading every class in Composer's
+  class map and asking `is_subclass_of()`; with an optimised autoloader that is all of
+  `vendor/`. On an app's first invoice that ran past PHP's 30-second limit (or died on a
+  class that cannot be loaded), and in the prorata webhook the fatal came after the invoice
+  had been written and before the paid plan change was applied. `EInvoiceService` now
+  confines discovery to `horstoeko\invoicesuite` for the duration of a document, unless the
+  app has set discovery namespaces of its own.
+
 ## [1.0.1] - 2026-11-25
 
 ### Added

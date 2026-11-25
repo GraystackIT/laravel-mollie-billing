@@ -524,3 +524,45 @@ it('keeps the plain PDF when the e-invoice cannot be built', function (): void {
     expect($pdf)->toStartWith('%PDF')
         ->and(PdfText::of($pdf))->toContain((string) $invoice->serial_number);
 });
+
+it('confines the library\'s provider and validator discovery to its own namespace', function (): void {
+    // Unconfined, invoicesuite loads every class in Composer's class map to ask
+    // `is_subclass_of()`. With an optimised autoloader in an app that is all of vendor/:
+    // longer than the 30-second limit, or a fatal on a class that cannot be loaded —
+    // inside the webhook, after the invoice was written and before the paid plan change
+    // was applied. A tripwire class in the class map must stay unloaded.
+    $dir = sys_get_temp_dir().'/mollie-billing-discovery-'.bin2hex(random_bytes(4));
+    mkdir($dir);
+    file_put_contents($dir.'/Tripwire.php', "<?php\nnamespace MollieBillingDiscoveryProbe;\n\$GLOBALS['mollie_billing_discovery_tripwire'] = true;\nfinal class Tripwire {}\n");
+
+    $loader = new \Composer\Autoload\ClassLoader($dir);
+    $loader->addClassMap(['MollieBillingDiscoveryProbe\\Tripwire' => $dir.'/Tripwire.php']);
+    $loader->register();
+    unset($GLOBALS['mollie_billing_discovery_tripwire']);
+
+    // Empty both the library's disk and memory caches, so it has to discover again.
+    \horstoeko\invoicesuite\utils\InvoiceSuiteClassFinder::clearCache();
+    \horstoeko\invoicesuite\utils\InvoiceSuiteClassFinder::factory()->init();
+
+    try {
+        $invoice = EInvoiceFixtures::invoice();
+
+        // The production paths only: storing the PDF (build and embed) and validating.
+        $pdf = storedPdf($invoice);
+        $errors = app(EInvoiceService::class)->schemaErrors($invoice, $invoice->billable);
+        $tripped = $GLOBALS['mollie_billing_discovery_tripwire'] ?? false;
+
+        expect($tripped)->toBeFalse()
+            ->and($errors)->toBe([])
+            // A global of the library: what the app had set is what it gets back.
+            ->and(\horstoeko\invoicesuite\InvoiceSuiteSettings::getDiscoveryNamespaces())->toBe([]);
+
+        // Read back with the library's own reader (a test helper, outside the confinement).
+        expect(EInvoiceFixtures::embedded($pdf))->not->toBeNull();
+    } finally {
+        $loader->unregister();
+        \horstoeko\invoicesuite\utils\InvoiceSuiteClassFinder::factory()->init();
+        @unlink($dir.'/Tripwire.php');
+        @rmdir($dir);
+    }
+});

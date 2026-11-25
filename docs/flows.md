@@ -803,7 +803,8 @@ sequenceDiagram
     US-->>U: events PlanChanged, SubscriptionUpdated, after commit
     M->>PH: webhook for the prorata charge, days later with SEPA
     alt paid
-        PH->>PH: invoice, refund lines paid out, plan switched, wallets rebalanced, coupons redeemed
+        PH->>PH: invoice, document, wallets rebalanced, refund lines paid out, plan switched, coupons redeemed
+        Note over PH: each step recorded in pending_prorata_change.progress, a re-delivery after a crash resumes after the last one
         PH->>P: PATCH amount, and cadence for an interval change or past-due reset
         PH-->>U: events PaymentSucceeded, PlanChanged, InvoiceAvailableNotification
     else failed
@@ -832,6 +833,12 @@ sequenceDiagram
     start date ([6.1](#61-moving-the-next-charge-patch-or-replacement)).
   - Refund line refused → `pending_refund_retries` → `RetryRefundLineJob`.
   - The prorata webhook never arrives → `CleanupStalePendingProrataChangeJob` asks Mollie.
+  - The webhook run dies after the invoice (a fatal, the time limit) → the next delivery
+    finds the invoice *and* the change still waiting for this payment, and
+    `ProrataChargeHandler::paid()` resumes after the last step recorded in
+    `pending_prorata_change.progress` instead of skipping it as done. If a renewal was
+    booked in between, it does not resume and alerts the operators
+    (`AdminPlanChangeFailedNotification`) instead.
   - The customer cancels the pending change (`UpdateSubscription::cancelPendingPlanChange()`,
     Mollie `CancelPaymentRequest`); if the payment settles anyway it is returned by
     `UnwantedPaymentRefund` (`change_cancelled`), likewise when the subscription has ended in
@@ -1316,7 +1323,9 @@ flowchart TD
 - **Idempotency has two layers:** the reservation plus outcome signature above, and the
   invoice guard (`WebhookSupport::invoiceAlreadyExistsForPayment()`) at the top of every
   handler that writes an invoice — a re-delivery after a crash must not trip the unique
-  index on `mollie_payment_id`.
+  index on `mollie_payment_id`. "Invoice exists" means "skip" only where the invoice is
+  the last thing written; `ProrataChargeHandler` writes it first and resumes instead
+  ([8](#8-plan-and-interval-change)).
 - **Activation is gated** by `ActivationGate` (`ActivationGate::Proceed`, `ActivationGate::AlreadyBooked`,
   `ActivationGate::Duplicate`) and
   the activation claim ([1](#1-checkout-of-a-paid-plan)).

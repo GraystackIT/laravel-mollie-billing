@@ -190,7 +190,24 @@ class WalletUsageService
             self::syncDeferredOverage($wallet);
         });
 
-        event(new WalletCredited($billable, $type, $quantity, $reason ?? 'credit'));
+        // After the outermost commit, so a credit made inside a caller's transaction (the
+        // prorata webhook's wallet step, a plan change's phase 3) reaches its listeners only
+        // if it persisted — not once for a rolled-back attempt and again for the retry.
+        //
+        // And isolated: a listener that throws there would otherwise throw out of the
+        // caller's DB::transaction() after the commit, past whatever the caller still had
+        // to do with what it committed — UpdateSubscription charges the overage a rebalance
+        // left only in memory right after its phase 3. The credit has happened; a listener
+        // cannot take it back, so its failure is reported, not propagated.
+        DB::afterCommit(static function () use ($billable, $type, $quantity, $reason): void {
+            try {
+                event(new WalletCredited($billable, $type, $quantity, $reason ?? 'credit'));
+            } catch (\Throwable $e) {
+                // The reporter can fail too (a log transport, a reportable callback); not
+                // reported again, which could throw once more.
+                rescue(static fn () => report($e), null, false);
+            }
+        });
     }
 
     /**

@@ -2266,8 +2266,24 @@ class InvoiceService
      */
     public function issueInvoiceDocument(BillingInvoice $invoice, Billable $billable): void
     {
-        $this->generateAndStorePdf($invoice, $billable);
+        $this->storeInvoiceDocument($invoice, $billable);
         event(new InvoiceCreated($billable, $invoice));
+    }
+
+    /**
+     * Render and store an invoice's PDF without announcing it — for a caller that
+     * announces the document as a step of its own (`ProrataChargeHandler`).
+     *
+     * Takes the billable the caller already holds. {@see regeneratePdf()} resolves it
+     * through the invoice's relation, under `BillingScope`: in a webhook there is no
+     * tenant context for an app's `applyBillingScope()` to key off, so it finds nothing
+     * and the invoice is left without a document.
+     *
+     * @return bool whether a PDF was stored (failures are logged by generateAndStorePdf())
+     */
+    public function storeInvoiceDocument(BillingInvoice $invoice, Billable $billable): bool
+    {
+        return $this->generateAndStorePdf($invoice, $billable);
     }
 
     /**

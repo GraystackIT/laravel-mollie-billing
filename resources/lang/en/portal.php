@@ -458,6 +458,7 @@ return [
         'scheduled_cancelled' => 'Scheduled change has been cancelled.',
         'plan_change_pending_payment' => 'Your subscription is being updated. We\'ll confirm once the transaction is complete.',
         'pending_change_cancelled' => 'The pending plan change has been cancelled.',
+        'pending_change_already_paid' => 'The payment for this change has already gone through, so it can no longer be cancelled.',
         'plan_change_failed' => 'Your plan upgrade could not be completed because the payment failed. Please try again or update your payment method.',
         'billing_details_saved' => 'Billing details saved.',
         'force_charge_no_longer_needed' => 'Nothing to charge — your subscription is no longer past due. Reload the page to see its current state.',

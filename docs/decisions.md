@@ -62,6 +62,67 @@ when the process dies outright, and a leaked row otherwise answered every later 
 200 — telling Mollie a payment it never processed was handled. A delivery skipped because
 another is genuinely in flight answers **503**, not 200.
 
+### A prorata charge whose run died is resumed, not skipped
+
+`ProrataChargeHandler::paid()` writes the charge invoice first and applies the change
+after it, so the invoice guard alone read a run that died in between (a fatal, PHP's time
+limit — hit in production rendering the e-invoice) as finished: paid for, never applied,
+Mollie left on the old amount. While `pending_prorata_change` still names the payment, a
+re-delivery resumes after the last step recorded in its `progress` (`STEP_*`). The steps
+are recorded because several move money: `createRefund()` has no per-line idempotency,
+the wallet credit and the undercollection settlement none either. The switch writes its
+own step in the same save, together with what the billable looked like before it, so a
+resumed run still announces the change correctly. What decides the run and is gone once
+the change is in force (whether it converts a trial, the stacked coupon codes) is noted
+*before* the invoice, with the period it was decided in. A run that dies *inside* a step
+repeats that step.
+
+Not resumed, on purpose: a run whose period has ended since it died — a renewal of the
+old cadence, or the charge that ends the trial, booked before Mollie re-delivered. The
+finished steps (wallets, refund lines, the trial treated as running) were right for the
+period that ended, and carrying on would book the switch on top of a renewal nobody
+credits. The change stays waiting and the operators get `AdminPlanChangeFailedNotification`
+with the completed steps; reconstructing the money for that case automatically was judged
+not worth the risk for a window of minutes. The same report, at once, for a run whose
+subscription has ended since (refund lines may be out already, so a full refund on top
+would return too much) and for a run that wrote its invoice without recording steps (a
+version before this one — resumed from nothing it would move the money twice). The report
+is noted in the progress (`interrupted_reported_at`): a later delivery and
+`CleanupStalePendingProrataChangeJob` do not alert again, and the job says "booked" rather
+than "no invoice exists" for a payment whose invoice is there.
+
+The clean-up leaves a run that recorded its steps alone for
+`CleanupStalePendingProrataChangeJob::RESUME_WINDOW_HOURS` (48) from the run's start
+(`progress.started_at`), not from the change's `created_at`: with SEPA the change is days
+old when its webhook arrives, and dropping it made Mollie's re-delivery skip the payment.
+The PDF and its `InvoiceCreated` are separate steps, so a run that dies between them still
+announces the invoice; the PDF is rendered with the billable the run holds
+(`InvoiceService::storeInvoiceDocument()`), never re-read through the invoice's relation,
+which applies `BillingScope` and finds nothing without a tenant context. The
+`interrupted_reported_at` note is written only once the report was handed over — submitted
+to the notification channel (queued, where the notification queues), not read; a resolver or
+send that throws leaves it unwritten and the next delivery tries again, and with nobody to
+tell yet nothing is noted. A mail worker that fails later is the queue's to retry.
+
+Where a step moves money, its record is not trusted to follow it: the wallet credits (or the
+rebalance) commit in one transaction with their step, the overage that leaves to charge is
+noted there and charged as the next step, outside it; each refund line gets its token —
+part of its Mollie idempotency key — stored before Mollie is asked, and a line whose token
+is on a credit note or in `pending_refund_retries` is not paid again. The period anchor is
+compared once more right before the switch, so a renewal booked while the run paid out is
+not overwritten (narrowed, not closed: the renewal handler takes no lock to share), and
+before the first step that moves money; the switch also requires the subscription to still
+run. A rebalance that throws is not caught: the transaction takes it back with its record.
+A shortfall `UndercollectionCharge` claimed in this run without an outcome is handed to the
+operators, not asked of Mollie again — its idempotency key is kept for an hour only. Refunds an
+earlier attempt sent without booking an answer are not sent again either: those lines go to
+the operators (`refunds_unknown`). A step whose record is refused because the waiting change
+is gone stops the run. The
+PATCH is not made exactly-once; it sets absolute values derived from the change, so a
+repeat sets the same target. The change events are built from what the switch wrote,
+stored with it.
+`tests/Feature/Webhook/ProrataChargeResumeTest.php` crashes after every step.
+
 ### Activation is two-phase
 
 `FirstPaymentHandler` and `MandateOnlyPaymentHandler` split into a short `openGate()`
