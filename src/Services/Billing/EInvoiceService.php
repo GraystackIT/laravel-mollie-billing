@@ -59,6 +59,9 @@ class EInvoiceService
     /** UN/ECE Rec. 20: "one" (piece / unit). */
     private const UNIT_CODE = 'C62';
 
+    /** Where every built-in provider and validator of the library lives; see {@see withLibrarySettings()}. */
+    private const LIBRARY_NAMESPACE = 'horstoeko\invoicesuite';
+
     public function __construct(
         private readonly VatCalculationService $vat,
     ) {}
@@ -80,7 +83,7 @@ class EInvoiceService
      */
     public function xml(BillingInvoice $invoice, Billable $billable, ?string $profile = null): string
     {
-        return $this->withCurrencyDecimals(
+        return $this->withLibrarySettings(
             $invoice,
             fn (): string => $this->render($invoice, $billable, $profile ?? $this->profile()),
         );
@@ -92,7 +95,7 @@ class EInvoiceService
      */
     public function embedIntoPdf(string $pdf, BillingInvoice $invoice, Billable $billable, ?string $profile = null): string
     {
-        return $this->withCurrencyDecimals($invoice, function () use ($pdf, $invoice, $billable, $profile): string {
+        return $this->withLibrarySettings($invoice, function () use ($pdf, $invoice, $billable, $profile): string {
             $xml = $this->render($invoice, $billable, $profile ?? $this->profile());
 
             return InvoiceSuitePdfDocumentBuilder::createFromDocumentContentAndPdfContent($xml, $pdf)
@@ -110,7 +113,7 @@ class EInvoiceService
      */
     public function schemaErrors(BillingInvoice $invoice, Billable $billable, ?string $profile = null): array
     {
-        return $this->withCurrencyDecimals($invoice, function () use ($invoice, $billable, $profile): array {
+        return $this->withLibrarySettings($invoice, function () use ($invoice, $billable, $profile): array {
             $validator = InvoiceSuiteXsdDocumentValidator::createFromContent(
                 $this->render($invoice, $billable, $profile ?? $this->profile())
             )->validate();
@@ -120,24 +123,42 @@ class EInvoiceService
     }
 
     /**
-     * The amount precision is a global of the library; it is set to the invoice's
-     * currency for the duration of one document and restored, so a JPY invoice cannot
-     * change the next EUR one rendered in the same worker.
+     * The library's settings are globals; the two this document depends on are set for
+     * its duration and restored, so nothing leaks into the next document or into the app.
+     *
+     *  - The amount precision follows the invoice's currency, so a JPY invoice cannot
+     *    change the next EUR one rendered in the same worker.
+     *  - Provider and validator discovery is confined to the library's own namespace.
+     *    Unconfined, it loads *every* class in Composer's class map to ask
+     *    `is_subclass_of()` — with an optimised autoloader that is all of `vendor/`. It
+     *    took longer than PHP's 30-second limit on the first invoice of an app, and
+     *    it can die outright on a class that cannot be loaded (Mockery's PHPUnit
+     *    listener in a dev install). In the webhook that fatal came after the invoice
+     *    had been written and before the paid plan change was applied. Every built-in
+     *    provider and validator lives under `horstoeko\invoicesuite`; an app that
+     *    registers providers of its own sets its namespaces and those are kept.
      *
      * @template T
      *
      * @param  \Closure(): T  $callback
      * @return T
      */
-    private function withCurrencyDecimals(BillingInvoice $invoice, \Closure $callback): mixed
+    private function withLibrarySettings(BillingInvoice $invoice, \Closure $callback): mixed
     {
-        $previous = InvoiceSuiteSettings::getAmountDecimals();
+        $previousDecimals = InvoiceSuiteSettings::getAmountDecimals();
+        $previousNamespaces = InvoiceSuiteSettings::getDiscoveryNamespaces();
+
         InvoiceSuiteSettings::setAmountDecimals(BillingMoney::fractionDigits($invoice->currency));
+
+        if ($previousNamespaces === []) {
+            InvoiceSuiteSettings::setDiscoveryNamespaces([self::LIBRARY_NAMESPACE]);
+        }
 
         try {
             return $callback();
         } finally {
-            InvoiceSuiteSettings::setAmountDecimals($previous);
+            InvoiceSuiteSettings::setAmountDecimals($previousDecimals);
+            InvoiceSuiteSettings::setDiscoveryNamespaces($previousNamespaces);
         }
     }
 

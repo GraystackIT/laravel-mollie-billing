@@ -6,6 +6,7 @@ namespace GraystackIT\MollieBilling\Jobs;
 
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Jobs\Concerns\UsesBillingQueue;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
@@ -69,6 +70,13 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
      * immediately, regardless of age.
      */
     private const HARD_LIMIT_DAYS = 7;
+
+    /**
+     * How long a paid charge whose webhook run died part-way is left for Mollie's
+     * re-delivery to resume, counted from the run's start. Mollie retries a failed webhook
+     * for about a day; past this the run is reported and the change dropped.
+     */
+    public const RESUME_WINDOW_HOURS = 48;
 
     /** Past one nightly retry of a scheduled change, with a day to spare. */
     public const CHARGE_IN_CREATION_LIMIT_HOURS = 48;
@@ -281,11 +289,7 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             // Only give up once Mollie has been unreachable past the hard limit — that
             // is the case this limit exists for.
             if ($pastHardLimit) {
-                $this->mutateBillingMeta($billable, function (array $current): array {
-                    unset($current['pending_prorata_change']);
-
-                    return $current;
-                });
+                $this->mutateBillingMeta($billable, fn (array $current): array => self::withoutPendingChange($current, $paymentId));
 
                 $this->notifyAdmins(
                     'pending_prorata_change was dropped after '.self::HARD_LIMIT_DAYS.' days because Mollie stayed unreachable — the payment outcome is unknown and needs checking in the Mollie dashboard',
@@ -305,16 +309,53 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             // unblock the customer's future plan changes and the payment is recorded as
             // an orphan for manual reconciliation — the same marker
             // ProrataChargeHandler uses for a payment that outlived its plan change.
+            //
+            // Or the webhook did arrive and its run died part-way, and the run could not be
+            // resumed (ProrataChargeHandler::reportInterruptedRun()). Then the payment is
+            // booked — the invoice exists — and the operators have already been told; the
+            // alert said "no invoice exists" and came a second time.
+            $invoiced = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->exists();
+            $progress = is_array($pending['progress'] ?? null) ? $pending['progress'] : [];
+            $alreadyReported = ! empty($progress['interrupted_reported_at']);
+
+            // A run that died part-way and recorded its steps is resumed by the next delivery
+            // of the payment — and Mollie keeps re-delivering a webhook that failed for about
+            // a day. `created_at` is no measure of that: with SEPA the change is days old when
+            // its webhook first arrives. Dropping the change here made that re-delivery skip
+            // the payment, and the paid change was lost after all. Left alone while the run
+            // is young; past the window nobody is going to resume it.
+            if ($invoiced && ! $alreadyReported && array_key_exists('anchor', $progress)) {
+                $startedAt = isset($progress['started_at']) && is_string($progress['started_at'])
+                    ? \Carbon\Carbon::parse($progress['started_at'])->setTimezone('UTC')
+                    : null;
+
+                if ($startedAt !== null && $startedAt->greaterThan(BillingTime::nowUtc()->subHours(self::RESUME_WINDOW_HOURS))) {
+                    Log::info('CleanupStalePendingProrataChangeJob: paid prorata charge whose run is waiting to be resumed — left for the webhook', [
+                        'billable_id' => $billable->getKey(),
+                        'payment_id' => $paymentId,
+                        'run_started_at' => $startedAt->toIso8601String(),
+                        'completed_steps' => array_values((array) ($progress['done'] ?? [])),
+                    ]);
+
+                    return;
+                }
+            }
+
             $orphan = [
                 'payment_id' => $paymentId,
-                'reason' => 'charge paid but its webhook never arrived',
+                'reason' => $invoiced
+                    ? 'charge paid and booked, but its plan change was never completed'
+                    : 'charge paid but its webhook never arrived',
                 'cancelled_at' => BillingTime::nowUtc()->toIso8601String(),
-                'pending_plan_change' => $meta['pending_plan_change'] ?? null,
+                // A run that got past the switch has removed the top-level key; it noted the
+                // change in its progress before the invoice.
+                'pending_plan_change' => $meta['pending_plan_change']
+                    ?? (is_array($progress['pending_plan_change'] ?? null) ? $progress['pending_plan_change'] : null),
                 'prorata_charge_lines' => $pending['charge_lines'] ?? null,
             ];
 
-            $this->mutateBillingMeta($billable, function (array $current) use ($orphan): array {
-                unset($current['pending_prorata_change']);
+            $this->mutateBillingMeta($billable, function (array $current) use ($orphan, $paymentId): array {
+                $current = self::withoutPendingChange($current, $paymentId);
                 $current['orphaned_prorata_payment'] = $orphan;
 
                 return $current;
@@ -322,16 +363,27 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
 
             $meta['orphaned_prorata_payment'] = $orphan;
 
-            Log::error('CleanupStalePendingProrataChangeJob: prorata charge was paid but no webhook ever arrived', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $paymentId,
-            ]);
+            Log::error($invoiced
+                ? 'CleanupStalePendingProrataChangeJob: prorata charge was paid and booked, but its plan change was never completed'
+                : 'CleanupStalePendingProrataChangeJob: prorata charge was paid but no webhook ever arrived', [
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $paymentId,
+                    'already_reported' => $alreadyReported,
+                ]);
+
+            if ($alreadyReported) {
+                return;
+            }
 
             $this->notifyAdmins(
-                'A prorata charge was paid but its webhook never arrived, so the plan change was never applied and no invoice exists — reconcile this payment manually',
+                $invoiced
+                    ? 'A prorata charge was paid and booked (its invoice exists), but the plan change was never completed — check the completed steps, then finish the change or refund the payment manually'
+                    : 'A prorata charge was paid but its webhook never arrived, so the plan change was never applied and no invoice exists — reconcile this payment manually',
                 [
                     'payment_id' => $paymentId,
                     'billable_id' => $billable->getKey(),
+                    'invoice_exists' => $invoiced,
+                    'completed_steps' => array_values((array) ($progress['done'] ?? [])),
                     'intended_plan_change' => $meta['orphaned_prorata_payment']['pending_plan_change'],
                     'charge_lines' => $meta['orphaned_prorata_payment']['prorata_charge_lines'],
                 ],
@@ -386,6 +438,29 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 'created_at' => $createdAt->toIso8601String(),
             ]);
         }
+    }
+
+    /**
+     * Drop the waiting change. All of it: `pending_plan_change` and
+     * `prorata_pending_payment_id` alone keep ValidateSubscriptionChange refusing every
+     * further change, and the portal announcing one that waits for a payment. Dropping
+     * only `pending_prorata_change` left the customer blocked for good — the opposite of
+     * what this job is for. The two are left alone when they name another payment.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    private static function withoutPendingChange(array $meta, string $paymentId): array
+    {
+        unset($meta['pending_prorata_change']);
+
+        $marker = (string) ($meta['prorata_pending_payment_id'] ?? '');
+
+        if ($marker === '' || $marker === $paymentId) {
+            unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
+        }
+
+        return $meta;
     }
 
     /**

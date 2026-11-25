@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Services\Billing\AdminExtensionService;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PlanWaiver;
+use GraystackIT\MollieBilling\Support\BillingAnchor;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Testing\TestBillable;
@@ -101,7 +102,11 @@ function waiverCyclePaying(int $daysIntoPeriod, array $addons = [], string $inte
     return $billable->fresh();
 }
 
-it('defers a plan-only subscription by whole periods, whenever in the period the gift is made', function (int $daysIntoPeriod, int $periods): void {
+it('defers a plan-only subscription by whole periods, whenever in the period the gift is made', function (int $daysIntoPeriod, int $periods, ?string $today = null): void {
+    if ($today !== null) {
+        $this->travelTo(Carbon::parse($today, 'UTC'));
+    }
+
     $billable = waiverCyclePaying($daysIntoPeriod);
     $nextRegularCharge = Carbon::instance($billable->nextBillingDate());
 
@@ -109,11 +114,14 @@ it('defers a plan-only subscription by whole periods, whenever in the period the
 
     $billable->refresh();
 
-    // N charges are skipped: the first one collected is the regular one N periods on.
-    $expected = $nextRegularCharge->copy();
-    for ($i = 0; $i < $periods; $i++) {
-        $expected = Carbon::instance(BillingTime::addInterval($expected, 'monthly'));
-    }
+    // N charges are skipped: the first one collected is the regular one N periods on —
+    // on the billing day, limited to the length of the month (docs/decisions.md, "A
+    // recurring code's window counts billing periods"). Stepping month by month from the
+    // next charge instead drifts: from a 31 October start that is 30 November, then
+    // 30 December, where the billing day says 31 December. The expectation used to be
+    // built that way and failed on every day whose period began on the 31st.
+    $billingDay = Carbon::instance($billable->getBillingPeriodStartsAt())->day;
+    $expected = BillingAnchor::advance($nextRegularCharge, 'monthly', $periods, $billingDay);
 
     $patch = WaiverCycleMollieLog::lastPatch();
 
@@ -126,6 +134,9 @@ it('defers a plan-only subscription by whole periods, whenever in the period the
     'day 10, one period' => [10, 1],
     'day 25, one period' => [25, 1],
     'day 10, three periods' => [10, 3],
+    // Pinned: the period begins on 31 October, so the cycle runs through short months.
+    'billing day 31, one period' => [25, 1, '2026-11-25 12:00:00'],
+    'billing day 31, three periods' => [25, 3, '2026-11-25 12:00:00'],
 ]);
 
 it('keeps a waiver alive across exactly N renewals when extras are billed', function (int $daysIntoPeriod): void {

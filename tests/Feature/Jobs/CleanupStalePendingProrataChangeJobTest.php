@@ -79,14 +79,71 @@ it('records an orphan and alerts when the charge was paid but no webhook arrived
 
     $meta = $b->fresh()->getBillingSubscriptionMeta();
 
-    // Pending cleared so the customer can change plan again…
+    // Pending cleared so the customer can change plan again — all of it: the validator
+    // refuses a change while `pending_plan_change` is there, and so does the portal.
     expect($meta['pending_prorata_change'] ?? null)->toBeNull()
+        ->and($meta['pending_plan_change'] ?? null)->toBeNull()
+        ->and($meta['prorata_pending_payment_id'] ?? null)->toBeNull()
         // …and the money is on record instead of vanishing.
         ->and($meta['orphaned_prorata_payment']['payment_id'] ?? null)->toBe('tr_stale')
         ->and($meta['orphaned_prorata_payment']['prorata_charge_lines'] ?? null)->not->toBeNull();
 
-    Notification::assertSentTo(staleProrataAdmin(), AdminPlanChangeFailedNotification::class);
+    Notification::assertSentTo(
+        staleProrataAdmin(),
+        AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => str_contains($n->reason, 'no invoice exists'),
+    );
 });
+
+it('says the payment is booked when its invoice exists, and stays quiet when the webhook already told the operators', function (bool $reported): void {
+    // A webhook run that died part-way and could not be resumed: the invoice is there,
+    // the change is not. The alert used to claim "no invoice exists", and came on top of
+    // the one ProrataChargeHandler::reportInterruptedRun() had already sent.
+    Notification::fake();
+
+    Mollie::shouldReceive('send')
+        ->withArgs(fn ($req) => $req instanceof GetPaymentRequest)
+        ->andReturn((object) ['status' => 'paid', 'id' => 'tr_stale']);
+
+    $b = staleProrataBillable(2, $reported
+        ? ['progress' => ['done' => ['invoiced', 'document'], 'interrupted_reported_at' => '2026-01-01T00:00:00+00:00']]
+        : ['progress' => ['done' => ['invoiced', 'document']]]);
+
+    \GraystackIT\MollieBilling\Models\BillingInvoice::query()->forceCreate([
+        'billable_type' => $b->getMorphClass(),
+        'billable_id' => $b->getKey(),
+        'mollie_payment_id' => 'tr_stale',
+        'invoice_kind' => \GraystackIT\MollieBilling\Enums\InvoiceKind::Subscription,
+        'status' => \GraystackIT\MollieBilling\Enums\InvoiceStatus::Paid,
+        'country' => 'AT',
+        'currency' => 'EUR',
+        'amount_net' => 1000,
+        'amount_vat' => 200,
+        'amount_gross' => 1200,
+        'line_items' => [],
+        'refunded_net' => 0,
+        'serial_number' => 'IN-STALE-1',
+    ]);
+
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    $meta = $b->fresh()->getBillingSubscriptionMeta();
+
+    expect($meta['pending_prorata_change'] ?? null)->toBeNull()
+        ->and($meta['pending_plan_change'] ?? null)->toBeNull()
+        ->and($meta['orphaned_prorata_payment']['reason'] ?? null)->toBe('charge paid and booked, but its plan change was never completed');
+
+    if ($reported) {
+        Notification::assertNothingSent();
+    } else {
+        Notification::assertSentTo(
+            staleProrataAdmin(),
+            AdminPlanChangeFailedNotification::class,
+            fn (AdminPlanChangeFailedNotification $n): bool => str_contains($n->reason, 'its invoice exists')
+                && $n->context['completed_steps'] === ['invoiced', 'document'],
+        );
+    }
+})->with(['webhook already told them' => [true], 'nobody told them yet' => [false]]);
 
 it('acts on a paid charge regardless of how young the entry is', function (): void {
     Notification::fake();

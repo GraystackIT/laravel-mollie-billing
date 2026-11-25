@@ -458,6 +458,7 @@ return [
         'scheduled_cancelled' => 'Geplante Änderung wurde abgebrochen.',
         'plan_change_pending_payment' => 'Dein Abonnement wird aktualisiert. Wir bestätigen, sobald die Transaktion abgeschlossen ist.',
         'pending_change_cancelled' => 'Die ausstehende Planänderung wurde abgebrochen.',
+        'pending_change_already_paid' => 'Die Zahlung für diese Änderung ist bereits eingegangen – sie kann nicht mehr abgebrochen werden.',
         'plan_change_failed' => 'Dein Plan-Upgrade konnte nicht durchgeführt werden, da die Zahlung fehlgeschlagen ist. Bitte versuche es erneut oder aktualisiere deine Zahlungsmethode.',
         'billing_details_saved' => 'Rechnungsdaten gespeichert.',
         'force_charge_no_longer_needed' => 'Es ist nichts einzuziehen — Ihr Abo ist nicht mehr überfällig. Laden Sie die Seite neu, um den aktuellen Stand zu sehen.',

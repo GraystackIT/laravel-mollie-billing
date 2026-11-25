@@ -26,6 +26,8 @@ $fKeep = $actions.'action plan-change@toggleKeepExtraSeats';
 $fScheduled = $actions.'actions plan-change@applyChange (end of period), @cancelScheduledChange, @applyScheduledNow';
 $fMode = $actions.'enum PlanChangeMode / config plan_change_mode';
 $fPending = $actions.'action plan-change@cancelPendingChange';
+$fPendingPaid = $actions.'action plan-change@cancelPendingChange: a change whose payment has already settled';
+$fPendingOutcome = $actions.'UpdateSubscription::tryCancelPendingPlanChange';
 $fPlanCoupons = $actions.'actions plan-change@applyCoupon, @removeCoupon, @canAddMoreCoupons';
 $fAddress = $actions.'actions plan-change@openEditBillingModal, @saveBillingDetails';
 $fLocal = $actions.'actions plan-change@applyChange, @backToPlanSelection, @confirmAndPay';
@@ -96,6 +98,10 @@ return [
         'browser' => [$bScheduled],
     ],
     'action:plan-change@cancelPendingChange' => ['feature' => [$fPending], 'browser' => [$screens.'test_a_payment_for_a_withdrawn_change_is_returned_in_full_and_both_documents_are_listed']],
+    // The screen tells these apart only by its toast, which no browser test reads yet.
+    'enum:PendingChangeCancelOutcome.Cancelled' => ['feature' => [$fPendingOutcome], 'no_browser' => 'only the toast differs from Cleared'],
+    'enum:PendingChangeCancelOutcome.Cleared' => ['feature' => [$fPendingOutcome, $fPending], 'no_browser' => 'only the toast differs from Cancelled'],
+    'enum:PendingChangeCancelOutcome.AlreadyPaid' => ['feature' => [$fPendingPaid], 'no_browser' => 'needs a prorata charge that settles before the click; the screen shows only a toast'],
     'action:plan-change@applyCoupon' => ['feature' => [$fPlanCoupons], 'browser' => [$bForm]],
     'action:plan-change@removeCoupon' => ['feature' => [$fPlanCoupons], 'browser' => [$bForm]],
     'action:plan-change@canAddMoreCoupons' => ['feature' => [$fPlanCoupons], 'browser' => [$bForm]],

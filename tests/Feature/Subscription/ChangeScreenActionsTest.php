@@ -5,12 +5,14 @@ declare(strict_types=1);
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\DiscountType;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
+use GraystackIT\MollieBilling\Enums\PendingChangeCancelOutcome;
 use GraystackIT\MollieBilling\Enums\PlanChangeMode;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Facades\MollieBilling;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
+use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use GraystackIT\MollieBilling\Tests\Support\ChangeMatrixWorld as World;
@@ -403,6 +405,39 @@ it('action plan-change@cancelPendingChange: a change still waiting for its payme
         ->and($billable->getBillingSubscriptionPlanCode())->toBe('pro')
         ->and(World::heldGross())->toBe(6000);
 });
+
+it('action plan-change@cancelPendingChange: a change whose payment has already settled is not reported as cancelled', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+
+    $plan = changeScreen('plan-change', $billable);
+    $plan->call('previewFor', 'enterprise')->call('applyChange', 'immediate')->call('$refresh');
+    $paymentId = (string) $billable->refresh()->getBillingSubscriptionMeta()['prorata_pending_payment_id'];
+    World::$paymentStatus[$paymentId] = 'paid';
+
+    expect(app(UpdateSubscription::class)->tryCancelPendingPlanChange($billable))
+        ->toBe(PendingChangeCancelOutcome::AlreadyPaid);
+
+    $plan->call('cancelPendingChange');
+
+    // The change stays for its webhook to apply, and the screen keeps saying so. (Which
+    // toast it shows is not visible here — the feature suite runs without Flux.)
+    expect($billable->refresh()->getBillingSubscriptionMeta()['pending_plan_change']['plan_code'] ?? null)->toBe('enterprise');
+    $plan->assertSee(__('billing::portal.pending_plan_change_notice', ['plan' => 'Enterprise']))
+        ->assertSet('wasPending', true);
+});
+
+it('UpdateSubscription::tryCancelPendingPlanChange: names the outcome the bool of cancelPendingPlanChange folds together', function (bool $cancelable, PendingChangeCancelOutcome $outcome): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    $paymentId = (string) $billable->refresh()->getBillingSubscriptionMeta()['prorata_pending_payment_id'];
+    World::$cancelable[$paymentId] = $cancelable;
+
+    expect(app(UpdateSubscription::class)->tryCancelPendingPlanChange($billable))->toBe($outcome)
+        ->and($billable->refresh()->getBillingSubscriptionMeta()['pending_plan_change'] ?? null)->toBeNull();
+})->with([
+    'cancelled at Mollie' => [true, PendingChangeCancelOutcome::Cancelled],
+    'not cancelable, recorded as orphaned' => [false, PendingChangeCancelOutcome::Cleared],
+]);
 
 it('actions plan-change@applyCoupon, @removeCoupon, @canAddMoreCoupons: a code entered with the change lowers the charge and the renewals', function (): void {
     changeScreenCoupon('PLAN20');

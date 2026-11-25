@@ -425,12 +425,28 @@ new class extends Component {
         abort_unless(MollieBilling::authorizes(request(), $billable), 403);
 
         try {
-            $service->cancelPendingPlanChange($billable);
-            $this->toast(__('billing::portal.flash.pending_change_cancelled'), 'success');
+            $outcome = $service->tryCancelPendingPlanChange($billable);
         } catch (\Throwable $e) {
             report($e);
             $this->toast(__('billing::portal.flash.error'), 'danger');
+
+            return;
         }
+
+        if (! $outcome->withdrawn()) {
+            // The payment has already been collected: the change stays. Usually its webhook
+            // applies it, but not always (a run that could not be resumed is with the
+            // operators), so the message promises nothing about when. Confirming the
+            // cancel here left the notice standing under a success toast.
+            $this->toast(__('billing::portal.flash.pending_change_already_paid'), 'warning');
+
+            return;
+        }
+
+        // Withdrawn, not applied: without this, with() sees pending → resolved and adds a
+        // "plan changed" toast for the change that was just called off.
+        $this->wasPending = false;
+        $this->toast(__('billing::portal.flash.pending_change_cancelled'), 'success');
     }
 
     /**

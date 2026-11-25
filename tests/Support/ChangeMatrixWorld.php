@@ -601,7 +601,7 @@ final class ChangeMatrixWorld
     }
 
     /** Settle the prorata payment that is pending on the billable, through the webhook. */
-    public static function settle(TestBillable $billable, string $status = 'paid'): ?string
+    public static function settle(TestBillable $billable, string $status = 'paid', int $expectHttp = 200): ?string
     {
         $pending = $billable->refresh()->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null;
 
@@ -612,7 +612,7 @@ final class ChangeMatrixWorld
         $paymentId = (string) $pending['charge_payment_id'];
         $value = (string) (self::$payments[$paymentId]['value'] ?? '0.00');
 
-        self::deliver($billable, $paymentId, $status, $value, self::$payments[$paymentId]['metadata'] ?? ['type' => 'prorata_charge']);
+        self::deliver($billable, $paymentId, $status, $value, self::$payments[$paymentId]['metadata'] ?? ['type' => 'prorata_charge'], expectHttp: $expectHttp);
         $billable->refresh();
 
         return $value;
@@ -639,7 +639,7 @@ final class ChangeMatrixWorld
     // ── Things that happen ──────────────────────────────────────────────────
 
     /** Deliver a payment to the real webhook route. */
-    public static function deliver(TestBillable $billable, string $paymentId, string $status, string $value, array $metadata, ?string $paidAt = null, bool $recurring = false): void
+    public static function deliver(TestBillable $billable, string $paymentId, string $status, string $value, array $metadata, ?string $paidAt = null, bool $recurring = false, int $expectHttp = 200): void
     {
         ChangeMatrixWebhookController::$nextPayment = new ChangeMatrixPayment([
             'id' => $paymentId,
@@ -655,7 +655,7 @@ final class ChangeMatrixWorld
             ],
         ]);
 
-        test()->postJson(route('billing.webhook'), ['id' => $paymentId])->assertStatus(200);
+        test()->postJson(route('billing.webhook'), ['id' => $paymentId])->assertStatus($expectHttp);
     }
 
     /**
