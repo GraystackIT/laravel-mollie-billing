@@ -37,6 +37,9 @@ final class CrashingProrataChargeHandler extends ProrataChargeHandler
     /** Dies with the step done but not yet recorded. */
     public static ?string $crashBefore = null;
 
+    /** @var array<string, \Closure> Something that happens from outside right after a step is recorded. */
+    public static array $afterStep = [];
+
     protected function markStep(Billable $billable, string $paymentId, array &$done, string $step, array $extra = []): void
     {
         if ($step === self::$crashBefore) {
@@ -46,6 +49,12 @@ final class CrashingProrataChargeHandler extends ProrataChargeHandler
         }
 
         parent::markStep($billable, $paymentId, $done, $step, $extra);
+
+        if (isset(self::$afterStep[$step])) {
+            $hook = self::$afterStep[$step];
+            unset(self::$afterStep[$step]);
+            $hook($billable);
+        }
 
         if ($step === self::$crashAfter) {
             self::$crashAfter = null;
@@ -75,6 +84,7 @@ beforeEach(function (): void {
     World::boot();
     CrashingProrataChargeHandler::$crashAfter = null;
     CrashingProrataChargeHandler::$crashBefore = null;
+    CrashingProrataChargeHandler::$afterStep = [];
     CrashingUndercollectionCharge::$armed = false;
     $this->app->bind(ProrataChargeHandler::class, CrashingProrataChargeHandler::class);
 
@@ -88,6 +98,14 @@ beforeEach(function (): void {
 /** Arrange for the run to die once, right after `$step` (or, for 'switched', between the switch and its events). */
 function crashOnceAfter(string $step): void
 {
+    if ($step === 'wallet') {
+        // Recorded inside the transaction that credits the wallets; "died after it" is
+        // a death after that commit, i.e. before the next step is recorded.
+        CrashingProrataChargeHandler::$crashBefore = 'wallet_overage';
+
+        return;
+    }
+
     if ($step !== 'switched') {
         CrashingProrataChargeHandler::$crashAfter = $step === 'none' ? null : $step;
 
@@ -143,7 +161,7 @@ function resumeOutcome(TestBillable $billable): array
     ];
 }
 
-$steps = ['none', 'invoiced', 'document', 'document_announced', 'announced', 'wallet', 'spanned_renewal', 'refunds', 'switched', 'events', 'coupons', 'patched'];
+$steps = ['none', 'invoiced', 'document', 'document_announced', 'announced', 'wallet', 'wallet_overage', 'spanned_renewal', 'refunds', 'switched', 'events', 'coupons', 'patched'];
 
 it('finishes an upgrade whose run died, exactly as an uninterrupted run would', function (string $step): void {
     $billable = World::subscription('none', 'pro', 2);
@@ -198,7 +216,7 @@ it('finishes a trial conversion whose run died, crediting the new period once', 
             'PlanChanged' => 1,
             'SubscriptionUpdated' => 1,
         ]);
-})->with($steps);
+})->with([...$steps, 'trial_overage']);
 
 it('still swallows a re-delivery once the run has finished', function (): void {
     $billable = World::subscription('none', 'pro', 2);
@@ -404,7 +422,7 @@ it('tells the operators at once when the subscription ended before a run could b
     Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
     Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
         fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'subscription_ended'
-            && $n->context['completed_steps'] === ['invoiced', 'document', 'document_announced', 'announced', 'wallet', 'spanned_renewal', 'refunds']);
+            && $n->context['completed_steps'] === ['invoiced', 'document', 'document_announced', 'announced', 'wallet', 'wallet_overage', 'spanned_renewal', 'refunds']);
 });
 
 it('keeps trying to tell the operators until it has — the note follows the send', function (): void {
@@ -466,3 +484,116 @@ it('stores the charge invoice\'s PDF for a billable the app scopes by tenant', f
     expect(resumeOutcome($billable)['plan'])->toBe('enterprise')
         ->and(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeTrue();
 })->with(['uninterrupted' => ['none'], 'died before the document' => ['invoiced']]);
+
+it('credits a converted trial\'s quota once when the run dies inside the wallet step', function (): void {
+    // The credit and the record of it commit together. A run that dies before the commit
+    // leaves neither; the next delivery credits once — a rollover wallet adds to its
+    // balance, so a credit kept without its record was paid twice.
+    config()->set('mollie-billing-plans.plans.pro.intervals.monthly.included_usages', ['tokens' => 100]);
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+    config()->set('mollie-billing-plans.usage_types', ['tokens' => ['rollover' => true]]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+    $before = $billable->refresh()->remainingBillingQuota('tokens');
+
+    // Credited, not yet recorded.
+    CrashingProrataChargeHandler::$crashBefore = 'wallet';
+    World::settle($billable, expectHttp: 500);
+    expect($billable->refresh()->remainingBillingQuota('tokens'))->toBe($before);
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['interval'])->toBe('yearly')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and($billable->refresh()->remainingBillingQuota('tokens'))->toBe(1000);
+});
+
+it('does not pay a refund line again when the run died after paying it and before recording it', function (): void {
+    // The line's token is stored before Mollie is asked and found on the credit note
+    // afterwards; a fresh token on the re-delivery was a second payout.
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'refunds';
+    World::settle($billable, expectHttp: 500);
+    expect(World::$refunds)->toBe(['tr_cm_renewal_2' => World::$refunds['tr_cm_renewal_2']])
+        ->and(count(World::$refunds['tr_cm_renewal_2']))->toBe(1);
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toMatchArray([
+        'plan' => 'enterprise',
+        'waiting' => [],
+        'invoices' => [['subscription', 6000], ['subscription', 16258], ['refund', -4064]],
+        'refunds' => ['tr_cm_renewal_2' => ['40.64']],
+    ]);
+});
+
+it('does not switch over a renewal booked while the run was paying out', function (): void {
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['refunds'] = function (TestBillable $b): void {
+        $b->newQuery()->whereKey($b->getKey())->update(['subscription_period_starts_at' => now('UTC')->addDay()]);
+    };
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro')
+        ->and(resumeOutcome($billable)['waiting'])->toContain('pending_prorata_change');
+    Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'renewal_booked');
+});
+
+it('announces the change from what the switch made of it, not from a row emptied since', function (): void {
+    $billable = World::subscription('none', 'pro', 2, addons: ['storage']);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    crashOnceAfter('switched');
+    World::settle($billable, expectHttp: 500);
+    $this->events = [];
+
+    // The expiry pass empties the plan-scoped fields before the re-delivery.
+    $billable->forceFill(['active_addon_codes' => []])->save();
+    World::settle($billable);
+
+    expect($this->events['AddonDisabled'] ?? 0)->toBe(0)
+        ->and($this->events['PlanChanged'] ?? 0)->toBe(1);
+});
+
+/** Fails to render the first document it is asked for. */
+final class FlakyDocumentInvoiceService extends \GraystackIT\MollieBilling\Services\Billing\InvoiceService
+{
+    public static bool $fail = true;
+
+    public function storeInvoiceDocument(\GraystackIT\MollieBilling\Models\BillingInvoice $invoice, Billable $billable): bool
+    {
+        if (self::$fail) {
+            self::$fail = false;
+
+            return false;
+        }
+
+        return parent::storeInvoiceDocument($invoice, $billable);
+    }
+}
+
+it('renders the document again on the next delivery when the first render failed', function (): void {
+    FlakyDocumentInvoiceService::$fail = true;
+    $this->app->bind(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class, FlakyDocumentInvoiceService::class);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+    [$paymentId] = pendingCharge($billable);
+
+    // The render fails, the run goes on and then dies before it is through.
+    CrashingProrataChargeHandler::$crashAfter = 'announced';
+    World::settle($billable, expectHttp: 500);
+    expect(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeFalse();
+
+    World::settle($billable);
+
+    expect(BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()?->hasPdf())->toBeTrue()
+        ->and(resumeOutcome($billable)['plan'])->toBe('enterprise');
+});

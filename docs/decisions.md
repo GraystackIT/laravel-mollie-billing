@@ -101,6 +101,15 @@ announces the invoice; the PDF is rendered with the billable the run holds
 which applies `BillingScope` and finds nothing without a tenant context. The
 `interrupted_reported_at` note is written only after the operators were sent the report — a
 send that throws leaves it unwritten, and the next delivery tries again.
+
+Where a step moves money, its record is not trusted to follow it: the wallet credits (or the
+rebalance) commit in one transaction with their step, the overage that leaves to charge is
+noted there and charged as the next step, outside it; each refund line gets its token —
+part of its Mollie idempotency key — stored before Mollie is asked, and a line whose token
+is on a credit note or in `pending_refund_retries` is not paid again. The period anchor is
+compared once more right before the switch, so a renewal booked while the run paid out is
+not overwritten (narrowed, not closed: the renewal handler takes no lock to share). The
+change events are built from what the switch wrote, stored with it.
 `tests/Feature/Webhook/ProrataChargeResumeTest.php` crashes after every step.
 
 ### Activation is two-phase

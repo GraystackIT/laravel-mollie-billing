@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use Illuminate\Bus\Queueable;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -289,7 +290,26 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             // Only give up once Mollie has been unreachable past the hard limit — that
             // is the case this limit exists for.
             if ($pastHardLimit) {
-                $this->mutateBillingMeta($billable, fn (array $current): array => self::withoutPendingChange($current, $paymentId));
+                // Whether Mollie answers right now must not decide what the paid branch
+                // below decides differently: a run the webhook may still finish is left to it.
+                if ($this->leftForWebhookRun($billable, $paymentId, $pending)) {
+                    return;
+                }
+
+                $dropped = false;
+                $this->mutateBillingMeta($billable, function (array $current) use ($paymentId, &$dropped): ?array {
+                    if (self::runMayStillFinish($current['pending_prorata_change'] ?? null, $paymentId)) {
+                        return null;
+                    }
+
+                    $dropped = true;
+
+                    return self::withoutPendingChange($current, $paymentId, 'Payment outcome unknown — Mollie unreachable');
+                });
+
+                if (! $dropped) {
+                    return;
+                }
 
                 $this->notifyAdmins(
                     'pending_prorata_change was dropped after '.self::HARD_LIMIT_DAYS.' days because Mollie stayed unreachable — the payment outcome is unknown and needs checking in the Mollie dashboard',
@@ -318,27 +338,8 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
             $progress = is_array($pending['progress'] ?? null) ? $pending['progress'] : [];
             $alreadyReported = ! empty($progress['interrupted_reported_at']);
 
-            // A run that died part-way and recorded its steps is resumed by the next delivery
-            // of the payment — and Mollie keeps re-delivering a webhook that failed for about
-            // a day. `created_at` is no measure of that: with SEPA the change is days old when
-            // its webhook first arrives. Dropping the change here made that re-delivery skip
-            // the payment, and the paid change was lost after all. Left alone while the run
-            // is young; past the window nobody is going to resume it.
-            if ($invoiced && ! $alreadyReported && array_key_exists('anchor', $progress)) {
-                $startedAt = isset($progress['started_at']) && is_string($progress['started_at'])
-                    ? \Carbon\Carbon::parse($progress['started_at'])->setTimezone('UTC')
-                    : null;
-
-                if ($startedAt !== null && $startedAt->greaterThan(BillingTime::nowUtc()->subHours(self::RESUME_WINDOW_HOURS))) {
-                    Log::info('CleanupStalePendingProrataChangeJob: paid prorata charge whose run is waiting to be resumed — left for the webhook', [
-                        'billable_id' => $billable->getKey(),
-                        'payment_id' => $paymentId,
-                        'run_started_at' => $startedAt->toIso8601String(),
-                        'completed_steps' => array_values((array) ($progress['done'] ?? [])),
-                    ]);
-
-                    return;
-                }
+            if ($this->leftForWebhookRun($billable, $paymentId, $pending)) {
+                return;
             }
 
             $orphan = [
@@ -354,12 +355,24 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
                 'prorata_charge_lines' => $pending['charge_lines'] ?? null,
             ];
 
-            $this->mutateBillingMeta($billable, function (array $current) use ($orphan, $paymentId): array {
-                $current = self::withoutPendingChange($current, $paymentId);
+            // Asked again under the row lock: a webhook run that started after this job read
+            // the meta — its context is written before its invoice — must not lose its change.
+            $dropped = false;
+            $this->mutateBillingMeta($billable, function (array $current) use ($orphan, $paymentId, &$dropped): ?array {
+                if (self::runMayStillFinish($current['pending_prorata_change'] ?? null, $paymentId)) {
+                    return null;
+                }
+
+                $dropped = true;
+                $current = self::withoutPendingChange($current, $paymentId, 'Payment received, change not completed');
                 $current['orphaned_prorata_payment'] = $orphan;
 
                 return $current;
             });
+
+            if (! $dropped) {
+                return;
+            }
 
             $meta['orphaned_prorata_payment'] = $orphan;
 
@@ -450,17 +463,81 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
      * @param  array<string, mixed>  $meta
      * @return array<string, mixed>
      */
-    private static function withoutPendingChange(array $meta, string $paymentId): array
+    private static function withoutPendingChange(array $meta, string $paymentId, string $failedReason): array
     {
-        unset($meta['pending_prorata_change']);
+        // Only this payment's: a change withdrawn while this job ran may have made room for
+        // another one, and that one's markers name its own payment.
+        $owner = (string) ($meta['pending_prorata_change']['charge_payment_id'] ?? '');
+
+        if ($owner === '' || $owner === $paymentId) {
+            unset($meta['pending_prorata_change']);
+        }
 
         $marker = (string) ($meta['prorata_pending_payment_id'] ?? '');
 
-        if ($marker === '' || $marker === $paymentId) {
+        if (($marker === '' || $marker === $paymentId) && isset($meta['pending_plan_change'])) {
             unset($meta['pending_plan_change'], $meta['prorata_pending_payment_id']);
+
+            // A plan change that never switched is a failed one to the plan page, which
+            // otherwise reads "pending → gone" as the webhook having applied it and
+            // congratulates the customer on a change they did not get.
+            $meta['plan_change_failed_at'] = BillingTime::nowUtc()->toIso8601String();
+            $meta['plan_change_failed_reason'] = $failedReason;
+        } elseif ($marker === '' || $marker === $paymentId) {
+            unset($meta['prorata_pending_payment_id']);
         }
 
         return $meta;
+    }
+
+    /**
+     * Whether the webhook may still finish this payment's run — leave it alone if so.
+     *
+     * A run records its context (`anchor`, `started_at`) before its invoice and every step
+     * after it; the next delivery resumes it, and Mollie re-delivers a webhook that failed
+     * for about a day. `created_at` is no measure of that: with SEPA the change is days old
+     * when its webhook first arrives, and dropping it then made the re-delivery skip the
+     * payment — the paid change lost after all. Not once the run has been reported as one
+     * that will not be resumed, and not past RESUME_WINDOW_HOURS from its start.
+     */
+    private static function runMayStillFinish(mixed $pending, string $paymentId): bool
+    {
+        if (! is_array($pending) || (string) ($pending['charge_payment_id'] ?? '') !== $paymentId) {
+            return false;
+        }
+
+        $progress = is_array($pending['progress'] ?? null) ? $pending['progress'] : [];
+
+        if (! array_key_exists('anchor', $progress) || ! empty($progress['interrupted_reported_at'])
+            || ! is_string($progress['started_at'] ?? null)
+        ) {
+            return false;
+        }
+
+        try {
+            $startedAt = \Carbon\Carbon::parse($progress['started_at'])->setTimezone('UTC');
+        } catch (\Throwable) {
+            return false;
+        }
+
+        return $startedAt->greaterThan(BillingTime::nowUtc()->subHours(self::RESUME_WINDOW_HOURS));
+    }
+
+    /** {@see runMayStillFinish()}, logged. */
+    private function leftForWebhookRun(Model $billable, string $paymentId, mixed $pending): bool
+    {
+        if (! self::runMayStillFinish($pending, $paymentId)) {
+            return false;
+        }
+
+        Log::info('CleanupStalePendingProrataChangeJob: paid prorata charge whose run the webhook may still finish — left alone', [
+            'billable_id' => $billable->getKey(),
+            'payment_id' => $paymentId,
+            'run_started_at' => $pending['progress']['started_at'] ?? null,
+            'completed_steps' => array_values((array) ($pending['progress']['done'] ?? [])),
+        ]);
+
+        return true;
     }
 
     /**

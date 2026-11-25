@@ -84,6 +84,8 @@ it('records an orphan and alerts when the charge was paid but no webhook arrived
     expect($meta['pending_prorata_change'] ?? null)->toBeNull()
         ->and($meta['pending_plan_change'] ?? null)->toBeNull()
         ->and($meta['prorata_pending_payment_id'] ?? null)->toBeNull()
+        // …and the plan page reads the change as failed, not as applied.
+        ->and($meta['plan_change_failed_at'] ?? null)->not->toBeNull()
         // …and the money is on record instead of vanishing.
         ->and($meta['orphaned_prorata_payment']['payment_id'] ?? null)->toBe('tr_stale')
         ->and($meta['orphaned_prorata_payment']['prorata_charge_lines'] ?? null)->not->toBeNull();
@@ -216,4 +218,59 @@ it('gives up only once Mollie has been unreachable past the hard limit', functio
         ->and($old->fresh()->getBillingSubscriptionMeta()['pending_prorata_change'] ?? null)->toBeNull();
 
     Notification::assertSentTo(staleProrataAdmin(), AdminPlanChangeFailedNotification::class);
+});
+
+it('leaves a run the webhook may still finish alone, invoice or not, and whether Mollie answers or not', function (bool $mollieAnswers): void {
+    // The run notes its context before its invoice; between the two, and while Mollie may
+    // still re-deliver, the change is the webhook's to finish.
+    Notification::fake();
+
+    $lookup = Mollie::shouldReceive('send')->withArgs(fn ($req) => $req instanceof GetPaymentRequest);
+    $mollieAnswers
+        ? $lookup->andReturn((object) ['status' => 'paid', 'id' => 'tr_stale'])
+        : $lookup->andThrow(new RuntimeException('Mollie down'));
+
+    $b = staleProrataBillable(9, ['progress' => [
+        'anchor' => null,
+        'started_at' => BillingTime::nowUtc()->subHour()->toIso8601String(),
+        'done' => [],
+    ]]);
+
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    $meta = $b->fresh()->getBillingSubscriptionMeta();
+    expect($meta['pending_prorata_change']['charge_payment_id'] ?? null)->toBe('tr_stale')
+        ->and($meta['pending_plan_change'] ?? null)->not->toBeNull()
+        ->and($meta['orphaned_prorata_payment'] ?? null)->toBeNull();
+    Notification::assertNothingSent();
+})->with(['Mollie answers paid' => [true], 'Mollie unreachable past the hard limit' => [false]]);
+
+it('drops only the cleaned payment\'s change, never one that took its place meanwhile', function (): void {
+    // The customer withdrew the change while the job asked Mollie, and started another.
+    Notification::fake();
+
+    $b = staleProrataBillable(2);
+
+    Mollie::shouldReceive('send')
+        ->withArgs(fn ($req) => $req instanceof GetPaymentRequest)
+        ->andReturnUsing(function () use ($b) {
+            $b->refresh()->forceFill(['subscription_meta' => [
+                'pending_plan_change' => ['plan_code' => 'enterprise', 'interval' => 'monthly'],
+                'prorata_pending_payment_id' => 'tr_other',
+                'pending_prorata_change' => [
+                    'charge_payment_id' => 'tr_other',
+                    'created_at' => BillingTime::nowUtc()->toIso8601String(),
+                ],
+            ]])->save();
+
+            return (object) ['status' => 'paid', 'id' => 'tr_stale'];
+        });
+
+    CleanupStalePendingProrataChangeJob::dispatchSync();
+
+    $meta = $b->fresh()->getBillingSubscriptionMeta();
+    expect($meta['pending_prorata_change']['charge_payment_id'] ?? null)->toBe('tr_other')
+        ->and($meta['prorata_pending_payment_id'] ?? null)->toBe('tr_other')
+        ->and($meta['pending_plan_change']['plan_code'] ?? null)->toBe('enterprise')
+        ->and($meta['orphaned_prorata_payment']['payment_id'] ?? null)->toBe('tr_stale');
 });

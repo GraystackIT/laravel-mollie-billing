@@ -25,6 +25,7 @@ use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Support\ProrataLine;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 
@@ -46,7 +47,11 @@ class ProrataChargeHandler
 
     protected const STEP_ANNOUNCED = 'announced';
 
+    protected const STEP_TRIAL_OVERAGE = 'trial_overage';
+
     protected const STEP_WALLET = 'wallet';
+
+    protected const STEP_WALLET_OVERAGE = 'wallet_overage';
 
     protected const STEP_SPANNED_RENEWAL = 'spanned_renewal';
 
@@ -344,14 +349,17 @@ class ProrataChargeHandler
             // Noted before the invoice, so that every run which finds the invoice can rely
             // on it: what decides the run and cannot be read off the billable once the
             // change is in force, and the period it was decided in.
-            $this->rememberRunContext($billable, $paymentId, [
+            $progress = [
                 'was_trial' => $wasTrial,
                 'pending_plan_change' => $pendingPlanChange,
                 'anchor' => $billable->getBillingPeriodStartsAt()?->toIso8601String(),
                 // CleanupStalePendingProrataChangeJob leaves a run alone while Mollie may
                 // still re-deliver it — counted from here, not from the change's creation.
                 'started_at' => BillingTime::nowUtc()->toIso8601String(),
-            ]);
+                'done' => [],
+            ];
+            // This run reads it too: the anchor check before the switch compares against it.
+            $this->rememberRunContext($billable, $paymentId, $progress);
 
             try {
                 $chargeInvoice = $this->invoiceService->createInvoice(
@@ -397,7 +405,12 @@ class ProrataChargeHandler
                 $chargeInvoice->refresh();
             }
 
-            $this->markStep($billable, $paymentId, $done, self::STEP_DOCUMENT);
+            // Recorded only with a document: a render that failed is tried again by the
+            // next delivery, should the run need one. It does not hold the change up — the
+            // download controller renders a missing document on request.
+            if ($chargeInvoice->hasPdf()) {
+                $this->markStep($billable, $paymentId, $done, self::STEP_DOCUMENT);
+            }
         }
 
         if (! in_array(self::STEP_DOCUMENT_ANNOUNCED, $done, true)) {
@@ -437,54 +450,85 @@ class ProrataChargeHandler
             $this->markStep($billable, $paymentId, $done, self::STEP_ANNOUNCED);
         }
 
-        // The prorated old-plan entitlement is measured over the OLD period, so the
-        // boundaries are captured here and passed explicitly. Running the adjuster
-        // after the switch below (or letting it re-derive them) made the elapsed
-        // fraction ~0, the prorated old quota 0 and therefore every unit consumed
-        // in the old period "excess" — which the preview, validateWalletUsage and
-        // the synchronous path never showed, and which can even trigger an
-        // unannounced overage charge.
+        if ($wasTrial && ! in_array(self::STEP_WALLET, $done, true) && ! in_array(self::STEP_TRIAL_OVERAGE, $done, true)) {
+            // The trial's own overage is collected first, exactly as the ordinary renewal
+            // does it — and while the billable is still on the plan it was consumed on, so
+            // it is priced there. Carried uncharged instead, it was paid out of the new
+            // plan's quota or billed later at the new plan's price. A Mollie call, so a step
+            // of its own and outside the transaction below.
+            $billable->refresh();
+            $this->support->collectOutstandingOverage($billable);
+            $this->markStep($billable, $paymentId, $done, self::STEP_TRIAL_OVERAGE);
+        }
+
+        // The wallet credits and the record that they are done commit together: a run that
+        // dies after a credit but before its record cannot add the same quota again on the
+        // next delivery — a rollover wallet adds on top of its balance. What the rebalance
+        // leaves to charge is a Mollie call; it is noted in the same commit and charged as
+        // the next step, outside it (the shape of UpdateSubscription's phase 3).
         if (! in_array(self::STEP_WALLET, $done, true)) {
+            // The prorated old-plan entitlement is measured over the OLD period, so the
+            // boundaries are captured here and passed explicitly. Running the adjuster
+            // after the switch below (or letting it re-derive them) made the elapsed
+            // fraction ~0, the prorated old quota 0 and therefore every unit consumed
+            // in the old period "excess" — which the preview, validateWalletUsage and
+            // the synchronous path never showed, and which can even trigger an
+            // unannounced overage charge.
             $billable->refresh();
             $oldPeriodStart = $billable->getBillingPeriodStartsAt();
             $oldPeriodEnd = $billable->nextBillingDate();
 
-            if ($wasTrial) {
-                // The trial ends here and a full period has just been paid for, so the wallets
-                // get that period's quota — the same refill the first ordinary renewal does.
-                //
-                // Not the plan-change adjuster: its premise is a period that was paid for and
-                // partly consumed, and a trial's wallet holds only the prorated share it was
-                // granted. It also only ran when plan or interval moved, so a seat change
-                // mid-trial converted the trial, started a new period, charged for it — and
-                // left the wallet on the trial's fraction for the whole month that followed.
-                //
-                // The trial's own overage is collected first, exactly as the ordinary renewal
-                // does it — and while the billable is still on the plan it was consumed on, so
-                // it is priced there. Carried uncharged instead, it was paid out of the new
-                // plan's quota or billed later at the new plan's price.
-                $this->support->collectOutstandingOverage($billable);
-                $this->support->creditPeriodQuota($billable, $newPlanCode, $newIntervalCode, 'subscription_trial_conversion');
-            } elseif ($planOrIntervalChanged) {
-                try {
-                    $this->walletAdjuster->adjust(
-                        $billable,
-                        $oldPlan,
-                        $oldInterval,
-                        $newPlanCode,
-                        $newIntervalCode,
-                        $oldPeriodStart,
-                        $oldPeriodEnd,
-                    );
-                } catch (\Throwable $e) {
-                    Log::warning('Wallet adjust during prorata charge phase 2 failed', [
-                        'billable' => $billable->getKey(),
-                        'error' => $e->getMessage(),
-                    ]);
+            DB::transaction(function () use (
+                $billable, $paymentId, &$done, &$progress, $wasTrial, $planOrIntervalChanged,
+                $oldPlan, $oldInterval, $newPlanCode, $newIntervalCode, $oldPeriodStart, $oldPeriodEnd,
+            ): void {
+                $deferredOverage = [];
+
+                if ($wasTrial) {
+                    // The trial ends here and a full period has just been paid for, so the
+                    // wallets get that period's quota — the same refill the first ordinary
+                    // renewal does.
+                    //
+                    // Not the plan-change adjuster: its premise is a period that was paid for
+                    // and partly consumed, and a trial's wallet holds only the prorated share
+                    // it was granted. It also only ran when plan or interval moved, so a seat
+                    // change mid-trial converted the trial, started a new period, charged for
+                    // it — and left the wallet on the trial's fraction for the whole month
+                    // that followed.
+                    $this->support->creditPeriodQuota($billable, $newPlanCode, $newIntervalCode, 'subscription_trial_conversion');
+                } elseif ($planOrIntervalChanged) {
+                    try {
+                        $deferredOverage = $this->walletAdjuster->adjust(
+                            $billable,
+                            $oldPlan,
+                            $oldInterval,
+                            $newPlanCode,
+                            $newIntervalCode,
+                            $oldPeriodStart,
+                            $oldPeriodEnd,
+                            deferOverageCharge: true,
+                        );
+                    } catch (\Throwable $e) {
+                        Log::warning('Wallet adjust during prorata charge phase 2 failed', [
+                            'billable' => $billable->getKey(),
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
                 }
+
+                $this->markStep($billable, $paymentId, $done, self::STEP_WALLET, ['deferred_overage' => $deferredOverage]);
+                $progress['deferred_overage'] = $deferredOverage;
+            });
+        }
+
+        if (! in_array(self::STEP_WALLET_OVERAGE, $done, true)) {
+            $deferred = array_values((array) ($progress['deferred_overage'] ?? []));
+
+            if ($deferred !== []) {
+                $this->walletAdjuster->chargeDeferredOverage($billable, $deferred);
             }
 
-            $this->markStep($billable, $paymentId, $done, self::STEP_WALLET);
+            $this->markStep($billable, $paymentId, $done, self::STEP_WALLET_OVERAGE);
         }
 
         // A plan change inside one interval whose charge was created in one period and
@@ -511,25 +555,17 @@ class ProrataChargeHandler
         }
 
         if (! in_array(self::STEP_REFUNDS, $done, true)) {
-            $refundLinesData = (array) ($pending['refund_lines'] ?? []);
-            $refundLines = array_map(
-                fn (array $data) => ProrataLine::fromArray($data),
-                $refundLinesData,
+            $refundLines = $this->refundLinesForRun(
+                $billable,
+                $paymentId,
+                $pending,
+                $progress,
+                $startsNewPeriod && ! $wasTrial && ! $forcesResetStartDate,
             );
 
-            // An interval change whose charge was created in one period and settles in the
-            // next. The stored refund lines were composed in Phase 1, against the period that
-            // was running then — but a renewal of the OLD interval has been booked since
-            // (Mollie is only moved to the new cadence below, and with SEPA the charge takes
-            // days). The charge that just cleared pays for a full new interval from now, so
-            // what that renewal bought is unused from here on and nothing in the stored list
-            // credits it: the customer had paid a month and a year for the same days.
-            // Composed again here, while the billable still describes the old configuration.
-            if ($startsNewPeriod && ! $wasTrial && ! $forcesResetStartDate
-                && $this->periodMovedSince($billable, $pending)
-            ) {
-                $refundLines = $this->recomposeRefundLines($billable, $pending, $refundLines);
-            }
+            // A line whose token is already on a credit note — or queued for a retry — was
+            // paid (or is being paid) by the attempt that died; it is not paid again.
+            $refundLines = $this->withoutSettledRefundLines($billable, $refundLines);
 
             if (! empty($refundLines)) {
                 try {
@@ -547,6 +583,20 @@ class ProrataChargeHandler
 
         if (! in_array(self::STEP_SWITCHED, $done, true)) {
             $billable->refresh();
+
+            // Asked again right before the switch writes the period: a renewal booked while
+            // this run was paying out moves the anchor, and the switch would write this
+            // payment's earlier period over the one the renewal booked. None of this run's
+            // own steps moves it. (It narrows the window; the renewal handler takes no lock
+            // this check could share.)
+            if (array_key_exists('anchor', $progress)
+                && $progress['anchor'] !== $billable->getBillingPeriodStartsAt()?->toIso8601String()
+            ) {
+                $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_RENEWAL_BOOKED, $done, $progress, $pendingPlanChange);
+
+                return;
+            }
+
             // `$wasTrial` was resolved before the period decision above — same status, one
             // source of truth for both the anchor and the Mollie cadence.
             $wasPastDue = $billable->getBillingSubscriptionStatus() === SubscriptionStatus::PastDue;
@@ -599,7 +649,15 @@ class ProrataChargeHandler
                     $meta['pending_prorata_change']['progress'] = self::progressWith(
                         $meta['pending_prorata_change'],
                         self::STEP_SWITCHED,
-                        ['before' => $before],
+                        [
+                            'before' => $before,
+                            // What the switch made of it — announced from these, not from the
+                            // row at announcement time, which an expiry may have emptied.
+                            'after' => [
+                                'seats' => (int) $meta['seat_count'],
+                                'addons' => array_values(array_map('strval', array_keys((array) ($intentData['new_addons'] ?? [])))),
+                            ],
+                        ],
                     );
                 }
 
@@ -622,7 +680,7 @@ class ProrataChargeHandler
                 $this->markStep($billable, $paymentId, $done, self::STEP_SWITCHED, ['before' => $before]);
             }
 
-            $progress['before'] = $before;
+            $progress = (array) ($billable->refresh()->getBillingSubscriptionMeta()['pending_prorata_change']['progress'] ?? $progress);
         }
 
         if ($intentData !== null && ! in_array(self::STEP_EVENTS, $done, true)) {
@@ -638,8 +696,9 @@ class ProrataChargeHandler
             // and a change that waits for its charge was applied by this handler in
             // silence — no event for the app's listeners (the documented extension seam),
             // no `plan_changed` row in the audit trail, for every paid upgrade.
-            $seatsAfter = $billable->getBillingSeatCount();
-            $addonsAfter = array_values($billable->getActiveBillingAddonCodes());
+            $after = is_array($progress['after'] ?? null) ? $progress['after'] : [];
+            $seatsAfter = (int) ($after['seats'] ?? $billable->getBillingSeatCount());
+            $addonsAfter = array_values((array) ($after['addons'] ?? $billable->getActiveBillingAddonCodes()));
             $addonsAdded = array_values(array_diff($addonsAfter, $addonsBefore));
             $addonsRemoved = array_values(array_diff($addonsBefore, $addonsAfter));
             $planMoved = (string) $planBefore !== $newPlanCode;
@@ -952,6 +1011,127 @@ class ProrataChargeHandler
 
             return $meta;
         });
+    }
+
+    /**
+     * Note something in the progress without recording a step.
+     *
+     * @param  array<string, mixed>  $extra
+     */
+    protected function noteProgress(Billable $billable, string $paymentId, array $extra): void
+    {
+        if (! ($billable instanceof Model)) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $extra): ?array {
+            $pending = $meta['pending_prorata_change'] ?? null;
+
+            if (! is_array($pending) || (string) ($pending['charge_payment_id'] ?? '') !== $paymentId) {
+                return null;
+            }
+
+            $progress = is_array($pending['progress'] ?? null) ? $pending['progress'] : [];
+            $meta['pending_prorata_change']['progress'] = array_replace($progress, $extra);
+
+            return $meta;
+        });
+    }
+
+    /**
+     * The refund lines this run pays out, each with its refund token.
+     *
+     * Decided once: the first attempt takes the lines Phase 1 stored — composed again for
+     * the period running now when a renewal was booked since — mints a token for each and
+     * stores them before Mollie is asked. Every later attempt takes exactly those. The
+     * token is part of each refund's Mollie idempotency key; createRefund() mints one when
+     * a line has none, but only in memory, so a run that died after a refund went out sent
+     * a fresh key on the next delivery, and Mollie paid the same amount a second time.
+     *
+     * @param  array<string, mixed>  $pending
+     * @param  array<string, mixed>  $progress
+     * @return list<ProrataLine>
+     */
+    protected function refundLinesForRun(Billable $billable, string $paymentId, array $pending, array $progress, bool $mayRecompose): array
+    {
+        if (is_array($progress['refund_lines'] ?? null)) {
+            return array_map(
+                static fn (array $data): ProrataLine => ProrataLine::fromArray($data),
+                array_values($progress['refund_lines']),
+            );
+        }
+
+        $lines = array_map(
+            static fn (array $data): ProrataLine => ProrataLine::fromArray($data),
+            array_values((array) ($pending['refund_lines'] ?? [])),
+        );
+
+        // An interval change whose charge was created in one period and settles in the
+        // next. The stored refund lines were composed in Phase 1, against the period that
+        // was running then — but a renewal of the OLD interval has been booked since
+        // (Mollie is only moved to the new cadence later, and with SEPA the charge takes
+        // days). The charge that just cleared pays for a full new interval from now, so
+        // what that renewal bought is unused from here on and nothing in the stored list
+        // credits it: the customer had paid a month and a year for the same days.
+        // Composed again here, while the billable still describes the old configuration.
+        if ($mayRecompose && $this->periodMovedSince($billable, $pending)) {
+            $lines = $this->recomposeRefundLines($billable, $pending, $lines);
+        }
+
+        foreach ($lines as $line) {
+            $line->refundToken ??= bin2hex(random_bytes(8));
+        }
+
+        $this->noteProgress($billable, $paymentId, [
+            'refund_lines' => array_map(static fn (ProrataLine $l): array => $l->toArray(), $lines),
+        ]);
+
+        return $lines;
+    }
+
+    /**
+     * The refund lines no earlier attempt of this run has settled: neither on one of the
+     * billable's credit notes (createRefund() writes each line, token included, onto it)
+     * nor queued under `pending_refund_retries` for RetryRefundLineJob.
+     *
+     * @param  list<ProrataLine>  $lines
+     * @return list<ProrataLine>
+     */
+    protected function withoutSettledRefundLines(Billable $billable, array $lines): array
+    {
+        if (! ($billable instanceof Model) || $lines === []) {
+            return $lines;
+        }
+
+        $settled = [];
+
+        BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['id', 'line_items'])
+            ->each(function (BillingInvoice $note) use (&$settled): void {
+                foreach ((array) $note->line_items as $item) {
+                    $token = is_array($item) ? ($item['refund_token'] ?? null) : null;
+
+                    if (is_string($token) && $token !== '') {
+                        $settled[$token] = true;
+                    }
+                }
+            });
+
+        foreach ((array) ($billable->getBillingSubscriptionMeta()['pending_refund_retries'] ?? []) as $retry) {
+            $token = is_array($retry) ? ($retry['line']['refund_token'] ?? null) : null;
+
+            if (is_string($token) && $token !== '') {
+                $settled[$token] = true;
+            }
+        }
+
+        return array_values(array_filter(
+            $lines,
+            static fn (ProrataLine $l): bool => $l->refundToken === null || ! isset($settled[$l->refundToken]),
+        ));
     }
 
     /**

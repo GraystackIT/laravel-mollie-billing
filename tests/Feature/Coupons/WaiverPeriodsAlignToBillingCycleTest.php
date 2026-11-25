@@ -102,7 +102,7 @@ function waiverCyclePaying(int $daysIntoPeriod, array $addons = [], string $inte
     return $billable->fresh();
 }
 
-it('defers a plan-only subscription by whole periods, whenever in the period the gift is made', function (int $daysIntoPeriod, int $periods, ?string $today = null): void {
+it('defers a plan-only subscription by whole periods, whenever in the period the gift is made', function (int $daysIntoPeriod, int $periods, ?string $today = null, ?string $literal = null): void {
     if ($today !== null) {
         $this->travelTo(Carbon::parse($today, 'UTC'));
     }
@@ -123,6 +123,12 @@ it('defers a plan-only subscription by whole periods, whenever in the period the
     $billingDay = Carbon::instance($billable->getBillingPeriodStartsAt())->day;
     $expected = BillingAnchor::advance($nextRegularCharge, 'monthly', $periods, $billingDay);
 
+    // The pinned rows also name the date outright, so a regression in the cycle step that
+    // both sides share cannot pass by moving them together.
+    if ($literal !== null) {
+        expect($expected->toDateString())->toBe($literal);
+    }
+
     $patch = WaiverCycleMollieLog::lastPatch();
 
     expect(ChargeDeferral::until($billable)?->toDateString())->toBe($expected->toDateString())
@@ -135,8 +141,8 @@ it('defers a plan-only subscription by whole periods, whenever in the period the
     'day 25, one period' => [25, 1],
     'day 10, three periods' => [10, 3],
     // Pinned: the period begins on 31 October, so the cycle runs through short months.
-    'billing day 31, one period' => [25, 1, '2026-11-25 12:00:00'],
-    'billing day 31, three periods' => [25, 3, '2026-11-25 12:00:00'],
+    'billing day 31, one period' => [25, 1, '2026-11-25 12:00:00', '2026-12-31'],
+    'billing day 31, three periods' => [25, 3, '2026-11-25 12:00:00', '2027-02-28'],
 ]);
 
 it('keeps a waiver alive across exactly N renewals when extras are billed', function (int $daysIntoPeriod): void {
