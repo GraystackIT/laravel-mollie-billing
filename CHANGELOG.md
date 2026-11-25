@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-25
+
 ### Added
 
 - **Admin invoice list** (`billing/admin/invoices`): every invoice across all billables, with date range and quick filters, kind/status/search filters, per-currency sums, a detail modal, inline PDF view and download, and a ZIP export of exactly the filtered set, capped by `invoices.export_max` (`BILLING_INVOICE_EXPORT_MAX`, default 1000). The export needs the PHP `zip` extension; run `php artisan migrate` for the new `billing_invoices.created_at` index.
