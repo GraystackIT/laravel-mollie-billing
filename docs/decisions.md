@@ -130,7 +130,15 @@ the next delivery. The cancel answers "already paid"; the withdrawal tells the o
 A cancel when nothing waits any more answers `NothingPending`, and the plan page then says
 what did happen. A change the clean-up gives up with its payment collected (or unknown) is
 `plan_change_unfinished` to the plan page, not `plan_change_failed_at`: that one says "the
-payment failed, try again", and a second try charged twice. The
+payment failed, try again", and a second try charged twice.
+
+A paid prorata charge whose webhook never arrived (no invoice) is not given up by the
+clean-up at all: it delivers it through `MollieWebhookController::replayDelivery()`, as
+`CleanupStalePendingOverageChargeJob` does for overage. Dropped as an orphan, a plan change
+paid for never happened, and a seat or addon change — in force since Phase 1 and PATCHed at
+Mollie — had its payment returned in full by the late webhook while the addon stayed on.
+Only a payment whose metadata names `prorata_charge` is replayed. A cancel refused past the
+switch suppresses the render's "plan changed" toast: the portal shows one toast, the last. The
 PATCH is not made exactly-once; it sets absolute values derived from the change, so a
 repeat sets the same target. The change events are built from what the switch wrote,
 stored with it.

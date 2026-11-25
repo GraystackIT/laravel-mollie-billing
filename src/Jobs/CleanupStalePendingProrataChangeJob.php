@@ -328,18 +328,46 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         $status = (string) ($payment->status ?? '');
 
         if ($status === 'paid') {
-            // The charge was collected but its webhook never arrived, so Phase 2 never
-            // ran. Replaying the webhook from here is not possible in production (the
-            // only replay path is a testing helper), so the pending state is cleared to
-            // unblock the customer's future plan changes and the payment is recorded as
-            // an orphan for manual reconciliation — the same marker
-            // ProrataChargeHandler uses for a payment that outlived its plan change.
+            // The charge was collected but its webhook never arrived, so Phase 2 never ran.
+            // It is run now, through the webhook's own path
+            // (MollieWebhookController::replayDelivery(), as CleanupStalePendingOverageChargeJob
+            // does it): the change is booked and carried out exactly as the delivery would
+            // have. Dropping it as an orphan instead was wrong both ways — a plan change paid
+            // for never happened, and a seat or addon change (in force since Phase 1, and
+            // PATCHed at Mollie) had its payment returned in full by the late webhook while
+            // the addon stayed on and Mollie kept charging for it.
+            $invoiced = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->exists();
+
+            if (! $invoiced && ! $this->leftForWebhookRun($billable, $paymentId, $pending)
+                && $this->isProrataCharge($payment)
+            ) {
+                try {
+                    app(\GraystackIT\MollieBilling\Http\Controllers\MollieWebhookController::class)->replayDelivery($payment, $billable);
+
+                    Log::warning('CleanupStalePendingProrataChangeJob: paid prorata charge whose webhook never arrived — delivered from here', [
+                        'billable_id' => $billable->getKey(),
+                        'payment_id' => $paymentId,
+                    ]);
+                } catch (\Throwable $e) {
+                    // Whatever the run recorded before it failed, the next pass (or Mollie)
+                    // resumes; nothing is dropped on a failed replay.
+                    Log::error('CleanupStalePendingProrataChangeJob: replaying the paid prorata charge failed', [
+                        'billable_id' => $billable->getKey(),
+                        'payment_id' => $paymentId,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+
+                return;
+            }
+
+            // Otherwise the payment is recorded as an orphan for manual reconciliation — the
+            // same marker ProrataChargeHandler uses for a payment that outlived its plan change.
             //
             // Or the webhook did arrive and its run died part-way, and the run could not be
             // resumed (ProrataChargeHandler::reportInterruptedRun()). Then the payment is
             // booked — the invoice exists — and the operators have already been told; the
             // alert said "no invoice exists" and came a second time.
-            $invoiced = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->exists();
             $progress = is_array($pending['progress'] ?? null) ? $pending['progress'] : [];
             $alreadyReported = ! empty($progress['interrupted_reported_at']);
 
@@ -538,6 +566,15 @@ class CleanupStalePendingProrataChangeJob implements ShouldQueue
         }
 
         return $startedAt->greaterThan(BillingTime::nowUtc()->subHours(self::RESUME_WINDOW_HOURS));
+    }
+
+    /** Whether Mollie's payment says it is a prorata charge — the only kind replayed here. */
+    private function isProrataCharge(object $payment): bool
+    {
+        $metadata = $payment->metadata ?? null;
+        $metadata = is_object($metadata) ? (array) json_decode((string) json_encode($metadata), true) : (array) $metadata;
+
+        return ($metadata['type'] ?? null) === 'prorata_charge';
     }
 
     /** Whether the waiting change is still the one for this payment. */

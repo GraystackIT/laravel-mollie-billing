@@ -447,6 +447,15 @@ new class extends Component {
             // cancel here left the notice standing under a success toast.
             $this->toast(__('billing::portal.flash.pending_change_already_paid'), 'warning');
 
+            // Past the switch the run has removed `pending_plan_change` already, so the render
+            // below would also toast "plan changed" — and the portal shows one toast at a
+            // time, the last: the refusal was dispatched and never seen. The new plan is in
+            // the header; the customer has to read why their click did nothing.
+            // (tryCancelPendingPlanChange() has refreshed the billable.)
+            if (empty($billable->getBillingSubscriptionMeta()['pending_plan_change'])) {
+                $this->wasPending = false;
+            }
+
             return;
         }
 

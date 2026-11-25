@@ -832,7 +832,10 @@ sequenceDiagram
     Mollie refuses that, and the subscription is replaced with the new amount, interval and
     start date ([6.1](#61-moving-the-next-charge-patch-or-replacement)).
   - Refund line refused → `pending_refund_retries` → `RetryRefundLineJob`.
-  - The prorata webhook never arrives → `CleanupStalePendingProrataChangeJob` asks Mollie.
+  - The prorata webhook never arrives → `CleanupStalePendingProrataChangeJob` asks Mollie;
+    a paid charge with no invoice is delivered from there through
+    `MollieWebhookController::replayDelivery()`, so the change is carried out as the webhook
+    would have.
   - The webhook run dies after the invoice (a fatal, the time limit) → the next delivery
     finds the invoice *and* the change still waiting for this payment, and
     `ProrataChargeHandler::paid()` resumes after the last step recorded in

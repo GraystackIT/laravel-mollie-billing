@@ -34,7 +34,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   operators instead. Cancelling when the change had just gone through says nothing false
   (`PendingChangeCancelOutcome::NothingPending`). A change the clean-up gives up with its
   payment collected is shown as unfinished, not as a failed payment to retry.
-- A capped refund line keeps its refund token, so its retry is recognised and not paid again. `CleanupStalePendingProrataChangeJob`
+- A capped refund line keeps its refund token, so its retry is recognised and not paid again.
+- **`CleanupStalePendingProrataChangeJob` delivers a paid charge whose webhook never arrived**
+  through the webhook's own path instead of dropping it: the change is carried out. A seat or
+  addon change's payment used to be returned in full by the late webhook while the addon
+  stayed on.
+- A cancel refused after the switch is now visible; the same click used to show only
+  "plan changed". `CleanupStalePendingProrataChangeJob`
   leaves a run that can still be resumed alone for 48 hours from its start.
 - **`CleanupStalePendingProrataChangeJob` really unblocks the customer.** For a paid charge
   whose change never arrived (and when Mollie stays unreachable) it dropped only
