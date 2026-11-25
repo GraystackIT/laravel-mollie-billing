@@ -9,7 +9,6 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Services\Billing\AdminExtensionService;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\PlanWaiver;
-use GraystackIT\MollieBilling\Support\BillingAnchor;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\ChargeDeferral;
 use GraystackIT\MollieBilling\Testing\TestBillable;
@@ -102,32 +101,33 @@ function waiverCyclePaying(int $daysIntoPeriod, array $addons = [], string $inte
     return $billable->fresh();
 }
 
-it('defers a plan-only subscription by whole periods, whenever in the period the gift is made', function (int $daysIntoPeriod, int $periods, ?string $today = null, ?string $literal = null): void {
-    if ($today !== null) {
-        $this->travelTo(Carbon::parse($today, 'UTC'));
-    }
+/**
+ * The regular charge `$n` periods after the next one (0 = the next one itself).
+ *
+ * Counted from the period start, `start + (n + 1) × interval` clamped to the month, and
+ * not by adding one interval at a time to the next charge: a cycle on the 31st is charged
+ * on 30 November and then on 31 December, not on 30 December. Stepping from charge to
+ * charge carried a short month's clamp forward, and the expectations turned red only on
+ * the days whose period happened to start on the 29th, 30th or 31st.
+ */
+function waiverCycleCharge(TestBillable $billable, int $n): Carbon
+{
+    $start = Carbon::instance($billable->subscription_period_starts_at);
 
+    return $billable->subscription_interval === SubscriptionInterval::Yearly
+        ? $start->copy()->addYearsNoOverflow($n + 1)
+        : $start->copy()->addMonthsNoOverflow($n + 1);
+}
+
+it('defers a plan-only subscription by whole periods, whenever in the period the gift is made', function (int $daysIntoPeriod, int $periods): void {
     $billable = waiverCyclePaying($daysIntoPeriod);
-    $nextRegularCharge = Carbon::instance($billable->nextBillingDate());
+
+    // N charges are skipped: the first one collected is the regular one N periods on.
+    $expected = waiverCycleCharge($billable, $periods);
 
     app(AdminExtensionService::class)->freePlanPeriods($billable, $periods);
 
     $billable->refresh();
-
-    // N charges are skipped: the first one collected is the regular one N periods on —
-    // on the billing day, limited to the length of the month (docs/decisions.md, "A
-    // recurring code's window counts billing periods"). Stepping month by month from the
-    // next charge instead drifts: from a 31 October start that is 30 November, then
-    // 30 December, where the billing day says 31 December. The expectation used to be
-    // built that way and failed on every day whose period began on the 31st.
-    $billingDay = Carbon::instance($billable->getBillingPeriodStartsAt())->day;
-    $expected = BillingAnchor::advance($nextRegularCharge, 'monthly', $periods, $billingDay);
-
-    // The pinned rows also name the date outright, so a regression in the cycle step that
-    // both sides share cannot pass by moving them together.
-    if ($literal !== null) {
-        expect($expected->toDateString())->toBe($literal);
-    }
 
     $patch = WaiverCycleMollieLog::lastPatch();
 
@@ -140,16 +140,12 @@ it('defers a plan-only subscription by whole periods, whenever in the period the
     'day 10, one period' => [10, 1],
     'day 25, one period' => [25, 1],
     'day 10, three periods' => [10, 3],
-    // Pinned: the period begins on 31 October, so the cycle runs through short months.
-    'billing day 31, one period' => [25, 1, '2026-11-25 12:00:00', '2026-12-31'],
-    'billing day 31, three periods' => [25, 3, '2026-11-25 12:00:00', '2027-02-28'],
 ]);
 
 it('keeps a waiver alive across exactly N renewals when extras are billed', function (int $daysIntoPeriod): void {
     $billable = waiverCyclePaying($daysIntoPeriod, addons: ['sso']);
-    $c0 = Carbon::instance($billable->nextBillingDate());
-    $c1 = Carbon::instance(BillingTime::addInterval($c0, 'monthly'));
-    $c2 = Carbon::instance(BillingTime::addInterval($c1, 'monthly'));
+    $c1 = waiverCycleCharge($billable, 1);
+    $c2 = waiverCycleCharge($billable, 2);
 
     app(AdminExtensionService::class)->freePlanPeriods($billable, 2);
 
@@ -163,20 +159,15 @@ it('keeps a waiver alive across exactly N renewals when extras are billed', func
         ->and($validUntil->lessThan($c2))->toBeTrue()
         ->and($coupons->markerExpired($billable, $c1))->toBeFalse()
         ->and($coupons->markerExpired($billable, $c2))->toBeTrue();
-})->with([1, 15, 29]);
+})->with([1, 15, 27]); // not 29: February has no 29th day of a period, its renewal would lie in the past
 
 it('appends whole periods to a deferred waiver', function (): void {
     $billable = waiverCyclePaying(10);
-    $c0 = Carbon::instance($billable->nextBillingDate());
+    $expected = waiverCycleCharge($billable, 3);
     $service = app(AdminExtensionService::class);
 
     $service->freePlanPeriods($billable, 1);
     $service->freePlanPeriods($billable->fresh(), 2);
-
-    $expected = $c0->copy();
-    for ($i = 0; $i < 3; $i++) {
-        $expected = Carbon::instance(BillingTime::addInterval($expected, 'monthly'));
-    }
 
     $billable->refresh();
 
@@ -184,14 +175,35 @@ it('appends whole periods to a deferred waiver', function (): void {
         ->and(app(PlanWaiver::class)->marker($billable)['max_applications'])->toBe(3);
 });
 
+it('appends free periods on the cycle day, not on the clamped day the charge was deferred to', function (string $now, string $first, string $resumes): void {
+    // One free period moves the charge to the end of February, which is not the cycle's
+    // day. The two appended periods must land where three given at once land.
+    Carbon::setTestNow(Carbon::parse($now, 'UTC'));
+
+    $billable = waiverCyclePaying(10);
+    $service = app(AdminExtensionService::class);
+
+    $service->freePlanPeriods($billable, 1);
+    expect(ChargeDeferral::until($billable->fresh())?->toDateString())->toBe($first);
+
+    $service->freePlanPeriods($billable->fresh(), 2);
+    $billable->refresh();
+
+    expect(ChargeDeferral::until($billable)?->toDateString())->toBe($resumes)
+        ->and(WaiverCycleMollieLog::startDate(WaiverCycleMollieLog::lastPatch()))->toBe($resumes);
+})->with([
+    'cycle on the 29th' => ['2027-01-08 13:49:00', '2027-02-28', '2027-04-29'],
+    'cycle on the 31st' => ['2027-01-10 13:49:00', '2027-02-28', '2027-04-30'],
+    'cycle on the 30th, leap year' => ['2028-01-09 13:49:00', '2028-02-29', '2028-04-30'],
+]);
+
 it('counts a yearly waiver in years', function (): void {
     $billable = waiverCyclePaying(100, interval: 'yearly');
-    $c0 = Carbon::instance($billable->nextBillingDate());
+    $expected = waiverCycleCharge($billable, 1);
 
     app(AdminExtensionService::class)->freePlanPeriods($billable, 1);
 
-    expect(ChargeDeferral::until($billable->fresh())?->toDateString())
-        ->toBe(Carbon::instance(BillingTime::addInterval($c0, 'yearly'))->toDateString());
+    expect(ChargeDeferral::until($billable->fresh())?->toDateString())->toBe($expected->toDateString());
 });
 
 // ── A gift that ends on a date ──────────────────────────────────────────────
@@ -216,10 +228,14 @@ function waiverCycleGift(TestBillable $billable, int $days, string $onExpiry = P
     );
 }
 
-it('charges a fully covering gift again on the first renewal after it ends, not the day after', function (int $giftDays, int $boundariesAhead): void {
-    // Period started 10 days ago: the regular renewals are in ~20, ~51, ~81 days.
+it('charges a fully covering gift again on the first renewal after it ends, not the day after', function (int $days, bool $fromRenewal, int $boundariesAhead): void {
+    // Period started 10 days ago: the regular renewals are in 18–21, ~50, ~80 days —
+    // 18 in February, so the cases around the renewal are counted from it.
     $billable = waiverCyclePaying(10);
-    $expected = Carbon::instance($billable->nextBillingDate())->addMonthsNoOverflow($boundariesAhead);
+    $expected = waiverCycleCharge($billable, $boundariesAhead);
+    $giftDays = $fromRenewal
+        ? (int) BillingTime::nowUtc()->startOfDay()->diffInDays(waiverCycleCharge($billable, 0)->startOfDay()) + $days
+        : $days;
 
     waiverCycleGift($billable, $giftDays);
     app(PlanWaiver::class)->syncMollie($billable->fresh());
@@ -231,10 +247,10 @@ it('charges a fully covering gift again on the first renewal after it ends, not 
         ->and(ChargeDeferral::until($billable)?->toDateString())->toBe($expected->toDateString())
         ->and(WaiverCycleMollieLog::property($patch, 'amount')->value)->toBe('60.00');
 })->with([
-    'gift ends in 5 days, inside the running period' => [5, 0],
-    'gift ends in 19 days, just before the renewal' => [19, 0],
-    'gift ends in 25 days, just after the renewal' => [25, 1],
-    'gift ends in 60 days' => [60, 2],
+    'gift ends in 5 days, inside the running period' => [5, false, 0],
+    'gift ends the day before the renewal' => [-1, true, 0],
+    'gift ends 5 days after the renewal' => [5, true, 1],
+    'gift ends in 60 days' => [60, false, 2],
 ]);
 
 it('agrees with the renewal handler about which renewal is the first one charged', function (int $giftDays): void {
@@ -251,11 +267,10 @@ it('agrees with the renewal handler about which renewal is the first one charged
     $withAddon->refresh();
 
     $coupons = app(CouponService::class);
-    $boundary = Carbon::instance($withAddon->nextBillingDate());
     $firstCharged = null;
 
     for ($i = 0; $i < 12 && $firstCharged === null; $i++) {
-        $at = $boundary->copy()->addMonthsNoOverflow($i);
+        $at = waiverCycleCharge($withAddon, $i);
 
         if ($coupons->markerExpired($withAddon, $at)) {
             $firstCharged = $at;

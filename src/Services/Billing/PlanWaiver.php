@@ -318,7 +318,17 @@ class PlanWaiver
             (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'),
         );
 
-        $cycleDay = $this->cycleDay($billable, (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'), $nextCharge);
+        // The cycle's day is read off the charge the subscription would make without the
+        // waiver, as the grant reads it — not off the deferred one. A deferral to
+        // 28 February of a cycle on the 29th lies two periods past the period start, on
+        // no step `BillingAnchor::forCycle()` can trace back, so its own day was taken for
+        // the cycle's: one free period and then two more ended on 28 April, three at once
+        // on 29 April, and Mollie's cycle moved to the 28th for good.
+        $cycleDay = $this->cycleDay(
+            $billable,
+            (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'),
+            \GraystackIT\MollieBilling\Support\ChargeDeferral::undeferredNextChargeDate($billable) ?? $nextCharge,
+        );
 
         $this->mutateBillingMeta($billable, function (array $meta) use ($periods, $nextCharge, $cycleDay, &$newEnd): ?array {
             $marker = $meta['active_recurring_coupon'] ?? null;
