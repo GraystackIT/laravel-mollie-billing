@@ -203,7 +203,9 @@ class WalletUsageService
             try {
                 event(new WalletCredited($billable, $type, $quantity, $reason ?? 'credit'));
             } catch (\Throwable $e) {
-                report($e);
+                // The reporter can fail too (a log transport, a reportable callback); not
+                // reported again, which could throw once more.
+                rescue(static fn () => report($e), null, false);
             }
         });
     }
