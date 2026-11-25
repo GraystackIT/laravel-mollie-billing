@@ -23,9 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Each completed step is now recorded under `pending_prorata_change.progress`, and the next
   delivery resumes after the last one. Wallet credits commit together with their record and
   each refund line keeps its Mollie idempotency token, so neither is repeated; the PATCH sets
-  absolute values derived from the change, so a repeated one sets the same target. If a renewal was booked before the re-delivery, the subscription has ended,
-  or the run predates the recorded steps, it is not resumed and the operators get an
-  `AdminPlanChangeFailedNotification` instead, once. `CleanupStalePendingProrataChangeJob`
+  absolute values derived from the change, so a repeated one sets the same target. A run is
+  not carried on — the operators get one `AdminPlanChangeFailedNotification` instead — when,
+  before its switch, a renewal was booked or the subscription ended; when it predates the
+  recorded steps; or when an earlier attempt left refunds or a period balance with Mollie
+  whose outcome was never booked. `WalletCredited` is now dispatched after the commit. `CleanupStalePendingProrataChangeJob`
   leaves a run that can still be resumed alone for 48 hours from its start.
 - **`CleanupStalePendingProrataChangeJob` really unblocks the customer.** For a paid charge
   whose change never arrived (and when Mollie stays unreachable) it dropped only

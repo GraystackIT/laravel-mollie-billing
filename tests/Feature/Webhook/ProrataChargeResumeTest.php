@@ -631,26 +631,106 @@ it('does not write the new plan onto a subscription cancelled while the run was 
         fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'subscription_ended');
 });
 
-it('hands a balance claimed but never charged by an earlier attempt to the operators', function (): void {
+it('hands a balance this run claimed but never charged to the operators, and lets an unrelated one be', function (bool $ofThisRun): void {
     operatorsTold();
     $billable = World::subscription('none', 'pro', 2);
     World::change($billable, ['plan_code' => 'enterprise'], settle: null);
 
-    // The attempt dies inside UndercollectionCharge::settle(), after its claim.
+    // The attempt dies inside UndercollectionCharge::settle(), after its claim — or a claim
+    // of some other case happens to stand open on the billable.
     CrashingProrataChargeHandler::$crashAfter = 'wallet_overage';
     World::settle($billable, expectHttp: 500);
     $meta = $billable->refresh()->getBillingSubscriptionMeta();
-    $meta[\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::META_KEY]['plan_change_renewal:1'] = [
+    $reason = $ofThisRun
+        ? \GraystackIT\MollieBilling\Events\RenewalUndercollected::REASON_PLAN_CHANGE_SPANNED_RENEWAL
+        : 'some_other_case';
+    $meta[\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::META_KEY][$reason.':1'] = [
         'shortfall_net' => 1000,
         'claimed_at' => now('UTC')->toIso8601String(),
     ];
+    if ($ofThisRun) {
+        $meta['pending_prorata_change']['progress']['spanned_renewal_attempted_at'] = now('UTC')->toIso8601String();
+    }
     $billable->forceFill(['subscription_meta' => $meta])->save();
 
     World::settle($billable);
 
-    expect(resumeOutcome($billable)['plan'])->toBe('pro');
+    expect(resumeOutcome($billable)['plan'])->toBe($ofThisRun ? 'pro' : 'enterprise');
+
+    if ($ofThisRun) {
+        Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
+            fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'shortfall_unsettled');
+    } else {
+        Notification::assertNothingSent();
+    }
+})->with(['claimed by this run' => [true], 'another case' => [false]]);
+
+it('does not send refunds again whose outcome an earlier attempt never booked', function (): void {
+    // The attempt asked Mollie and died before the credit note: whether those lines were
+    // paid is unknown, and the idempotency key protects them only for an hour.
+    operatorsTold();
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashAfter = 'spanned_renewal';
+    World::settle($billable, expectHttp: 500);
+    $meta = $billable->refresh()->getBillingSubscriptionMeta();
+    $meta['pending_prorata_change']['progress']['refunds_started_at'] = now('UTC')->toIso8601String();
+    $billable->forceFill(['subscription_meta' => $meta])->save();
+
+    World::settle($billable);
+
+    expect(World::$refunds)->toBe([])
+        ->and(resumeOutcome($billable)['plan'])->toBe('pro');
     Notification::assertSentTo(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class,
-        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'shortfall_unsettled');
+        fn (AdminPlanChangeFailedNotification $n): bool => $n->context['why'] === 'refunds_unknown');
+});
+
+it('redeems the change\'s coupon once, even when the run died after redeeming it', function (): void {
+    // Each code commits on its own and the step is recorded after the last one; a run that
+    // died in between redeemed the code again on the next delivery.
+    app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->create([
+        'code' => 'ONCE10', 'name' => 'ONCE10', 'type' => \GraystackIT\MollieBilling\Enums\CouponType::Recurring,
+        'discount_type' => \GraystackIT\MollieBilling\Enums\DiscountType::Percentage, 'discount_value' => 10,
+        'max_redemptions_per_billable' => 5,
+    ]);
+
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise', 'coupon_codes' => ['ONCE10']], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'coupons';
+    World::settle($billable, expectHttp: 500);
+    expect(\GraystackIT\MollieBilling\Models\CouponRedemption::query()->count())->toBe(1);
+
+    $errors = [];
+    Event::listen(\Illuminate\Log\Events\MessageLogged::class, function ($e) use (&$errors): void {
+        if ($e->level === 'error') {
+            $errors[] = $e->message;
+        }
+    });
+
+    World::settle($billable);
+
+    // Not tried again either — a second redeem() of a recurring code throws, and that was
+    // logged as a redemption that "needs a human".
+    expect(\GraystackIT\MollieBilling\Models\CouponRedemption::query()->count())->toBe(1)
+        ->and($errors)->toBe([])
+        ->and(resumeOutcome($billable)['waiting'])->toBe([]);
+});
+
+it('stops a run whose waiting change was given up under it', function (): void {
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$afterStep['announced'] = function (TestBillable $b): void {
+        $meta = $b->refresh()->getBillingSubscriptionMeta();
+        unset($meta['pending_prorata_change']);
+        $b->forceFill(['subscription_meta' => $meta])->save();
+    };
+    World::settle($billable, expectHttp: 500);
+
+    expect(resumeOutcome($billable)['plan'])->toBe('pro')
+        ->and(World::$refunds)->toBe([]);
 });
 
 /** Throws on its first rebalance, part-way. */

@@ -74,6 +74,8 @@ class ProrataChargeHandler
 
     protected const INTERRUPTED_SHORTFALL_UNSETTLED = 'shortfall_unsettled';
 
+    protected const INTERRUPTED_REFUNDS_UNKNOWN = 'refunds_unknown';
+
     /**
      * Subscription states a deferred prorata change may still be applied to.
      *
@@ -154,6 +156,7 @@ class ProrataChargeHandler
             // a second time; skipped in silence, the paid change is lost. Told instead.
             if (is_array($waiting) && $this->paymentOwnsPending($payment, $waiting)
                 && $chargeInvoice->invoice_kind === InvoiceKind::Subscription
+                && $this->mayBeThisPaymentsChange($billable, $waiting, $paymentId, $chargeInvoice)
             ) {
                 $this->reportInterruptedRun(
                     $billable,
@@ -211,6 +214,12 @@ class ProrataChargeHandler
         // reads everything afresh, including what such a run may have noted down.
         $progress = $chargeInvoice !== null && is_array($pending['progress'] ?? null) ? $pending['progress'] : [];
         $done = array_values(array_map('strval', (array) ($progress['done'] ?? [])));
+
+        // The invoice is in the books whether or not its step was recorded — the run may
+        // have died between the two. Recorded now, so every report lists it.
+        if ($chargeInvoice !== null && ! in_array(self::STEP_INVOICED, $done, true)) {
+            $this->markStep($billable, $paymentId, $done, self::STEP_INVOICED);
+        }
 
         if ($chargeInvoice !== null) {
             Log::warning('Resuming a prorata charge a previous delivery left unfinished', [
@@ -555,19 +564,24 @@ class ProrataChargeHandler
             // between left a claim with no outcome, and settle() now answers "already handled"
             // for a balance nobody charged. Asking Mollie again is only safe within the hour
             // its idempotency key is kept; the operators settle it instead.
-            if ($this->unsettledShortfallClaimsOfRun($billable, $progress) !== []) {
+            if (! empty($progress['spanned_renewal_attempted_at'])
+                && $this->unsettledShortfallClaimsOfRun($billable, $progress) !== []
+            ) {
                 $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_SHORTFALL_UNSETTLED, $done, $progress, $pendingPlanChange);
 
                 return;
             }
 
             if (! $startsNewPeriod && $planOrIntervalChanged && $this->periodMovedSince($billable, $pending)) {
-                $this->support->safely(
-                    fn () => $this->settlePeriodTheChangeLandsIn($billable, $pending, $oldPlan),
-                    'prorata_charge.spanned_renewal',
-                    $billable,
-                    ['payment_id' => (string) ($payment->id ?? '')],
-                );
+                // Noted first, so a later attempt knows a claim of this kind is this run's.
+                $this->noteProgress($billable, $paymentId, ['spanned_renewal_attempted_at' => BillingTime::nowUtc()->toIso8601String()]);
+                $progress['spanned_renewal_attempted_at'] = true;
+
+                // Not inside safely(): settle() claims its case before it asks Mollie and
+                // records an outcome after. A throw in between, swallowed and recorded as
+                // done, left the claim standing and the balance uncharged with nobody told.
+                // Thrown, the step stays open and the next delivery finds the claim above.
+                $this->settlePeriodTheChangeLandsIn($billable, $pending, $oldPlan);
             }
 
             $this->markStep($billable, $paymentId, $done, self::STEP_SPANNED_RENEWAL);
@@ -586,7 +600,20 @@ class ProrataChargeHandler
             // paid (or is being paid) by the attempt that died; it is not paid again.
             $refundLines = $this->withoutSettledRefundLines($billable, $refundLines);
 
+            // An earlier attempt asked Mollie and died before it could book the answer:
+            // whether the lines left over were paid is not known here. Asked again, the
+            // idempotency key protects them only within the hour Mollie keeps it, and not
+            // at all once a clamped amount changes the key. Not asked again — the
+            // operators look it up.
+            if ($refundLines !== [] && ! empty($progress['refunds_started_at'])) {
+                $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_REFUNDS_UNKNOWN, $done, $progress, $pendingPlanChange);
+
+                return;
+            }
+
             if (! empty($refundLines)) {
+                $this->noteProgress($billable, $paymentId, ['refunds_started_at' => BillingTime::nowUtc()->toIso8601String()]);
+
                 try {
                     $this->invoiceService->createRefund($billable, $refundLines, 'Plan change refund');
                 } catch (\Throwable $e) {
@@ -1025,7 +1052,9 @@ class ProrataChargeHandler
             return;
         }
 
-        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $step, $extra): ?array {
+        $recorded = false;
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $step, $extra, &$recorded): ?array {
             $pending = $meta['pending_prorata_change'] ?? null;
 
             if (! is_array($pending) || (string) ($pending['charge_payment_id'] ?? '') !== $paymentId) {
@@ -1033,9 +1062,46 @@ class ProrataChargeHandler
             }
 
             $meta['pending_prorata_change']['progress'] = self::progressWith($pending, $step, $extra);
+            $recorded = true;
 
             return $meta;
         });
+
+        // The waiting change is gone from under this run — CleanupStalePendingProrataChangeJob
+        // gave it up, or it was withdrawn. Carrying on would move money with nothing to
+        // record it in; the run stops (and, through the controller, answers 500).
+        if (! $recorded) {
+            throw new \RuntimeException("Prorata run for payment {$paymentId} lost its waiting change at step {$step} — stopped");
+        }
+    }
+
+    /**
+     * Whether a waiting change can be the one this payment's invoice was booked for.
+     *
+     * A change that names this payment is. One that names none — written before the id
+     * was recorded on it — may be a run of this payment that predates the recorded steps,
+     * or a later change nobody has paid for yet. The later one is told apart by being
+     * younger than the invoice, or by its top-level marker naming another payment.
+     *
+     * @param  array<string, mixed>  $waiting
+     */
+    protected function mayBeThisPaymentsChange(Billable $billable, array $waiting, string $paymentId, BillingInvoice $invoice): bool
+    {
+        $owner = (string) ($waiting['charge_payment_id'] ?? '');
+
+        if ($owner !== '') {
+            return $owner === $paymentId;
+        }
+
+        $marker = (string) ($billable->getBillingSubscriptionMeta()['prorata_pending_payment_id'] ?? '');
+
+        if ($marker !== '' && $marker !== $paymentId) {
+            return false;
+        }
+
+        $createdAt = is_string($waiting['created_at'] ?? null) ? Carbon::parse($waiting['created_at']) : null;
+
+        return $createdAt === null || $invoice->created_at === null || $createdAt->lessThanOrEqualTo($invoice->created_at);
     }
 
     /** Whether the period this run was decided in has ended since — a renewal moved it. */
@@ -1063,7 +1129,9 @@ class ProrataChargeHandler
         $keys = [];
 
         foreach ((array) ($billable->getBillingSubscriptionMeta()[\GraystackIT\MollieBilling\Services\Billing\UndercollectionCharge::META_KEY] ?? []) as $key => $case) {
-            if (! is_array($case) || isset($case['outcome']) || ! is_string($case['claimed_at'] ?? null)) {
+            if (! is_array($case) || isset($case['outcome']) || ! is_string($case['claimed_at'] ?? null)
+                || ! str_starts_with((string) $key, \GraystackIT\MollieBilling\Events\RenewalUndercollected::REASON_PLAN_CHANGE_SPANNED_RENEWAL.':')
+            ) {
                 continue;
             }
 
@@ -1259,6 +1327,10 @@ class ProrataChargeHandler
                 'Prorata charge not resumed — its run died before steps were recorded, reconcile it by hand',
                 'A paid plan change was interrupted after its invoice was written, by a version that did not record its steps, so it cannot be resumed safely — the payment is booked; check what was done (wallet, refunds, plan) and finish or refund it by hand',
             ],
+            self::INTERRUPTED_REFUNDS_UNKNOWN => [
+                'Prorata charge not resumed — refunds were sent to Mollie but their outcome was never booked, reconcile it by hand',
+                'A paid plan change was interrupted while its refunds were being paid out; whether Mollie paid the lines not on a credit note is unknown — the change payment is booked; check the refunds in Mollie, then finish the change by hand',
+            ],
             self::INTERRUPTED_SHORTFALL_UNSETTLED => [
                 'Prorata charge not resumed — the balance of the period it landed in was claimed but never charged, reconcile it by hand',
                 'A paid plan change was interrupted while the balance of the billing period it landed in was being charged; whether Mollie created that payment is unknown — the change payment is booked; check Mollie for the balance payment, then finish the change by hand',
@@ -1286,13 +1358,19 @@ class ProrataChargeHandler
         $admins = MollieBilling::notifyAdmin();
         $admins = is_array($admins) ? $admins : iterator_to_array($admins);
 
-        if ($admins !== []) {
-            Notification::send($admins, MollieBilling::resolveNotification(
-                AdminPlanChangeFailedNotification::class,
-                $reason,
-                $context,
-            ));
+        // Nobody to tell yet: no note either, so an operator configured later still hears
+        // of it from the next delivery or the clean-up.
+        if ($admins === []) {
+            return;
         }
+
+        // The note records that the report was handed over (to the queue, where the
+        // notification queues) — not that it was read.
+        Notification::send($admins, MollieBilling::resolveNotification(
+            AdminPlanChangeFailedNotification::class,
+            $reason,
+            $context,
+        ));
 
         if ($billable instanceof Model) {
             $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId): ?array {
@@ -1444,6 +1522,20 @@ class ProrataChargeHandler
             ];
             if ($chargeInvoice !== null) {
                 $context['invoice_id'] = (int) $chargeInvoice->id;
+
+                // Each code commits on its own, and the step is recorded after the last: a
+                // run that died between two codes redeemed the first again on the next
+                // delivery — a second campaign slot used, the coupon twice in the audit.
+                $alreadyRedeemed = \GraystackIT\MollieBilling\Models\CouponRedemption::query()
+                    ->where('coupon_id', $coupon->getKey())
+                    ->where('billable_type', $billable instanceof Model ? $billable->getMorphClass() : '')
+                    ->where('billable_id', $billable instanceof Model ? $billable->getKey() : null)
+                    ->where('invoice_id', (int) $chargeInvoice->id)
+                    ->exists();
+
+                if ($alreadyRedeemed) {
+                    continue;
+                }
             }
 
             try {

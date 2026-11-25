@@ -99,8 +99,10 @@ The PDF and its `InvoiceCreated` are separate steps, so a run that dies between 
 announces the invoice; the PDF is rendered with the billable the run holds
 (`InvoiceService::storeInvoiceDocument()`), never re-read through the invoice's relation,
 which applies `BillingScope` and finds nothing without a tenant context. The
-`interrupted_reported_at` note is written only after the operators were sent the report — a
-send that throws leaves it unwritten, and the next delivery tries again.
+`interrupted_reported_at` note is written only once the report was handed over — submitted
+to the notification channel (queued, where the notification queues), not read; a resolver or
+send that throws leaves it unwritten and the next delivery tries again, and with nobody to
+tell yet nothing is noted. A mail worker that fails later is the queue's to retry.
 
 Where a step moves money, its record is not trusted to follow it: the wallet credits (or the
 rebalance) commit in one transaction with their step, the overage that leaves to charge is
@@ -112,7 +114,10 @@ not overwritten (narrowed, not closed: the renewal handler takes no lock to shar
 before the first step that moves money; the switch also requires the subscription to still
 run. A rebalance that throws is not caught: the transaction takes it back with its record.
 A shortfall `UndercollectionCharge` claimed in this run without an outcome is handed to the
-operators, not asked of Mollie again — its idempotency key is kept for an hour only. The
+operators, not asked of Mollie again — its idempotency key is kept for an hour only. Refunds an
+earlier attempt sent without booking an answer are not sent again either: those lines go to
+the operators (`refunds_unknown`). A step whose record is refused because the waiting change
+is gone stops the run. The
 PATCH is not made exactly-once; it sets absolute values derived from the change, so a
 repeat sets the same target. The change events are built from what the switch wrote,
 stored with it.
