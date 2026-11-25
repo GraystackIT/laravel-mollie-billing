@@ -499,10 +499,14 @@ it('credits a converted trial\'s quota once when the run dies inside the wallet 
 
     // Credited, not yet recorded.
     CrashingProrataChargeHandler::$crashBefore = 'wallet';
+    $this->events = [];
     World::settle($billable, expectHttp: 500);
-    expect($billable->refresh()->remainingBillingQuota('tokens'))->toBe($before);
+    // Rolled back with its record — and never announced.
+    expect($billable->refresh()->remainingBillingQuota('tokens'))->toBe($before)
+        ->and($this->events['WalletCredited'] ?? 0)->toBe(0);
 
     World::settle($billable);
+    expect($this->events['WalletCredited'] ?? 0)->toBe(1);
 
     expect(resumeOutcome($billable)['interval'])->toBe('yearly')
         ->and(resumeOutcome($billable)['waiting'])->toBe([])
@@ -761,4 +765,21 @@ it('does not record a rebalance that failed, so the next delivery runs it', func
     expect(FlakyWalletAdjuster::$calls)->toBe(2)
         ->and(resumeOutcome($billable)['plan'])->toBe('enterprise')
         ->and(resumeOutcome($billable)['waiting'])->toBe([]);
+});
+
+it('keeps a credit and what follows it when a WalletCredited listener throws', function (): void {
+    // After the commit, a throwing listener used to escape the caller's transaction call
+    // — past UpdateSubscription's overage charge, which then never ran.
+    Event::listen(\GraystackIT\MollieBilling\Events\WalletCredited::class, function (): void {
+        throw new RuntimeException('listener down');
+    });
+    config()->set('mollie-billing-plans.plans.pro.intervals.yearly.included_usages', ['tokens' => 1000]);
+
+    $billable = World::trial('pro', 2);
+    World::change($billable, ['interval' => 'yearly'], settle: null);
+    World::settle($billable);
+
+    expect(resumeOutcome($billable)['interval'])->toBe('yearly')
+        ->and(resumeOutcome($billable)['waiting'])->toBe([])
+        ->and($billable->refresh()->remainingBillingQuota('tokens'))->toBe(1000);
 });

@@ -27,7 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   not carried on — the operators get one `AdminPlanChangeFailedNotification` instead — when,
   before its switch, a renewal was booked or the subscription ended; when it predates the
   recorded steps; or when an earlier attempt left refunds or a period balance with Mollie
-  whose outcome was never booked. `WalletCredited` is now dispatched after the commit. `CleanupStalePendingProrataChangeJob`
+  whose outcome was never booked. `WalletCredited` is now dispatched after the commit, and a listener that throws is
+  reported instead of failing the caller. `CleanupStalePendingProrataChangeJob`
   leaves a run that can still be resumed alone for 48 hours from its start.
 - **`CleanupStalePendingProrataChangeJob` really unblocks the customer.** For a paid charge
   whose change never arrived (and when Mollie stays unreachable) it dropped only
