@@ -1,0 +1,704 @@
+{
+    "created_at": "2026-11-26T20:51:47+00:00",
+    "first_charge_on": "2026-11-27",
+    "database": "/Users/bharb/Library/Application Support/mollie-billing-canary/renewal-replay.sqlite",
+    "scenarios": {
+        "renewal": {
+            "billable_id": 1,
+            "customer_id": "cst_Ex7WxVY6HZ",
+            "mandate_id": "mdt_qJ7E3UDMD8",
+            "subscription_ids": [
+                "sub_yTvneFcB5r"
+            ],
+            "next_billing_date": "2026-11-27T00:00:00+00:00",
+            "setup": {
+                "status": "active",
+                "plan": "canary_pro",
+                "ends_at": null,
+                "scheduled_change_at": null,
+                "mollie_status": "active",
+                "mollie_amount": "24.00",
+                "mollie_start_date": "2026-11-27",
+                "mollie_next_payment_date": "2026-11-27",
+                "mollie_webhook_url": "http://example.com/billing/webhook",
+                "wallets": {
+                    "tokens": 170,
+                    "credits": 30
+                }
+            },
+            "now": {
+                "status": "active",
+                "plan": "canary_pro",
+                "period_starts_at": "2026-11-27T00:24:52+00:00",
+                "next_billing_date": "2026-12-27T00:24:52+00:00",
+                "ends_at": null,
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 80
+                },
+                "invoices": 1
+            }
+        },
+        "overage": {
+            "billable_id": 2,
+            "customer_id": "cst_Dfy9pNPUVa",
+            "mandate_id": "mdt_LiNyCkpg5N",
+            "subscription_ids": [
+                "sub_TGHgeTdUug"
+            ],
+            "next_billing_date": "2026-11-27T00:00:00+00:00",
+            "setup": {
+                "status": "active",
+                "plan": "canary_pro",
+                "ends_at": null,
+                "scheduled_change_at": null,
+                "mollie_status": "active",
+                "mollie_amount": "24.00",
+                "mollie_start_date": "2026-11-27",
+                "mollie_next_payment_date": "2026-11-27",
+                "mollie_webhook_url": "http://example.com/billing/webhook",
+                "wallets": {
+                    "tokens": -30,
+                    "credits": 50
+                }
+            },
+            "after_sweep_recorded_at": "2026-11-26T20:52:17+00:00",
+            "now": {
+                "status": "active",
+                "plan": "canary_pro",
+                "period_starts_at": "2026-11-27T00:24:52+00:00",
+                "next_billing_date": "2026-12-27T00:24:52+00:00",
+                "ends_at": null,
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 100
+                },
+                "invoices": 3
+            }
+        },
+        "scheduled_change": {
+            "billable_id": 3,
+            "customer_id": "cst_6Do7eHoCF4",
+            "mandate_id": "mdt_ZLxLPGqiXs",
+            "subscription_ids": [
+                "sub_Hfn7Ck87HM"
+            ],
+            "next_billing_date": "2026-11-27T00:00:00+00:00",
+            "setup": {
+                "status": "active",
+                "plan": "canary_pro",
+                "ends_at": null,
+                "scheduled_change_at": "2026-11-27T00:00:00+00:00",
+                "mollie_status": "active",
+                "mollie_amount": "12.00",
+                "mollie_start_date": "2026-11-27",
+                "mollie_next_payment_date": "2026-11-27",
+                "mollie_webhook_url": "http://example.com/billing/webhook",
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 50
+                }
+            },
+            "now": {
+                "status": "active",
+                "plan": "canary_basic",
+                "period_starts_at": "2026-11-27T00:24:53+00:00",
+                "next_billing_date": "2026-12-27T00:24:53+00:00",
+                "ends_at": null,
+                "wallets": {
+                    "tokens": 100,
+                    "credits": 100
+                },
+                "invoices": 1
+            }
+        },
+        "recurring_coupon": {
+            "billable_id": 4,
+            "customer_id": "cst_6dBwfFPEYX",
+            "mandate_id": "mdt_Debbgzi4Lk",
+            "subscription_ids": [
+                "sub_RypzvpzfAT"
+            ],
+            "next_billing_date": "2026-11-27T00:00:00+00:00",
+            "coupon_code": "RRC428B89",
+            "setup": {
+                "status": "active",
+                "plan": "canary_pro",
+                "ends_at": null,
+                "scheduled_change_at": null,
+                "mollie_status": "active",
+                "mollie_amount": "12.00",
+                "mollie_start_date": "2026-11-27",
+                "mollie_next_payment_date": "2026-11-27",
+                "mollie_webhook_url": "http://example.com/billing/webhook",
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 50
+                }
+            },
+            "now": {
+                "status": "active",
+                "plan": "canary_pro",
+                "period_starts_at": "2026-11-27T00:24:53+00:00",
+                "next_billing_date": "2026-12-27T00:24:53+00:00",
+                "ends_at": null,
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 100
+                },
+                "invoices": 1
+            }
+        },
+        "cancel_at_period_end": {
+            "billable_id": 5,
+            "customer_id": "cst_2AuAxepm4t",
+            "mandate_id": "mdt_P8Cdfu8dzm",
+            "subscription_ids": [
+                "sub_i6ukddsa8V"
+            ],
+            "next_billing_date": "2026-11-27T00:00:00+00:00",
+            "setup": {
+                "status": "cancelled",
+                "plan": "canary_pro",
+                "ends_at": "2026-11-27T00:00:00+00:00",
+                "scheduled_change_at": null,
+                "mollie_status": "canceled",
+                "mollie_amount": "24.00",
+                "mollie_start_date": "2026-11-27",
+                "mollie_next_payment_date": "",
+                "mollie_webhook_url": "http://example.com/billing/webhook",
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 50
+                }
+            },
+            "now": {
+                "status": "expired",
+                "plan": null,
+                "period_starts_at": "2026-10-27T00:00:00+00:00",
+                "next_billing_date": null,
+                "ends_at": "2026-11-27T00:00:00+00:00",
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 50
+                },
+                "invoices": 0
+            },
+            "milestones": {
+                "expired": "2026-11-27T08:15:49+00:00"
+            }
+        },
+        "failed_renewal": {
+            "billable_id": 6,
+            "customer_id": "cst_cQZ7sJmscr",
+            "mandate_id": "mdt_vg85nCjJCp",
+            "subscription_ids": [
+                "sub_YrMKwVJWLB"
+            ],
+            "next_billing_date": "2026-11-27T00:00:00+00:00",
+            "setup": {
+                "status": "active",
+                "plan": "canary_pro",
+                "ends_at": null,
+                "scheduled_change_at": null,
+                "mollie_status": "active",
+                "mollie_amount": "24.00",
+                "mollie_start_date": "2026-11-27",
+                "mollie_next_payment_date": "2026-11-27",
+                "mollie_webhook_url": "http://example.com/billing/webhook",
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 50
+                }
+            },
+            "now": {
+                "status": "past_due",
+                "plan": "canary_pro",
+                "period_starts_at": "2026-10-27T00:00:00+00:00",
+                "next_billing_date": "2026-11-27T00:00:00+00:00",
+                "ends_at": null,
+                "wallets": {
+                    "tokens": 200,
+                    "credits": 50
+                },
+                "invoices": 0
+            },
+            "past_due_since": "2026-11-27T08:15:38+00:00"
+        }
+    },
+    "payments": {
+        "tr_ikuogtGoASAfAYWihe7aJ": {
+            "scenario": "overage",
+            "kind": "overage",
+            "subscription_id": null,
+            "created_at": "2026-11-26T20:52:02+00:00",
+            "amount": "3.60",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-26T20:52:04+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "paid",
+            "settled_at": "2026-11-26T20:52:10+00:00",
+            "status": "paid",
+            "paid_at": "2026-11-26T20:52:07+00:00",
+            "failed_at": null,
+            "wallets_before": {
+                "tokens": -30,
+                "credits": 50
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 0,
+                "credits": 50
+            },
+            "subscription_status_after": "active",
+            "plan_after": "canary_pro",
+            "invoices": [
+                {
+                    "id": 1,
+                    "serial": "IN-26000001",
+                    "kind": "overage",
+                    "gross": 360,
+                    "net": 300,
+                    "period_start": "2026-10-27T00:00:00+00:00",
+                    "period_end": "2026-11-27T00:00:00+00:00",
+                    "lines": [
+                        {
+                            "kind": "overage",
+                            "amount_net": 300,
+                            "quantity": 30
+                        }
+                    ]
+                }
+            ],
+            "replayed_at": "2026-11-26T20:52:11+00:00",
+            "redelivery_http": 200,
+            "done": true
+        },
+        "tr_V66tCJLJwiNUVvj4X38aJ": {
+            "scenario": "renewal",
+            "kind": "renewal",
+            "subscription_id": "sub_yTvneFcB5r",
+            "created_at": "2026-11-27T00:24:52+00:00",
+            "amount": "24.00",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-27T08:15:09+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "paid",
+            "settled_at": "2026-11-27T08:15:15+00:00",
+            "status": "paid",
+            "paid_at": "2026-11-27T08:15:12+00:00",
+            "failed_at": null,
+            "wallets_before": {
+                "tokens": 170,
+                "credits": 30
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 200,
+                "credits": 80
+            },
+            "subscription_status_after": "active",
+            "plan_after": "canary_pro",
+            "invoices": [
+                {
+                    "id": 2,
+                    "serial": "IN-26000002",
+                    "kind": "subscription",
+                    "gross": 2400,
+                    "net": 2000,
+                    "period_start": "2026-11-27T00:24:52+00:00",
+                    "period_end": "2026-12-27T00:24:52+00:00",
+                    "lines": [
+                        {
+                            "kind": "plan",
+                            "amount_net": 2000,
+                            "quantity": 1
+                        }
+                    ]
+                }
+            ],
+            "replayed_at": "2026-11-27T08:15:16+00:00",
+            "redelivery_http": 200,
+            "done": true
+        },
+        "tr_A9ETtUb85MtT4RS6X38aJ": {
+            "scenario": "overage",
+            "kind": "renewal",
+            "subscription_id": "sub_TGHgeTdUug",
+            "created_at": "2026-11-27T00:24:52+00:00",
+            "amount": "24.00",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-27T08:15:17+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "paid",
+            "settled_at": "2026-11-27T08:15:21+00:00",
+            "status": "paid",
+            "paid_at": "2026-11-27T08:15:18+00:00",
+            "failed_at": null,
+            "wallets_before": {
+                "tokens": -20,
+                "credits": 50
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 180,
+                "credits": 100
+            },
+            "subscription_status_after": "active",
+            "plan_after": "canary_pro",
+            "invoices": [
+                {
+                    "id": 3,
+                    "serial": "IN-26000003",
+                    "kind": "subscription",
+                    "gross": 2400,
+                    "net": 2000,
+                    "period_start": "2026-11-27T00:24:52+00:00",
+                    "period_end": "2026-12-27T00:24:52+00:00",
+                    "lines": [
+                        {
+                            "kind": "plan",
+                            "amount_net": 2000,
+                            "quantity": 1
+                        }
+                    ]
+                }
+            ],
+            "replayed_at": "2026-11-27T08:15:22+00:00",
+            "redelivery_http": 200,
+            "done": true
+        },
+        "tr_xXfLurZqDPntLd78X38aJ": {
+            "scenario": "scheduled_change",
+            "kind": "renewal",
+            "subscription_id": "sub_Hfn7Ck87HM",
+            "created_at": "2026-11-27T00:24:53+00:00",
+            "amount": "12.00",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-27T08:15:23+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "paid",
+            "settled_at": "2026-11-27T08:15:27+00:00",
+            "status": "paid",
+            "paid_at": "2026-11-27T08:15:24+00:00",
+            "failed_at": null,
+            "wallets_before": {
+                "tokens": 200,
+                "credits": 50
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 100,
+                "credits": 100
+            },
+            "subscription_status_after": "active",
+            "plan_after": "canary_basic",
+            "invoices": [
+                {
+                    "id": 4,
+                    "serial": "IN-26000004",
+                    "kind": "subscription",
+                    "gross": 1200,
+                    "net": 1000,
+                    "period_start": "2026-11-27T00:24:53+00:00",
+                    "period_end": "2026-12-27T00:24:53+00:00",
+                    "lines": [
+                        {
+                            "kind": "plan",
+                            "amount_net": 1000,
+                            "quantity": 1
+                        }
+                    ]
+                }
+            ],
+            "replayed_at": "2026-11-27T08:15:28+00:00",
+            "redelivery_http": 200,
+            "done": true
+        },
+        "tr_Nuffu7qZj4794Lq9X38aJ": {
+            "scenario": "recurring_coupon",
+            "kind": "renewal",
+            "subscription_id": "sub_RypzvpzfAT",
+            "created_at": "2026-11-27T00:24:53+00:00",
+            "amount": "12.00",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-27T08:15:29+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "paid",
+            "settled_at": "2026-11-27T08:15:32+00:00",
+            "status": "paid",
+            "paid_at": "2026-11-27T08:15:29+00:00",
+            "failed_at": null,
+            "wallets_before": {
+                "tokens": 200,
+                "credits": 50
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 200,
+                "credits": 100
+            },
+            "subscription_status_after": "active",
+            "plan_after": "canary_pro",
+            "invoices": [
+                {
+                    "id": 5,
+                    "serial": "IN-26000005",
+                    "kind": "subscription",
+                    "gross": 1200,
+                    "net": 1000,
+                    "period_start": "2026-11-27T00:24:53+00:00",
+                    "period_end": "2026-12-27T00:24:53+00:00",
+                    "lines": [
+                        {
+                            "kind": "plan",
+                            "amount_net": 2000,
+                            "quantity": 1
+                        },
+                        {
+                            "kind": "coupon",
+                            "amount_net": -1000,
+                            "quantity": 1
+                        }
+                    ]
+                }
+            ],
+            "replayed_at": "2026-11-27T08:15:33+00:00",
+            "redelivery_http": 200,
+            "done": true
+        },
+        "tr_BTwG6hg92hF4PeUBX38aJ": {
+            "scenario": "failed_renewal",
+            "kind": "renewal",
+            "subscription_id": "sub_YrMKwVJWLB",
+            "created_at": "2026-11-27T00:24:53+00:00",
+            "amount": "24.00",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-27T08:15:33+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "failed",
+            "settled_at": "2026-11-27T08:15:37+00:00",
+            "status": "failed",
+            "paid_at": null,
+            "failed_at": "2026-11-27T08:15:35+00:00",
+            "wallets_before": {
+                "tokens": 200,
+                "credits": 50
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 200,
+                "credits": 50
+            },
+            "subscription_status_after": "past_due",
+            "plan_after": "canary_pro",
+            "invoices": [],
+            "replayed_at": "2026-11-27T08:15:38+00:00",
+            "redelivery_http": 200,
+            "done": true
+        },
+        "tr_xMKKK5uRJboDDMxfjs8aJ": {
+            "scenario": "overage",
+            "kind": "overage",
+            "subscription_id": null,
+            "created_at": "2026-11-27T08:15:22+00:00",
+            "amount": "2.40",
+            "method": "directdebit",
+            "first_seen_at": "2026-11-27T08:15:39+00:00",
+            "pending_replay": {
+                "status": "pending",
+                "http": 200
+            },
+            "settled_to": "paid",
+            "settled_at": "2026-11-27T08:15:43+00:00",
+            "status": "paid",
+            "paid_at": "2026-11-27T08:15:40+00:00",
+            "failed_at": null,
+            "wallets_before": {
+                "tokens": 180,
+                "credits": 100
+            },
+            "subscription_status_before": "active",
+            "http": 200,
+            "wallets_after": {
+                "tokens": 200,
+                "credits": 100
+            },
+            "subscription_status_after": "active",
+            "plan_after": "canary_pro",
+            "invoices": [
+                {
+                    "id": 6,
+                    "serial": "IN-26000006",
+                    "kind": "overage",
+                    "gross": 240,
+                    "net": 200,
+                    "period_start": "2026-10-27T00:00:00+00:00",
+                    "period_end": "2026-11-27T00:00:00+00:00",
+                    "lines": [
+                        {
+                            "kind": "overage",
+                            "amount_net": 200,
+                            "quantity": 20
+                        }
+                    ]
+                }
+            ],
+            "replayed_at": "2026-11-27T08:15:43+00:00",
+            "redelivery_http": 200,
+            "done": true
+        }
+    },
+    "jobs_ran_on": "2026-11-27",
+    "jobs_runs": [
+        "2026-11-26T20:52:03+00:00",
+        "2026-11-27T08:15:47+00:00"
+    ],
+    "events": [
+        {
+            "event": "SubscriptionChangeScheduled",
+            "scenario": "scheduled_change",
+            "at": "2026-11-26T20:51:52+00:00"
+        },
+        {
+            "event": "CouponRedeemed",
+            "scenario": "recurring_coupon",
+            "at": "2026-11-26T20:51:54+00:00"
+        },
+        {
+            "event": "SubscriptionCancelled",
+            "scenario": "cancel_at_period_end",
+            "at": "2026-11-26T20:51:57+00:00"
+        },
+        {
+            "event": "OverageCharged",
+            "scenario": "overage",
+            "at": "2026-11-26T20:52:11+00:00"
+        },
+        {
+            "event": "PaymentSucceeded",
+            "scenario": "overage",
+            "at": "2026-11-26T20:52:11+00:00"
+        },
+        {
+            "event": "PaymentSucceeded",
+            "scenario": "renewal",
+            "at": "2026-11-27T08:15:16+00:00"
+        },
+        {
+            "event": "PaymentSucceeded",
+            "scenario": "overage",
+            "at": "2026-11-27T08:15:22+00:00"
+        },
+        {
+            "event": "PlanChanged",
+            "scenario": "scheduled_change",
+            "at": "2026-11-27T08:15:28+00:00"
+        },
+        {
+            "event": "PaymentSucceeded",
+            "scenario": "scheduled_change",
+            "at": "2026-11-27T08:15:28+00:00"
+        },
+        {
+            "event": "CouponRedeemed",
+            "scenario": "recurring_coupon",
+            "at": "2026-11-27T08:15:33+00:00"
+        },
+        {
+            "event": "PaymentSucceeded",
+            "scenario": "recurring_coupon",
+            "at": "2026-11-27T08:15:33+00:00"
+        },
+        {
+            "event": "PaymentFailed",
+            "scenario": "failed_renewal",
+            "at": "2026-11-27T08:15:38+00:00"
+        },
+        {
+            "event": "OverageCharged",
+            "scenario": "overage",
+            "at": "2026-11-27T08:15:43+00:00"
+        },
+        {
+            "event": "PaymentSucceeded",
+            "scenario": "overage",
+            "at": "2026-11-27T08:15:43+00:00"
+        },
+        {
+            "event": "SubscriptionExpired",
+            "scenario": "cancel_at_period_end",
+            "at": "2026-11-27T08:15:47+00:00"
+        }
+    ],
+    "visits": [
+        {
+            "at": "2026-11-26T20:52:18+00:00",
+            "created_world": true,
+            "jobs_ran": true,
+            "observations": [
+                "overage: overage tr_ikuogtGoASAfAYWihe7aJ 3.60 paid created 2026-11-26T20:52 \u2192 200, invoice IN-26000001 360"
+            ],
+            "problems": [],
+            "log": []
+        },
+        {
+            "at": "2026-11-26T20:53:19+00:00",
+            "created_world": false,
+            "jobs_ran": false,
+            "observations": [],
+            "problems": [],
+            "log": []
+        },
+        {
+            "at": "2026-11-26T21:59:44+00:00",
+            "created_world": false,
+            "jobs_ran": false,
+            "observations": [],
+            "problems": [],
+            "log": []
+        },
+        {
+            "at": "2026-11-27T08:15:49+00:00",
+            "created_world": false,
+            "jobs_ran": true,
+            "observations": [
+                "renewal: renewal tr_V66tCJLJwiNUVvj4X38aJ 24.00 paid created 2026-11-27T00:24 \u2192 200, invoice IN-26000002 2400",
+                "overage: renewal tr_A9ETtUb85MtT4RS6X38aJ 24.00 paid created 2026-11-27T00:24 \u2192 200, invoice IN-26000003 2400",
+                "scheduled_change: renewal tr_xXfLurZqDPntLd78X38aJ 12.00 paid created 2026-11-27T00:24 \u2192 200, invoice IN-26000004 1200",
+                "recurring_coupon: renewal tr_Nuffu7qZj4794Lq9X38aJ 12.00 paid created 2026-11-27T00:24 \u2192 200, invoice IN-26000005 1200",
+                "failed_renewal: renewal tr_BTwG6hg92hF4PeUBX38aJ 24.00 failed created 2026-11-27T00:24 \u2192 200, invoice none",
+                "overage: overage tr_xMKKK5uRJboDDMxfjs8aJ 2.40 paid created 2026-11-27T08:15 \u2192 200, invoice IN-26000006 240",
+                "cancel_at_period_end: expired after its end, never charged"
+            ],
+            "problems": [],
+            "log": []
+        }
+    ],
+    "last_checked_at": "2026-11-27T08:15:49+00:00",
+    "last_problems": []
+}
