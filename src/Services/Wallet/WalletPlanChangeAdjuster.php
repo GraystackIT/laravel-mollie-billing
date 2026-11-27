@@ -141,19 +141,10 @@ class WalletPlanChangeAdjuster
             // the quantity back when that charge settles. Clearing the debt first made the
             // credit land on a non-negative balance and handed the customer free capacity,
             // permanently for a rollover type.
-            $pendingOverage = $this->pendingOverageQuantityFor($billable, $slug);
-
-            // Plan-change excess from an EARLIER change that is still waiting to be charged
-            // (see `restoreUnchargedExcess()`). It is debt with a recorded price, not
-            // consumption on the plan being left now — read as that, a second plan change
-            // would prorate it against the wrong quota and re-price whatever was left at
-            // yet another plan's rate. Carried exactly like the in-flight units above.
-            // What a pending charge already lists is counted there, not twice.
-            $pendingOverage += max(
-                0,
-                WalletUsageService::deferredOverageQuantity($wallet)
-                    - $this->pendingOverageQuantityFor($billable, $slug, deferredOnly: true),
-            );
+            //
+            // Plus plan-change excess from an EARLIER change that is still waiting to be
+            // charged — see carriedDebtUnits().
+            $pendingOverage = $this->carriedDebtUnits($billable, $wallet);
 
             // Not gated on the old plan including any of this type. A usage type may be
             // priced without an included quota at all — every unit is billed and the wallet
@@ -410,6 +401,30 @@ class WalletPlanChangeAdjuster
                 'skipped' => $skipped,
             ]);
         }
+    }
+
+    /**
+     * Units of a wallet's negative balance that are debt, not consumption on the plan being
+     * left — `adjust()` keeps them out of the excess it prices, and the plan-change preview
+     * (`PreviewService`) has to do the same or it quotes them a second time:
+     *
+     *  - units an in-flight period-end overage charge is already collecting;
+     *  - plan-change excess from an EARLIER change that is still waiting to be charged (see
+     *    `restoreUnchargedExcess()`). It is debt with a recorded price — read as consumption,
+     *    a second plan change would prorate it against the wrong quota and re-price whatever
+     *    was left at yet another plan's rate. What a pending charge already lists is counted
+     *    with the in-flight units, not twice.
+     */
+    public function carriedDebtUnits(Billable $billable, \Bavix\Wallet\Models\Wallet $wallet): int
+    {
+        $slug = (string) $wallet->slug;
+
+        return $this->pendingOverageQuantityFor($billable, $slug)
+            + max(
+                0,
+                WalletUsageService::deferredOverageQuantity($wallet)
+                    - $this->pendingOverageQuantityFor($billable, $slug, deferredOnly: true),
+            );
     }
 
     /**

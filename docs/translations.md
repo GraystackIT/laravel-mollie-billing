@@ -28,6 +28,7 @@ The package ships with two locales out of the box:
 | `notifications.php` | Email notification subjects and bodies: trial reminders, payment failures, invoice available, usage thresholds, overage billing, refunds, plan change failures |
 | `emails.php` | Shared email partials: greeting, action buttons |
 | `errors.php` | User-facing error messages: country validation, coupons, usage limits, access grants, refunds |
+| `exceptions.php` | What a screen shows when a service refuses (an invalid state, a refund that is not possible, an input the coupon form cannot take, …). Resolved from the key a package exception carries — see [Exception messages](#exception-messages) below. |
 | `enums.php` | Human-readable labels for all enums: `SubscriptionStatus`, `InvoiceStatus`, `InvoiceKind`, `SubscriptionSource`, `SubscriptionInterval`, `CouponType`, `DiscountType`, `RefundReasonCode`, `CountryMismatchStatus`, `PlanChangeMode`, `MollieSubscriptionStatus`, `AuditCategory` |
 | `audit.php` | Audit-trail event sentences, category and actor labels, admin timeline UI. Unlike every other file here, these strings are resolved from a **key stored in the database** rather than at the call site — a missing key degrades to "Unrecognised billing event" instead of failing. Keep it in sync with `BillingAuditMap`; see [audit.md](audit.md). |
 | `countries.php` | EU-27 country names keyed by ISO 3166-1 alpha-2 code |
@@ -36,6 +37,30 @@ The package ships with two locales out of the box:
 | `addons.php` | Addon name and description overrides (keyed by addon code) |
 | `products.php` | Product name and description overrides (keyed by product code) |
 | `product_groups.php` | Product group name overrides (keyed by group key) |
+
+## Exception messages
+
+An exception's `getMessage()` is English and written for the log. Never show it to a person:
+package exceptions implement `GraystackIT\MollieBilling\Exceptions\TranslatableException` and
+carry a `billing::…` key with its parameters, and `GraystackIT\MollieBilling\Support\ExceptionMessage`
+turns that into the sentence in the current locale:
+
+```php
+use GraystackIT\MollieBilling\Support\ExceptionMessage;
+
+try {
+    $billable->syncBillingSeats(5);
+} catch (\Throwable $e) {
+    report($e);
+    $message = ExceptionMessage::for($e);          // customers: generic sentence for anything unknown
+    // ExceptionMessage::forOperator($e)           // admins: "The action was refused: <message>" for anything unknown
+}
+```
+
+Most sentences live in `exceptions.php`; a few customer-facing refusals reuse their `portal.php`
+or `checkout.php` key. Override them like any other file (`lang/vendor/billing/{locale}/exceptions.php`).
+An app that throws one of the package's state exceptions itself can give it a sentence the same
+way the package does: `throw (new InvalidSubscriptionStateException('…'))->withTranslation('app.key');`.
 
 ## Catalog entity name resolution
 

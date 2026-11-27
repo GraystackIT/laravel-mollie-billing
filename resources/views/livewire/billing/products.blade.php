@@ -280,7 +280,7 @@ new class extends Component {
             $this->toast(__('billing::portal.products.error'), 'danger');
         } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
             // Not an error to report: the customer is told what to do first.
-            $this->toast($e->getMessage(), 'danger');
+            $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
         } catch (\Throwable $e) {
             report($e);
             $this->toast(__('billing::portal.products.error'), 'danger');

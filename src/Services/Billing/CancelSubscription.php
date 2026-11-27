@@ -47,9 +47,31 @@ class CancelSubscription
         // true: a month of access for calling "cancel" on nothing. An expired one flipped
         // back to `cancelled` and its customer was mailed a cancellation a second time.
         if (in_array($billable->getBillingSubscriptionStatus(), [SubscriptionStatus::New, SubscriptionStatus::Expired], true)) {
-            throw new \GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException(
+            throw (new \GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException(
                 'There is no subscription to cancel.'
-            );
+            ))->withTranslation('billing::exceptions.state.no_subscription_to_cancel');
+        }
+
+        // Cancelling at period end what is already cancelled changes nothing, and must not
+        // be written as if it did: a second tab, a second billing member or a direct call
+        // to the dashboard action used to run the whole method again — recording the grace
+        // date as the "before cancel" end below (so a resumed free plan came back with a
+        // 30-day expiry and was wiped on it), and mailing the cancellation a second time.
+        // An immediate cancel of a cancelled row still goes through: it ends the grace.
+        if (! $immediately && $billable->getBillingSubscriptionStatus() === SubscriptionStatus::Cancelled) {
+            return;
+        }
+
+        // A graceful cancel keeps the access the customer has until the end of what was
+        // paid for. With no access to keep there is nothing to run out: past due because a
+        // trial's first charge failed or a renewal was charged back, the period the grace
+        // would be read from (`nextBillingDate()`) is one nobody paid for — up to a year
+        // of access handed back, and a resume on top of it made that an Active paid plan
+        // with its first charge as far away. (Past due for an overage debt only keeps its
+        // access, and so its grace.) Such a cancel is an immediate one, overage pass
+        // included, exactly what the past-due auto-cancel does later anyway.
+        if (! $immediately && ! $billable->hasAccessibleBillingSubscription()) {
+            $immediately = true;
         }
 
         $isLocal = $billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value
@@ -253,12 +275,16 @@ class CancelSubscription
             MollieCall::send(new CancelSubscriptionRequest($customerId, $subscriptionId));
 
             unset($meta['pending_subscription_cancel']);
+            // What the gate remembered of it (60 s) is "live": the checkout would send the
+            // customer back to the dashboard for a minute after an immediate cancel.
+            MollieSubscriptionGate::forget($subscriptionId);
 
             return $meta;
         } catch (ApiException $e) {
             // 404/410, or 422 "has been cancelled" for one cancelled before.
             if (\GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer::cancelledAlready($e)) {
                 unset($meta['pending_subscription_cancel']);
+                MollieSubscriptionGate::forget($subscriptionId);
 
                 return $meta;
             }

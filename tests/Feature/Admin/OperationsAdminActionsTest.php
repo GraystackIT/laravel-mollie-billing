@@ -97,7 +97,9 @@ it('show: planName() answers the catalog name and mandate() what the inspector r
     $component = Livewire::test('mollie-billing::admin.billables.show', ['routeParameters' => ['billable' => $billable->getKey()]]);
 
     expect($component->instance()->planName())->toBe('Basic Free')
-        ->and($component->instance()->mandate())->toBe($summary);
+        // Equal, not the same object: after the first render the page answers from the
+        // summary it kept, so a header refresh does not ask Mollie again (26 Nov 2026).
+        ->and($component->instance()->mandate())->toEqual($summary);
 
     $component->assertSee('Basic Free')->assertSee('mdt_show');
 

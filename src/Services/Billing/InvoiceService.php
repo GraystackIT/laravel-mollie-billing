@@ -17,14 +17,17 @@ use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
+use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\CreditNoteIssued;
 use GraystackIT\MollieBilling\Events\InvoiceCreated;
 use GraystackIT\MollieBilling\Events\InvoicePdfRegenerated;
 use GraystackIT\MollieBilling\Exceptions\LineItemTotalsMismatchException;
+use GraystackIT\MollieBilling\Exceptions\InvalidBillingInputException;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsLineAmountException;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
+use GraystackIT\MollieBilling\Services\Vat\CountryMatchService;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingRoute;
@@ -46,6 +49,8 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use GraystackIT\MollieBilling\Support\MollieCall;
+use GraystackIT\MollieBilling\Support\MollieRefusal;
+use GraystackIT\MollieBilling\Support\MolliePaymentCredits;
 
 class InvoiceService
 {
@@ -239,7 +244,7 @@ class InvoiceService
         bool $deferDocument = false,
     ): BillingInvoice {
         if ($amountNet <= 0) {
-            throw new \InvalidArgumentException('Credit-note net amount must be positive.');
+            throw new InvalidBillingInputException('Credit-note net amount must be positive.', 'billing::exceptions.refund.amount_positive');
         }
 
         // Upper bound, not just a lower one: a caller that derives the net from a
@@ -338,8 +343,8 @@ class InvoiceService
      * Render a credit note's PDF and announce it.
      *
      * Split out of {@see createCreditNote()} so a caller can persist inside a transaction
-     * and do this after committing. Safe to call twice — `generateAndStorePdf()` overwrites
-     * the same deterministic path — but nothing calls it twice.
+     * and do this after committing. Safe to call twice — a document already on the disk is
+     * kept (see {@see renderDeferredDocument()}) — but nothing calls it twice.
      */
     public function issueCreditNoteDocument(BillingInvoice $creditNote, BillingInvoice $original): void
     {
@@ -350,8 +355,29 @@ class InvoiceService
             return;
         }
 
-        $this->generateAndStorePdf($creditNote, $billable);
-        event(new CreditNoteIssued($billable, $creditNote, $original));
+        $this->renderDeferredDocument($creditNote, $billable);
+        self::announceBooked(new CreditNoteIssued($billable, $creditNote, $original));
+    }
+
+    /**
+     * Dispatch an event about money that has already moved, with a listener's failure
+     * reported rather than propagated.
+     *
+     * Every credit-note announcement comes after the refund left Mollie and the booking
+     * committed; a listener cannot take either back. Propagated, its throw read as a
+     * failed refund: RetryRefundLineJob was retried with the same line — clamped to what
+     * was left, so under a new idempotency key, paying out again — the admin screen showed
+     * "the payment provider rejected the request" for a refund that had gone out, and the
+     * customer's RefundProcessedNotification was skipped. Same rule as WalletCredited.
+     */
+    public static function announceBooked(object $event): void
+    {
+        try {
+            event($event);
+        } catch (\Throwable $e) {
+            // The reporter can fail too; not reported again, which could throw once more.
+            rescue(static fn () => report($e), null, false);
+        }
     }
 
     /**
@@ -503,7 +529,7 @@ class InvoiceService
     public function creditLineFor(BillingInvoice $original, int $lineIndex, int $amountNet): array
     {
         if ($amountNet <= 0) {
-            throw new \InvalidArgumentException('Refund amount must be positive.');
+            throw new InvalidBillingInputException('Refund amount must be positive.', 'billing::exceptions.refund.amount_positive');
         }
 
         $part = null;
@@ -514,7 +540,8 @@ class InvoiceService
         }
 
         if ($part === null) {
-            throw new InvalidRefundTargetException("Line {$lineIndex} of invoice {$original->id} cannot be refunded on its own.");
+            throw (new InvalidRefundTargetException("Line {$lineIndex} of invoice {$original->id} cannot be refunded on its own."))
+                ->withTranslation('billing::exceptions.refund.line_not_refundable');
         }
 
         $remainingNet = max(0, min($part['net'] - $part['credited_net'], $original->remainingRefundableNet()));
@@ -1077,8 +1104,9 @@ class InvoiceService
 
         // Serialised per invoice: a double-click (or several tabs, or an export running
         // next to a download) would otherwise regenerate the same PDF concurrently, and
-        // each run deletes the file the other just wrote.
-        $lock = Cache::lock('billing:invoice-pdf-regenerate:'.$invoice->id, 30);
+        // each run deletes the file the other just wrote. The deferred render right after a
+        // booking takes the same lock ({@see renderDeferredDocument()}).
+        $lock = self::documentLock($invoice);
 
         try {
             $lock->block(15);
@@ -1103,6 +1131,62 @@ class InvoiceService
         $invoice = $invoice->fresh();
 
         return $invoice instanceof BillingInvoice && self::pdfIsStored($invoice) ? $invoice : null;
+    }
+
+    /**
+     * The one per-invoice lock every render outside the booking itself takes: a download
+     * click ({@see ensureStoredPdf()}) and the deferred render after a commit.
+     */
+    private static function documentLock(BillingInvoice $invoice): \Illuminate\Contracts\Cache\Lock
+    {
+        return Cache::lock('billing:invoice-pdf-regenerate:'.$invoice->id, 30);
+    }
+
+    /**
+     * Render a document that was deferred until after its booking committed — under the
+     * same lock as a download click, and not again when that click got there first.
+     *
+     * The PDF link is shown from the moment the row exists (decision 13), so a customer can
+     * click between the commit and this render. Without the shared lock both ran at once
+     * and the later write truncated the file the click was streaming. A render does not
+     * touch the serial number, so the overlap never cost one; it cost a readable document.
+     *
+     * A lock that cannot be had in time is no reason to leave the invoice without its
+     * document: the render goes ahead, as it did before.
+     *
+     * @return bool whether the invoice has a stored PDF afterwards
+     */
+    private function renderDeferredDocument(BillingInvoice $invoice, Billable $billable): bool
+    {
+        $lock = self::documentLock($invoice);
+        $held = false;
+
+        try {
+            $held = (bool) $lock->block(15);
+        } catch (\Illuminate\Contracts\Cache\LockTimeoutException) {
+            // Rendered regardless — see above.
+        }
+
+        try {
+            $stored = $invoice->exists ? BillingInvoice::query()->withoutGlobalScopes()->find($invoice->getKey()) : null;
+
+            if ($stored instanceof BillingInvoice && self::pdfIsStored($stored)) {
+                // A download click rendered it while the booking was finishing. The
+                // caller's model learns where, without a second write over the file.
+                $invoice->forceFill([
+                    'pdf_disk' => $stored->pdf_disk,
+                    'pdf_path' => $stored->pdf_path,
+                ])->syncOriginalAttributes(['pdf_disk', 'pdf_path']);
+
+                return true;
+            }
+
+            return $this->generateAndStorePdf($invoice, $billable);
+        } finally {
+            if ($held) {
+                $lock->release();
+            }
+        }
     }
 
     /** Whether the invoice's PDF is on its disk right now — what ensureStoredPdf() would not have to regenerate. */
@@ -1906,11 +1990,9 @@ class InvoiceService
         // refund step so the reissue PDF can reference it.
         $oldCountry = strtoupper((string) ($original->country ?? ''));
 
-        $meta = $billable->getBillingSubscriptionMeta();
-        $pending = (array) ($meta['country_corrections'] ?? []);
         $paymentId = is_object($payment) ? (string) ($payment->id ?? '') : '';
         if ($paymentId !== '') {
-            $pending[$paymentId] = [
+            $entry = [
                 'mismatch_id' => $mismatchId,
                 'original_invoice_id' => (int) $original->id,
                 'old_country' => $oldCountry,
@@ -1921,10 +2003,19 @@ class InvoiceService
                 'period_end' => $original->period_end?->toIso8601String(),
                 'created_at' => BillingTime::nowUtc()->toIso8601String(),
             ];
-            $this->mutateBillingMeta($billable, fn (array $meta): array => [
-                ...$meta,
-                'country_corrections' => $pending,
-            ]);
+
+            // Added to the map read under the lock, never to the caller's snapshot: that
+            // snapshot predates the Mollie call above, and the previous correction of the
+            // same resolve() can be paid and cleared by its webhook in the meantime.
+            // Replaying the snapshot brought that entry back for good — the dashboard kept
+            // showing a pending re-charge and the sweeper polled the payment every hour.
+            $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId, $entry): array {
+                $corrections = (array) ($meta['country_corrections'] ?? []);
+                $corrections[$paymentId] = $entry;
+                $meta['country_corrections'] = $corrections;
+
+                return $meta;
+            });
         }
 
         return $payment;
@@ -2084,6 +2175,7 @@ class InvoiceService
         $periodEnd = ($original->period_end ?? $now)->toIso8601String();
 
         $cloned = [];
+        $clonedAt = [];
         foreach ((array) $original->line_items as $index => $line) {
             $netLine = (int) ($line['amount_net'] ?? 0);
             $lineRate = $this->correctedLineRate(
@@ -2108,12 +2200,156 @@ class InvoiceService
                 'amount_gross' => $netLine + $vatLine,
                 'period_start' => $periodStart,
                 'period_end' => $periodEnd,
-                'parent_invoice_id' => (int) $original->id,
+                // Not `parent_invoice_id`: that key marks a CREDIT against another invoice,
+                // and every reader of a document's own charges skips such lines. On the
+                // reissue it left nothing to refund by — a full refund credited 0 % VAT and
+                // paid back only the net — so the reference to the corrected invoice has a
+                // key of its own, like the undercollection's `completes_invoice_id`.
+                'corrects_invoice_id' => (int) $original->id,
                 'description' => $line['description'] ?? null,
+            ];
+            $clonedAt[(int) $index] = count($cloned) - 1;
+        }
+
+        return [...$cloned, ...$this->refundedBeforeCorrectionLines($original, $cloned, $clonedAt, $periodStart, $periodEnd)];
+    }
+
+    /**
+     * The reductions that bring a reissue down to what remained paid on the original.
+     *
+     * A refund made before the correction — goodwill, a partial refund by line, a plan
+     * change's credit — already gave that money back. The correction then refunds only the
+     * remainder, so the reissue may charge only the remainder too: cloning the original at
+     * full value collected the earlier refund a second time over the mandate.
+     *
+     * One negative line per original line that was credited, at that line's corrected rate
+     * and naming it in `applies_to`, so the reissue reads like any invoice with a reduction
+     * (refunds fold it into its line, a prorata credit takes it off that component). Credit
+     * that names no line is set against the largest one.
+     *
+     * @param  list<array<string, mixed>>  $cloned
+     * @param  array<int, int>  $clonedAt  original line index → position in `$cloned`
+     * @return list<array<string, mixed>>
+     */
+    private function refundedBeforeCorrectionLines(BillingInvoice $original, array $cloned, array $clonedAt, string $periodStart, string $periodEnd): array
+    {
+        $credited = $this->creditedOutsideCorrection($original);
+
+        $reductions = [];
+        foreach ($credited['per_line'] as $index => $net) {
+            if ($net > 0 && isset($clonedAt[$index])) {
+                $reductions[$clonedAt[$index]] = ($reductions[$clonedAt[$index]] ?? 0) + $net;
+            } else {
+                $credited['unattributed'] += max(0, $net);
+            }
+        }
+
+        if ($credited['unattributed'] > 0) {
+            $largest = null;
+            foreach ($cloned as $position => $line) {
+                if ($largest === null || (int) $line['amount_net'] > (int) $cloned[$largest]['amount_net']) {
+                    $largest = $position;
+                }
+            }
+
+            if ($largest !== null) {
+                $reductions[$largest] = ($reductions[$largest] ?? 0) + $credited['unattributed'];
+            }
+        }
+
+        $lines = [];
+        foreach ($reductions as $position => $net) {
+            $line = $cloned[$position];
+            $rate = (float) $line['vat_rate'];
+            $vat = (int) round(-$net * $rate / 100);
+
+            $lines[] = [
+                'kind' => 'refunded',
+                'code' => $line['code'] ?? null,
+                'label' => (string) __('billing::portal.country_correction_refunded_label', [
+                    'serial' => (string) ($original->serial_number ?? $original->id),
+                    'label' => (string) $line['label'],
+                ]),
+                'quantity' => 1,
+                'unit_price_net' => -$net,
+                'amount_net' => -$net,
+                'vat_rate' => $rate,
+                'vat_amount' => $vat,
+                'amount_gross' => -$net + $vat,
+                'applies_to' => [ProrataComposer::lineKey($line)],
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'corrects_invoice_id' => (int) $original->id,
             ];
         }
 
-        return $cloned;
+        return $lines;
+    }
+
+    /**
+     * Net credited back on `$original` by every refund except the country correction's own,
+     * per original line index, plus what names no line.
+     *
+     * The correction's own refund is recognised by its reason
+     * ({@see CountryMatchService::CORRECTION_REFUND_REASON}); a resolve that refunded an
+     * invoice and stopped before charging it still owes the whole reissue on the retry.
+     * A reversal (the refund failed at Mollie) takes its credit back out again.
+     *
+     * @return array{per_line: array<int, int>, unattributed: int, total: int}
+     */
+    public function creditedOutsideCorrection(BillingInvoice $original): array
+    {
+        $notes = BillingInvoice::query()
+            ->where('billable_type', $original->billable_type)
+            ->where('billable_id', $original->billable_id)
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->orderBy('id')
+            ->get(['id', 'line_items', 'refund_reason_code', 'refund_reason_text']);
+
+        $correctionNotes = [];
+        foreach ($notes as $note) {
+            if ($note->refund_reason_code === RefundReasonCode::BillingError
+                && $note->refund_reason_text === CountryMatchService::CORRECTION_REFUND_REASON
+            ) {
+                $correctionNotes[(int) $note->id] = true;
+            }
+        }
+
+        $perLine = [];
+        $unattributed = 0;
+        foreach ($notes as $note) {
+            if (isset($correctionNotes[(int) $note->id])) {
+                continue;
+            }
+
+            foreach ((array) ($note->line_items ?? []) as $line) {
+                if (! is_array($line) || (int) ($line['parent_invoice_id'] ?? 0) !== (int) $original->id) {
+                    continue;
+                }
+
+                if (isset($correctionNotes[(int) ($line['reversed_credit_note_id'] ?? 0)])) {
+                    continue;
+                }
+
+                $net = BillingInvoice::creditSign($line) * abs((int) ($line['amount_net'] ?? 0));
+
+                if (isset($line['parent_line_item_index'])) {
+                    $index = (int) $line['parent_line_item_index'];
+                    $perLine[$index] = ($perLine[$index] ?? 0) + $net;
+                } else {
+                    $unattributed += $net;
+                }
+            }
+        }
+
+        $perLine = array_map(static fn (int $net): int => max(0, $net), $perLine);
+        $unattributed = max(0, $unattributed);
+
+        return [
+            'per_line' => $perLine,
+            'unattributed' => $unattributed,
+            'total' => min($original->refundableBaseNet(), array_sum($perLine) + $unattributed),
+        ];
     }
 
     /**
@@ -2261,8 +2497,8 @@ class InvoiceService
      * Render an invoice's PDF and announce it.
      *
      * Split out of {@see createInvoice()} so a caller can persist inside a transaction and
-     * do this after committing. Safe to call twice — `generateAndStorePdf()` overwrites the
-     * same deterministic path — but nothing calls it twice.
+     * do this after committing. Safe to call twice — a document already on the disk is kept
+     * (see {@see renderDeferredDocument()}) — but nothing calls it twice.
      */
     public function issueInvoiceDocument(BillingInvoice $invoice, Billable $billable): void
     {
@@ -2283,7 +2519,7 @@ class InvoiceService
      */
     public function storeInvoiceDocument(BillingInvoice $invoice, Billable $billable): bool
     {
-        return $this->generateAndStorePdf($invoice, $billable);
+        return $this->renderDeferredDocument($invoice, $billable);
     }
 
     /**
@@ -2571,8 +2807,10 @@ class InvoiceService
      * Each call is posted in the currency of the invoice it refunds — Mollie
      * rejects any other — and the credit note inherits that currency.
      *
-     * Mollie 409 idempotency per line: if a refund line_item already exists with
-     * (parent_invoice_id, parent_line_item_index, amount_net) → skipped.
+     * Idempotent per line, locally: if a refund line_item already exists with
+     * (parent_invoice_id, parent_line_item_index, amount_net) → skipped. (Not a Mollie
+     * status: Mollie answers a reused key with the first answer, or 400 for other
+     * parameters — measured 26 November 2026, tests/Sandbox/MollieIdempotencyContractTest.)
      *
      * Coupon-covered lines are filtered out.
      *
@@ -2629,6 +2867,7 @@ class InvoiceService
         // idempotency key. A fresh one sent a retried refund under a new key — paid again —
         // and left nothing on the credit note to recognise the line by.
         $capped->refundToken = $line->refundToken;
+        $capped->refundKeyRefusals = $line->refundKeyRefusals;
 
         $capped->refundCapNote = [
             'alreadyRefundedNet' => (int) $original->effectiveRefundedNet(),
@@ -2640,6 +2879,130 @@ class InvoiceService
         ];
 
         return $capped;
+    }
+
+    /**
+     * Whether a credit note of this billable carries a refund line's token on a booking
+     * that still stands — written by {@see createRefund()} itself, or by RefundHandler from
+     * the token the refund carried in its Mollie metadata.
+     *
+     * A booking whose refund Mollie later reported `failed` or `canceled` has been taken
+     * back by {@see reverseBookedCredit()} (a mirror line under the same `mollie_refund_id`,
+     * `reverses_credit` set; the mirror drops the token). The token is still on the
+     * historical note, but the money never left — that booking settles nothing.
+     */
+    private function refundTokenOnBooks(Billable $billable, string $token): bool
+    {
+        return $this->refundTokenBooking($billable, $token) === 'standing';
+    }
+
+    /**
+     * What the books hold for a refund line's token: a booking that stands, only bookings
+     * a reversal took back, or nothing.
+     *
+     * @return 'standing'|'reversed'|null
+     */
+    private function refundTokenBooking(Billable $billable, string $token): ?string
+    {
+        return $this->refundTokenBookings($billable, [$token])[$token] ?? null;
+    }
+
+    /**
+     * What the books hold for each of these refund-line tokens, read from the billable's
+     * credit notes in one query: `standing` when a booking carrying the token still stands,
+     * `reversed` when every booking carrying it was taken back by
+     * {@see reverseBookedCredit()} (Mollie reported the refund `failed` or `canceled` — the
+     * money never left). A token with no booking at all is absent from the result.
+     *
+     * Only `standing` settles a line. Shared with ProrataChargeHandler, whose resumed run
+     * must not drop a line a reversal re-opened any more than {@see createRefund()} may.
+     *
+     * @param  list<string>  $tokens
+     * @return array<string, 'standing'|'reversed'>
+     */
+    public function refundTokenBookings(Billable $billable, array $tokens): array
+    {
+        $wanted = array_flip(array_filter($tokens, static fn (mixed $t): bool => is_string($t) && $t !== ''));
+
+        if ($wanted === [] || ! ($billable instanceof Model)) {
+            return [];
+        }
+
+        $lines = BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items'])
+            ->flatMap(fn (BillingInvoice $note): array => array_values(array_filter((array) $note->line_items, 'is_array')));
+
+        $reversedRefundIds = $lines
+            ->filter(fn (array $line): bool => BillingInvoice::creditSign($line) === -1)
+            ->map(fn (array $line): mixed => $line['mollie_refund_id'] ?? null)
+            ->filter(fn (mixed $id): bool => is_string($id) && $id !== '')
+            ->flip();
+
+        $found = [];
+
+        foreach ($lines as $line) {
+            $token = $line['refund_token'] ?? null;
+
+            if (! is_string($token) || ! isset($wanted[$token]) || BillingInvoice::creditSign($line) === -1
+                || ($found[$token] ?? null) === 'standing') {
+                continue;
+            }
+
+            $refundId = $line['mollie_refund_id'] ?? null;
+
+            $found[$token] = is_string($refundId) && $refundId !== '' && $reversedRefundIds->has($refundId)
+                ? 'reversed'
+                : 'standing';
+        }
+
+        return $found;
+    }
+
+    /**
+     * Whether a credit note of this billable already carries this Mollie refund id.
+     */
+    private function refundIdOnBooks(Billable $billable, string $refundId): bool
+    {
+        return $refundId !== '' && $this->creditNoteLineExists($billable, 'mollie_refund_id', $refundId);
+    }
+
+    private function creditNoteLineExists(Billable $billable, string $key, string $value): bool
+    {
+        /** @var Model&Billable $billable */
+        return BillingInvoice::query()
+            ->where('billable_type', $billable->getMorphClass())
+            ->where('billable_id', $billable->getKey())
+            ->where('invoice_kind', InvoiceKind::Refund)
+            ->get(['line_items'])
+            ->contains(fn (BillingInvoice $note): bool => collect((array) $note->line_items)
+                ->contains(fn ($line): bool => is_array($line) && ($line[$key] ?? null) === $value));
+    }
+
+    /**
+     * The refund an earlier attempt created for this token at Mollie, if there is one.
+     *
+     * Read from the payment's refund list (every page, through MollieCall), matched on the
+     * token {@see createRefund()} sends as refund metadata. A refund Mollie reports as
+     * `failed` or `canceled` did not pay out and does not count — the line is posted again.
+     */
+    private function refundCreatedWithToken(string $paymentId, string $token): ?object
+    {
+        foreach (app(MolliePaymentCredits::class)->refunds((object) ['id' => $paymentId]) as $refund) {
+            $metadata = $refund->metadata ?? null;
+            $carried = is_object($metadata) ? ($metadata->refund_token ?? null) : (is_array($metadata) ? ($metadata['refund_token'] ?? null) : null);
+
+            if ($carried === $token
+                && ! in_array(strtolower((string) ($refund->status ?? '')), ['failed', 'canceled'], true)
+                && (string) ($refund->id ?? '') !== ''
+            ) {
+                return $refund;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -2845,6 +3208,9 @@ class InvoiceService
         /** @var array<int|string, \Illuminate\Contracts\Cache\Lock|null> $refundLocks */
         $refundLocks = [];
 
+        /** @var array<int|string, array{0: BillingInvoice, 1: int, 2: ?string}> $refundedNetWrites */
+        $refundedNetWrites = [];
+
         try {
             foreach ($effective as $line) {
                 $original = $line->originalInvoice;
@@ -2875,6 +3241,63 @@ class InvoiceService
                     $failedLines[] = ['line' => $line->toArray(), 'error' => 'Another refund of this invoice is in progress', 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
 
                     continue;
+                }
+
+                // A line whose refund is already on the books is settled, whoever booked it.
+                // A retried line arrives here after its Mollie answer was lost — and by then
+                // the payment webhook has typically booked that very refund as "synced from
+                // Mollie dashboard" (RefundHandler stamps the token from the refund's
+                // metadata onto it). Posting the line again wrote a second credit note for
+                // one refund, or — once the headroom clamp or Mollie's one-hour key cache
+                // moved the key — paid the customer a second time; and with the invoice used
+                // up, failed "Nothing left to refund" for seven days and dead-lettered as a
+                // refund that never went out.
+                //
+                // On the books means a booking that stands. One that RefundHandler reversed —
+                // Mollie reported the refund `failed` or `canceled` after it was synced — paid
+                // nothing out, and settling the line on it dropped an owed refund with no
+                // retry left. Such a line is posted again, as when the lookup below finds
+                // the dead refund at Mollie before anything booked it.
+                $tokenBooking = $line->refundToken !== null ? $this->refundTokenBooking($billable, $line->refundToken) : null;
+
+                if ($tokenBooking === 'standing') {
+                    Log::info('Refund line already on the books — not posted again', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $original->getKey(),
+                        'refund_token' => $line->refundToken,
+                    ]);
+
+                    continue;
+                }
+
+                if ($tokenBooking === 'reversed') {
+                    // A refund carrying this token exists at Mollie and is dead. Its key still
+                    // replays it within the hour (the same amount comes back once the reversal
+                    // restored the headroom), so the key moves on — the token stays, and the
+                    // lookup below runs first, so a live refund a later attempt created is
+                    // adopted rather than paid a second time.
+                    $line->refundKeyRefusals++;
+                    $line->refundOutcomeUnknown = true;
+                }
+
+                // Its earlier call threw, so Mollie may hold the refund without anything here
+                // knowing. Asked, not guessed — the idempotency key only covers the first
+                // hour of a retry ladder that runs for days. See "A lost create-payment
+                // answer is marked, never guessed" in docs/decisions.md.
+                $adopted = null;
+
+                if ($line->refundOutcomeUnknown && $line->refundToken !== null) {
+                    try {
+                        $adopted = $this->refundCreatedWithToken($refundPaymentId, $line->refundToken);
+                    } catch (\Throwable $e) {
+                        $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+
+                        continue;
+                    }
+
+                    if ($adopted !== null && $this->refundIdOnBooks($billable, (string) $adopted->id)) {
+                        continue;
+                    }
                 }
 
                 // No (parent_invoice_id, idx, amount_net)-style idempotency check here:
@@ -2939,7 +3362,14 @@ class InvoiceService
                 $restRefundable = min($original->refundableBaseGross(), $restRefundableGross);
                 $refundAmount = min($absGross, $restRefundable);
 
-                if ($refundAmount < $absGross) {
+                if ($adopted !== null) {
+                    // The refund exists: book what Mollie paid out, not what would be sent now.
+                    $refundAmount = abs(self::mollieAmountToMinor($adopted->amount->value ?? null, $adopted->amount->currency ?? $lineCurrency));
+
+                    if ($refundAmount !== $absGross) {
+                        $line = $this->cappedRefundLine($line, $original, $refundAmount, $absGross);
+                    }
+                } elseif ($refundAmount < $absGross) {
                     Log::warning('Refund amount clamped below local gross', [
                         'billable' => $billable->getKey(),
                         'original_invoice_id' => $original->getKey(),
@@ -2982,51 +3412,88 @@ class InvoiceService
                 // instead of paying the customer a second time.
                 $line->refundToken ??= bin2hex(random_bytes(4));
 
-                $idempotencyKey = sprintf(
-                    'refund:%s:%s:%s:%d:%d:%s',
-                    $billable->getMorphClass(),
-                    (string) $billable->getKey(),
-                    (string) $original->getKey(),
-                    (int) ($line->originalLineItemIndex ?? 0),
-                    (int) $refundAmount,
-                    $line->refundToken,
-                );
+                if ($adopted !== null) {
+                    $refund = $adopted;
+                } else {
+                    // Moved on by every definite refusal of this line (a 4xx binds its key to
+                    // the refusal for an hour — measured 26 November 2026), never by an outage
+                    // or a lost answer. See MollieRefusal.
+                    $idempotencyKey = MollieRefusal::key(sprintf(
+                        'refund:%s:%s:%s:%d:%d:%s',
+                        $billable->getMorphClass(),
+                        (string) $billable->getKey(),
+                        (string) $original->getKey(),
+                        (int) ($line->originalLineItemIndex ?? 0),
+                        (int) $refundAmount,
+                        $line->refundToken,
+                    ), $line->refundKeyRefusals);
 
-                // Set here, cleared in the `finally` below.
-                //
-                // The SDK's `ResetIdempotencyKey` middleware only runs on a response, and
-                // `ConvertResponseToException` turns a 4xx into a throw before it gets there —
-                // so a refund Mollie rejects left its key on the shared client, and the next
-                // mutating request through that client (a payment, a PATCH) carried it. Mollie
-                // answers a reused key with the *previous* response, which is how a plan
-                // change's charge could come back as the rejected refund's error.
-                Mollie::setIdempotencyKey($idempotencyKey);
+                    // Set here, cleared in the `finally` below.
+                    //
+                    // The SDK's `ResetIdempotencyKey` middleware only runs on a response, and
+                    // `ConvertResponseToException` turns a 4xx into a throw before it gets there —
+                    // so a refund Mollie rejects left its key on the shared client, and the next
+                    // mutating request through that client (a payment, a PATCH) carried it. Mollie
+                    // answers a reused key with the *previous* response, which is how a plan
+                    // change's charge could come back as the rejected refund's error.
+                    Mollie::setIdempotencyKey($idempotencyKey);
 
-                // The try covers the Mollie call and nothing else. It used to wrap the
-                // bookkeeping below as well, so a failing `save()` — a lock-wait timeout
-                // against a concurrent admin refund is enough — filed the line in
-                // `$persistedLines` *and* in `$failedLines`: the credit note was written and a
-                // retry marker queued for a refund Mollie had already paid out. The retry then
-                // read `refunded_net` (whose write had just failed) as the remaining headroom
-                // and paid the customer twice.
-                try {
-                    $refund = MollieCall::send(new CreatePaymentRefundRequest(
-                        paymentId: $refundPaymentId,
-                        description: $description ?? "Plan change refund: {$line->label}",
-                        amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
-                    ));
-                } catch (\Throwable $e) {
-                    $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+                    // The try covers the Mollie call and nothing else. It used to wrap the
+                    // bookkeeping below as well, so a failing `save()` — a lock-wait timeout
+                    // against a concurrent admin refund is enough — filed the line in
+                    // `$persistedLines` *and* in `$failedLines`: the credit note was written and a
+                    // retry marker queued for a refund Mollie had already paid out. The retry then
+                    // read `refunded_net` (whose write had just failed) as the remaining headroom
+                    // and paid the customer twice.
+                    try {
+                        $refund = MollieCall::send(new CreatePaymentRefundRequest(
+                            paymentId: $refundPaymentId,
+                            description: $description ?? "Plan change refund: {$line->label}",
+                            amount: new MollieMoney($lineCurrency, self::molliePrice($refundAmount, $lineCurrency)),
+                            // How a retry finds this refund at Mollie once the key has expired,
+                            // and how the webhook that books it tells which line it belongs to.
+                            metadata: ['refund_token' => $line->refundToken],
+                        ));
+                    } catch (\Throwable $e) {
+                        // A throw does not say the refund was not created — a read timeout
+                        // arrives after Mollie has acted.
+                        $line->refundOutcomeUnknown = true;
 
-                    continue;
-                } finally {
-                    // Whatever happened. The SDK clears the key from a *response*, and a 4xx
-                    // is converted to a throw before that runs — leaving the key on the shared
-                    // client for the next mutating request to reuse.
-                    self::forgetIdempotencyKey();
+                        // …unless Mollie answered with a refusal: nothing was created by this
+                        // attempt, and its key is bound to the refusal. The retry gets a new
+                        // one. The flag above stays — an *earlier* attempt's answer may have
+                        // been lost, and the retry still asks Mollie by the token first.
+                        if (MollieRefusal::isDefinite($e)) {
+                            $line->refundKeyRefusals++;
+                        }
+                        $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
+
+                        continue;
+                    } finally {
+                        // Whatever happened. The SDK clears the key from a *response*, and a 4xx
+                        // is converted to a throw before that runs — leaving the key on the shared
+                        // client for the next mutating request to reuse.
+                        self::forgetIdempotencyKey();
+                    }
                 }
 
                 $line->mollieRefundId = is_object($refund) ? ($refund->id ?? null) : null;
+                $line->refundOutcomeUnknown = false;
+
+                // Mollie answers a repeated key with the refund it already holds — and the
+                // webhook may have booked that one since, from a refund that carried no token
+                // to recognise the line by. One refund, one credit note.
+                if ($adopted === null && $line->mollieRefundId !== null && $this->refundIdOnBooks($billable, (string) $line->mollieRefundId)) {
+                    Log::info('Mollie replayed a refund that is already on the books — not booked again', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $originalKey,
+                        'mollie_refund_id' => $line->mollieRefundId,
+                    ]);
+
+                    continue;
+                }
+
+
                 $persistedLines[] = $line;
 
                 // Keep `refunded_net` on the original in sync with what we just
@@ -3042,22 +3509,11 @@ class InvoiceService
                 $newRefundedNet = $alreadyRefundedNet + (int) abs($line->amountNet);
                 $refundedNetPerInvoice[$originalKey] = $newRefundedNet;
 
-                // Logged, never retried: the money has moved and the credit note carries the
-                // line, so `effectiveRefundedNet()` derives the amount from the credit note
-                // even when this cache write is lost. Queueing a retry here is what turned a
-                // lost write into a second payout.
-                try {
-                    $original->refunded_net = $newRefundedNet;
-                    $original->save();
-                } catch (\Throwable $e) {
-                    Log::error('Refund booked at Mollie but refunded_net could not be updated', [
-                        'billable' => $billable->getKey(),
-                        'original_invoice_id' => $originalKey,
-                        'mollie_refund_id' => $line->mollieRefundId,
-                        'refunded_net' => $newRefundedNet,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
+                // Written once the credit note exists (below), never before it: a credit
+                // note whose write failed left the counter raised with no document behind
+                // it, and the retry that then found the refund at Mollie by its token added
+                // the same amount on top — `refunded_net` at twice what went back.
+                $refundedNetWrites[$originalKey] = [$original, $newRefundedNet, $line->mollieRefundId];
             }
 
             if (! empty($failedLines)) {
@@ -3114,6 +3570,25 @@ class InvoiceService
                 ? $firstOriginal->vat_validation_id
                 : $billable->currentVatValidation()?->getKey();
             $this->persistWithSerial($invoice, 'refund');
+
+            // Logged, never retried: the money has moved and the credit note carries the
+            // line, so `effectiveRefundedNet()` derives the amount from the credit note
+            // even when this cache write is lost. Queueing a retry here is what turned a
+            // lost write into a second payout.
+            foreach ($refundedNetWrites as $originalKey => [$original, $newRefundedNet, $mollieRefundId]) {
+                try {
+                    $original->refunded_net = $newRefundedNet;
+                    $original->save();
+                } catch (\Throwable $e) {
+                    Log::error('Refund booked at Mollie but refunded_net could not be updated', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $originalKey,
+                        'mollie_refund_id' => $mollieRefundId,
+                        'refunded_net' => $newRefundedNet,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
         } finally {
             foreach ($refundLocks as $refundLock) {
                 $refundLock?->release();
@@ -3121,7 +3596,7 @@ class InvoiceService
         }
 
         $this->generateAndStorePdf($invoice, $billable);
-        event(new CreditNoteIssued($billable, $invoice, null));
+        self::announceBooked(new CreditNoteIssued($billable, $invoice, null));
 
         return $invoice;
     }

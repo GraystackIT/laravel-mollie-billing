@@ -4,8 +4,15 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Exceptions;
 
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
-class GrantMismatchException extends RuntimeException
+class GrantMismatchException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.grant_mismatch';
+    }
 }

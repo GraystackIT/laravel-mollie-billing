@@ -89,8 +89,9 @@
             "@php vendor/bin/pest --compact tests/Feature/Config/RemoteDiskLiveS3Test.php"
         ],
         "test:sandbox": "@php vendor/bin/pest --configuration=phpunit.sandbox.xml",
-        "test:sandbox:browser": "@php vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --exclude-filter=SubscriptionCanaryTest",
+        "test:sandbox:browser": "@php vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --exclude-filter='SubscriptionCanaryTest|RenewalReplayCanaryTest'",
         "test:sandbox:canary": "@php vendor/bin/pest --configuration=phpunit.sandbox-browser.xml tests/SandboxBrowser/SubscriptionCanaryTest.php",
+        "test:sandbox:renewal-replay": "@php vendor/bin/pest --configuration=phpunit.sandbox-browser.xml tests/SandboxBrowser/RenewalReplayCanaryTest.php",
         "browser:assets": "npm run build",
         "browser:driver": "@php vendor/bin/dusk-updater detect --auto-update",
         "browser:gallery": "@php tests/Browser/gallery.php"

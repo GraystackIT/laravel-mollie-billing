@@ -505,6 +505,16 @@ new class extends Component {
                 return;
             }
 
+            // Applied before its period end, an upgrade carries a prorata charge and waits
+            // for it: the plan is not switched yet. Announcing "plan changed" here put that
+            // toast beside the notice that the upgrade awaits its payment — and the payment
+            // could still be declined. Say nothing, as applyChange() does for the same wait:
+            // the notice speaks, and the poll that sees the charge settle announces the
+            // outcome ("plan changed" or "failed").
+            if (! empty($billable->getBillingSubscriptionMeta()['pending_plan_change'])) {
+                return;
+            }
+
             $this->toast(__('billing::portal.flash.plan_changed'), 'success');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Scheduled plan change (apply now) failed', [
@@ -591,9 +601,13 @@ new class extends Component {
             $this->appliedCouponInfo = [];
             $this->couponInput = '';
             $this->couponError = null;
+        } catch (\GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException) {
+            // The preview blocks this already; a direct call (or a mandate revoked since the
+            // preview) gets the same sentence instead of a generic error.
+            $this->toast(__('billing::portal.error_usage_overage_requires_mandate'), 'danger');
         } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
             // Not an error to report: the customer is told what to do first.
-            $this->toast($e->getMessage(), 'danger');
+            $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Plan change failed', [
                 'billable' => $billable instanceof \Illuminate\Database\Eloquent\Model ? $billable->getKey() : null,
@@ -698,11 +712,15 @@ new class extends Component {
         // One payment per intent, like the checkout.
         //
         // `refreshPreview()` above is several round-trips and the Mollie call another, so
-        // the button stays live for a second or more: a double-click — or browser-Back
-        // from Mollie and click again — minted a second `sequenceType: first` payment on
-        // the same mandate-to-be. Both settle, both activate, and the customer is charged
-        // twice. Non-blocking on purpose: the loser must not sit on a worker waiting for
-        // the winner to finish talking to Mollie.
+        // the button stays live for a second or more: a double-click minted a second
+        // `sequenceType: first` payment on the same mandate-to-be. Both settle, both
+        // activate, and the customer is charged twice. Non-blocking on purpose: the loser
+        // must not sit on a worker waiting for the winner to finish talking to Mollie.
+        //
+        // The lock alone does not cover browser-Back from Mollie and click again: it is
+        // released as soon as the payment exists. That is the payment on record, which
+        // `PendingFirstPayment` sends the customer back to while it is open for this
+        // upgrade (or withdraws when the upgrade has changed).
         $submitLock = Cache::lock('billing:checkout-submit:'.$billable->getKey(), 60);
 
         if (! $submitLock->get()) {
@@ -712,6 +730,20 @@ new class extends Component {
         }
 
         try {
+            $reusable = app(\GraystackIT\MollieBilling\Services\Billing\PendingFirstPayment::class)->redirectFor($billable, [
+                'plan_code' => (string) $this->selectedPlan,
+                'interval' => (string) $this->selectedInterval,
+                'addon_codes' => $addonCodes,
+                'extra_seats' => $extraSeats,
+                'coupon_code' => $this->appliedCouponCodes[0] ?? null,
+                'amount_gross' => $grossAmount,
+                'upgrade_from_local' => true,
+            ]);
+
+            if ($reusable !== null) {
+                return $this->redirect($reusable, navigate: false);
+            }
+
             $result = $service->handle($billable, [
                 'plan_code' => $this->selectedPlan,
                 'interval' => $this->selectedInterval,
@@ -730,6 +762,11 @@ new class extends Component {
             }
 
             $this->toast(__('billing::portal.flash.error'), 'danger');
+            return null;
+        } catch (\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
+            // Not an error to report: an earlier upgrade payment is still open and Mollie
+            // would not withdraw it. The customer is told what to do first.
+            $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
             return null;
         } catch (\Throwable $e) {
             report($e);
@@ -1718,6 +1755,11 @@ new class extends Component {
                             <flux:callout variant="danger" icon="exclamation-triangle" dusk="change-refused-subscription-ended">
                                 {{ __('billing::portal.error_subscription_ended') }}
                             </flux:callout>
+                        @elseif (($error['type'] ?? '') === 'usage_overage_requires_mandate')
+                            {{-- No mandate: the change is refused, the overage is not "charged later". --}}
+                            <flux:callout variant="danger" icon="exclamation-triangle" dusk="change-refused-overage-needs-mandate">
+                                {{ __('billing::portal.error_usage_overage_requires_mandate') }}
+                            </flux:callout>
                         @elseif (($error['type'] ?? '') === 'interval_change_under_waiver')
                             <flux:callout variant="warning" icon="exclamation-triangle">
                                 {{ __('billing::portal.error_interval_change_under_waiver') }}
@@ -1991,11 +2033,11 @@ new class extends Component {
                                             <div class="space-y-2">
                                                 <div class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-zinc-400">{{ __('billing::portal.prorata_overage_group') }}</div>
                                                 @foreach ($overageLines as $oline)
-                                                    <div class="flex items-baseline justify-between gap-3 text-sm">
+                                                    <div class="flex items-baseline justify-between gap-3 text-sm" dusk="prorata-overage-{{ $oline['type'] }}" data-units="{{ $oline['units'] }}" data-unit-price-net="{{ $oline['unit_price_net'] }}">
                                                         <div class="min-w-0 flex-1">
                                                             <div class="text-zinc-600 dark:text-zinc-300 wrap-break-word">{{ __('billing::portal.invoice_line_overage', ['type' => $oline['type']]) }}</div>
                                                             <div class="mt-0.5 text-xs text-zinc-400 wrap-break-word">
-                                                                {{ $oline['units'] }}× {{ BillingMoney::format($oline['unit_price_net']) }}
+                                                                <span dusk="prorata-overage-{{ $oline['type'] }}-units">{{ $oline['units'] }}× {{ BillingMoney::format($oline['unit_price_net']) }}</span>
                                                                 <span class="text-zinc-300 dark:text-zinc-600">·</span>
                                                                 @if ($overageVatRate == 0)
                                                                     {{ __('billing::portal.prorata_reverse_charge') }}
@@ -2009,6 +2051,13 @@ new class extends Component {
                                                         </span>
                                                     </div>
                                                 @endforeach
+                                                {{-- Another overage charge holds the slot: the change does not
+                                                     charge this now, the next sweep does (decision 8). --}}
+                                                @if (! empty($preview['usageOverageAwaitsChargeInFlight']))
+                                                    <div class="text-xs italic text-zinc-500 dark:text-zinc-400" dusk="overage-after-charge-in-flight">
+                                                        {{ __('billing::portal.preview_usage_overage_after_charge_in_flight') }}
+                                                    </div>
+                                                @endif
                                             </div>
                                         @endif
 
@@ -2097,6 +2146,11 @@ new class extends Component {
                                                 </div>
                                             @endif
                                         @endforeach
+                                        @if (! empty($preview['usageOverageAwaitsChargeInFlight']))
+                                            <div class="text-xs italic text-zinc-500 dark:text-zinc-400" dusk="overage-after-charge-in-flight">
+                                                {{ __('billing::portal.preview_usage_overage_after_charge_in_flight') }}
+                                            </div>
+                                        @endif
                                     @endif
 
                                     <flux:separator class="my-2!" />

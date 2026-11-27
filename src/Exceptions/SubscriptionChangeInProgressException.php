@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Exceptions;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -16,8 +17,15 @@ use RuntimeException;
  * payment plus a PATCH, and everything it validated — seats, addons, the prorata amounts —
  * is stale by the time it gets its turn anyway.
  */
-class SubscriptionChangeInProgressException extends RuntimeException
+class SubscriptionChangeInProgressException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.subscription_change_in_progress';
+    }
+
     public function __construct(public readonly Billable $billable)
     {
         parent::__construct('Another subscription change for this billable is already in progress.');

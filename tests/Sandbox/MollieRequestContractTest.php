@@ -109,6 +109,20 @@ class MollieRequestContractTest extends SandboxTestCase
         $this->assertSame('directdebit', $summary->method);
         $this->assertNotNull($summary->signatureDate, 'The portal shows when the mandate was signed.');
         $this->assertNotSame('', (string) ($summary->details['consumerAccount'] ?? ''), 'The masked IBAN is what the customer recognises.');
+
+        // The admin header keeps the summary between requests instead of asking again; a
+        // real mandate has to come back from that round trip with what the header renders.
+        $kept = \GraystackIT\MollieBilling\Support\MandateSummary::fromSnapshot(
+            json_decode(json_encode($summary->snapshot()), true),
+        );
+        $this->assertSame($summary->id, $kept->id);
+        $this->assertSame($summary->status, $kept->status);
+        $this->assertSame($summary->method, $kept->method);
+        $this->assertSame($summary->details, $kept->details);
+        $this->assertSame($summary->mandateReference, $kept->mandateReference);
+        $this->assertSame($summary->signatureDate?->toIso8601String(), $kept->signatureDate?->toIso8601String());
+        $this->assertSame($summary->accountDisplay(), $kept->accountDisplay());
+        $this->assertSame($summary->holder(), $kept->holder());
     }
 
     public function test_it_creates_a_recurring_payment_through_the_overage_charger(): void

@@ -155,6 +155,7 @@ return [
     'event:CreditNoteIssued' => $event($money.'::dispatches InvoiceRefunded and CreditNoteIssued when an invoice is refunded'),
     'event:RefundReversed' => $event($money.'::dispatches RefundReversed when Mollie reports a booked refund as failed'),
     'event:ChargebackReversed' => $event('tests/Feature/Webhook/ChargebackReversalTest.php::takes a chargeback back out of the books when it is reversed'),
+    'event:ChargebackOnRefundedPayment' => $event('tests/Feature/Webhook/ChargebackAfterRefundTest.php::tells the operator, once, about a chargeback on a payment that was refunded in full'),
     'event:InvoicePdfRegenerated' => $event($money.'::dispatches InvoicePdfRegenerated when an invoice document is rendered again'),
     'event:OneTimeOrderCompleted' => $event($money.'::dispatches OneTimeOrderCompleted when a product purchase is paid, and OneTimeOrderFailed when it is not'),
     'event:OneTimeOrderFailed' => $event($money.'::dispatches OneTimeOrderCompleted when a product purchase is paid, and OneTimeOrderFailed when it is not'),

@@ -142,7 +142,9 @@ class AdminSubscriptionTabMatrixTest extends BrowserTestCase
                     __('billing::admin.billables.subscription.flash.free_periods_given', ['count' => 2])),
                 'extendGrant' => $this->submitForm($browser, 'extendGrant', ['grantOnExpiry' => 'continue_paid'], ['grantDays' => '30'],
                     __('billing::admin.billables.subscription.flash.grant_extended', ['count' => 30])),
-                'cancelAtPeriodEnd' => $this->cancelWithReason($browser, false),
+                // Past due on an unpaid period: no access to run out, so the service turns
+                // the cancel at period end into an immediate one, and the tab says so.
+                'cancelAtPeriodEnd' => $this->cancelWithReason($browser, false, $state === 'past_due'),
                 'cancelNow' => $this->cancelWithReason($browser, true),
                 'resubscribe' => $this->resubscribe($browser),
             };
@@ -172,7 +174,7 @@ class AdminSubscriptionTabMatrixTest extends BrowserTestCase
         $browser->waitForText($flash, 15)->pause(500);
     }
 
-    private function cancelWithReason(Browser $browser, bool $immediately): void
+    private function cancelWithReason(Browser $browser, bool $immediately, bool $endsNow = false): void
     {
         $this->clickWire($browser, '[wire\\:click="openCancel('.($immediately ? 'true' : 'false').')"]');
         $browser->waitFor('textarea[name="cancelNote"]', 10)->pause(400);
@@ -183,7 +185,7 @@ class AdminSubscriptionTabMatrixTest extends BrowserTestCase
 
         $browser->type('cancelNote', 'Matrix: asked for by the customer')->pause(300);
         $this->clickWire($browser, 'form[wire\\:submit="confirmCancel"] button[type="submit"]');
-        $browser->waitForText(__('billing::admin.billables.subscription.flash.'.($immediately ? 'cancelled_now' : 'cancelled_grace')), 15)->pause(500);
+        $browser->waitForText(__('billing::admin.billables.subscription.flash.'.($immediately || $endsNow ? 'cancelled_now' : 'cancelled_grace')), 15)->pause(500);
     }
 
     private function resubscribe(Browser $browser): void
@@ -276,7 +278,7 @@ class AdminSubscriptionTabMatrixTest extends BrowserTestCase
 
                 expect($billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Cancelled)
                     ->and($row?->properties['replace']['reason'] ?? null)->toBe('Matrix: asked for by the customer')
-                    ->and((bool) ($row?->properties['replace']['immediately'] ?? null))->toBe($action === 'cancelNow');
+                    ->and((bool) ($row?->properties['replace']['immediately'] ?? null))->toBe($action === 'cancelNow' || $state === 'past_due');
 
                 if ($action === 'cancelNow' || $state === 'past_due') {
                     // Past due: the period that was paid for is already over, so

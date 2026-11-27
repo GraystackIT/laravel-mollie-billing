@@ -200,6 +200,47 @@ it('clears ends_at again when the local plan had no expiry before the cancel', f
     expect($billable->subscription_ends_at)->toBeNull();
 });
 
+it('keeps the unlimited free plan through a second cancel, and announces the cancellation once', function (): void {
+    // A second "cancel" from a stale tab or another billing member ran the whole cancel
+    // again: it recorded the 30-day grace date as the end the plan had before the cancel,
+    // so the resumed free plan came back with that expiry — and the nightly pass expired
+    // it on the date, plan and addons wiped. The customer was mailed twice as well.
+    \GraystackIT\MollieBilling\Facades\MollieBilling::notifyBillingAdminsUsing(fn ($b) => [$b]);
+    $cancelled = 0;
+    Event::listen(\GraystackIT\MollieBilling\Events\SubscriptionCancelled::class, function () use (&$cancelled): void {
+        $cancelled++;
+    });
+
+    /** @var TestBillable $billable */
+    $billable = TestBillable::create(['name' => 'Twice Co', 'email' => 'twice-resub@x.test']);
+    $billable->forceFill([
+        'subscription_source' => SubscriptionSource::Local,
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_plan_code' => 'free',
+        'subscription_interval' => SubscriptionInterval::Monthly,
+        'subscription_period_starts_at' => BillingTime::nowUtc()->subDays(3),
+        'subscription_ends_at' => null,
+        'subscription_meta' => ['seat_count' => 1],
+    ])->save();
+
+    $billable->refresh()->cancelBillingSubscription();
+    $graceEnd = $billable->refresh()->subscription_ends_at;
+
+    \Carbon\Carbon::setTestNow(BillingTime::nowUtc()->addHour());
+    $billable->refresh()->cancelBillingSubscription();
+
+    expect($billable->refresh()->subscription_ends_at->toIso8601String())->toBe($graceEnd->toIso8601String());
+
+    $billable->refresh()->resubscribeBillingPlan();
+    \Carbon\Carbon::setTestNow();
+
+    $billable->refresh();
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Active)
+        ->and($billable->subscription_ends_at)->toBeNull();
+    expect($cancelled)->toBe(1);
+    Notification::assertSentToTimes($billable, \GraystackIT\MollieBilling\Notifications\SubscriptionCancelledNotification::class, 1);
+});
+
 it('refuses to resubscribe once the grace period has ended', function (): void {
     $billable = resubMollieBillable();
     $billable->forceFill([

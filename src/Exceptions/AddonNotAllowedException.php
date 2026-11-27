@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Exceptions;
 
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -19,8 +20,21 @@ use RuntimeException;
  * Only *newly added* codes are judged. An addon the billable already holds was sold
  * under the rules of its time and is not taken away by a later catalog change.
  */
-class AddonNotAllowedException extends RuntimeException
+class AddonNotAllowedException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.addon_not_allowed';
+    }
+
+    /** @return array<string, string|int|float> */
+    protected function defaultTranslationParameters(): array
+    {
+        return ['addon' => $this->addonCode, 'plan' => $this->planCode];
+    }
+
     public function __construct(
         public readonly string $planCode,
         public readonly string $addonCode,

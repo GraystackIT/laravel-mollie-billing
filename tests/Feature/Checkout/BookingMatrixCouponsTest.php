@@ -347,9 +347,12 @@ it('books the paid amount when a coupon dies between payment and webhook, and sa
     $coupon->forceFill(['active' => false])->save();
     $invoice = $m->settle($payment);
 
-    // The payment wins: the customer paid 48.60 and that is what the invoice states.
+    // The payment wins: the customer paid 48.60 and that is what the invoice states. The
+    // checkout was the gate, so the code the payment was made with is redeemed for it
+    // (FirstPaymentCouponPricing::afterPayment()); switched off, it carries no recurring
+    // discount into the subscription, which runs at the full 54.00.
     expect((int) $invoice->amount_gross)->toBe(4860)
         ->and($billable->fresh()->subscription_status)->toBe(SubscriptionStatus::Active)
         ->and($m->subscriptionMinor())->toBe(5400)
-        ->and(CouponRedemption::query()->count())->toBe(0);
+        ->and(CouponRedemption::query()->where('coupon_id', $coupon->getKey())->count())->toBe(1);
 });

@@ -60,17 +60,29 @@ new class extends Component {
         $currency = BillingMoney::normalizeCurrency(null);
         $inCurrency = fn () => $query->clone()->where('currency', $currency);
 
-        // Brutto-Summen: Charge-Invoices (paid) tragen positives amount_gross,
-        // Refund-Invoices (refunded) tragen negatives amount_gross.
+        // Gross sums: a charge (paid) carries a positive amount_gross, a credit note
+        // (refunded) a negative one.
+        //
+        // A credit note taken back out of the books (a reversed chargeback, a refund Mollie
+        // reported as failed) keeps its row and gets a reversal document beside it: kind
+        // Refund, status Paid, positive amounts (InvoiceService::reverseBookedCredit()). It
+        // is not a payment — counted as one, a renewal paid once read as paid twice — but
+        // the credit it cancels, so it is netted against the credits.
         $paidGross = (int) $inCurrency()
             ->where('status', InvoiceStatus::Paid)
+            ->where(fn ($q) => $q->whereNull('invoice_kind')->orWhere('invoice_kind', '!=', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund))
             ->where('amount_gross', '>', 0)
             ->sum('amount_gross');
         $refundGross = (int) $inCurrency()
             ->where('status', InvoiceStatus::Refunded)
             ->where('amount_gross', '<', 0)
-            ->sum('amount_gross'); // negativ
-        $spentGross = $paidGross + $refundGross; // Saldo = bezahlt − gutschriften
+            ->sum('amount_gross'); // negative
+        $reversedGross = (int) $inCurrency()
+            ->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)
+            ->where('amount_gross', '>', 0)
+            ->sum('amount_gross');
+        $refundGross = min(0, $refundGross + $reversedGross);
+        $spentGross = $paidGross + $refundGross; // balance = paid − credits
 
         $fmt = fn (int $cents): string => BillingMoney::format($cents, $currency);
 
@@ -192,8 +204,10 @@ new class extends Component {
                                             <flux:badge size="sm" :color="$invoice->status->color()">{{ $invoice->status->label() }}</flux:badge>
                                         </flux:table.cell>
                                         <flux:table.cell class="text-right">
-                                            @if ($invoice->hasPdf())
-                                                <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $invoice->getDownloadUrl() }}" target="_blank">
+                                            {{-- Always offered: the download route renders a document that is not on
+                                                 the disk yet (deferred, or a failed render), so no hasPdf() gate. --}}
+                                            @if ($pdfUrl = $invoice->getDownloadUrl())
+                                                <flux:button size="xs" variant="ghost" icon="arrow-down-tray" href="{{ $pdfUrl }}" target="_blank" dusk="invoice-{{ $invoice->id }}-pdf">
                                                     {{ __('billing::portal.invoice.pdf') }}
                                                 </flux:button>
                                             @endif

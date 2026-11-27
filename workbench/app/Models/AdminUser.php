@@ -19,8 +19,13 @@ class AdminUser extends Authenticatable implements AuthorizesBillingAdmin
 
     protected $guarded = [];
 
+    /**
+     * Always, unless a test demoted the operator mid-session (`deny_billing_admin` = 1): the
+     * server reads it on every request, so a tab that is already open loses the panel on its
+     * next click.
+     */
     public function canAccessBillingAdmin(): bool
     {
-        return true;
+        return ! \Workbench\App\Providers\WorkbenchServiceProvider::settingIs('deny_billing_admin', '1');
     }
 }

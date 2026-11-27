@@ -710,11 +710,11 @@ trait HasBilling
             SubscriptionStatus::Active,
             SubscriptionStatus::PastDue,
         ], true)) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'Cannot extend a trial while the subscription is '
                 .($this->subscription_status?->value ?? 'in no billable state')
                 .'. Resubscribe instead of extending.'
-            );
+            ))->withTranslation('billing::exceptions.state.trial_not_while_status', ['status' => $this->subscription_status?->label() ?? '—']);
         }
 
         // A running Local subscription has no trial to extend: there is no charge to
@@ -724,10 +724,10 @@ trait HasBilling
         // they were not paying for, and auto-cancelled them a month later. The admin panel
         // offers this action on whatever billable is open, and catches this exception.
         if ($this->isLocalBillingSubscription() && $this->subscription_status === SubscriptionStatus::Active) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'Cannot extend a trial on a local subscription that is not on one. '
                 .'Extend the grant or the period instead.'
-            );
+            ))->withTranslation('billing::exceptions.state.trial_local_not_on_trial');
         }
 
         // A subscription that is already paying has a charge date of its own, and the
@@ -742,10 +742,10 @@ trait HasBilling
             $nextCharge = \GraystackIT\MollieBilling\Support\ChargeDeferral::nextChargeDate($this);
 
             if ($nextCharge !== null && $nextCharge->isFuture() && ! $until->greaterThan($nextCharge)) {
-                throw new InvalidSubscriptionStateException(
+                throw (new InvalidSubscriptionStateException(
                     'This subscription is not charged before '.$nextCharge->copy()->utc()->toDateString()
                     .'. A trial ending on or before that date would not give the customer anything — pick a later date.'
-                );
+                ))->withTranslation('billing::exceptions.state.trial_before_next_charge', ['date' => $nextCharge->copy()->utc()->toDateString()]);
             }
         }
 

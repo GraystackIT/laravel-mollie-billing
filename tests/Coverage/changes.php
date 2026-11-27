@@ -95,8 +95,16 @@ return [
     'action:plan-change@toggleKeepExtraSeats' => ['feature' => [$fKeep], 'browser' => [$bCell]],
     'action:plan-change@cancelScheduledChange' => ['feature' => [$fScheduled], 'browser' => [$bScheduled]],
     'action:plan-change@applyScheduledNow' => [
-        'feature' => [$fScheduled, 'tests/Feature/Portal/ApplyScheduledChangeNowTest.php::keeps the scheduled change when applying it early fails'],
-        'browser' => [$bScheduled],
+        'feature' => [
+            $fScheduled,
+            'tests/Feature/Portal/ApplyScheduledChangeNowTest.php::keeps the scheduled change when applying it early fails',
+            'tests/Feature/Portal/ApplyScheduledNowAwaitingPaymentTest.php::does not announce an upgrade applied now as changed while it waits for its payment',
+        ],
+        'browser' => [
+            $bScheduled,
+            'tests/Browser/ChangesInFlightTest.php::test_a_scheduled_upgrade_applied_now_and_withdrawn_while_its_payment_is_open_leaves_pro_at_mollie',
+            'tests/Browser/ChangesInFlightTest.php::test_a_scheduled_upgrade_applied_now_whose_payment_is_declined_reads_failed_and_leaves_pro_at_mollie',
+        ],
     ],
     'action:plan-change@cancelPendingChange' => ['feature' => [$fPending], 'browser' => [$screens.'test_a_payment_for_a_withdrawn_change_is_returned_in_full_and_both_documents_are_listed']],
     // The screen tells these apart only by its toast, which no browser test reads yet.

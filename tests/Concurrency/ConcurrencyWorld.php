@@ -404,6 +404,12 @@ final class ConcurrencyWorld
     /** Laravel's `jobs` table, for the case in which a worker puts a job back on the queue. */
     public static function createJobsTable(): void
     {
+        // The workbench migrations now ship the queue tables (browser suite); keep this
+        // for a schema that predates them.
+        if (Schema::hasTable('jobs')) {
+            return;
+        }
+
         Schema::create('jobs', function (Blueprint $table): void {
             $table->id();
             $table->string('queue')->index();

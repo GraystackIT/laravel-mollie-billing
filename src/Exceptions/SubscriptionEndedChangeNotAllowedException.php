@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Exceptions;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -21,12 +22,16 @@ use RuntimeException;
  * Taking a seat or an addon away is not this case: it charges nothing and credits what
  * was paid.
  *
- * The message is the customer-facing text, translated.
+ * The message is the customer-facing text in English, for the log; a screen shows the same
+ * sentence in the reader's language through its translation key.
  */
-class SubscriptionEndedChangeNotAllowedException extends RuntimeException
+class SubscriptionEndedChangeNotAllowedException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
     public function __construct(public readonly Billable $billable)
     {
-        parent::__construct((string) __('billing::portal.error_subscription_ended'));
+        parent::__construct((string) __('billing::portal.error_subscription_ended', [], 'en'));
+        $this->withTranslation('billing::portal.error_subscription_ended');
     }
 }

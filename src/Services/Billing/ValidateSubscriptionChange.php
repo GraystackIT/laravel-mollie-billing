@@ -119,9 +119,9 @@ class ValidateSubscriptionChange
         $source = $billable->getBillingSubscriptionSource();
 
         if ($source === null || $source === SubscriptionSource::None->value) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'Cannot change plan — no active subscription. Complete checkout first.'
-            );
+            ))->withTranslation('billing::exceptions.state.no_active_subscription');
         }
     }
 
@@ -230,6 +230,15 @@ class ValidateSubscriptionChange
             fn (string $code): bool => ! $this->catalog->addonIsFree($code, $interval),
         );
 
+        if (! $planOrIntervalChanged && ($extraSeats > 0 || $paidAddons !== [])
+            && \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::appliesTo($billable)) {
+            // Cancelled at the period end and still running: say until when, and that
+            // withdrawing the cancellation is the way to book (decision 5, 26 Nov 2026).
+            throw $paidAddons !== []
+                ? \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::addons($billable)
+                : \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::seats($billable);
+        }
+
         if ($planOrIntervalChanged || $extraSeats > 0 || $paidAddons !== []) {
             throw new \GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException($billable);
         }
@@ -302,10 +311,17 @@ class ValidateSubscriptionChange
             return;
         }
 
-        throw new InvalidSubscriptionStateException(
+        $until = ! empty($marker['valid_until']) ? substr((string) $marker['valid_until'], 0, 10) : null;
+
+        throw (new InvalidSubscriptionStateException(
             'The billing interval cannot be changed while the plan is free of charge'
-            .(! empty($marker['valid_until']) ? ' (until '.substr((string) $marker['valid_until'], 0, 10).')' : '')
+            .($until !== null ? ' (until '.$until.')' : '')
             .'. Change it once the free period has ended.'
+        ))->withTranslation(
+            $until !== null
+                ? 'billing::exceptions.state.interval_locked_while_free_until'
+                : 'billing::exceptions.state.interval_locked_while_free',
+            $until !== null ? ['date' => $until] : [],
         );
     }
 
@@ -558,6 +574,29 @@ class ValidateSubscriptionChange
      */
     protected function validateWalletUsage(Billable $billable, SubscriptionChangeContext $context): void
     {
+        $this->assertUnresolvedOverageIsChargeable(
+            $billable,
+            $context->currentPlan,
+            $context->currentInterval,
+            $context->newPlan,
+            $context->newInterval,
+        );
+    }
+
+    /**
+     * The check behind {@see validateWalletUsage()}, on plain arguments so the plan-change
+     * preview can ask it too: without a mandate the change is refused, and the screen used
+     * to quote the excess as "charged with the change" right up to a generic error toast.
+     *
+     * @throws DowngradeRequiresMandateException
+     */
+    public function assertUnresolvedOverageIsChargeable(
+        Billable $billable,
+        string $currentPlan,
+        string $currentInterval,
+        string $newPlan,
+        string $newInterval,
+    ): void {
         if (! ($billable instanceof Model)) {
             return;
         }
@@ -568,8 +607,8 @@ class ValidateSubscriptionChange
         foreach ($billable->wallets()->get() as $wallet) {
             $slug = (string) $wallet->slug;
             $rollover = $this->catalog->usageRollover($slug);
-            $oldIncluded = $this->catalog->includedUsage($context->currentPlan, $context->currentInterval, $slug);
-            $newIncluded = $this->catalog->includedUsage($context->newPlan, $context->newInterval, $slug);
+            $oldIncluded = $this->catalog->includedUsage($currentPlan, $currentInterval, $slug);
+            $newIncluded = $this->catalog->includedUsage($newPlan, $newInterval, $slug);
             $balance = (int) $wallet->balanceInt;
 
             // Separate purchased credits from plan credits.
@@ -597,7 +636,7 @@ class ValidateSubscriptionChange
 
             // Unresolvable overage: mandate is required to charge it.
             if (! $billable->hasMollieMandate()) {
-                throw new DowngradeRequiresMandateException($billable, $context->newPlan);
+                throw new DowngradeRequiresMandateException($billable, $newPlan);
             }
         }
     }
@@ -651,9 +690,9 @@ class ValidateSubscriptionChange
         $meta = $billable->getBillingSubscriptionMeta();
 
         if (! $context->isPendingReapply && (! empty($meta['pending_plan_change']) || ! empty($meta['pending_prorata_change']))) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'A plan change is already pending payment confirmation. Cancel it first or wait for the payment to resolve.'
-            );
+            ))->withTranslation('billing::exceptions.state.plan_change_pending_payment');
         }
 
         // Everything below is about being able to CREATE a charge, so it stays scoped
@@ -663,15 +702,15 @@ class ValidateSubscriptionChange
         }
 
         if (! $billable->hasMollieMandate()) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'Cannot create a deferred upgrade payment — no Mollie mandate found.'
-            );
+            ))->withTranslation('billing::exceptions.state.upgrade_no_mandate');
         }
 
         if (empty($meta['mollie_subscription_id'])) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'Cannot create a deferred upgrade — no mollie_subscription_id in subscription meta.'
-            );
+            ))->withTranslation('billing::exceptions.state.upgrade_no_mollie_subscription');
         }
     }
 }

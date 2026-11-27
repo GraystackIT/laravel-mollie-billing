@@ -56,7 +56,21 @@ new class extends Component {
 
     private const MAX_REVOKE_NOTE_LENGTH = 200;
 
+    /**
+     * Announced after every action that reached a service, whatever it answered. The
+     * page's header (status badge, plan, mandate) is rendered by the parent component,
+     * which only re-renders when it hears this; without it the badge kept the state from
+     * page load. A refusal is announced too: it usually means the subscription moved
+     * under the tab (another operator, a job, a webhook), and the header is just as stale.
+     */
+    public const CHANGED_EVENT = 'billing-admin-billable-changed';
+
     public function mount(mixed $billableId = null): void { $this->billableId = $billableId; }
+
+    private function announceChange(): void
+    {
+        $this->dispatch(self::CHANGED_EVENT);
+    }
 
     public function with(): array
     {
@@ -170,7 +184,7 @@ new class extends Component {
 
             return;
         } catch (InvalidSubscriptionStateException|\InvalidArgumentException $e) {
-            $this->error = $e->getMessage();
+            $this->error = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
 
             return;
         } catch (\Throwable $e) {
@@ -178,6 +192,8 @@ new class extends Component {
             $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
 
             return;
+        } finally {
+            $this->announceChange();
         }
 
         $this->flash = __('billing::admin.billables.subscription.flash.'.$flashKey, ['count' => (int) $n]);
@@ -227,9 +243,11 @@ new class extends Component {
         try {
             $b->extendBillingTrialUntil($until);
         } catch (InvalidSubscriptionStateException $e) {
-            $this->error = $e->getMessage();
+            $this->error = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
 
             return;
+        } finally {
+            $this->announceChange();
         }
 
         $this->flash = __('billing::admin.billables.subscription.flash.trial_extended', [
@@ -293,12 +311,35 @@ new class extends Component {
         }
 
         $immediately = $this->cancelImmediately;
-        $service->handle($b, $immediately, $note);
+
+        // Caught like every other action here. The buttons were decided at render, and the
+        // subscription can have ended since — the expiry job, a grace cancel reaching its
+        // end, another operator. CancelSubscription refuses that ("nothing to cancel"),
+        // and uncaught the refusal left the action as a 500 with the modal still open and
+        // the operator told nothing. Nothing has been written when it throws.
+        try {
+            $service->handle($b, $immediately, $note);
+        } catch (InvalidSubscriptionStateException $e) {
+            $this->showCancelModal = false;
+            $this->reset(['cancelImmediately', 'cancelNote']);
+            $this->error = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
+
+            return;
+        } finally {
+            $this->announceChange();
+        }
 
         $this->showCancelModal = false;
         $this->reset(['cancelImmediately', 'cancelNote']);
 
-        $this->flash = $immediately
+        // Read from what was written, not from the checkbox: CancelSubscription ends a
+        // graceful cancel now when there is no access to keep (past due on a failed first
+        // charge or a chargeback), and "grace period applies" then told the operator — and
+        // through them the customer — about access that was already gone.
+        $endsAt = $b->fresh()?->getBillingSubscriptionEndsAt();
+        $endedNow = $immediately || $endsAt === null || ! $endsAt->isFuture();
+
+        $this->flash = $endedNow
             ? __('billing::admin.billables.subscription.flash.cancelled_now')
             : __('billing::admin.billables.subscription.flash.cancelled_grace');
     }
@@ -308,8 +349,37 @@ new class extends Component {
         $this->error = $this->flash = null;
         $b = $this->billable();
         if ($b) {
-            try { $service->handle($b); $this->flash = __('billing::admin.billables.subscription.flash.resubscribed'); }
-            catch (\Throwable $e) { report($e); $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]); }
+            try {
+                $service->handle($b);
+                $this->flash = __('billing::admin.billables.subscription.flash.resubscribed');
+            } catch (\GraystackIT\MollieBilling\Exceptions\PreviousSubscriptionStillRunningException) {
+                // The cancel this resume would undo has not reached Mollie yet; the hourly
+                // sweep retries it. Nothing written — the same click works once it has.
+                $this->error = __('billing::admin.billables.subscription.flash.resubscribe_previous_still_running');
+            } catch (\GraystackIT\MollieBilling\Exceptions\SubscriptionChangeInProgressException) {
+                $this->error = __('billing::admin.billables.subscription.flash.resubscribe_in_progress');
+            } catch (\Throwable $e) {
+                // A second click (or a second operator) after the first resume finished
+                // finds the row no longer cancelled: a refusal, not an error to report.
+                if ($b->fresh()?->getBillingSubscriptionStatus() !== SubscriptionStatus::Cancelled) {
+                    $this->error = __('billing::admin.billables.subscription.flash.resubscribe_not_cancelled');
+
+                    return;
+                }
+
+                // A refusal the service can say (an open country mismatch, say): shown in
+                // the operator's language, and not an error to report.
+                if (\GraystackIT\MollieBilling\Support\ExceptionMessage::isTranslatable($e)) {
+                    $this->error = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
+
+                    return;
+                }
+
+                report($e);
+                $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
+            } finally {
+                $this->announceChange();
+            }
         }
     }
 
@@ -395,9 +465,13 @@ new class extends Component {
             ]);
             $this->showRevokeModal = false;
             $this->reset(['revokingId', 'revokeNote']);
+        } catch (\GraystackIT\MollieBilling\Exceptions\TranslatableException $e) {
+            $this->error = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
         } catch (\Throwable $e) {
             report($e);
             $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);
+        } finally {
+            $this->announceChange();
         }
     }
 };
@@ -412,16 +486,16 @@ new class extends Component {
         <div class="grid gap-6 lg:grid-cols-2">
             <x-mollie-billing::admin.section :title="__('billing::admin.billables.subscription.current_title')" :description="__('billing::admin.billables.subscription.current_description')">
                 <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <x-mollie-billing::admin.detail :label="__('billing::admin.common.plan')" mono>
+                    <x-mollie-billing::admin.detail dusk="sub-plan" :label="__('billing::admin.common.plan')" mono>
                         {{ $b->subscription_plan_code ?? '—' }}
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail :label="__('billing::admin.common.interval')">
                         {{ $b->subscription_interval?->label() ?? '—' }}
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail :label="__('billing::admin.common.status')">
+                    <x-mollie-billing::admin.detail dusk="sub-status" :label="__('billing::admin.common.status')">
                         <x-mollie-billing::admin.enum-badge :value="$b->subscription_status" />
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.source')">
+                    <x-mollie-billing::admin.detail dusk="sub-source" :label="__('billing::admin.billables.subscription.source')">
                         <x-mollie-billing::admin.enum-badge :value="$b->subscription_source ?? null" />
                     </x-mollie-billing::admin.detail>
                     <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.seats')" mono>
@@ -445,7 +519,7 @@ new class extends Component {
                             <flux:text size="xs" class="text-zinc-500">{{ $b->trial_ends_at->diffForHumans() }}</flux:text>
                         @endif
                     </x-mollie-billing::admin.detail>
-                    <x-mollie-billing::admin.detail :label="__('billing::admin.billables.subscription.subscription_ends')" mono>
+                    <x-mollie-billing::admin.detail dusk="sub-ends" :label="__('billing::admin.billables.subscription.subscription_ends')" mono>
                         <x-mollie-billing::admin.time :at="$b->subscription_ends_at" />
                         @if ($b->subscription_ends_at)
                             <flux:text size="xs" class="text-zinc-500">{{ $b->subscription_ends_at->diffForHumans() }}</flux:text>
@@ -473,7 +547,10 @@ new class extends Component {
                 ], true) && ($b->isOnBillingTrial() || $b->trial_ends_at !== null);
                 $canResubscribe = $status === \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled
                     && $endsAt !== null && $endsAt->isFuture();
+                // `New` too: CancelSubscription refuses it like Expired (nothing to cancel),
+                // and a checkout that never completed leaves a plan code behind.
                 $canCancel = ! in_array($status, [
+                    \GraystackIT\MollieBilling\Enums\SubscriptionStatus::New,
                     \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Cancelled,
                     \GraystackIT\MollieBilling\Enums\SubscriptionStatus::Expired,
                 ], true) && $b->getBillingSubscriptionPlanCode() !== null;
@@ -676,7 +753,7 @@ new class extends Component {
                                 $interval = $snap['interval'] ?? null;
                                 $addons = (array) ($snap['addon_codes'] ?? []);
                             @endphp
-                            <flux:table.row :key="$g->id">
+                            <flux:table.row :key="$g->id" dusk="grant-row-{{ $g->id }}">
                                 <flux:table.cell variant="strong" class="font-mono">{{ $g->coupon?->code ?? '—' }}</flux:table.cell>
                                 <flux:table.cell>
                                     @php

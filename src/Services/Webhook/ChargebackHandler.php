@@ -8,6 +8,7 @@ use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
+use GraystackIT\MollieBilling\Events\ChargebackOnRefundedPayment;
 use GraystackIT\MollieBilling\Events\ChargebackReversed;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
@@ -16,6 +17,7 @@ use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\AdminPlanChangeFailedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Support\MolliePaymentCredits;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
 use Illuminate\Database\Eloquent\Model;
@@ -46,11 +48,16 @@ use Illuminate\Support\Facades\Notification;
  */
 class ChargebackHandler
 {
+    use MutatesBillingMeta;
+
     private const UNKNOWN = 'unknown';
 
     private const BOOKED = 'booked';
 
     private const REVERSED = 'reversed';
+
+    /** The cent an invoice may differ from what Mollie collected — see uncreditedGross(). */
+    private const RECONCILIATION_SLACK_CENTS = 1;
 
     public function __construct(
         protected readonly InvoiceService $salesInvoiceService,
@@ -130,6 +137,13 @@ class ChargebackHandler
             // API had the sign the other way round. Pinned by ChargebackSdkContractTest.
             $grossCents = abs($grossCents);
 
+            // The part of the chargeback that had already been given back: a refund (or an
+            // earlier credit) left less on the invoice than the bank has now pulled back, so
+            // the customer received that part twice. Only the rest can be credited — the
+            // books stay right — and the part beyond it is reported below, because no
+            // document will ever show it.
+            $uncreditedGross = $this->uncreditedGross($original, $grossCents);
+
             // Same net/VAT resolution as a refund: against the invoice's own line
             // composition, never one line's rate applied to the whole gross.
             $netAmount = $this->salesInvoiceService->creditNetForGross($original, $grossCents);
@@ -141,6 +155,13 @@ class ChargebackHandler
                     'chargeback_gross' => $grossCents,
                     'remaining_refundable_net' => $original->remainingRefundableNet(),
                 ]);
+
+                // Not past due: the payment was given back already, so there is nothing to
+                // dun for. But the money went out a second time, and only an operator who
+                // disputes the chargeback with the proof of the refund gets it back.
+                if ($uncreditedGross > 0) {
+                    $this->reportChargebackOnRefundedPayment($billable, $original, $chargebackId, $grossCents, $uncreditedGross);
+                }
 
                 continue;
             }
@@ -173,6 +194,10 @@ class ChargebackHandler
                 'reason_text' => 'chargeback reported by Mollie',
                 'mollie_chargeback_id' => $chargebackId,
             ]));
+
+            if ($uncreditedGross > 0) {
+                $this->reportChargebackOnRefundedPayment($billable, $original, $chargebackId, $grossCents, $uncreditedGross);
+            }
         }
 
         if ($booked === 0) {
@@ -180,6 +205,111 @@ class ChargebackHandler
         }
 
         $this->markPastDue($billable, $original, $booked);
+    }
+
+    /**
+     * How much of a chargeback exceeds what is still creditable on the invoice, in gross
+     * minor units — zero when nothing had been credited before.
+     *
+     * Measured only when something had been: a first chargeback of a whole payment may
+     * differ from the invoice's gross by the cent of reconciliation slack, and that is no
+     * second payout. One cent is tolerated on the same grounds.
+     */
+    protected function uncreditedGross(BillingInvoice $original, int $grossCents): int
+    {
+        if ($original->effectiveRefundedNet() <= 0) {
+            return 0;
+        }
+
+        $remainingNet = max(0, $original->remainingRefundableNet());
+        $remainingGross = $remainingNet > 0
+            ? $remainingNet + $this->salesInvoiceService->creditNoteVat($original, $remainingNet)
+            : 0;
+
+        $uncredited = $grossCents - $remainingGross;
+
+        return $uncredited > self::RECONCILIATION_SLACK_CENTS ? $uncredited : 0;
+    }
+
+    /**
+     * Tell the operator — once per chargeback — that the bank pulled back money that had
+     * already been refunded, and announce it to the app.
+     *
+     * A chargeback with nothing left to credit leaves no credit note, so its id is noted in
+     * `subscription_meta.chargebacks_on_refunded_payment` instead: every re-delivery of the
+     * payment runs this handler again (its refund notes keep it "on the books"), and
+     * without the note each one mailed the operator again.
+     */
+    protected function reportChargebackOnRefundedPayment(
+        Billable $billable,
+        BillingInvoice $original,
+        string $chargebackId,
+        int $chargebackGross,
+        int $uncreditedGross,
+    ): void {
+        if ($billable instanceof Model) {
+            $first = false;
+
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($chargebackId, &$first): ?array {
+                $reported = (array) ($meta['chargebacks_on_refunded_payment'] ?? []);
+
+                if (in_array($chargebackId, $reported, true)) {
+                    return null;
+                }
+
+                $first = true;
+                $meta['chargebacks_on_refunded_payment'] = [...$reported, $chargebackId];
+
+                return $meta;
+            });
+
+            if (! $first) {
+                return;
+            }
+        }
+
+        Log::warning('Chargeback on a payment that had already been refunded — paid out twice', [
+            'invoice_id' => (int) $original->id,
+            'mollie_payment_id' => (string) $original->mollie_payment_id,
+            'mollie_chargeback_id' => $chargebackId,
+            'chargeback_amount_cents' => $chargebackGross,
+            'uncredited_amount_cents' => $uncreditedGross,
+        ]);
+
+        // Neither the event nor the mail may leave this method. The report runs inside the
+        // booking loop, before markPastDue(): a throwing app listener or mail transport made
+        // the delivery a 500, the re-delivery found the chargeback booked (its credit note
+        // carries the id) and returned before markPastDue() — the customer kept Active
+        // access on money the bank had pulled back. The id is noted above, so a failure is
+        // reported rather than retried; the warning above carries everything the mail does.
+        InvoiceService::announceBooked(new ChargebackOnRefundedPayment($billable, $original, $chargebackId, $chargebackGross, $uncreditedGross));
+
+        try {
+            $admins = MollieBilling::notifyAdmin();
+            $admins = is_array($admins) ? $admins : iterator_to_array($admins);
+
+            if ($admins === []) {
+                return;
+            }
+
+            Notification::send($admins, MollieBilling::resolveNotification(
+                AdminPlanChangeFailedNotification::class,
+                'A payment that had already been refunded was charged back — the amount went out twice; dispute the chargeback with the proof of the refund',
+                [
+                    'billable_type' => $billable instanceof Model ? $billable->getMorphClass() : null,
+                    'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
+                    'invoice_id' => (int) $original->id,
+                    'mollie_payment_id' => (string) $original->mollie_payment_id,
+                    'mollie_chargeback_id' => $chargebackId,
+                    'currency' => InvoiceService::normalizeCurrency($original->currency),
+                    'chargeback_amount_cents' => $chargebackGross,
+                    'uncredited_amount_cents' => $uncreditedGross,
+                ],
+            ));
+        } catch (\Throwable $e) {
+            // The reporter can fail too; not reported again, which could throw once more.
+            rescue(static fn () => report($e), null, false);
+        }
     }
 
     /**

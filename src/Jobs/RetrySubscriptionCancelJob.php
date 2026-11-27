@@ -126,6 +126,9 @@ class RetrySubscriptionCancelJob implements ShouldQueue, ShouldBeUnique
             // Already gone at Mollie — nothing left to cancel.
         }
 
+        // The gate's 60-second snapshot still says "live"; the checkout reads it.
+        \GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionGate::forget($this->mollieSubscriptionId);
+
         Log::info('RetrySubscriptionCancelJob: Mollie subscription cancelled', [
             'billable_id' => $this->billableId,
             'mollie_subscription_id' => $this->mollieSubscriptionId,

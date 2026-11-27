@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Log;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use GraystackIT\MollieBilling\Support\MollieCall;
+use GraystackIT\MollieBilling\Support\MollieRefusal;
 
 class ChargeUsageOverageDirectly
 {
@@ -62,6 +63,35 @@ class ChargeUsageOverageDirectly
      * the only place that knows whether the request arrived.
      */
     public const PAYMENT_UNKNOWN_KEY = 'payment_unknown_at';
+
+    /**
+     * Snapshot key listing the payments of this dunning cycle that came before the one in
+     * `payment_id` — every one of them over (failed, expired, cancelled).
+     *
+     * `payment_id` names the payment *in flight*, and only that one. The retry after a failed
+     * payment used to keep the failed id there while it created the next payment, which made
+     * the next payment's create indistinguishable from the old one: it was sent with the same
+     * idempotency key (and Mollie, inside its hour, answered with the failed payment), a throw
+     * could not be marked as {@see PAYMENT_UNKNOWN_KEY} because an id was "already there", the
+     * nightly pass skipped the row for the same reason, and the stale sweep polled the old,
+     * failed payment and wrote the cycle off while the new one might be collecting. Moving the
+     * id here when the next payment is asked for keeps the cycle's history — for the key and
+     * for telling a lost payment apart from its predecessors — without pretending it is live.
+     */
+    public const PREVIOUS_PAYMENTS_KEY = 'previous_payment_ids';
+
+    /**
+     * Snapshot key: the refusals Mollie gave the create request of this cycle
+     * (`['key' => stable key, 'refusals' => n, 'at' => …]`, see {@see MollieRefusal}).
+     *
+     * A 4xx binds its idempotency key to the refusal for an hour (measured 26 November 2026),
+     * and `RetryUsageOverageChargeJob`'s whole ladder (1, 5, 15 minutes) lies inside that
+     * hour: every retry got the first refusal replayed, even after the customer replaced
+     * the mandate. Each definite refusal moves the key on; a timeout, 5xx or lost answer
+     * does not. Bound to the stable key it was counted for, so a new amount or a new
+     * payment of the cycle starts from none.
+     */
+    public const KEY_REFUSALS_KEY = 'key_refusals';
 
     /**
      * How many later renewals try to collect a debt again after its dunning cycle gave up.
@@ -243,6 +273,46 @@ class ChargeUsageOverageDirectly
         }
 
         return [$lineItems, $start[0] ?? null, $end[0] ?? null];
+    }
+
+    /**
+     * Where the current period's usage ends: the next billing date — unless the
+     * subscription has already ended before it.
+     *
+     * An immediate cancellation (and the past-due auto-cancel, which is one) sets
+     * `subscription_ends_at` to now and then charges the overage accrued so far. Stamped
+     * with `nextBillingDate()`, that final invoice stated a period the subscription never
+     * reaches: cancelled on 12 March, it said 1–31 March. The end is the exclusive bound of
+     * the last day of service — 00:00 UTC of the day after the end, the same convention as
+     * every period boundary, so the invoice prints "1–12 March" (service periods are UTC
+     * billing days, the end the day before the bound; see EInvoiceService::servicePeriod()).
+     *
+     * Only a subscription that is over *now*: a graceful cancel is charged by the last
+     * sweep the day before its end, which is the next billing date, and keeps the full
+     * period. Never later than the next billing date either.
+     */
+    private static function currentUsagePeriodEnd(Billable $billable): ?\Carbon\CarbonInterface
+    {
+        $nextBilling = $billable->nextBillingDate();
+        $endsAt = $billable->getBillingSubscriptionEndsAt();
+
+        if ($nextBilling === null
+            || $endsAt === null
+            || ! in_array($billable->getBillingSubscriptionStatus(), [SubscriptionStatus::Cancelled, SubscriptionStatus::Expired], true)
+            || BillingTime::toUtc($endsAt)->greaterThan(BillingTime::nowUtc())
+        ) {
+            return $nextBilling;
+        }
+
+        $endBound = BillingTime::toUtc($endsAt)->startOfDay()->addDay();
+        $periodStart = $billable->getBillingPeriodStartsAt();
+
+        // An end before this period began says nothing about this period's usage.
+        if ($periodStart !== null && $endBound->lessThanOrEqualTo(BillingTime::toUtc($periodStart))) {
+            return $nextBilling;
+        }
+
+        return $endBound->lessThan($nextBilling) ? $endBound : $nextBilling;
     }
 
     private static function parsedPeriodBound(mixed $value): ?\Carbon\CarbonInterface
@@ -631,6 +701,17 @@ class ChargeUsageOverageDirectly
     }
 
     /**
+     * Whether `handleExplicit()` would refuse right now because another overage charge holds
+     * the slot — the plan-change preview asks, so it can say that the excess it quotes is
+     * collected with the next debit rather than with the change. Read-only and silent: the
+     * refusal itself is logged where it happens.
+     */
+    public function chargeIsInFlight(Billable $billable): bool
+    {
+        return $this->anotherChargeIsInFlight($billable, log: false);
+    }
+
+    /**
      * Whether a previous overage charge is still waiting for its webhook.
      *
      * `subscription_meta.usage_overage` is a single slot, so a second charge does not
@@ -639,7 +720,7 @@ class ChargeUsageOverageDirectly
      * overwritten payment invisible to `CleanupStalePendingOverageChargeJob`, which only
      * ever polls the id currently in the slot.
      */
-    private function anotherChargeIsInFlight(Billable $billable): bool
+    private function anotherChargeIsInFlight(Billable $billable, bool $log = true): bool
     {
         $meta = $billable->getBillingSubscriptionMeta();
         $inFlight = (array) ($meta[self::META_KEY] ?? []);
@@ -653,10 +734,12 @@ class ChargeUsageOverageDirectly
         // there is no id to name it by. Otherwise this guard reads "no id" as "no payment" and
         // the next sweep charges a debt Mollie may already be collecting.
         if ($inFlightPaymentId === '' && isset($inFlight[self::PAYMENT_UNKNOWN_KEY])) {
-            Log::warning('Refusing an overage charge while a previous one may already exist at Mollie', [
-                'billable' => $billable instanceof Model ? $billable->getKey() : null,
-                'unknown_since' => (string) $inFlight[self::PAYMENT_UNKNOWN_KEY],
-            ]);
+            if ($log) {
+                Log::warning('Refusing an overage charge while a previous one may already exist at Mollie', [
+                    'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                    'unknown_since' => (string) $inFlight[self::PAYMENT_UNKNOWN_KEY],
+                ]);
+            }
 
             return true;
         }
@@ -665,10 +748,12 @@ class ChargeUsageOverageDirectly
             return false;
         }
 
-        Log::warning('Refusing an overage charge while another is still in flight', [
-            'billable' => $billable instanceof Model ? $billable->getKey() : null,
-            'in_flight_payment_id' => $inFlightPaymentId,
-        ]);
+        if ($log) {
+            Log::warning('Refusing an overage charge while another is still in flight', [
+                'billable' => $billable instanceof Model ? $billable->getKey() : null,
+                'in_flight_payment_id' => $inFlightPaymentId,
+            ]);
+        }
 
         return true;
     }
@@ -797,6 +882,29 @@ class ChargeUsageOverageDirectly
 
             return $meta;
         });
+    }
+
+    /** Count a definite refusal of the create request on the snapshot. Never throws. */
+    private function recordKeyRefusal(Billable $billable, string $stableKey): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        rescue(function () use ($billable, $stableKey): void {
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($stableKey): ?array {
+                $snapshot = (array) ($meta[self::META_KEY] ?? []);
+
+                if ($snapshot === [] || (string) ($snapshot['payment_id'] ?? '') !== '') {
+                    return null;
+                }
+
+                $snapshot[self::KEY_REFUSALS_KEY] = MollieRefusal::recordRefusal($snapshot[self::KEY_REFUSALS_KEY] ?? null, $stableKey);
+                $meta[self::META_KEY] = $snapshot;
+
+                return $meta;
+            });
+        }, null, true);
     }
 
     /**
@@ -984,9 +1092,22 @@ class ChargeUsageOverageDirectly
         // the wallet balances it was derived from.
         $this->persistPendingCharge($billable, null, $lineItems, $vat);
 
+        $stableKey = $this->idempotencyKeyFor($billable, $vat);
+        $idempotencyKey = $stableKey === null
+            ? null
+            : MollieRefusal::key($stableKey, MollieRefusal::refusalsFor(($this->pendingCharge($billable) ?? [])[self::KEY_REFUSALS_KEY] ?? null, $stableKey));
+
         try {
-            $payment = $this->createMolliePayment($billable, $vat, $lineItems, $this->idempotencyKeyFor($billable, $vat));
+            $payment = $this->createMolliePayment($billable, $vat, $lineItems, $idempotencyKey);
         } catch (\Throwable $e) {
+            // Mollie answered with a refusal: no payment, and the key is bound to the
+            // refusal. The retry carries a new one (see KEY_REFUSALS_KEY). The marker below
+            // is written all the same — the debt stays frozen exactly as before until the
+            // stale sweep has asked Mollie; only the key changes.
+            if ($stableKey !== null && MollieRefusal::isDefinite($e)) {
+                $this->recordKeyRefusal($billable, $stableKey);
+            }
+
             // The request left this process. Whether Mollie created the payment is now unknown
             // — and "unknown" must not be read as "no", because the next sweep would charge the
             // same debt again while the first payment settles into its own invoice. The marker
@@ -1039,7 +1160,7 @@ class ChargeUsageOverageDirectly
         [$lineItems, $periodStart, $periodEnd] = self::stampUsagePeriods(
             $lineItems,
             $billable->getBillingPeriodStartsAt()?->toIso8601String(),
-            $billable->nextBillingDate()?->toIso8601String(),
+            self::currentUsagePeriodEnd($billable)?->toIso8601String(),
         );
 
         $this->mutateBillingMeta($billable, function (array $meta) use ($paymentId, $lineItems, $vat, $periodStart, $periodEnd): array {
@@ -1069,8 +1190,23 @@ class ChargeUsageOverageDirectly
                 unset($meta[self::RECOLLECTIONS_KEY]);
             }
 
+            // The payments this cycle already made. Asking for a new one (`$paymentId === null`)
+            // while the slot still names an earlier payment means that payment is over — the
+            // retry after its failure, or a charge after it settled — so it leaves the slot for
+            // the history instead of standing in for the payment about to be created. See
+            // PREVIOUS_PAYMENTS_KEY.
+            $previousPayments = array_values(array_filter(
+                (array) ($existing[self::PREVIOUS_PAYMENTS_KEY] ?? []),
+                static fn ($id): bool => is_string($id) && $id !== '',
+            ));
+            $existingPaymentId = (string) ($existing['payment_id'] ?? '');
+
+            if ($paymentId === null && $existingPaymentId !== '' && ! in_array($existingPaymentId, $previousPayments, true)) {
+                $previousPayments[] = $existingPaymentId;
+            }
+
             $meta[self::META_KEY] = [
-                'payment_id' => $paymentId ?? ($existing['payment_id'] ?? null),
+                'payment_id' => $paymentId,
                 'line_items' => $lineItems,
                 'amount_net' => $vat['net'],
                 'amount_gross' => $vat['gross'],
@@ -1088,6 +1224,17 @@ class ChargeUsageOverageDirectly
                 'period_start' => $periodStart,
                 'period_end' => $periodEnd,
             ];
+
+            if ($previousPayments !== []) {
+                $meta[self::META_KEY][self::PREVIOUS_PAYMENTS_KEY] = $previousPayments;
+            }
+
+            // The refusals of the create request travel with the cycle until a payment
+            // exists — the retry that asks again has to send the moved-on key.
+            if ($paymentId === null && is_array($existing[self::KEY_REFUSALS_KEY] ?? null)) {
+                $meta[self::META_KEY][self::KEY_REFUSALS_KEY] = $existing[self::KEY_REFUSALS_KEY];
+            }
+
             $meta['usage_overage_status'] = self::STATUS_PENDING;
 
             // A new payment starts a new dunning cycle. The retry job leaves the counter at
@@ -1130,11 +1277,18 @@ class ChargeUsageOverageDirectly
      *  - the gross amount, because Mollie answers 400 to a reused key whose parameters
      *    differ. If more usage accrued between two attempts the amount moves, and this makes
      *    that a new key rather than a rejected request;
-     *  - the billable, so two customers can never collide.
+     *  - the billable, so two customers can never collide;
+     *  - the payment of this cycle that came before, when there is one. A retry after a
+     *    *failed payment* is a new payment, not a repeat of the old request — and a card
+     *    refuses within minutes, well inside Mollie's hour. With the cycle's key alone Mollie
+     *    answered p2's request with p1, the failed payment, so the cycle never made a second
+     *    or third attempt and sat `pending` until the stale sweep wrote it off. The previous
+     *    id moves the key on exactly when a new payment is meant, and stays put across the
+     *    retries of asking for that one payment.
      *
-     * Mollie caches a key for **one hour**. That covers this ladder — `backoff()` is
-     * `[60, 300, 900]`, so all three retries land inside ~21 minutes — and deliberately not
-     * the nightly sweep, which is a day later and a genuinely new decision.
+     * Mollie caches a key for **one hour**. That covers the ladder of one create request —
+     * `backoff()` is `[60, 300, 900]`, so all three retries land inside ~21 minutes — and
+     * deliberately not the nightly sweep, which is a day later and a genuinely new decision.
      *
      * @param  array{net:int,vat:int,gross:int,rate:float}  $vat
      */
@@ -1144,7 +1298,8 @@ class ChargeUsageOverageDirectly
             return null;
         }
 
-        $cycleStartedAt = (string) ($this->pendingCharge($billable)['created_at'] ?? '');
+        $pending = (array) ($this->pendingCharge($billable) ?? []);
+        $cycleStartedAt = (string) ($pending['created_at'] ?? '');
 
         if ($cycleStartedAt === '') {
             // No snapshot to key off. Better no key than an unstable one: a key that changes
@@ -1155,13 +1310,18 @@ class ChargeUsageOverageDirectly
 
         // Readable rather than hashed, like `RefundInvoiceService`'s: when support has to ask
         // Mollie what happened to a key, the key should say what it was for.
-        return sprintf(
+        $key = sprintf(
             'usage-overage:%s:%s:%s:%d',
             $billable->getMorphClass(),
             (string) $billable->getKey(),
             $cycleStartedAt,
             (int) $vat['gross'],
         );
+
+        $previousPayments = (array) ($pending[self::PREVIOUS_PAYMENTS_KEY] ?? []);
+        $previousPayment = (string) (end($previousPayments) ?: '');
+
+        return $previousPayment === '' ? $key : $key.':after:'.$previousPayment;
     }
 
     private function createMolliePayment(Billable $billable, array $vat, array $lineItems, ?string $idempotencyKey = null): object

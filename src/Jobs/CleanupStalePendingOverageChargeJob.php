@@ -161,7 +161,7 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
 
         $waitHours = $unknownPayment ? self::RECONCILE_UNKNOWN_AFTER_HOURS : self::STALE_AFTER_HOURS;
 
-        if ($createdAt->diffInHours(BillingTime::nowUtc()) < $waitHours) {
+        if ($this->waitingSince($snapshot, $createdAt, $unknownPayment)->diffInHours(BillingTime::nowUtc()) < $waitHours) {
             return;
         }
 
@@ -183,9 +183,16 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
             // the debt may already be being collected, and "no id" must not be read as "no
             // payment": that is what let the next sweep charge it a second time. Mollie's own
             // payment list is the only place that knows, so this is the one branch that asks.
-            if ($unknownPayment) {
-                $this->reconcileUnknownPayment($billable, $snapshot, $createdAt);
-
+            //
+            // Once Mollie has answered "no such payment", the snapshot is exactly the one
+            // described above — and the hard limit applies to it as well. Returning straight
+            // after the answer made the limit unreachable for a mandate that is gone: every
+            // night pass 3 asked again, the refused create marked the snapshot again, this job
+            // reconciled and dropped the marker again, and the cycle never ended — the
+            // customer kept full access with the debt unbilled and nobody past due. A dunning
+            // retry walks into it most often: its failed predecessor leaves the slot for
+            // `previous_payment_ids`, and an invalidated mandate refuses the next payment.
+            if ($unknownPayment && ! $this->reconcileUnknownPayment($billable, $snapshot, $createdAt)) {
                 return;
             }
 
@@ -269,6 +276,40 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
     }
 
     /**
+     * Where the wait before this pass may look at the snapshot starts.
+     *
+     * The cycle's start, except for a lost answer to a *later* payment of the cycle: that
+     * question is an hour old when the retry asked it, not when the cycle began days ago.
+     * Measured from the cycle, the sweep reconciled in the middle of the retry ladder — and
+     * adopting a payment a queued re-entry of `RetryUsageOverageChargeJob` then finds in the
+     * slot has that re-entry count it as failed and create the next one while it is still
+     * open. The marker is re-set by every attempt, so it is the last one's time.
+     *
+     * @param  array<string, mixed>  $snapshot
+     */
+    private function waitingSince(array $snapshot, CarbonInterface $createdAt, bool $unknownPayment): CarbonInterface
+    {
+        if (! $unknownPayment || (array) ($snapshot[ChargeUsageOverageDirectly::PREVIOUS_PAYMENTS_KEY] ?? []) === []) {
+            return $createdAt;
+        }
+
+        $marker = (string) ($snapshot[ChargeUsageOverageDirectly::PAYMENT_UNKNOWN_KEY] ?? '');
+
+        try {
+            // An empty string would parse as "now" and postpone the reconciliation for ever.
+            $unknownSince = $marker !== '' ? BillingTime::toUtc($marker) : null;
+        } catch (\Throwable) {
+            $unknownSince = null;
+        }
+
+        if ($unknownSince === null) {
+            return $createdAt;
+        }
+
+        return $unknownSince->greaterThan($createdAt) ? $unknownSince : $createdAt;
+    }
+
+    /**
      * When Mollie created the payment, or null when the answer does not say.
      */
     private function paymentCreatedAt(object $payment): ?CarbonInterface
@@ -307,13 +348,16 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
      *  - the payment exists → adopt its id, and the ordinary flow takes it from there (poll the
      *    status, replay a lost `paid` delivery, write off a `failed` one);
      *  - Mollie has no such payment → the request never arrived, so the marker is dropped and
-     *    the debt becomes an ordinary un-charged one again, retryable by the next cycle;
+     *    the debt becomes an ordinary un-charged one again, retryable by the next cycle — and
+     *    subject to the hard limit for one that could not be created, which is why this
+     *    outcome alone answers `true`;
      *  - Mollie cannot be reached → nothing is decided. Tomorrow's run asks again. An
      *    unanswered question is not evidence of absence.
      *
      * @param  array<string, mixed>  $snapshot
+     * @return bool whether Mollie answered that the payment does not exist
      */
-    private function reconcileUnknownPayment(Billable $billable, array $snapshot, CarbonInterface $chargedAt): void
+    private function reconcileUnknownPayment(Billable $billable, array $snapshot, CarbonInterface $chargedAt): bool
     {
         $customerId = (string) ($billable->getMollieCustomerId() ?? '');
 
@@ -327,7 +371,7 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
 
             $this->overageService()->forgetUnknownPayment($billable);
 
-            return;
+            return true;
         }
 
         try {
@@ -346,7 +390,7 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
 
                 $this->overageService()->forgetUnknownPayment($billable);
 
-                return;
+                return true;
             }
 
             Log::warning('CleanupStalePendingOverageChargeJob: Mollie unreachable while reconciling a lost overage payment', [
@@ -354,14 +398,14 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
                 'error' => $e->getMessage(),
             ]);
 
-            return;
+            return false;
         } catch (\Throwable $e) {
             Log::warning('CleanupStalePendingOverageChargeJob: Mollie unreachable while reconciling a lost overage payment', [
                 'billable_id' => $billable instanceof Model ? $billable->getKey() : null,
                 'error' => $e->getMessage(),
             ]);
 
-            return;
+            return false;
         }
 
         $match = $this->matchLostPayment($billable, $payments, $snapshot, $chargedAt);
@@ -374,7 +418,7 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
 
             $this->overageService()->forgetUnknownPayment($billable);
 
-            return;
+            return true;
         }
 
         $paymentId = (string) ($match->id ?? '');
@@ -390,6 +434,8 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
         // pass takes the polling branch. It cannot come back here: `paymentMayExist()` is false
         // once the marker is gone.
         $this->processBillable($billable);
+
+        return false;
     }
 
     /**
@@ -413,7 +459,17 @@ class CleanupStalePendingOverageChargeJob implements ShouldQueue
         // in the same call, and only the clocks differ.
         $notBefore = $chargedAt->copy()->subMinutes(5);
 
+        // The cycle's earlier payments carry the same metadata and the same amount, and were
+        // made after the cycle began — so the lost answer to a retry matched the very payment
+        // whose failure the retry was for, and the cycle was written off on it. They are over;
+        // the lost one is the one that is not among them.
+        $previousPayments = array_map('strval', (array) ($snapshot[ChargeUsageOverageDirectly::PREVIOUS_PAYMENTS_KEY] ?? []));
+
         foreach ($this->iterablePayments($payments) as $payment) {
+            if (in_array((string) ($payment->id ?? ''), $previousPayments, true)) {
+                continue;
+            }
+
             $metadata = (array) json_decode((string) json_encode($payment->metadata ?? []), true);
 
             if (($metadata['type'] ?? null) !== 'overage') {

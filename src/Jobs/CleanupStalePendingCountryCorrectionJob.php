@@ -155,7 +155,19 @@ class CleanupStalePendingCountryCorrectionJob implements ShouldQueue
                 // Re-runs the same code path the webhook would have. Idempotent:
                 // a duplicate (real webhook arriving later) finds the invoice
                 // already persisted and no-ops.
-                $controller->handleCountryCorrectionPaid($payment, $billable, $metadata);
+                //
+                // A booking that fails throws (the webhook needs that to answer 5xx); here
+                // it is logged and left for the next hourly pass, so one payment cannot stop
+                // the sweep of every billable after it.
+                try {
+                    $controller->handleCountryCorrectionPaid($payment, $billable, $metadata);
+                } catch (\Throwable $e) {
+                    Log::error('CleanupStalePendingCountryCorrectionJob: reissue booking failed', [
+                        'billable_id' => $billable->getKey(),
+                        'payment_id' => $paymentId,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
                 continue;
             }
 

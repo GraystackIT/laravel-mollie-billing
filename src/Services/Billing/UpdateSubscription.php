@@ -21,6 +21,7 @@ use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\SubscriptionAmount;
 use GraystackIT\MollieBilling\Support\SubscriptionMetaHygiene;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Scopes\BillingScope;
 use Illuminate\Database\Eloquent\Model;
 use GraystackIT\MollieBilling\Exceptions\SubscriptionChangeInProgressException;
@@ -31,6 +32,8 @@ use GraystackIT\MollieBilling\Support\MollieCall;
 
 class UpdateSubscription
 {
+    use MutatesBillingMeta;
+
     /**
      * The recurring-coupon marker of the change being run, for applyProrata()'s intent —
      * see runUpdate().
@@ -89,6 +92,33 @@ class UpdateSubscription
 
         /** @var Model&Billable $billable */
         return $this->withChangeLock($billable, fn (): array => $this->runUpdate($billable, $dto));
+    }
+
+    /**
+     * Take the previous attempt's outcome markers off once a new change is accepted.
+     *
+     * The screens ask them "how did the change I am watching end?" and only look at their
+     * age, so a declined charge outranked the paid change that followed it for a day (the
+     * addon screen: half an hour), and a change the clean-up gave up for a week. See
+     * SubscriptionMetaHygiene::withoutPlanChangeOutcome().
+     */
+    private function dropPreviousChangeOutcome(Billable $billable): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        if (array_intersect(SubscriptionMetaHygiene::PLAN_CHANGE_OUTCOME_KEYS, array_keys($meta)) === []) {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, static function (array $current): ?array {
+            $next = SubscriptionMetaHygiene::withoutPlanChangeOutcome($current);
+
+            return $next === $current ? null : $next;
+        });
     }
 
     /**
@@ -247,6 +277,12 @@ class UpdateSubscription
             $existingCouponIds[] = $coupon->id;
             $remainingNet = max(0, $remainingNet - $thisDiscount);
         }
+
+        // The change is accepted: whatever the previous attempt ended in is no longer the
+        // outcome the screens should report. Before any Mollie call, so a new charge that
+        // is declined at once writes its own stamp after this, never under it; in its own
+        // short locked write, because the webhook and the clean-up write the same column.
+        $this->dropPreviousChangeOutcome($billable);
 
         // The marker the redemption in phase 3 will write, built now. Mollie is PATCHed
         // before phase 3 (no Mollie call may sit inside the transaction that holds the
@@ -598,7 +634,12 @@ class UpdateSubscription
                     $meta = SubscriptionMetaHygiene::forFreshSubscription($meta);
 
                     if ($cancelledAtMollie) {
-                        unset($meta['mollie_subscription_id']);
+                        // A replacement waiting between its cancel and its create
+                        // (`MollieSubscriptionReplacer`) was moving the subscription this
+                        // downgrade just ended. Left behind, its retry created the paid
+                        // subscription again for a Local billable — charged and refunded
+                        // every period — and the checkout gate counted it as live.
+                        unset($meta['mollie_subscription_id'], $meta[MollieSubscriptionReplacer::META_KEY]);
                     }
                 }
 
@@ -1542,6 +1583,18 @@ class UpdateSubscription
 
         $this->clearPendingPlanChange($billable);
 
+        // The change is off: its payment is cancelled, or refunded in full should it settle
+        // anyway (reportOrphanedCharge()). What a seat or addon change already wrote goes
+        // with it — locally and at Mollie — exactly as for a declined charge and for
+        // withdrawPendingChangeForPayment(). This is the path CancelSubscription takes for a
+        // seat or addon change in flight; without it the customer kept the seats and the
+        // addon's features through the grace period, and over a resubscribe, unpaid. A
+        // plan or interval change wrote nothing before its charge, so for it this is a no-op.
+        if (is_array($meta['pending_prorata_change'] ?? null)) {
+            app(\GraystackIT\MollieBilling\Services\Webhook\ProrataChargeHandler::class)
+                ->restoreUnpaidChange($billable, (array) ($meta['pending_prorata_change']['intent'] ?? []));
+        }
+
         return $cancelled ? PendingChangeCancelOutcome::Cancelled : PendingChangeCancelOutcome::Cleared;
     }
 
@@ -2087,11 +2140,11 @@ class UpdateSubscription
         // a change on the period-end day itself still has 0 remaining days and
         // prorates to ~0 legitimately — only a strictly past end date is stuck.
         if (BillingTime::nowUtc()->startOfDay()->greaterThan($periodEnd->copy()->utc()->startOfDay())) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'Cannot modify the subscription — the current billing period ended on '
                 .$periodEnd->copy()->utc()->toDateString()
                 .' and has not renewed yet. Wait for the renewal to complete before changing the subscription.'
-            );
+            ))->withTranslation('billing::exceptions.state.period_not_renewed', ['date' => $periodEnd->copy()->utc()->toDateString()]);
         }
     }
 

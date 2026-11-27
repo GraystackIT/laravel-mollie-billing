@@ -302,6 +302,48 @@ class PlanWaiver
     }
 
     /**
+     * Move the end of a date-based waiver earlier — never before today. Returns the new
+     * end, or null when the billable has no date-based waiver.
+     *
+     * The counterpart of `extendByDays()`, for days that were added to a gift's end and
+     * are taken back after the gift was carried into this waiver. A waiver that ends on a
+     * count of charges is not shortened here.
+     */
+    public function shortenByDays(Billable $billable, int $days): ?Carbon
+    {
+        if (! $billable instanceof Model || $days <= 0 || $this->marker($billable) === null) {
+            return null;
+        }
+
+        $newEnd = null;
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($days, &$newEnd): ?array {
+            $marker = $meta['active_recurring_coupon'] ?? null;
+
+            if (! is_array($marker) || ! self::isWaiver($marker) || ($marker['max_applications'] ?? null) !== null) {
+                return null;
+            }
+
+            $current = self::parse($marker['valid_until'] ?? null);
+
+            if ($current === null) {
+                return null;
+            }
+
+            $now = Carbon::instance(BillingTime::nowUtc());
+            $shortened = $current->copy()->subDays($days);
+            $newEnd = $shortened->lessThan($now) ? $now : $shortened;
+
+            $marker['valid_until'] = $newEnd->toIso8601String();
+            $meta['active_recurring_coupon'] = $marker;
+
+            return $meta;
+        });
+
+        return $newEnd;
+    }
+
+    /**
      * Append free periods to a waiver. The date moves by whole intervals and the
      * application count, if the waiver has one, grows with it.
      */

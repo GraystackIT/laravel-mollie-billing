@@ -5,6 +5,7 @@ use GraystackIT\MollieBilling\Services\Billing\MollieMandateInspector;
 use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\MandateSummary;
 use Livewire\Attributes\Locked;
+use Livewire\Attributes\On;
 use Livewire\Component;
 
 new class extends Component {
@@ -21,11 +22,62 @@ new class extends Component {
         }
     }
 
+    /**
+     * The header (status badge, plan, mandate) is rendered here, the tabs are child
+     * components that re-render only themselves. A tab announces every action that
+     * reached a service, and the page re-reads the billable so the header follows
+     * without a reload. The children are keyed, so this does not re-render them.
+     */
+    #[On('billing-admin-billable-changed')]
+    public function billableChanged(): void
+    {
+        $this->billable = $this->billable?->fresh();
+    }
+
+    /**
+     * The mandate id the summary below was fetched for. Null with `$mandateFetched` false
+     * until the first render; kept between requests so a header refresh does not ask Mollie
+     * again. A full page load starts empty and always fetches.
+     */
+    #[Locked]
+    public ?string $mandateFetchedFor = null;
+
+    #[Locked]
+    public bool $mandateFetched = false;
+
+    /** @var array<string, mixed>|null  {@see MandateSummary::snapshot()}, null when Mollie had none to give */
+    #[Locked]
+    public ?array $mandateSnapshot = null;
+
+    /**
+     * One GetMandate per page load, not per tab action. The header refresh re-renders this
+     * component after every action a tab announces — a status or plan change, none of
+     * which touches the mandate — and asking Mollie each time was one extra API call per
+     * admin action. Asked again only when the billable's mandate id is not the one the
+     * kept summary belongs to.
+     */
     public function mandate(): ?MandateSummary
     {
-        return $this->billable
-            ? app(MollieMandateInspector::class)->inspect($this->billable)
-            : null;
+        if (! $this->billable) {
+            return null;
+        }
+
+        $mandateId = $this->billable->mollie_mandate_id;
+        $mandateId = is_string($mandateId) && $mandateId !== '' ? $mandateId : null;
+
+        if (! $this->mandateFetched || $this->mandateFetchedFor !== $mandateId) {
+            $summary = $mandateId !== null
+                ? app(MollieMandateInspector::class)->inspect($this->billable)
+                : null;
+
+            $this->mandateFetched = true;
+            $this->mandateFetchedFor = $mandateId;
+            $this->mandateSnapshot = $summary?->snapshot();
+
+            return $summary;
+        }
+
+        return $this->mandateSnapshot !== null ? MandateSummary::fromSnapshot($this->mandateSnapshot) : null;
     }
 
     public function planName(): ?string
@@ -75,7 +127,9 @@ new class extends Component {
                     <div class="min-w-0 space-y-1">
                         <div class="flex flex-wrap items-center gap-3">
                             <flux:heading size="xl" class="truncate">{{ $billable->getBillingName() }}</flux:heading>
-                            <x-mollie-billing::admin.enum-badge :value="$billable->subscription_status" />
+                            <span data-billable-status="{{ $billable->subscription_status?->value }}">
+                                <x-mollie-billing::admin.enum-badge :value="$billable->subscription_status" />
+                            </span>
                         </div>
                         <flux:text class="text-zinc-600 dark:text-zinc-400">{{ $billable->getBillingEmail() }}</flux:text>
                     </div>

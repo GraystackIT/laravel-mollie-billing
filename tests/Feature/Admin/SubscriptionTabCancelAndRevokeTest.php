@@ -142,3 +142,28 @@ it('revokes only with a reason, and records it', function (): void {
         ->and($billable->fresh()->getBillingSubscriptionMeta())->not->toHaveKey('active_recurring_coupon')
         ->and(CouponRedemption::query()->whereNull('revoked_at')->count())->toBe(0);
 });
+
+it('says the cancel took effect now when the service turned a cancel at period end into an immediate one', function (): void {
+    // Past due on a chargeback: no access to keep, so CancelSubscription ends it now even
+    // though the operator left "immediately" unchecked. The tab reported "cancelled at
+    // period end" — and the operator told the customer they kept access they no longer had.
+    $billable = tabPromptPaying();
+    $billable->forceFill([
+        'subscription_status' => SubscriptionStatus::PastDue,
+        'subscription_meta' => [
+            ...$billable->getBillingSubscriptionMeta(),
+            'past_due_since' => BillingTime::nowUtc()->subDays(2)->toIso8601String(),
+            'payment_failure' => ['reason' => 'chargeback', 'invoice_id' => 1, 'at' => BillingTime::nowUtc()->toIso8601String()],
+        ],
+    ])->save();
+
+    tabPrompt($billable->fresh())
+        ->call('openCancel', false)
+        ->set('cancelNote', 'Charged back, customer left')
+        ->call('confirmCancel')
+        ->assertSet('error', null)
+        ->assertSet('flash', __('billing::admin.billables.subscription.flash.cancelled_now'));
+
+    expect($billable->fresh()->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Cancelled)
+        ->and($billable->fresh()->getBillingSubscriptionEndsAt()->isFuture())->toBeFalse();
+});

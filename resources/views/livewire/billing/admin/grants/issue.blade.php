@@ -103,7 +103,7 @@ new class extends Component {
         } catch (InvalidCouponException $e) {
             $this->rejected($coupon, __('billing::admin.grants.error_rejected', ['reason' => $e->reason()]));
         } catch (\InvalidArgumentException $e) {
-            $this->rejected($coupon, $e->getMessage());
+            $this->rejected($coupon, \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e));
         } catch (\Throwable $e) {
             report($e);
             $this->rejected($coupon, __('billing::admin.common.error_unexpected'));

@@ -71,6 +71,16 @@ new class extends Component {
     public function increment(PreviewService $service): void
     {
         $this->ensureMinSeats();
+
+        // Cancelled at the period end: no seat is bought for a period that ends anyway
+        // (decision 5). The stepper stops at what is booked; the service refuses the rest.
+        $billable = $this->readableBillable();
+        if ($billable !== null
+            && \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::appliesTo($billable)
+            && $this->seatCount >= $billable->getBillingSeatCount()) {
+            return;
+        }
+
         $this->seatCount++;
         $this->refreshCouponPreview($service);
     }
@@ -298,9 +308,9 @@ new class extends Component {
         ) {
             try {
                 $url = $purchase->handle($billable, $billable->getActiveBillingAddonCodes(), (int) $this->seatCount);
-            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
+            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException|\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
                 // Not an error to report: the customer is told what to do first.
-                $this->flash = $e->getMessage();
+                $this->flash = \GraystackIT\MollieBilling\Support\ExceptionMessage::for($e);
                 $this->flashSuccess = false;
 
                 return;
@@ -359,7 +369,7 @@ new class extends Component {
             $this->flashSuccess = false;
         } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
             // Not an error to report: the customer is told what to do first.
-            $this->flash = $e->getMessage();
+            $this->flash = \GraystackIT\MollieBilling\Support\ExceptionMessage::for($e);
             $this->flashSuccess = false;
         } catch (\Throwable $e) {
             report($e);
@@ -504,6 +514,12 @@ new class extends Component {
     // A GIFTED plan is the exception: seats can be bought on top, keeping the gift.
     $grantAllowsExtras = app(\GraystackIT\MollieBilling\Services\Billing\StartGrantExtrasPurchase::class)->eligible($billable);
     $localBlocksPaidSeats = $billable && $billable->isLocalBillingSubscription() && ! $grantAllowsExtras;
+    // Cancelled at the period end and still running: fewer seats yes, more no (decision 5).
+    $graceEndsOn = $billable !== null
+        && ! $billable->isLocalBillingSubscription()
+        && \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::appliesTo($billable)
+            ? \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::endDate($billable)
+            : null;
     // Layout: when there's no seat-price card (free plan) we have 3 cards → use a 3-col grid.
     $statsCols = $seatPrice !== null ? 'lg:grid-cols-4' : 'lg:grid-cols-3';
 @endphp
@@ -575,6 +591,14 @@ new class extends Component {
                 {{ __('billing::portal.error_past_due_expansion') }}
             </flux:callout>
         @endif
+        @if ($graceEndsOn)
+            <flux:callout icon="information-circle" color="zinc" class="mb-4" dusk="seats-grace-blocked">
+                <span>{{ __('billing::portal.error_subscription_ending_seats', ['date' => $graceEndsOn]) }}</span>
+                <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('index'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" icon="arrow-path" class="mt-3">
+                    {{ __('billing::portal.grace_withdraw_cancellation') }}
+                </flux:button>
+            </flux:callout>
+        @endif
         {{-- Stat cards --}}
         <div class="grid gap-4 sm:grid-cols-2 {{ $statsCols }}">
             {{-- Total seats --}}
@@ -586,7 +610,7 @@ new class extends Component {
                     </div>
                 </div>
                 <div class="mt-3">
-                    <span class="text-3xl font-bold tabular-nums tracking-tight">{{ $currentSeats }}</span>
+                    <span dusk="seats-current" class="text-3xl font-bold tabular-nums tracking-tight">{{ $currentSeats }}</span>
                 </div>
             </flux:card>
 
@@ -675,7 +699,7 @@ new class extends Component {
                             <flux:input type="number" wire:model.live="seatCount" :min="$includedSeats" :disabled="$hasPendingPlanChange" class="w-20 text-center tabular-nums rounded-none! border-x-0!" x-on:blur="if (!$el.value || parseInt($el.value) < {{ $includedSeats }}) { $wire.set('seatCount', {{ $includedSeats }}) }" />
                             <flux:button size="sm" variant="ghost" icon="plus"
                                 wire:click="increment"
-                                :disabled="$hasPendingPlanChange"
+                                :disabled="$hasPendingPlanChange || ($graceEndsOn && $currentSeats >= $savedSeatCount)"
                                 class="rounded-l-none"
                             />
                         </div>

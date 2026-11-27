@@ -79,6 +79,16 @@ class StartSubscriptionCheckout
             throw new \RuntimeException('Billable already has an active subscription.');
         }
 
+        // Paid and not yet activated is not "no subscription" either. While an activation
+        // runs or waits for its retry the billable has no accessible subscription, so the
+        // guard above let a second order through — the customer paid twice, and whichever
+        // payment activated second was kept as a duplicate with no invoice and no refund.
+        // The checkout sends such a customer to the return page; this is the seam an app's
+        // own checkout passes through.
+        if (app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class)->activationInFlight($billable)) {
+            throw new \GraystackIT\MollieBilling\Exceptions\ActivationInFlightException($billable);
+        }
+
         // Hidden plans are never bookable through checkout — not via the plan
         // step, not via `?plan=` on the checkout URL, and not via an AccessGrant
         // coupon pointing at one. Hidden plans are assigned programmatically

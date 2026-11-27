@@ -103,3 +103,38 @@ it('refuses to restart the counter when it outgrows its slot', function (): void
     expect(fn () => (new InvoiceNumberGenerator)->generate('invoice'))
         ->toThrow(RuntimeException::class, 'overflowed');
 });
+
+it('prints the full year in a four-digit year slot', function (): void {
+    // `Y` is documented as one digit slot per character, so an operator wanting the full
+    // year writes `YYYY`. The generator only ever read the two-digit year and left-padded
+    // it to the slot, which printed year 0026 on every invoice and credit note.
+    $billable = serialRangeBillable();
+    config()->set('mollie-billing.invoices.serial_number.format', 'PP-YYYY-CCCCC');
+    $this->travelTo(\Carbon\CarbonImmutable::parse('2026-06-15 12:00:00', 'UTC'));
+
+    $first = (new InvoiceNumberGenerator)->generate('invoice');
+    expect($first)->toBe('IN-2026-00001');
+
+    persistRangeSerial($first, $billable);
+
+    // The counter is read back from the slot the format puts it in, so the sequence
+    // continues rather than restarting.
+    expect((new InvoiceNumberGenerator)->generate('invoice'))->toBe('IN-2026-00002')
+        ->and((new InvoiceNumberGenerator)->generate('credit_note'))->toBe('CR-2026-00001');
+});
+
+it('keeps the counter where the format puts it when the year slot is a single digit', function (): void {
+    // A one-character year slot used to receive both digits of the year, which moved the
+    // counter one character to the right of where extractCounter() reads it: the next
+    // serial was computed from the wrong characters and repeated an existing one.
+    $billable = serialRangeBillable();
+    config()->set('mollie-billing.invoices.serial_number.format', 'PP-YCCCC');
+    $this->travelTo(\Carbon\CarbonImmutable::parse('2026-06-15 12:00:00', 'UTC'));
+
+    $first = (new InvoiceNumberGenerator)->generate('invoice');
+    expect($first)->toBe('IN-60001');
+
+    persistRangeSerial($first, $billable);
+
+    expect((new InvoiceNumberGenerator)->generate('invoice'))->toBe('IN-60002');
+});

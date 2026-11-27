@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\UnwantedPaymentRefundedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Webhook\Concerns\QueuesThrownRefund;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -53,6 +54,7 @@ use Illuminate\Support\Facades\Notification;
 class UnwantedPaymentRefund
 {
     use MutatesBillingMeta;
+    use QueuesThrownRefund;
 
     /** Line flag marking the invoice of a payment that was not applied. */
     public const LINE_FLAG = 'payment_not_applied';
@@ -72,6 +74,9 @@ class UnwantedPaymentRefund
 
     /** A first payment whose subscription could not be created after every retry. */
     public const REASON_ACTIVATION_FAILED = 'activation_failed';
+
+    /** A second first payment, for a subscription another payment had already activated. */
+    public const REASON_DUPLICATE_PAYMENT = 'duplicate_payment';
 
     public function __construct(
         protected readonly WebhookSupport $support,
@@ -95,9 +100,12 @@ class UnwantedPaymentRefund
         /** @var Model&Billable $billable */
         $paymentId = (string) ($payment->id ?? '');
 
-        $invoice = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()
-            ?? $this->bookPayment($payment, $billable, $reason, $label, $context);
+        $booked = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first();
+        $invoice = $booked ?? $this->bookPayment($payment, $billable, $reason, $label, $context);
 
+        // An invoice this service booked on an earlier run, with no credit note and nothing
+        // queued: that run may have reached Mollie before it died. Asked, not guessed.
+        $this->earlierAttempt = self::isUnwanted($booked);
         $creditNote = $this->refund($billable, $invoice);
 
         $this->announceOnce($paymentId, $billable->refresh(), $invoice->refresh(), $creditNote, $reason);
@@ -238,6 +246,10 @@ class UnwantedPaymentRefund
      * Return the whole payment through `InvoiceService::createRefund()` — the path that
      * stamps the Mollie refund id onto the credit note and, when Mollie cannot be reached,
      * parks the line under `pending_refund_retries`. Null when no credit note exists yet.
+     *
+     * When createRefund() itself throws — the lock store, the credit note's write — the
+     * line is parked by {@see QueuesThrownRefund} instead, so the retry happens whether or
+     * not Mollie calls the webhook again.
      */
     protected function refund(Billable $billable, BillingInvoice $invoice): ?BillingInvoice
     {
@@ -251,31 +263,40 @@ class UnwantedPaymentRefund
         $line = (array) ($invoice->line_items[0] ?? []);
         $now = BillingTime::nowUtc();
 
+        $refundLine = new ProrataLine(
+            originalInvoice: $invoice,
+            originalLineItemIndex: 0,
+            kind: self::LINE_KIND,
+            code: null,
+            label: (string) ($line['label'] ?? 'Payment not applied'),
+            quantity: 1,
+            amountNet: -(int) $invoice->amount_net,
+            vatRate: (float) ($line['vat_rate'] ?? 0.0),
+            amountVat: -(int) $invoice->amount_vat,
+            amountGross: -(int) $invoice->amount_gross,
+            periodStart: $now,
+            periodEnd: $now,
+            daysActive: 0,
+            daysRemaining: 0,
+            isCouponCovered: false,
+            direction: 'refund',
+        );
+
+        // One refund per payment: every attempt carries the same token, so the same
+        // idempotency key and the same metadata to find it by at Mollie.
+        $refundLine->refundToken = self::fullRefundToken($invoice);
+        $refundLine->refundOutcomeUnknown = $this->earlierAttempt;
+
         try {
-            return $this->invoices->createRefund($billable, [new ProrataLine(
-                originalInvoice: $invoice,
-                originalLineItemIndex: 0,
-                kind: self::LINE_KIND,
-                code: null,
-                label: (string) ($line['label'] ?? 'Payment not applied'),
-                quantity: 1,
-                amountNet: -(int) $invoice->amount_net,
-                vatRate: (float) ($line['vat_rate'] ?? 0.0),
-                amountVat: -(int) $invoice->amount_vat,
-                amountGross: -(int) $invoice->amount_gross,
-                periodStart: $now,
-                periodEnd: $now,
-                daysActive: 0,
-                daysRemaining: 0,
-                isCouponCovered: false,
-                direction: 'refund',
-            )], 'Payment not applied — returned in full');
+            return $this->invoices->createRefund($billable, [$refundLine], 'Payment not applied — returned in full');
         } catch (\Throwable $e) {
             Log::error('Automatic refund of an unwanted payment threw', [
                 'billable_id' => $billable->getKey(),
                 'invoice_id' => $invoice->getKey(),
                 'error' => $e->getMessage(),
             ]);
+
+            $this->queueThrownRefund($billable, $invoice, $refundLine, $e);
 
             return null;
         }
@@ -390,12 +411,19 @@ class UnwantedPaymentRefund
             // do anything. The event above carries a null credit note, so the audit trail
             // says "queued"; `RetryRefundLineJob` tells an admin — once — when its
             // retries are used up and the line moves to the dead letter.
-            Log::warning('Automatic refund of an unwanted payment is queued for retry', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $paymentId,
-                'invoice_id' => $invoice->getKey(),
-                'reason' => $reason,
-            ]);
+            //
+            // Said only when it is true: the queue write can fail as well, and then the
+            // refund waits for Mollie's next delivery of the webhook (`resume()`).
+            $queued = $this->refundIsQueued($billable->refresh(), $invoice);
+
+            Log::warning($queued
+                ? 'Automatic refund of an unwanted payment is queued for retry'
+                : 'Automatic refund of an unwanted payment is not through and could not be queued — it is posted on the next webhook delivery', [
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $paymentId,
+                    'invoice_id' => $invoice->getKey(),
+                    'reason' => $reason,
+                ]);
         }
     }
 }

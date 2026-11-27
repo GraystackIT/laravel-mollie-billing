@@ -616,16 +616,26 @@ class ProrataChargeHandler
                 $startsNewPeriod && ! $wasTrial && ! $forcesResetStartDate,
             );
 
-            // A line whose token is already on a credit note — or queued for a retry — was
-            // paid (or is being paid) by the attempt that died; it is not paid again.
-            $refundLines = $this->withoutSettledRefundLines($billable, $refundLines);
+            // A line whose token is on a credit note under a booking that stands — or queued
+            // for a retry — was paid (or is being paid) by the attempt that died; it is not
+            // paid again. One whose booking a reversal took back (the refund failed or was
+            // canceled at Mollie) is owed again and comes back in `$reopened`.
+            $reopened = [];
+            $refundLines = $this->withoutSettledRefundLines($billable, $refundLines, $reopened);
 
             // An earlier attempt asked Mollie and died before it could book the answer:
             // whether the lines left over were paid is not known here. Asked again, the
             // idempotency key protects them only within the hour Mollie keeps it, and not
             // at all once a clamped amount changes the key. Not asked again — the
-            // operators look it up.
-            if ($refundLines !== [] && ! empty($progress['refunds_started_at'])) {
+            // operators look it up. A re-opened line is not unknown: its refund was booked
+            // and then reported dead. createRefund() posts it under a moved key, after
+            // asking Mollie for a live refund carrying its token, as it does for a retry.
+            $unknown = array_filter(
+                $refundLines,
+                static fn (ProrataLine $l): bool => $l->refundToken === null || ! isset($reopened[$l->refundToken]),
+            );
+
+            if ($unknown !== [] && ! empty($progress['refunds_started_at'])) {
                 $this->reportInterruptedRun($billable, $paymentId, self::INTERRUPTED_REFUNDS_UNKNOWN, $done, $progress, $pendingPlanChange);
 
                 return;
@@ -1241,13 +1251,19 @@ class ProrataChargeHandler
 
     /**
      * The refund lines no earlier attempt of this run has settled: neither on one of the
-     * billable's credit notes (createRefund() writes each line, token included, onto it)
-     * nor queued under `pending_refund_retries` for RetryRefundLineJob.
+     * billable's credit notes under a booking that still stands (createRefund() writes each
+     * line, token included, onto it) nor queued under `pending_refund_retries` for
+     * RetryRefundLineJob.
+     *
+     * A token whose only bookings a reversal took back — Mollie reported that refund
+     * `failed` or `canceled`, RefundHandler booked the mirror line — settles nothing: the
+     * money never left. Such a line is kept, and its token is added to `$reopened`.
      *
      * @param  list<ProrataLine>  $lines
+     * @param  array<string, true>  $reopened  out: the tokens of the kept lines a reversal re-opened
      * @return list<ProrataLine>
      */
-    protected function withoutSettledRefundLines(Billable $billable, array $lines): array
+    protected function withoutSettledRefundLines(Billable $billable, array $lines, array &$reopened = []): array
     {
         if (! ($billable instanceof Model) || $lines === []) {
             return $lines;
@@ -1255,26 +1271,30 @@ class ProrataChargeHandler
 
         $settled = [];
 
-        BillingInvoice::query()
-            ->where('billable_type', $billable->getMorphClass())
-            ->where('billable_id', $billable->getKey())
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get(['id', 'line_items'])
-            ->each(function (BillingInvoice $note) use (&$settled): void {
-                foreach ((array) $note->line_items as $item) {
-                    $token = is_array($item) ? ($item['refund_token'] ?? null) : null;
+        // One read of the credit notes for every token, through the same reading
+        // createRefund() settles a line on — a reversed booking counts for neither.
+        $bookings = $this->invoiceService->refundTokenBookings(
+            $billable,
+            array_values(array_filter(array_map(static fn (ProrataLine $l): ?string => $l->refundToken, $lines))),
+        );
 
-                    if (is_string($token) && $token !== '') {
-                        $settled[$token] = true;
-                    }
-                }
-            });
+        foreach ($bookings as $token => $state) {
+            if ($state === 'standing') {
+                $settled[$token] = true;
+            }
+        }
 
         foreach ((array) ($billable->getBillingSubscriptionMeta()['pending_refund_retries'] ?? []) as $retry) {
             $token = is_array($retry) ? ($retry['line']['refund_token'] ?? null) : null;
 
             if (is_string($token) && $token !== '') {
                 $settled[$token] = true;
+            }
+        }
+
+        foreach ($bookings as $token => $state) {
+            if ($state === 'reversed' && ! isset($settled[$token])) {
+                $reopened[$token] = true;
             }
         }
 
@@ -1807,6 +1827,17 @@ class ProrataChargeHandler
                 $meta['prorata_pending_payment_id'],
             );
             $billable->forceFill(['subscription_meta' => $meta])->save();
+
+            // The money goes back in full below, so what a seat or addon change already
+            // wrote goes back too — otherwise a subscription cancelled while its charge was
+            // settling kept the seats and the addon's features through its grace period,
+            // and over a resubscribe, for nothing. Only while it is Cancelled: the expiry
+            // pass has wiped seats and addons from an Expired one, and restoring them would
+            // hand them back to a subscription that has ended. No Mollie PATCH either way —
+            // revertRecurringAmount() leaves a subscription that no longer runs alone.
+            if ($status === SubscriptionStatus::Cancelled) {
+                $this->restoreUnpaidChange($billable, (array) ($pending['intent'] ?? []));
+            }
         }
 
         Log::info('Prorata charge settled for a subscription that no longer runs — not applied, returning it', [
@@ -1854,9 +1885,12 @@ class ProrataChargeHandler
      * Mollie collecting for seats the customer no longer has. A plan or interval change
      * never patched before its charge cleared — there is nothing to take back.
      *
-     * Called for a declined charge ({@see failed()}) and for a waiting change that is
+     * Called for a declined charge ({@see failed()}), for a waiting change that is
      * withdrawn with its scheduled change
-     * (`UpdateSubscription::withdrawPendingChangeForPayment()`). Reaches Mollie.
+     * (`UpdateSubscription::withdrawPendingChangeForPayment()`) or by the customer or a
+     * cancellation (`UpdateSubscription::tryCancelPendingPlanChange()`), and for a charge
+     * that settled after the subscription was cancelled ({@see reportUnapplicableCharge()}).
+     * Reaches Mollie while the subscription still runs.
      *
      * @param  array<string, mixed>  $intent  the stored `pending_prorata_change.intent`
      */

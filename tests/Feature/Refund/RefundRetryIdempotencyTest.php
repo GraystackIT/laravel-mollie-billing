@@ -112,7 +112,14 @@ it('carries one idempotency token through a lost response and its retry', functi
 
     $replayed = ProrataLine::fromArray($stored);
 
-    Mollie::shouldReceive('send')->once()->andReturn((object) ['id' => 're_1']);
+    // The retry first asks Mollie whether the refund exists (here: Mollie lists none),
+    // then posts it under the same key.
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(\Mollie\Api\Http\Requests\GetPaginatedPaymentRefundsRequest::class))
+        ->andReturn(new ArrayIterator([]));
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(\Mollie\Api\Http\Requests\CreatePaymentRefundRequest::class))
+        ->andReturn((object) ['id' => 're_1']);
 
     app(InvoiceService::class)->createRefund($billable, [$replayed], 'Refund retry');
 

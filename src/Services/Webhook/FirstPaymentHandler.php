@@ -9,7 +9,6 @@ use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
 use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
-use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
 use GraystackIT\MollieBilling\Services\Wallet\WalletUsageService;
@@ -66,6 +65,13 @@ class FirstPaymentHandler
         $gate = $this->openGate($payment, $billable, $paymentId);
 
         if ($gate === ActivationGate::AlreadyBooked) {
+            // A duplicate that was booked to be returned is finished business: the
+            // re-delivery only repeats what may still be open (a refund never posted, an
+            // announcement never sent), each at most once.
+            if (app(UnwantedPaymentRefund::class)->resume($payment, $billable)) {
+                return;
+            }
+
             // "Invoice exists" is only equivalent to "nothing left to do" when the
             // crash happened AFTER CreateSubscription — which is the case the gate's
             // comment describes, because that call is what sets Active. It is not the
@@ -81,7 +87,9 @@ class FirstPaymentHandler
                 // The retry job resumes exactly this state: invoice there, subscription
                 // not. It claims, then runs the same activation with the invoice it finds.
                 if (ActivationRetry::resuming()) {
-                    $this->support->claimForResume($billable, $paymentId);
+                    if (! $this->support->claimForResume($billable, $paymentId)) {
+                        return;
+                    }
 
                     try {
                         $this->activate($payment, $billable, $metadata);
@@ -104,12 +112,14 @@ class FirstPaymentHandler
         }
 
         if ($gate === ActivationGate::Duplicate) {
-            Log::warning('Duplicate first-payment received — billable already has an active subscription', [
+            Log::warning('Duplicate first-payment received — billable already has an active subscription; booking and refunding it', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $paymentId,
             ]);
 
-            DuplicatePaymentReceived::dispatch($billable, $paymentId);
+            // Booked and returned in full, then DuplicatePaymentReceived — outside the
+            // gate's transaction, since the refund is a Mollie call.
+            $this->support->settleDuplicatePayment($payment, $billable);
 
             return;
         }
@@ -167,7 +177,9 @@ class FirstPaymentHandler
 
         // Priced BEFORE the invoice is persisted: the checkout charged the
         // discounted gross, and the invoice header is derived from its line items.
-        $pricedCoupon = $this->firstPaymentCouponPricing->price(
+        // After the payment: a code the checkout accepted is honoured even if its campaign
+        // changed while the money travelled (FirstPaymentCouponPricing::afterPayment()).
+        $pricedCoupon = $this->firstPaymentCouponPricing->afterPayment()->price(
             $billable,
             (string) ($metadata['coupon_code'] ?? ''),
             $planCode,
@@ -200,6 +212,7 @@ class FirstPaymentHandler
                 'extra_seats' => $extraSeats,
                 'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
+                'activating_payment_id' => (string) ($payment->id ?? ''),
             ]);
         } catch (\Throwable $e) {
             $this->support->reportSubscriptionActivationFailure(

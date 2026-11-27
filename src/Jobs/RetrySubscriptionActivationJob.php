@@ -23,6 +23,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
@@ -44,6 +45,10 @@ use Mollie\Api\Http\Requests\GetPaymentRequest;
  * When every attempt is spent: a payment that collected money is refunded in full
  * (`UnwantedPaymentRefund`: invoice, credit note, a mail to the customer), and an operator
  * is told — once, here, and nowhere before.
+ *
+ * When another payment activated the subscription meanwhile (a second checkout tab), this
+ * payment is a duplicate: refunded the same way, as `duplicate_payment`, with no operator
+ * mail — see `finishCompleted()`.
  */
 class RetrySubscriptionActivationJob implements ShouldBeUnique, ShouldQueue
 {
@@ -113,7 +118,7 @@ class RetrySubscriptionActivationJob implements ShouldBeUnique, ShouldQueue
         }
 
         if ($support->activationCompleted($billable)) {
-            $this->clearMarker($billable);
+            $this->finishCompleted($billable, $support);
 
             return;
         }
@@ -153,6 +158,14 @@ class RetrySubscriptionActivationJob implements ShouldBeUnique, ShouldQueue
             throw $e;
         }
 
+        // Complete — but possibly by another payment that activated while this one was
+        // waiting (the resumed activation then stands down, see claimForResume()).
+        if ($support->activatedByAnotherPayment($billable, $this->paymentId)) {
+            $this->finishCompleted($billable, $support);
+
+            return;
+        }
+
         $this->clearMarker($billable);
 
         if ($billable->getPendingFirstPaymentId() === $this->paymentId) {
@@ -178,7 +191,7 @@ class RetrySubscriptionActivationJob implements ShouldBeUnique, ShouldQueue
         }
 
         if (app(WebhookSupport::class)->activationCompleted($billable)) {
-            $this->clearMarker($billable);
+            $this->finishCompleted($billable, app(WebhookSupport::class));
 
             return;
         }
@@ -198,6 +211,13 @@ class RetrySubscriptionActivationJob implements ShouldBeUnique, ShouldQueue
         }
 
         $this->clearMarker($billable);
+
+        app(WebhookSupport::class)->safely(
+            fn () => $this->giveBackMandate($billable),
+            'activation_failed.revoke_mandate',
+            $billable,
+            ['payment_id' => $this->paymentId],
+        );
 
         Log::error('Subscription activation failed for good', [
             'billable_id' => $billable->getKey(),
@@ -231,6 +251,105 @@ class RetrySubscriptionActivationJob implements ShouldBeUnique, ShouldQueue
                 'error' => (string) ($exception?->getMessage() ?? ($marker['reason'] ?? '')),
             ],
         ));
+    }
+
+    /**
+     * Take back the mandate this payment captured for a subscription that never came.
+     *
+     * The first payment (or the €0 authorisation of a trial) saved its mandate onto the
+     * billable before the subscription was created. Left there, it denied every later
+     * checkout the trial the customer never had — `StartSubscriptionCheckout` and the
+     * checkout's `trialApplies()` grant one only without a mandate — and charged the first
+     * period in full instead. The same reason `GrantExtrasPurchaseRefund` gives its mandate
+     * back: the customer is left as they would be without the purchase.
+     *
+     * Only this payment's own mandate, and only while no Mollie subscription is on record
+     * that could be charged against it. A refund still goes through on a revoked mandate
+     * (measured in the sandbox, see docs/decisions.md).
+     */
+    private function giveBackMandate(Model $billable): void
+    {
+        /** @var Model&Billable $billable */
+        $mandateId = (string) ($billable->getMollieMandateId() ?? '');
+        $customerId = (string) ($billable->getMollieCustomerId() ?? '');
+
+        if ($mandateId === '' || $customerId === ''
+            || (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '') !== ''
+        ) {
+            return;
+        }
+
+        $payment = MollieCall::send(new GetPaymentRequest($this->paymentId));
+
+        if ((string) ($payment->mandateId ?? '') !== $mandateId) {
+            return;
+        }
+
+        // The lookup above ran with nothing held — no Mollie call inside a transaction — so
+        // what was checked before it may be stale: a second checkout can have activated
+        // meanwhile and saved a new mandate, or adopted this one, for a subscription that
+        // now exists. Checked again on the locked row; only an unchanged billable gives the
+        // mandate back. Otherwise it is left alone — and not revoked either, because Mollie
+        // cancels every subscription of a revoked mandate.
+        $givenBack = DB::transaction(function () use ($billable, $mandateId, $customerId): bool {
+            /** @var (Model&Billable)|null $locked */
+            $locked = $billable->newQuery()
+                ->withoutGlobalScope(BillingScope::class)
+                ->whereKey($billable->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($locked === null
+                || (string) ($locked->getMollieMandateId() ?? '') !== $mandateId
+                || (string) ($locked->getMollieCustomerId() ?? '') !== $customerId
+                || (string) ($locked->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '') !== ''
+            ) {
+                return false;
+            }
+
+            $locked->forceFill(['mollie_mandate_id' => null])->save();
+
+            return true;
+        });
+
+        $billable->refresh();
+
+        if ($givenBack) {
+            RevokeMollieMandateJob::dispatch($customerId, $mandateId);
+        }
+    }
+
+    /**
+     * The billable's subscription is complete: end the ladder. When the subscription was
+     * activated by ANOTHER payment, this payment's booked invoice is money nobody wants —
+     * it is returned in full as a duplicate (`WebhookSupport::settleDuplicatePayment()`),
+     * before the marker goes, so a failure on the way leaves the marker for the next run.
+     * Only a payment that collected money has anything to return.
+     *
+     * "Complete" used to be read billable-wide and the marker simply cleared, so the
+     * invoice of the payment that lost the race was kept and never refunded. A
+     * subscription without the record of which payment activated it (from before the
+     * record existed) is still treated that way: see `activatedByAnotherPayment()`.
+     */
+    private function finishCompleted(Model $billable, WebhookSupport $support): void
+    {
+        /** @var Model&Billable $billable */
+        if ($support->activatedByAnotherPayment($billable, $this->paymentId)) {
+            $invoice = BillingInvoice::query()->where('mollie_payment_id', $this->paymentId)->first();
+
+            if ($invoice !== null && (int) $invoice->amount_gross > 0) {
+                Log::warning('Activation retry found the subscription activated by another payment — refunding this one as a duplicate', [
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $this->paymentId,
+                    'invoice_id' => $invoice->getKey(),
+                ]);
+
+                // The invoice exists, so the service needs no more of the payment than its id.
+                $support->settleDuplicatePayment((object) ['id' => $this->paymentId], $billable);
+            }
+        }
+
+        $this->clearMarker($billable);
     }
 
     /** Whether the marker's first failure is younger than the whole ladder. */

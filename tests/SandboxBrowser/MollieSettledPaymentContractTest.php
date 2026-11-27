@@ -11,7 +11,10 @@ use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Data\Money;
+use GraystackIT\MollieBilling\Support\MollieCall;
+use Mollie\Api\Exceptions\RequestException;
 use Mollie\Api\Http\Requests\CancelPaymentRefundRequest;
+use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Api\Http\Requests\RevokeMandateRequest;
@@ -232,6 +235,57 @@ class MollieSettledPaymentContractTest extends SandboxBrowserTestCase
         if ($states[0]['status'] !== 'paid') {
             $this->assertEmpty($states[0]['paid_at'], 'A charge that is not paid yet carries no paidAt.');
         }
+    }
+
+    /**
+     * Refund idempotency (measured 26 November 2026).
+     *
+     * `RefundInvoiceService` and `InvoiceService::createCreditNote()` put a key on every refund
+     * so a retry of a refund whose answer was lost replays it instead of paying twice. Measured:
+     * the same key twice is one refund; the same key with another amount is refused; and a
+     * refund above what is left is refused with the status the fake's `refuse_refund` lever
+     * answers.
+     */
+    public function test_a_refund_sent_twice_with_one_key_is_one_refund(): void
+    {
+        [, $payment] = $this->paidSignup('refund-idempotency');
+        $paymentId = (string) $payment->id;
+
+        $attempt = function (string $value, ?string $key) use ($paymentId): array {
+            try {
+                $refund = MollieCall::send(new CreatePaymentRefundRequest($paymentId, 'Sandbox idempotency', new Money('EUR', $value)), $key);
+
+                return ['ok' => true, 'id' => (string) $refund->id];
+            } catch (RequestException $e) {
+                $body = $e->getResponse()->json();
+
+                return ['ok' => false, 'status' => $e->getStatusCode(), 'detail' => $body->detail ?? null, 'field' => $body->field ?? null];
+            }
+        };
+
+        $key = 'sandbox-refund:'.bin2hex(random_bytes(6));
+        $first = $attempt('1.00', $key);
+        $again = $attempt('1.00', $key);
+        $other = $attempt('2.00', $key);
+        $tooMuch = $attempt('50.00', 'sandbox-refund-high:'.bin2hex(random_bytes(6)));
+        $listed = $this->refundsOf($paymentId);
+
+        $this->record('refund_idempotency', [
+            'first' => $first,
+            'same_key_same_amount' => $again,
+            'same_key_other_amount' => $other,
+            'above_remaining' => $tooMuch,
+            'refunds' => $listed,
+        ]);
+
+        $this->assertTrue($first['ok']);
+        $this->assertTrue($again['ok']);
+        $this->assertSame($first['id'], $again['id'], 'Mollie created a second refund for a repeated key — a retry would pay the customer twice.');
+        $this->assertCount(1, $listed);
+        $this->assertFalse($other['ok']);
+        $this->assertSame(400, $other['status']);
+        $this->assertFalse($tooMuch['ok']);
+        $this->assertSame(422, $tooMuch['status']);
     }
 
     public function test_the_test_system_offers_no_way_to_charge_a_payment_back(): void

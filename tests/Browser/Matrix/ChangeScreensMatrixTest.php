@@ -165,6 +165,18 @@ class ChangeScreensMatrixTest extends BrowserTestCase
         $this->browse(function (Browser $browser) use ($billable, $state): void {
             $this->actAs($browser, $billable, '/billing/seats');
             $browser->waitFor('[wire\\:click="increment"]', 15)->pause(400);
+
+            if ($state === 'cancelled') {
+                // The grace period books nothing that costs money (decision 26 November
+                // 2026): the stepper stops at the booked seats and the screen says why.
+                $browser->assertPresent('[dusk="seats-grace-blocked"]');
+                $this->assertTrue((bool) $browser->script('const b = document.querySelector(\'[wire\\\\:click="increment"]\'); return b !== null && b.disabled;')[0], 'the + button is disabled in the grace period');
+                $this->assertSame(0, $this->domCount($browser, '[wire\\:click="syncSeats"]:not([disabled])'), 'nothing to confirm');
+                $this->shot($browser, 'Zustand cancelled: Zubuchen gesperrt');
+
+                return;
+            }
+
             $this->clickWire($browser, '[wire\\:click="increment"]');
             $browser->pause(900);
 
@@ -202,10 +214,11 @@ class ChangeScreensMatrixTest extends BrowserTestCase
                 [3, $payments + 1, 'first'],
                 [$billable->getBillingSeatCount(), DB::table('fake_mollie_payments')->count(), (string) $this->latestFakePayment()['sequence_type']],
             ),
-            // Still running until its end date: the seat is added and charged for the rest.
+            // Still running until its end date, but the grace period adds nothing paid:
+            // no seat, no payment, no invoice.
             'cancelled' => $this->assertSame(
-                [SubscriptionStatus::Cancelled, true],
-                [$billable->getBillingSubscriptionStatus(), in_array($billable->getBillingSeatCount(), [3, 4], true)],
+                [SubscriptionStatus::Cancelled, 3, $payments, $invoices],
+                [$billable->getBillingSubscriptionStatus(), $billable->getBillingSeatCount(), DB::table('fake_mollie_payments')->count(), BillingInvoice::query()->count()],
             ),
         };
     }

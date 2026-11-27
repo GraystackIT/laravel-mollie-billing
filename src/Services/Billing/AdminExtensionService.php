@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Enums\CouponType;
 use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\SubscriptionExtended;
+use GraystackIT\MollieBilling\Exceptions\InvalidBillingInputException;
 use GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException;
 use GraystackIT\MollieBilling\Models\Coupon;
 use GraystackIT\MollieBilling\Models\CouponRedemption;
@@ -126,7 +127,8 @@ class AdminExtensionService
         });
 
         if (! $claimed) {
-            throw new InvalidSubscriptionStateException(__('billing::admin.billables.subscription.flash.extension_repeated'));
+            throw (new InvalidSubscriptionStateException('This was done just a moment ago. If you want to give the same again, wait a few seconds and repeat it.'))
+                ->withTranslation('billing::admin.billables.subscription.flash.extension_repeated');
         }
 
         try {
@@ -226,7 +228,8 @@ class AdminExtensionService
     {
 
         if (! $billable instanceof Model) {
-            throw new InvalidSubscriptionStateException('This billable cannot be extended.');
+            throw (new InvalidSubscriptionStateException('This billable cannot be extended.'))
+                ->withTranslation('billing::exceptions.state.not_extendable');
         }
 
         $source = $billable->getBillingSubscriptionSource();
@@ -238,9 +241,9 @@ class AdminExtensionService
             // count did not already decide — and `on_expiry = end` would cancel a
             // paying customer's subscription once the free periods were used up.
             if (! $this->waiver->isGift($this->waiver->marker($billable))) {
-                throw new InvalidSubscriptionStateException(
+                throw (new InvalidSubscriptionStateException(
                     'There is no running grant to extend on this subscription. Free plan periods are extended by giving more periods.'
-                );
+                ))->withTranslation('billing::exceptions.state.no_running_grant_free_periods');
             }
 
             $status = $billable->getBillingSubscriptionStatus();
@@ -254,9 +257,9 @@ class AdminExtensionService
                 SubscriptionStatus::Trial,
                 SubscriptionStatus::PastDue,
             ], true)) {
-                throw new InvalidSubscriptionStateException(
+                throw (new InvalidSubscriptionStateException(
                     'There is no running grant to extend on this subscription.'
-                );
+                ))->withTranslation('billing::exceptions.state.no_running_grant');
             }
 
             $before = $this->waiver->marker($billable);
@@ -322,9 +325,9 @@ class AdminExtensionService
             || $currentEnd === null
             || $billable->getBillingSubscriptionStatus() !== SubscriptionStatus::Active
         ) {
-            throw new InvalidSubscriptionStateException(
+            throw (new InvalidSubscriptionStateException(
                 'There is no running grant to extend on this subscription.'
-            );
+            ))->withTranslation('billing::exceptions.state.no_running_grant');
         }
 
         $newEnd = Carbon::instance($currentEnd->isFuture() ? $currentEnd : BillingTime::nowUtc())
@@ -396,7 +399,10 @@ class AdminExtensionService
     private function assertPositive(int $value, string $what): void
     {
         if ($value <= 0) {
-            throw new \InvalidArgumentException("The number of {$what} must be greater than zero.");
+            throw new InvalidBillingInputException(
+                "The number of {$what} must be greater than zero.",
+                $what === 'days' ? 'billing::exceptions.extension.days_positive' : 'billing::exceptions.extension.periods_positive',
+            );
         }
     }
 }

@@ -188,11 +188,11 @@ new class extends Component {
                 $grossAbs = abs((int) $detail->amount_gross);
                 $netAbs = abs((int) $detail->amount_net);
                 $vatAbs = abs((int) $detail->amount_vat);
-                $refundDownloadUrl = $detail->hasPdf()
-                    ? route(BillingRoute::admin('invoice.download'), ['invoice' => $detail])
-                    : null;
+                // Not gated on hasPdf(): the download route renders a document that is not
+                // on the disk yet — a credit note's deferred render — on the click.
+                $refundDownloadUrl = route(BillingRoute::admin('invoice.download'), ['invoice' => $detail]);
 
-                $parentDownloadUrl = $parent && $parent->hasPdf()
+                $parentDownloadUrl = $parent
                     ? route(BillingRoute::admin('invoice.download'), ['invoice' => $parent])
                     : null;
                 $parentGross = $parent ? (int) $parent->amount_gross : null;

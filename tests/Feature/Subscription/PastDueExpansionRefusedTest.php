@@ -79,8 +79,16 @@ it('speaks to the customer in their language', function (): void {
 
     app()->setLocale('de');
 
-    expect(fn () => app(UpdateSubscription::class)->update($billable, ['seats' => 4]))
-        ->toThrow(PastDueExpansionNotAllowedException::class, 'Bitte begleichen Sie zuerst die offene Zahlung');
+    // The screen says it in the customer's language; the exception message is the English
+    // one the log reads (ExceptionMessage, docs/decisions.md).
+    try {
+        app(UpdateSubscription::class)->update($billable, ['seats' => 4]);
+        $this->fail('The seat expansion was not refused.');
+    } catch (PastDueExpansionNotAllowedException $e) {
+        expect(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e))->toBe(__('billing::portal.error_past_due_expansion'))
+            ->and(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e))->toContain('offene Zahlung')
+            ->and($e->getMessage())->toBe(app('translator')->get('billing::portal.error_past_due_expansion', [], 'en'));
+    }
 });
 
 it('still lets a past-due customer shrink: fewer seats, an addon off', function (): void {

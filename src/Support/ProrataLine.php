@@ -50,6 +50,31 @@ final class ProrataLine
     public ?string $refundToken = null;
 
     /**
+     * Set on a refund line whose Mollie call threw: the refund may exist at Mollie or not,
+     * and nothing local can tell which.
+     *
+     * The token above only protects a retry for as long as Mollie keeps the idempotency
+     * key — one hour — and RetryRefundLineJob's ladder runs for days. A line carrying this
+     * flag is therefore looked up in the payment's refund list (by the token, which goes
+     * out as refund metadata) before it is posted again. Serialised only when set, so
+     * every other stored line stays byte-identical.
+     */
+    public bool $refundOutcomeUnknown = false;
+
+    /**
+     * How many times Mollie has definitely refused this line's refund (a 4xx — it acted on
+     * nothing). Folded into the idempotency key ({@see \GraystackIT\MollieBilling\Support\MollieRefusal::key()}),
+     * because Mollie binds a key to its refusal for an hour (measured 26 November 2026): the
+     * retry after the reason has gone would otherwise get the same refusal replayed. An
+     * outage or a lost answer leaves it alone — that retry must keep the key.
+     *
+     * Only the key moves; the `refundToken` the refund carries as metadata does not, so the
+     * lookup after a lost answer finds a refund whichever attempt created it. Serialised only
+     * when set, so every other stored line stays byte-identical.
+     */
+    public int $refundKeyRefusals = 0;
+
+    /**
      * For a reduction line (a recurring coupon or plan waiver carried onto a prorata
      * charge): the charge lines it takes its amount off, as `ProrataComposer::lineKey()`
      * names them. Null for an ordinary reduction, which is spread over every line.
@@ -115,6 +140,8 @@ final class ProrataLine
             'refund_token' => $this->refundToken,
             // Only when set, so every other stored line stays byte-identical.
             ...($this->appliesTo !== null ? ['applies_to' => $this->appliesTo] : []),
+            ...($this->refundOutcomeUnknown ? ['refund_outcome_unknown' => true] : []),
+            ...($this->refundKeyRefusals > 0 ? ['refund_key_refusals' => $this->refundKeyRefusals] : []),
         ];
     }
 
@@ -180,6 +207,9 @@ final class ProrataLine
         if (isset($data['refund_token']) && is_string($data['refund_token'])) {
             $line->refundToken = $data['refund_token'];
         }
+
+        $line->refundOutcomeUnknown = ($data['refund_outcome_unknown'] ?? false) === true;
+        $line->refundKeyRefusals = max(0, (int) ($data['refund_key_refusals'] ?? 0));
 
         if (isset($data['applies_to']) && is_array($data['applies_to'])) {
             $line->appliesTo = array_values(array_map('strval', $data['applies_to']));

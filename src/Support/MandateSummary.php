@@ -162,6 +162,48 @@ final class MandateSummary
     }
 
     /**
+     * The raw fields only, as plain values — what a Livewire component can keep between
+     * requests so it does not ask Mollie again on every re-render. {@see fromSnapshot()}.
+     *
+     * @return array{id: string, status: string, method: string, details: array<string, mixed>, mandateReference: ?string, signatureDate: ?string}
+     */
+    public function snapshot(): array
+    {
+        return [
+            'id' => $this->id,
+            'status' => $this->status,
+            'method' => $this->method,
+            'details' => $this->details,
+            'mandateReference' => $this->mandateReference,
+            'signatureDate' => $this->signatureDate?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $snapshot  as returned by {@see snapshot()}
+     */
+    public static function fromSnapshot(array $snapshot): self
+    {
+        $signatureDate = null;
+        if (! empty($snapshot['signatureDate'])) {
+            try {
+                $signatureDate = \Carbon\Carbon::parse((string) $snapshot['signatureDate'])->setTimezone('UTC');
+            } catch (\Throwable) {
+                $signatureDate = null;
+            }
+        }
+
+        return new self(
+            id: (string) ($snapshot['id'] ?? ''),
+            status: (string) ($snapshot['status'] ?? 'unknown'),
+            method: (string) ($snapshot['method'] ?? 'unknown'),
+            details: (array) ($snapshot['details'] ?? []),
+            mandateReference: isset($snapshot['mandateReference']) ? (string) $snapshot['mandateReference'] : null,
+            signatureDate: $signatureDate,
+        );
+    }
+
+    /**
      * Human-readable single-line summary, e.g. "Visa •••• 4242 · Exp 12/2027"
      * for cards or "Jane Doe · NL00 INGB 0123 4567 89" for SEPA.
      */

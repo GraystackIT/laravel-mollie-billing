@@ -149,14 +149,23 @@ class PrepareUsageOverageJob implements ShouldQueue, ShouldBeUnique
                         $meta = $billable->getBillingSubscriptionMeta();
                         unset($meta['seat_count'], $meta['active_recurring_coupon']);
 
-                        $billable->forceFill([
-                            'subscription_status' => SubscriptionStatus::Expired,
-                            'subscription_source' => SubscriptionSource::None,
-                            'subscription_plan_code' => null,
-                            'subscription_interval' => null,
-                            'active_addon_codes' => [],
-                            'subscription_meta' => $meta,
-                        ])->save();
+                        // The gifts this subscription was made of end with it. Their
+                        // redemptions stay listed with a revoke button; revoking one later
+                        // must not act on whatever subscription the tenant has by then (a
+                        // free plan, another gift). One transaction: an expired row whose
+                        // grants were not marked would leave exactly that behind.
+                        DB::transaction(function () use ($billable, $meta): void {
+                            $billable->forceFill([
+                                'subscription_status' => SubscriptionStatus::Expired,
+                                'subscription_source' => SubscriptionSource::None,
+                                'subscription_plan_code' => null,
+                                'subscription_interval' => null,
+                                'active_addon_codes' => [],
+                                'subscription_meta' => $meta,
+                            ])->save();
+
+                            app(\GraystackIT\MollieBilling\Services\Billing\CouponService::class)->endGrantsWithSubscription($billable);
+                        });
 
                         SubscriptionExpired::dispatch($billable);
                     } catch (Throwable $e) {

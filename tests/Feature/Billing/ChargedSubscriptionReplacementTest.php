@@ -307,3 +307,42 @@ it('tells the admins once when a replacement has not finished after 24 hours, an
     expect($world->billable->fresh()->getBillingSubscriptionMeta())->not->toHaveKey(MollieSubscriptionReplacer::META_KEY)
         ->and($world->billable->fresh()->getBillingSubscriptionMeta()['mollie_subscription_id'])->toBe('sub_longrun_2');
 });
+
+it('drops a pending replacement when the customer downgrades to a free plan before it is finished', function (): void {
+    config()->set('mollie-billing-plans.plans.free', [
+        'name' => 'Free', 'tier' => 0, 'included_seats' => 1, 'feature_keys' => [], 'allowed_addons' => [],
+        'intervals' => ['monthly' => ['base_price_net' => 0, 'seat_price_net' => null, 'included_usages' => ['Tokens' => 10]]],
+    ]);
+
+    $world = replacementWorld();
+    $world->refuse[CreateSubscriptionRequest::class] = 1;
+
+    longRunAssertRenewal($world, longRunRenew($world), '34.51');
+
+    expect($world->billable->fresh()->getBillingSubscriptionMeta()[MollieSubscriptionReplacer::META_KEY]['old_cancelled'] ?? null)->toBeTrue();
+
+    // The free downgrade cancels the id on the row — the old one, already cancelled by the
+    // replacement: Mollie answers 422 "has been cancelled", which counts as done. The
+    // billable becomes Local and Active.
+    Carbon::setTestNow(Carbon::parse('2027-03-01 09:00:00', 'UTC'));
+    app(\GraystackIT\MollieBilling\Services\Billing\UpdateSubscription::class)
+        ->update($world->billable->fresh(), ['plan_code' => 'free', 'interval' => 'monthly', 'seats' => 1, 'addons' => []]);
+
+    $billable = $world->billable->fresh();
+
+    expect($billable->getBillingSubscriptionSource())->toBe(\GraystackIT\MollieBilling\Enums\SubscriptionSource::Local->value)
+        ->and($billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Active);
+
+    // The retry must not bring the paid subscription back for a customer on the free plan.
+    Carbon::setTestNow(Carbon::parse('2027-03-01 11:00:00', 'UTC'));
+    (new RetrySubscriptionReplacementJob(TestBillable::class, $world->billable->getKey()))
+        ->handle(app(MollieSubscriptionReplacer::class));
+    app()->call([new SweepPendingRetriesJob, 'handle']);
+
+    $meta = $world->billable->fresh()->getBillingSubscriptionMeta();
+
+    expect($world->subscriptionsCreated)->toBe(1)
+        ->and($meta)->not->toHaveKey(MollieSubscriptionReplacer::META_KEY)
+        ->and($meta['mollie_subscription_id'] ?? null)->toBeNull()
+        ->and(app(MollieSubscriptionGate::class)->hasLiveMollieSubscription($world->billable->fresh()))->toBeFalse();
+});

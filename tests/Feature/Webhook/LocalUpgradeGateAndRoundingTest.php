@@ -167,18 +167,27 @@ it('books the upgrade invoice at the charged amount without a mismatch event', f
     Event::assertNotDispatched(PaymentAmountMismatch::class);
 });
 
-it('reports a second upgrade payment as a duplicate instead of creating a second Mollie subscription', function (): void {
+it('books and refunds a second upgrade payment as a duplicate instead of creating a second Mollie subscription', function (): void {
     Event::fake([DuplicatePaymentReceived::class]);
 
     $billable = localUpgradeBillable();
 
     $created = [];
-    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$created) {
+    $refunds = [];
+    // The refund is sent with an idempotency key (MollieCall::send()).
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(fn () => Mollie::getFacadeRoot());
+    Mollie::shouldReceive('send')->andReturnUsing(function ($request) use (&$created, &$refunds) {
         if ($request instanceof CreateSubscriptionRequest) {
             $id = 'sub_upgrade_'.(count($created) + 1);
             $created[] = $id;
 
             return (object) ['id' => $id];
+        }
+
+        if ($request instanceof \Mollie\Api\Http\Requests\CreatePaymentRefundRequest) {
+            $refunds[] = $request;
+
+            return (object) ['id' => 're_upgrade_'.count($refunds), 'status' => 'pending'];
         }
 
         return (object) ['id' => 'unexpected'];
@@ -195,9 +204,14 @@ it('reports a second upgrade payment as a duplicate instead of creating a second
         ->and($billable->refresh()->getBillingSubscriptionMeta()['mollie_subscription_id'])->toBe('sub_upgrade_1')
         ->and($billable->subscription_source)->toBe(SubscriptionSource::Mollie);
 
-    // And only the first payment produced an invoice.
-    expect(BillingInvoice::query()->count())->toBe(1)
-        ->and(BillingInvoice::query()->where('mollie_payment_id', 'tr_upg_b')->exists())->toBeFalse();
+    // The second payment is booked and returned in full (flows.md §13): an invoice,
+    // its credit note, one refund at Mollie. It used to be kept without a document.
+    $duplicate = BillingInvoice::query()->where('mollie_payment_id', 'tr_upg_b')->sole();
+
+    expect(\GraystackIT\MollieBilling\Services\Webhook\UnwantedPaymentRefund::isUnwanted($duplicate))->toBeTrue()
+        ->and((int) $duplicate->amount_gross)->toBe(655)
+        ->and(BillingInvoice::query()->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)->sole()->amount_gross)->toBe(-655)
+        ->and($refunds)->toHaveCount(1);
 
     Event::assertDispatched(DuplicatePaymentReceived::class);
 });

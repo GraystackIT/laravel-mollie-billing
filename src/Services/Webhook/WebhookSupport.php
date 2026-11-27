@@ -643,6 +643,37 @@ class WebhookSupport
     }
 
     /**
+     * Whether money (or a mandate) this billable handed over is still on its way to a
+     * subscription: an activation running right now (a fresh claim) or one waiting for
+     * its retry (`activation_retries`).
+     *
+     * A new first payment must not be started beside it. The checkout used to look only
+     * at "is there an accessible subscription", which is false for exactly this state —
+     * so a customer sent back to the checkout during the retry window paid a second time,
+     * and whichever payment activated second was kept as a duplicate, unbooked.
+     */
+    public function activationInFlight(Billable $billable): bool
+    {
+        $meta = $billable->getBillingSubscriptionMeta();
+
+        // A €0 authorisation whose activation was REFUSED (its 100% code lost its cover)
+        // carries no money and is refused again on every retry: counting it locked the
+        // customer out of buying at full price for the whole ladder. Every other marker
+        // counts — a €0 trial whose Mollie call failed will most likely be activated by
+        // its retry, and a second checkout beside it (now with a mandate, so no trial)
+        // would charge in full for the trial about to start.
+        foreach ((array) ($meta[ActivationRetry::META_KEY] ?? []) as $marker) {
+            if (! (is_array($marker) && ($marker['refused_without_charge'] ?? false) === true)) {
+                return true;
+            }
+        }
+
+        $claim = $meta[self::ACTIVATION_CLAIM_META_KEY] ?? null;
+
+        return is_array($claim) && $this->claimIsFresh($claim);
+    }
+
+    /**
      * @param  array<string, mixed>  $claim
      */
     protected function claimIsFresh(array $claim): bool
@@ -813,6 +844,59 @@ class WebhookSupport
         $subscriptionId = (string) ($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? '');
 
         return $subscriptionId !== '' && $billable->hasAccessibleBillingSubscription();
+    }
+
+    /**
+     * Whether the subscription that runs was activated by a payment other than this one.
+     *
+     * Reads the record `CreateSubscription` writes in the same save as the subscription id
+     * (`CreateSubscription::ACTIVATED_BY_META_KEY`). False when no Mollie subscription is
+     * complete, when this payment is the one on record, and when there is no record at all —
+     * a subscription activated before the record existed. That last case cannot be told
+     * apart from "this payment activated it", and refunding a payment that bought the
+     * running subscription is the worse mistake, so it is left as it was.
+     */
+    public function activatedByAnotherPayment(Billable $billable, string $paymentId): bool
+    {
+        if ($billable->getBillingSubscriptionSource() !== SubscriptionSource::Mollie->value
+            || ! $this->activationCompleted($billable)
+        ) {
+            return false;
+        }
+
+        $meta = $billable->getBillingSubscriptionMeta();
+        $key = \GraystackIT\MollieBilling\Services\Billing\CreateSubscription::ACTIVATED_BY_META_KEY;
+
+        return array_key_exists($key, $meta) && (string) ($meta[$key] ?? '') !== $paymentId;
+    }
+
+    /**
+     * A first payment for a billable whose subscription another payment already activated:
+     * booked and returned in full through `UnwantedPaymentRefund` (invoice, credit note,
+     * customer mail), then `DuplicatePaymentReceived` for the app.
+     *
+     * flows.md §13: every payment becomes an invoice; a payment nobody wants becomes that
+     * invoice's credit note. It used to be dispatched as an event and kept, unbooked.
+     *
+     * Runs outside any transaction (it talks to Mollie). Safe to repeat: a re-delivery of
+     * the same payment meets the invoice guard and `UnwantedPaymentRefund::resume()`, and
+     * the event goes out only on the run that booked it — after the booking, so a
+     * listener that throws cannot cost the customer their refund.
+     */
+    public function settleDuplicatePayment(object $payment, Billable $billable): void
+    {
+        app(UnwantedPaymentRefund::class)->settle(
+            $payment,
+            $billable,
+            UnwantedPaymentRefund::REASON_DUPLICATE_PAYMENT,
+            'Duplicate payment — the subscription was already active',
+        );
+
+        $this->safely(
+            fn () => \GraystackIT\MollieBilling\Events\DuplicatePaymentReceived::dispatch($billable, (string) ($payment->id ?? '')),
+            'duplicate_payment.event',
+            $billable,
+        );
     }
 
     /**
@@ -996,12 +1080,24 @@ class WebhookSupport
      * claims here, under the same row lock, before it runs outside any transaction.
      * Throws ActivationClaimHeldException while a different payment's activation is in
      * flight; the retry job comes back.
+     *
+     * Returns false — nothing claimed, nothing to run — when the activation is complete by
+     * the time the row lock is held: another payment activated in the meantime. Resuming
+     * then would create a second Mollie subscription over the one that runs; the retry job
+     * refunds this payment as a duplicate instead.
      */
-    public function claimForResume(Billable $billable, string $paymentId): void
+    public function claimForResume(Billable $billable, string $paymentId): bool
     {
-        DB::transaction(function () use ($billable, $paymentId): void {
+        return DB::transaction(function () use ($billable, $paymentId): bool {
             $this->lockBillableRow($billable);
+
+            if ($this->activationCompleted($billable)) {
+                return false;
+            }
+
             $this->claimActivation($billable, $paymentId);
+
+            return true;
         });
     }
 
@@ -1011,10 +1107,15 @@ class WebhookSupport
      * Returns true when this call started the retry ladder — the caller announces the
      * failure then, once. False when the ladder is already running (a re-delivery), when
      * this very call IS the retry, or when the payment has already been given back.
+     *
+     * `$refused` marks an activation that was refused rather than broken off; for a payment
+     * that collected nothing, the marker then does not hold the checkout
+     * (`activationInFlight()`).
      */
-    public function scheduleActivationRetry(Billable $billable, object $payment, string $context, string $reason): bool
+    public function scheduleActivationRetry(Billable $billable, object $payment, string $context, string $reason, bool $refused = false): bool
     {
         $paymentId = (string) ($payment->id ?? '');
+        $refusedWithoutCharge = $refused && $this->amountFromMolliePayment($payment) <= 0;
 
         if (! ($billable instanceof Model) || $paymentId === '' || ActivationRetry::resuming()) {
             return false;
@@ -1028,7 +1129,7 @@ class WebhookSupport
 
         $started = false;
 
-        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $context, $reason, &$started): array {
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $context, $reason, $refusedWithoutCharge, &$started): array {
             $pending = (array) ($meta[ActivationRetry::META_KEY] ?? []);
 
             if (! array_key_exists($paymentId, $pending)) {
@@ -1038,6 +1139,11 @@ class WebhookSupport
                     'reason' => mb_substr($reason, 0, 500),
                     'first_failed_at' => BillingTime::nowUtc()->toIso8601String(),
                 ];
+
+                if ($refusedWithoutCharge) {
+                    $pending[$paymentId]['refused_without_charge'] = true;
+                }
+
                 $meta[ActivationRetry::META_KEY] = $pending;
             }
 
@@ -1072,7 +1178,7 @@ class WebhookSupport
         $status = $billable->getBillingSubscriptionStatus()->value;
         $reason ??= 'Mandate captured but the subscription was not activated: status '.$status.' is not activatable';
 
-        $this->announceActivationFailure($billable, $payment, $context, $reason, null);
+        $this->announceActivationFailure($billable, $payment, $context, $reason, null, refused: true);
     }
 
     /**
@@ -1116,6 +1222,7 @@ class WebhookSupport
         ?BillingInvoice $invoice,
         ?string $planCode = null,
         ?string $interval = null,
+        bool $refused = false,
     ): void {
         $paymentId = (string) ($payment->id ?? '');
 
@@ -1129,7 +1236,7 @@ class WebhookSupport
             'error' => $reason,
         ]);
 
-        if (! $this->scheduleActivationRetry($billable, $payment, $context, $reason)) {
+        if (! $this->scheduleActivationRetry($billable, $payment, $context, $reason, $refused)) {
             return;
         }
 

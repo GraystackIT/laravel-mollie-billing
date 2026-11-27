@@ -103,4 +103,37 @@ final class SubscriptionMetaHygiene
 
         return $meta;
     }
+
+    /**
+     * Keys that say how the *last* change attempt ended without being applied: its charge
+     * was declined (`plan_change_failed_at` + reason), or the clean-up gave it up with its
+     * payment collected or unknown (`plan_change_unfinished`). The plan and addon screens
+     * read them as the outcome of the change they are watching.
+     */
+    public const PLAN_CHANGE_OUTCOME_KEYS = [
+        'plan_change_failed_at',
+        'plan_change_failed_reason',
+        'plan_change_unfinished',
+    ];
+
+    /**
+     * Drop the outcome of the previous change attempt, once a new one is accepted.
+     *
+     * Nothing else ever removed them, and nothing ties them to the change they were
+     * written for: the screens only look at their age. A change that went through ten
+     * minutes after a declined one was announced as "the payment failed, please try
+     * again" — paid, in force, and the customer invited to pay a third time. The events,
+     * the audit log and the operators' notification keep the record of the earlier one.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    public static function withoutPlanChangeOutcome(array $meta): array
+    {
+        foreach (self::PLAN_CHANGE_OUTCOME_KEYS as $key) {
+            unset($meta[$key]);
+        }
+
+        return $meta;
+    }
 }

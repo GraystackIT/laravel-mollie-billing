@@ -18,6 +18,17 @@ namespace GraystackIT\MollieBilling\Exceptions;
  */
 class BillingCountryRequiredException extends NonEuCountryException
 {
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.billing_country_required';
+    }
+
+    /** @return array<string, string|int|float> */
+    protected function defaultTranslationParameters(): array
+    {
+        return [];
+    }
+
     public function __construct()
     {
         parent::__construct('');

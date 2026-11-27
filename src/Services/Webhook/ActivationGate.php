@@ -24,9 +24,9 @@ enum ActivationGate
 
     /**
      * The billable already has an accessible subscription — a different payment
-     * won the race. The caller dispatches
-     * {@see \GraystackIT\MollieBilling\Events\DuplicatePaymentReceived} after
-     * the transaction committed.
+     * won the race. After the transaction committed, a payment that collected money
+     * is booked and refunded ({@see WebhookSupport::settleDuplicatePayment()}), and
+     * {@see \GraystackIT\MollieBilling\Events\DuplicatePaymentReceived} is dispatched.
      */
     case Duplicate;
 }

@@ -908,7 +908,7 @@ class MollieSubscriptionPatcher
      * because the subscription has been charged, the subscription is replaced instead,
      * with every field of this PATCH — see `MollieSubscriptionReplacer`.
      *
-     * @param  array{amount?: Money, description?: string, interval?: string, metadata?: array<string, mixed>}  $fields
+     * @param  array{amount?: Money, description?: string, interval?: string, metadata?: array<string, mixed>, mandateId?: string}  $fields
      */
     protected function sendUpdate(Model&Billable $billable, array $fields, ?CarbonInterface $startDate, string $reason): void
     {
@@ -937,6 +937,7 @@ class MollieSubscriptionPatcher
                     interval: $fields['interval'] ?? null,
                     startDate: $startDate !== null ? new Date(Carbon::instance($startDate)) : null,
                     metadata: $fields['metadata'] ?? null,
+                    mandateId: $fields['mandateId'] ?? null,
                 ));
             } catch (\Throwable $e) {
                 if ($startDate === null || ! MollieSubscriptionAnswer::refusesStartDateAfterCharge($e)) {
@@ -946,6 +947,23 @@ class MollieSubscriptionPatcher
                 $replacer->replace($billable, $startDate, $fields, $reason);
             }
         });
+    }
+
+    /**
+     * Bind the running subscription to another mandate of the same customer.
+     *
+     * `CreateSubscription` names the mandate a subscription is charged against, so a change
+     * of payment method has to move it before the old mandate is revoked: Mollie cancels
+     * the subscriptions of a revoked mandate, or cannot charge them. No start date is
+     * sent, so a charged subscription takes it as it is.
+     */
+    public function rebindMandate(Billable $billable, string $mandateId): void
+    {
+        if (! ($billable instanceof Model) || $mandateId === '') {
+            return;
+        }
+
+        $this->sendUpdate($billable, ['mandateId' => $mandateId], null, 'mandate_rebind');
     }
 
     public function pushNextChargeDate(Billable $billable, int $days): void

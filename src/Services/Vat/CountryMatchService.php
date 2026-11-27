@@ -10,6 +10,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\CountryMismatchFlagged;
 use GraystackIT\MollieBilling\Events\CountryMismatchResolved;
+use GraystackIT\MollieBilling\Exceptions\InvalidBillingInputException;
 use GraystackIT\MollieBilling\Models\BillingCountryMismatch;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
@@ -63,6 +64,14 @@ class CountryMatchService
      * confirmed as correct together with the signals it was confirmed against.
      */
     private const VERIFIED_KEY = 'tax_country_verified';
+
+    /**
+     * The reason text on the credit note a correction writes for each original. Together
+     * with `RefundReasonCode::BillingError` it tells the correction's own refund apart from
+     * one made before the mismatch was resolved: the first is re-charged at the new rate,
+     * the second stays refunded ({@see InvoiceService::creditedOutsideCorrection()}).
+     */
+    public const CORRECTION_REFUND_REASON = 'Country mismatch correction';
 
     /**
      * Run the three-way check. Returns the freshly flagged mismatch (or the
@@ -205,7 +214,7 @@ class CountryMatchService
 
         $newCountry = strtoupper(trim($newCountry));
         if (strlen($newCountry) !== 2) {
-            throw new \InvalidArgumentException("Invalid ISO-2 country: {$newCountry}");
+            throw new InvalidBillingInputException("Invalid ISO-2 country: {$newCountry}", 'billing::exceptions.country.invalid', ['country' => $newCountry]);
         }
 
         $justification = $justification === null ? null : trim($justification);
@@ -218,9 +227,11 @@ class CountryMatchService
                 // `chosen_country`. Correcting them a second time would refund the
                 // valid reissues and bill the customer twice for one supply period;
                 // a genuinely new country needs a new mismatch.
-                throw new \InvalidArgumentException(
+                throw new InvalidBillingInputException(
                     "Mismatch {$mismatch->id} is already resolved to {$mismatch->chosen_country}; "
-                    ."flag a new mismatch to correct it to {$newCountry}."
+                    ."flag a new mismatch to correct it to {$newCountry}.",
+                    'billing::exceptions.country.mismatch_already_resolved',
+                    ['chosen' => (string) $mismatch->chosen_country, 'country' => $newCountry],
                 );
             }
 
@@ -245,11 +256,16 @@ class CountryMatchService
             }
 
             try {
-                $creditNote = $this->refunds->refundFully(
-                    $invoice,
-                    RefundReasonCode::BillingError,
-                    'Country mismatch correction'
-                );
+                // Money only, never wallet units: `refundFully()` hands an overage invoice's
+                // units back, but a correction re-issues the tax document of usage that was
+                // consumed and is charged again right below — crediting the units gave the
+                // customer that usage a second time for free.
+                $creditNote = $this->refunds->refund($invoice, [
+                    'amount_net' => null,
+                    'wallet_credits' => [],
+                    'reason_code' => RefundReasonCode::BillingError,
+                    'reason_text' => self::CORRECTION_REFUND_REASON,
+                ]);
                 $creditNoteSerialsByOriginal[(int) $invoice->id] = (string) ($creditNote->serial_number ?? '');
             } catch (\Throwable $e) {
                 Log::error('Country mismatch resolve: refund failed', [
@@ -285,6 +301,46 @@ class CountryMatchService
         }
 
         CountryMismatchResolved::dispatch($billable, $mismatch, $resolvedBy, $justification);
+    }
+
+    /**
+     * What resolving this mismatch will refund, per invoice: the invoices `resolve()`
+     * corrects that still have something left, each with the net and gross its refund
+     * pays back — the remainder at the invoice's own rates, as `RefundInvoiceService`
+     * computes it for a refund without an amount.
+     *
+     * The portal's confirmation reads this, so the figure it names cannot drift from the
+     * money `resolve()` moves: it summed the linked invoices' original gross and counted
+     * every one of them, which promised a refund made before the mismatch a second time
+     * and named an invoice refunded in full that nothing happens to.
+     *
+     * @return list<array{invoice: BillingInvoice, net: int, gross: int}>
+     */
+    public function refundsOnResolve(Billable $billable, BillingCountryMismatch $mismatch): array
+    {
+        $refunds = [];
+
+        $invoices = $this->correctionTargets($billable, $mismatch);
+
+        // Every invoice reads its remaining net and its credit VAT off the billable's credit
+        // notes, and each instance loaded that whole set itself — one identical query per
+        // linked invoice on every dashboard render. Read-only, so one load serves them all.
+        BillingInvoice::shareRefundChildren($invoices);
+
+        foreach ($invoices as $invoice) {
+            $net = $invoice->remainingRefundableNet();
+            if ($net <= 0) {
+                continue;
+            }
+
+            $refunds[] = [
+                'invoice' => $invoice,
+                'net' => $net,
+                'gross' => $net + $this->invoices->creditNoteVat($invoice, $net),
+            ];
+        }
+
+        return $refunds;
     }
 
     /**
@@ -329,6 +385,13 @@ class CountryMatchService
         $originalId = (int) $invoice->id;
 
         if (! $this->needsCorrection($billable, $originalId)) {
+            return;
+        }
+
+        // Refunded in full before the mismatch was resolved (a cancellation, an unwanted
+        // payment): nothing remained paid, so there is nothing to re-issue. Charged anyway,
+        // the customer paid again for a supply they had been given their money back for.
+        if ($this->invoices->creditedOutsideCorrection($invoice)['total'] >= $invoice->refundableBaseNet()) {
             return;
         }
 
@@ -530,14 +593,18 @@ class CountryMatchService
             return;
         }
 
-        throw new \InvalidArgumentException(sprintf(
-            'Country %s matches neither the payment (%s) nor the IP signal (%s) of mismatch %s. '
-            .'Pass a justification to record it as verified anyway.',
-            $newCountry,
-            $mismatch->tax_country_payment ?? '—',
-            $mismatch->tax_country_ip ?? '—',
-            (string) $mismatch->id,
-        ));
+        throw new InvalidBillingInputException(
+            sprintf(
+                'Country %s matches neither the payment (%s) nor the IP signal (%s) of mismatch %s. '
+                .'Pass a justification to record it as verified anyway.',
+                $newCountry,
+                $mismatch->tax_country_payment ?? '—',
+                $mismatch->tax_country_ip ?? '—',
+                (string) $mismatch->id,
+            ),
+            'billing::exceptions.country.needs_justification',
+            ['country' => $newCountry, 'payment' => $mismatch->tax_country_payment ?? '—', 'ip' => $mismatch->tax_country_ip ?? '—'],
+        );
     }
 
     /**

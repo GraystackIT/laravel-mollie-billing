@@ -65,3 +65,35 @@ it('has every literal billing:: key in both shipped locales', function (string $
 
     expect($missing)->toBe([], "Missing in {$locale}:\n".implode("\n", $missing));
 })->with(['de', 'en']);
+
+it('keeps the exception sentences in key and placeholder parity across both locales', function (): void {
+    // The sentences a screen shows for a service's refusal (ExceptionMessage). A key only
+    // in `en` reads English to a German operator; a placeholder only on one side renders
+    // as a literal `:name` there.
+    $flatten = function (array $lines, string $prefix = '') use (&$flatten): array {
+        $out = [];
+        foreach ($lines as $key => $value) {
+            $path = $prefix === '' ? (string) $key : $prefix.'.'.$key;
+            $out += is_array($value) ? $flatten($value, $path) : [$path => (string) $value];
+        }
+
+        return $out;
+    };
+    $placeholders = function (string $value): array {
+        preg_match_all('/:[a-zA-Z_][a-zA-Z0-9_]*/', $value, $m);
+        $found = array_values(array_unique($m[0]));
+        sort($found);
+
+        return $found;
+    };
+
+    $base = dirname(__DIR__, 3).'/resources/lang';
+    $en = $flatten(require $base.'/en/exceptions.php');
+    $de = $flatten(require $base.'/de/exceptions.php');
+
+    expect(array_keys($en))->toEqualCanonicalizing(array_keys($de));
+
+    $mismatched = array_keys(array_filter($en, fn (string $v, string $k) => isset($de[$k]) && $placeholders($v) !== $placeholders($de[$k]), ARRAY_FILTER_USE_BOTH));
+
+    expect($mismatched)->toBe([]);
+});

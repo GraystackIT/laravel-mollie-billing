@@ -417,15 +417,15 @@ new class extends Component {
                 <div class="grid grid-cols-3 gap-3 rounded-xl border border-zinc-200 p-4 dark:border-white/10">
                     <div>
                         <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.invoices.column.net') }}</div>
-                        <div class="tabular-nums text-zinc-900 dark:text-white"><x-mollie-billing::admin.money :cents="$detail->amount_net" :currency="$detail->currency" /></div>
+                        <div class="tabular-nums text-zinc-900 dark:text-white" dusk="invoice-detail-net"><x-mollie-billing::admin.money :cents="$detail->amount_net" :currency="$detail->currency" /></div>
                     </div>
                     <div>
                         <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.invoices.detail.vat') }}</div>
-                        <div class="tabular-nums text-zinc-900 dark:text-white"><x-mollie-billing::admin.money :cents="$detail->amount_vat" :currency="$detail->currency" /></div>
+                        <div class="tabular-nums text-zinc-900 dark:text-white" dusk="invoice-detail-vat"><x-mollie-billing::admin.money :cents="$detail->amount_vat" :currency="$detail->currency" /></div>
                     </div>
                     <div>
                         <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ __('billing::admin.invoices.column.gross') }}</div>
-                        <div class="tabular-nums text-zinc-900 dark:text-white"><span class="font-semibold"><x-mollie-billing::admin.money :cents="$detail->amount_gross" :currency="$detail->currency" /></span></div>
+                        <div class="tabular-nums text-zinc-900 dark:text-white" dusk="invoice-detail-gross"><span class="font-semibold"><x-mollie-billing::admin.money :cents="$detail->amount_gross" :currency="$detail->currency" /></span></div>
                     </div>
                 </div>
 

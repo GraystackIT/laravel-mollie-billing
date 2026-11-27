@@ -723,7 +723,11 @@ class CheckoutOptionsMatrixTest extends BrowserTestCase
             $this->clickWire($browser, '[wire\\:click="submit"]');
             $this->waitForPathContains($browser, '/fake-mollie/checkout/');
 
-            // Never paid: 5 ticks at 2 s, then 5 s each (pollInterval()), 22 in all.
+            // Submitted at the bank but never settled, and no webhook: Mollie reports the
+            // payment `pending`. (A payment still `open` is the customer who left the hosted
+            // page, which the page calls abandoned after a few ticks instead — that path is
+            // its own test.) 5 ticks at 2 s, then 5 s each (pollInterval()), 22 in all.
+            \Workbench\App\FakeMollie\FakeMollie::settle($this->latestFakePayment()['id'], 'pending', 'AT');
             $browser->visit('/billing/return')->waitForText(__('billing::portal.return.processing_title'), 15);
             $browser->waitForText(__('billing::portal.return.timeout_title'), 150)
                 ->assertSee(__('billing::portal.return.check_again'));

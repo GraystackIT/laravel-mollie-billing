@@ -335,6 +335,40 @@ class AdminCouponFormMatrixTest extends BrowserTestCase
         expect(Coupon::query()->count())->toBe($before);
     }
 
+    /**
+     * The service's refusal reaches a German operator in German. It used to arrive as the
+     * exception's English message ("A coupon with the code TAKEN already exists.") on an
+     * otherwise German form; the message now stays English for the log only.
+     */
+    public function test_the_form_says_why_in_the_operators_language(): void
+    {
+        \Workbench\App\Support\WorkbenchSetting::set('config.app.locale', json_encode('de'));
+        config(['app.locale' => 'de']);
+        app()->setLocale('de');
+
+        $this->coupons()->creditsCoupon('TAKEN', ['Tokens' => 1]);
+        $before = Coupon::query()->count();
+
+        $this->browse(function (Browser $browser): void {
+            $this->loginAdmin($browser);
+            $browser->visit('/billing/admin/coupons/create')
+                ->waitForText(__('billing::admin.coupons.create.title'), 15)->pause(500);
+
+            $this->choose($browser, 'intent', 'credits');
+            $browser->type('input[wire\\:model="code"]', 'TAKEN')
+                ->type('input[wire\\:model="credits_payload.Tokens"]', '5')
+                ->pause(200);
+            $this->clickWire($browser, self::FORM.' button[type="submit"]');
+
+            $browser->waitForText(__('billing::admin.coupons.create.error_heading'), 15)
+                ->assertSee('Ein Coupon mit dem Code TAKEN existiert bereits.')
+                ->assertDontSee('already exists');
+            $this->shot($browser, 'Abgelehnt auf Deutsch');
+        });
+
+        expect(Coupon::query()->count())->toBe($before);
+    }
+
     /** @return array<string, array{0: string}> */
     public static function typesForTooltips(): array
     {

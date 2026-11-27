@@ -6,7 +6,6 @@ namespace GraystackIT\MollieBilling\Services\Webhook;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
 use GraystackIT\MollieBilling\Contracts\SubscriptionCatalogInterface;
-use GraystackIT\MollieBilling\Events\DuplicatePaymentReceived;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\SubscriptionUpgradedFromLocal;
 use GraystackIT\MollieBilling\MollieBilling;
@@ -83,12 +82,19 @@ class LocalToMollieUpgradeHandler
                 return;
             }
 
+            // Likewise a duplicate upgrade payment that was booked to be returned.
+            if (app(UnwantedPaymentRefund::class)->resume($payment, $billable)) {
+                return;
+            }
+
             // See FirstPaymentHandler: an invoice without a finished activation means the
             // run died between the two, which is worth telling someone about.
             if (! $this->support->activationCompleted($billable)) {
                 // See FirstPaymentHandler: the retry job resumes this state.
                 if (\GraystackIT\MollieBilling\Support\ActivationRetry::resuming()) {
-                    $this->support->claimForResume($billable, $paymentId);
+                    if (! $this->support->claimForResume($billable, $paymentId)) {
+                        return;
+                    }
 
                     try {
                         $this->activate($payment, $billable, $planCode, $interval, $addonCodes, $extraSeats, $metadata);
@@ -111,12 +117,13 @@ class LocalToMollieUpgradeHandler
         }
 
         if ($gate === ActivationGate::Duplicate) {
-            Log::warning('Duplicate local-to-Mollie upgrade payment — billable already runs a Mollie subscription', [
+            Log::warning('Duplicate local-to-Mollie upgrade payment — billable already runs a Mollie subscription; booking and refunding it', [
                 'billable_id' => $billable->getKey(),
                 'payment_id' => $paymentId,
             ]);
 
-            DuplicatePaymentReceived::dispatch($billable, $paymentId);
+            // Booked and returned in full, then DuplicatePaymentReceived (see FirstPaymentHandler).
+            $this->support->settleDuplicatePayment($payment, $billable);
 
             return;
         }
@@ -134,10 +141,10 @@ class LocalToMollieUpgradeHandler
      *
      * The duplicate condition is "a Mollie subscription is running": an upgrade that
      * already ran moved the billable to `SubscriptionSource::Mollie`, so a sibling
-     * payment arriving afterwards has nothing left to do but be reported. The invoice guard
+     * payment arriving afterwards is booked and refunded as a duplicate. The invoice guard
      * runs first for the same reason as in FirstPaymentHandler — after a crash
      * mid-activation the billable is both Mollie-source and holds this payment's
-     * invoice, which is a re-delivery to swallow, not a duplicate to report.
+     * invoice, which is a re-delivery to swallow, not a duplicate to refund.
      */
     protected function openGate(object $payment, Billable $billable, string $paymentId): ActivationGate
     {
@@ -225,7 +232,7 @@ class LocalToMollieUpgradeHandler
         // A kept grant and a coupon do not combine — the waiver holds the one
         // recurring-discount slot — so the coupon is not looked at then.
         $pricedCoupon = $waiver === null
-            ? $this->firstPaymentCouponPricing->price(
+            ? $this->firstPaymentCouponPricing->afterPayment()->price(
                 $billable,
                 (string) ($metadata['coupon_code'] ?? ''),
                 $planCode,
@@ -263,6 +270,7 @@ class LocalToMollieUpgradeHandler
                 'extra_seats' => $extraSeats,
                 'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
+                'activating_payment_id' => (string) ($payment->id ?? ''),
             ]);
         } catch (\Throwable $e) {
             $this->support->reportSubscriptionActivationFailure(

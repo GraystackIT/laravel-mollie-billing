@@ -67,9 +67,13 @@ final class BookingMatrix
     /** @var array<int, string> VAT numbers the faked VIES confirms */
     private array $validVatNumbers = [];
 
+    /** Mollie's idempotency keys, honoured by default (`$idempotency->honour = false` switches it off). */
+    public MollieIdempotencyMemory $idempotency;
+
     public static function boot(): self
     {
         $matrix = new self;
+        $matrix->idempotency = new MollieIdempotencyMemory;
 
         Storage::fake('local');
         config()->set('mollie-billing.invoices.disk', 'local');
@@ -98,8 +102,19 @@ final class BookingMatrix
 
         self::catalog();
 
-        Mollie::shouldReceive('send')->andReturnUsing(fn ($request) => $matrix->answer($request));
-        // Idempotency keys are set and cleared on the client around refunds and charges.
+        Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(function (mixed $key = null) use ($matrix) {
+            $matrix->idempotency->setKey($key);
+
+            return Mollie::getFacadeRoot();
+        });
+        Mollie::shouldReceive('send')->andReturnUsing(fn ($request) => $matrix->idempotency->answer(
+            $request,
+            fn (object $request): object => $matrix->answer($request),
+            function (object $request) use ($matrix): void {
+                $matrix->sent[] = $request;
+            },
+        ));
+        // Idempotency keys are cleared on the client around refunds and charges.
         Mollie::getFacadeRoot()->shouldIgnoreMissing();
 
         return $matrix;

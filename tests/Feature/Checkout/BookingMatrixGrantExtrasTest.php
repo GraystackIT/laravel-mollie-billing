@@ -169,7 +169,7 @@ it('gifted plan + extras: seats already in use cannot be undercut', function ():
         ->and(BookingMatrix::prop($m->lastPayment(), 'metadata')['extra_seats'])->toBe(3);
 });
 
-it('gifted plan + extras: a second payment for the same purchase is reported, not booked', function (): void {
+it('gifted plan + extras: a second payment for the same purchase is booked and refunded, not kept', function (): void {
     $m = BookingMatrix::boot();
     Event::fake([DuplicatePaymentReceived::class, PaymentAmountMismatch::class]);
     $billable = bmGifted($m);
@@ -185,15 +185,31 @@ it('gifted plan + extras: a second payment for the same purchase is reported, no
     $m->settle($first);
     $m->settle($second);
 
-    expect(BillingInvoice::query()->count())->toBe(1)
-        ->and($m->sentOf(CreateSubscriptionRequest::class))->toHaveCount(1);
+    // One subscription; the second payment is booked and returned in full (flows.md §13).
+    bmGrantExtrasAssertDuplicateRefunded($m);
     Event::assertDispatched(DuplicatePaymentReceived::class, 1);
 
-    // A re-delivery of the first one changes nothing either.
+    // A re-delivery of either changes nothing.
     $m->settle($first);
-    expect(BillingInvoice::query()->count())->toBe(1)
-        ->and($m->sentOf(CreateSubscriptionRequest::class))->toHaveCount(1);
+    $m->settle($second);
+    bmGrantExtrasAssertDuplicateRefunded($m);
+    Event::assertDispatched(DuplicatePaymentReceived::class, 1);
 });
+
+/** One subscription, the first payment's invoice, and the duplicate booked and credited — once. */
+function bmGrantExtrasAssertDuplicateRefunded(BookingMatrix $m): void
+{
+    $kept = BillingInvoice::query()->where('invoice_kind', '!=', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)->orderBy('id')->get();
+    $notes = BillingInvoice::query()->where('invoice_kind', \GraystackIT\MollieBilling\Enums\InvoiceKind::Refund)->get();
+
+    expect($m->sentOf(CreateSubscriptionRequest::class))->toHaveCount(1)
+        ->and($kept)->toHaveCount(2)
+        ->and(\GraystackIT\MollieBilling\Services\Webhook\UnwantedPaymentRefund::isUnwanted($kept[0]))->toBeFalse()
+        ->and(\GraystackIT\MollieBilling\Services\Webhook\UnwantedPaymentRefund::isUnwanted($kept[1]))->toBeTrue()
+        ->and($notes)->toHaveCount(1)
+        ->and((int) $notes[0]->amount_gross)->toBe(-(int) $kept[1]->amount_gross)
+        ->and($m->sentOf(\Mollie\Api\Http\Requests\CreatePaymentRefundRequest::class))->toHaveCount(1);
+}
 
 it('gifted plan + extras: a double click starts one payment', function (): void {
     $m = BookingMatrix::boot();
@@ -231,7 +247,7 @@ it('gifted plan + extras: says whether a change needs paying for at all', functi
     'a seat beyond the included ones' => [['sso'], 3, true],
 ]);
 
-it('upgrade free → paid: still a duplicate once a Mollie subscription is running', function (): void {
+it('upgrade free → paid: a duplicate once a Mollie subscription is running — booked and refunded', function (): void {
     $m = BookingMatrix::boot();
     Event::fake([DuplicatePaymentReceived::class, PaymentAmountMismatch::class]);
     $billable = $m->billable('AT');
@@ -246,7 +262,6 @@ it('upgrade free → paid: still a duplicate once a Mollie subscription is runni
     $m->settle($first);
     $m->settle($second);
 
-    expect(BillingInvoice::query()->count())->toBe(1)
-        ->and($m->sentOf(CreateSubscriptionRequest::class))->toHaveCount(1);
+    bmGrantExtrasAssertDuplicateRefunded($m);
     Event::assertDispatched(DuplicatePaymentReceived::class, 1);
 });

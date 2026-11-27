@@ -61,7 +61,7 @@ return [
     'renewal_collected_for_ended_subscription' => 'A renewal was collected for a subscription that no longer runs (:status) — needs refunding',
     'renewal_undercollected' => 'A billing period was collected at less than its configuration costs — the balance is charged separately',
     'payment_amount_mismatch' => 'Paid amount differs from the expected amount',
-    'duplicate_payment_received' => 'Duplicate payment received and ignored',
+    'duplicate_payment_received' => 'Duplicate payment received — returned in full if it collected money',
     'checkout_started' => 'Checkout started',
     'checkout_abandoned' => 'Checkout abandoned',
     'one_time_order_completed' => 'One-time purchase :product completed',
@@ -78,6 +78,7 @@ return [
     'grant_extras_purchase_refunded' => 'Purchase of extras not carried out — the free period had ended; payment :serial refunded',
     'unwanted_payment_refunded' => 'A payment that was no longer wanted (:serial) was refunded automatically',
     'chargeback_reversed' => 'Chargeback on invoice :serial reversed',
+    'chargeback_on_refunded_payment' => 'Payment of invoice :serial charged back although it had been refunded — paid out twice',
     'invoice_pdf_regenerated' => 'Invoice :serial PDF regenerated',
 
     // Payment method

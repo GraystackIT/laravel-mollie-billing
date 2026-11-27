@@ -121,6 +121,28 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
 
         $line = ProrataLine::fromArray($this->lineData);
 
+        // The queue runs this same job object again after a throw, with the payload it was
+        // dispatched with — but what the last attempt learned lives on the stored entry that
+        // createRefund() re-appended: above all how often Mollie refused the line. Without
+        // it every rung of the ladder sent the key Mollie had bound to the first refusal and
+        // got that refusal replayed for an hour (measured 26 November 2026).
+        $stored = $this->storedLine($billable);
+
+        if ($stored !== null) {
+            $line->refundKeyRefusals = max($line->refundKeyRefusals, (int) ($stored['refund_key_refusals'] ?? 0));
+            $line->refundOutcomeUnknown = $line->refundOutcomeUnknown || ($stored['refund_outcome_unknown'] ?? false) === true;
+
+            // The token too: a payload dispatched before the first Mollie call carries none,
+            // and a fresh one here would never find the refund an earlier attempt created.
+            if ($line->refundToken === null && is_string($stored['refund_token'] ?? null)) {
+                $line->refundToken = $stored['refund_token'];
+            }
+        }
+
+        // Minted here rather than inside createRefund(), so the entry a throw below writes
+        // back carries the token the refund is sent with (a clamp sends a copy of the line).
+        $line->refundToken ??= bin2hex(random_bytes(4));
+
         // createRefund() does NOT throw on a rejected line: it catches the Mollie
         // error, re-appends the line to pending_refund_retries and returns null.
         // Clearing the stale entry up front makes a re-append unambiguously this
@@ -128,7 +150,26 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
         // the fresh entry a naive success path would have written off.
         $this->removeFromPendingRetries($billable);
 
-        $invoices->createRefund($billable, [$line], 'Refund retry');
+        try {
+            $invoices->createRefund($billable, [$line], 'Refund retry');
+        } catch (Throwable $e) {
+            // It can still throw — a credit note that cannot be written after Mollie paid out,
+            // a lock-wait timeout. The entry removed above was then gone: the queue's next run
+            // used the old payload, skipped the token lookup and sent a key Mollie no longer
+            // held — a second payout — and the sweep had nothing left to find.
+            try {
+                $this->restoreEntryAfterThrow($billable, $line, $e);
+            } catch (Throwable $restore) {
+                // The original throw is what the queue must see; this one is only told.
+                Log::error('RetryRefundLineJob: refund line could not be put back after a throw', [
+                    'billable_id' => $this->billableId,
+                    'line' => $line->toArray(),
+                    'error' => $restore->getMessage(),
+                ]);
+            }
+
+            throw $e;
+        }
 
         if ($this->stillPending($billable)) {
             // The re-appended entry is stamped "now"; the window counts from the first
@@ -190,6 +231,30 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
         }
 
         return false;
+    }
+
+    /**
+     * The line as the stored `pending_refund_retries` entry holds it now, or null.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function storedLine(\GraystackIT\MollieBilling\Contracts\Billable $billable): ?array
+    {
+        $signature = $this->lineSignature($this->lineData);
+
+        if ($billable instanceof \Illuminate\Database\Eloquent\Model) {
+            $billable->refresh();
+        }
+
+        foreach ((array) ($billable->getBillingSubscriptionMeta()['pending_refund_retries'] ?? []) as $entry) {
+            $line = is_array($entry) ? ($entry['line'] ?? $entry) : [];
+
+            if (is_array($line) && $this->lineSignature($line) === $signature) {
+                return $line;
+            }
+        }
+
+        return null;
     }
 
     private function moveToDeadLetter(): void
@@ -261,6 +326,34 @@ class RetryRefundLineJob implements ShouldQueue, ShouldBeUnique
             }
 
             $meta['pending_refund_retries'] = $entries;
+
+            return $meta;
+        });
+    }
+
+    /**
+     * Put the line back after createRefund() threw, unless it re-appended the line itself.
+     *
+     * Marked outcome-unknown whatever the line said: the throw may have come after Mollie
+     * created the refund, and only the token lookup tells. A line that was booked before the
+     * throw is found on the books by its token and not posted again. The window still counts
+     * from the first failure.
+     */
+    private function restoreEntryAfterThrow(\GraystackIT\MollieBilling\Contracts\Billable $billable, ProrataLine $line, Throwable $e): void
+    {
+        if (! $billable instanceof \Illuminate\Database\Eloquent\Model || $this->stillPending($billable)) {
+            return;
+        }
+
+        $line->refundOutcomeUnknown = true;
+        $entry = [
+            'line' => $line->toArray(),
+            'error' => $e->getMessage(),
+            'first_attempt_at' => $this->firstAttemptAt,
+        ];
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($entry): array {
+            $meta['pending_refund_retries'] = array_merge((array) ($meta['pending_refund_retries'] ?? []), [$entry]);
 
             return $meta;
         });

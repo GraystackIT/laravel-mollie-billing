@@ -124,6 +124,9 @@ final class ChangeMatrixWorld
     /** Listing the customer's payments fails while this is set. */
     public static bool $failPaymentLists = false;
 
+    /** Mollie's idempotency keys, honoured by default (`$idempotency->honour = false` switches it off). */
+    public static MollieIdempotencyMemory $idempotency;
+
     public static function boot(): void
     {
         Storage::fake('local');
@@ -154,6 +157,7 @@ final class ChangeMatrixWorld
         self::$acceptThenTimeout = false;
         self::$failLookups = false;
         self::$failPaymentLists = false;
+        self::$idempotency = new MollieIdempotencyMemory;
         ChangeMatrixWebhookController::$nextPayment = null;
 
         app()->bind(MollieWebhookController::class, ChangeMatrixWebhookController::class);
@@ -181,8 +185,18 @@ final class ChangeMatrixWorld
             ]],
         ]);
 
-        Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
-        Mollie::shouldReceive('send')->andReturnUsing(fn (object $request): object => self::mollie($request));
+        Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(function (mixed $key = null) {
+            self::$idempotency->setKey($key);
+
+            return Mollie::getFacadeRoot();
+        });
+        Mollie::shouldReceive('send')->andReturnUsing(fn (object $request): object => self::$idempotency->answer(
+            $request,
+            self::mollie(...),
+            static function (object $request): void {
+                self::$sent[] = $request;
+            },
+        ));
     }
 
     /** What Mollie does with a request. */
@@ -280,6 +294,7 @@ final class ChangeMatrixWorld
 
             if (self::$acceptThenTimeout) {
                 self::$acceptThenTimeout = false;
+                self::$idempotency->answerLost((object) ['id' => $paymentId, 'status' => 'open']);
 
                 throw new \RuntimeException('Mollie did not answer in time');
             }

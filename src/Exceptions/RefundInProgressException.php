@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Exceptions;
 
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use GraystackIT\MollieBilling\Models\BillingInvoice;
 use RuntimeException;
 
@@ -16,8 +17,15 @@ use RuntimeException;
  * the length of an HTTP call plus a PDF render, and by the time it got its turn the amount
  * it validated is stale anyway.
  */
-class RefundInProgressException extends RuntimeException
+class RefundInProgressException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.refund_in_progress';
+    }
+
     public function __construct(public readonly BillingInvoice $invoice)
     {
         parent::__construct("A refund for invoice {$invoice->id} is already in progress.");

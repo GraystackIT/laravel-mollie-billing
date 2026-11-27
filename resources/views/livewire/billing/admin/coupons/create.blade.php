@@ -199,8 +199,8 @@ new class extends Component {
             session()->flash('status', __('billing::admin.coupons.create.created', ['code' => $attrs['code']]));
             return $this->redirectRoute(BillingRoute::admin('coupons.index'), navigate: true);
         } catch (\InvalidArgumentException $e) {
-            // Domain-validation: surface the message directly so the admin can fix the input.
-            $this->error = $e->getMessage();
+            // Domain validation: say what to fix, in the operator's language.
+            $this->error = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
         } catch (\Throwable $e) {
             report($e);
             $this->error = __('billing::admin.common.error_generic', ['code' => $e->getCode()]);

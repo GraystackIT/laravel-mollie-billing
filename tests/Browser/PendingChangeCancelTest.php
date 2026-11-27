@@ -363,7 +363,7 @@ class PendingChangeCancelTest extends BrowserTestCase
             $this->openPlanPageWithPendingChange($browser, $billable);
 
             $browser->assertSeeIn(self::CANCEL_PENDING, 'Ausstehende Änderung abbrechen')
-                ->assertSee('Ein Upgrade auf den Business-Plan wartet auf Zahlungsbestätigung.');
+                ->assertSee(__('billing::portal.pending_plan_change_notice', ['plan' => 'Business']));
             $this->assertSame('Starter', $this->headerPlan($browser, 'Aktueller Plan'));
             $this->shot($browser, 'Deutsch: Upgrade wartet auf Zahlung');
 
@@ -373,7 +373,7 @@ class PendingChangeCancelTest extends BrowserTestCase
             $this->shot($browser, 'Deutsch: Abbruch abgelehnt');
 
             $this->assertSame(1, $this->domCount($browser, self::CANCEL_PENDING), 'the notice stays');
-            $browser->assertSee('Ein Upgrade auf den Business-Plan wartet auf Zahlungsbestätigung.')
+            $browser->assertSee(__('billing::portal.pending_plan_change_notice', ['plan' => 'Business']))
                 ->assertDontSee('Die ausstehende Planänderung wurde abgebrochen.')
                 ->assertDontSee('The payment for this change has already gone through');
 

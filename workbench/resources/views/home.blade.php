@@ -25,7 +25,7 @@
         <p class="sub">Browser-test host for graystackit/laravel-mollie-billing. Fake Mollie, fake VIES, real everything else.</p>
 
         @if ($actingAs)
-            <p>Acting as billable <span class="badge">#{{ $actingAs }}</span> — <a href="{{ route('billing.index') }}">open portal</a> · <a href="{{ route('wb.logout') }}">reset session</a></p>
+            <p>Acting as billable <span class="badge">#{{ $actingAs }}</span> — <a href="{{ Route::has('billing.index') ? route('billing.index') : '#' }}">open portal</a> · <a href="{{ route('wb.logout') }}">reset session</a></p>
         @endif
         @if ($admin)
             <p>Admin session: <span class="badge">{{ $admin->email }}</span> — <a href="{{ route('billing.admin.dashboard') }}">open admin</a></p>
@@ -45,8 +45,8 @@
 
         <h2>Entry points</h2>
         <ul>
-            <li><a href="{{ route('billing.checkout') }}">Checkout</a></li>
-            <li><a href="{{ route('billing.index') }}">Customer portal</a></li>
+            <li><a href="{{ Route::has('billing.checkout') ? route('billing.checkout') : '#' }}">Checkout</a></li>
+            <li><a href="{{ Route::has('billing.index') ? route('billing.index') : '#' }}">Customer portal</a></li>
             <li><a href="{{ route('wb.admin-login') }}">Admin panel (auto-login)</a></li>
         </ul>
     </div>

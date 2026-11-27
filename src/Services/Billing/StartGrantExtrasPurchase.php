@@ -25,7 +25,11 @@ class StartGrantExtrasPurchase
     public function __construct(
         private readonly UpgradeLocalToMollie $upgrade,
         private readonly SubscriptionCatalogInterface $catalog,
+        // Optional so that a subclass or a partial mock built with the two arguments
+        // this constructor used to take keeps working.
+        private ?PendingFirstPayment $pendingFirstPayment = null,
     ) {
+        $this->pendingFirstPayment ??= app(PendingFirstPayment::class);
     }
 
     /**
@@ -78,11 +82,14 @@ class StartGrantExtrasPurchase
      *
      * One payment per intent: a double-click, or Back from Mollie and click again,
      * would otherwise mint a second first payment — both settle, and the second is
-     * reported as a duplicate after the money has moved.
+     * reported as a duplicate after the money has moved. The lock covers the first; the
+     * payment on record (`PendingFirstPayment`) the second.
      *
      * @param  array<int, string>  $addonCodes  the complete addon set after the purchase
      *
      * @throws SubscriptionChangeInProgressException when a purchase is already being started
+     * @throws \GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException when an
+     *         earlier purchase of other extras is still open and Mollie would not withdraw it
      */
     public function handle(Billable $billable, array $addonCodes, int $seats): ?string
     {
@@ -101,6 +108,25 @@ class StartGrantExtrasPurchase
         }
 
         try {
+            // The lock is released as soon as the payment exists, so Back from Mollie and
+            // buy again is sequential and passes it. The payment on record is this
+            // purchase while it is open for the same extras; see PendingFirstPayment.
+            $plan = (string) ($billable->getBillingSubscriptionPlanCode() ?? '');
+            $included = $plan !== '' ? $this->catalog->includedSeats($plan) : 0;
+            $reusable = $this->pendingFirstPayment->redirectFor($billable, [
+                'plan_code' => $plan,
+                'interval' => (string) ($billable->getBillingSubscriptionInterval() ?? 'monthly'),
+                'addon_codes' => array_values(array_unique(array_map('strval', $addonCodes))),
+                'extra_seats' => max($seats, $included, $billable->getUsedBillingSeats()) - $included,
+                'coupon_code' => null,
+                'upgrade_from_local' => true,
+                'keep_grant' => true,
+            ]);
+
+            if ($reusable !== null) {
+                return $reusable;
+            }
+
             $result = $this->upgrade->handleKeepingGrant($billable, $addonCodes, $seats);
 
             if (! empty($result['payment_id'])) {

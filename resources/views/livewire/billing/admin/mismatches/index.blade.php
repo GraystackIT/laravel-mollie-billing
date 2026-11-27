@@ -126,8 +126,12 @@ new class extends Component {
         try {
             $service->resolve($billable, $m, $chosen, auth()->user(), $justification);
         } catch (\Throwable $e) {
-            report($e);
-            $this->resolvingError = $e->getMessage();
+            // A refusal the service can say is shown in the operator's language and not
+            // reported; anything else is reported and shown with its (English) detail.
+            if (! \GraystackIT\MollieBilling\Support\ExceptionMessage::isTranslatable($e)) {
+                report($e);
+            }
+            $this->resolvingError = \GraystackIT\MollieBilling\Support\ExceptionMessage::forOperator($e);
             return;
         }
 
@@ -326,7 +330,12 @@ new class extends Component {
                     $paymentCountryValid = strlen($paymentCountryRaw) === 2;
                     $ipCountryValid = strlen($ipCountryRaw) === 2;
                     $hasAnyChoice = $userCountryValid || $paymentCountryValid || $ipCountryValid;
-                    $invoiceCount = $resolvingMismatch->invoices->count();
+                    // The invoices the resolve will refund and reissue — the sentence below says
+                    // exactly that, so an invoice refunded in full before (nothing left) or an
+                    // earlier correction's reissue is not counted (CountryMatchService::refundsOnResolve()).
+                    $invoiceCount = $resolvingMismatch->billable !== null
+                        ? count(app(CountryMatchService::class)->refundsOnResolve($resolvingMismatch->billable, $resolvingMismatch))
+                        : $resolvingMismatch->invoices->count();
                 @endphp
 
                 <flux:text>

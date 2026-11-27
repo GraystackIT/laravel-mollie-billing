@@ -127,6 +127,9 @@ final class LongRunWorld
     /** @var list<mixed> every idempotency key the package set, in order */
     public array $idempotencyKeys = [];
 
+    /** Mollie's idempotency keys, honoured by default (`$idempotency->honour = false` switches it off). */
+    public \GraystackIT\MollieBilling\Tests\Support\MollieIdempotencyMemory $idempotency;
+
     /** How many subscriptions were actually created at Mollie. */
     public int $subscriptionsCreated = 0;
 
@@ -134,6 +137,7 @@ final class LongRunWorld
 
     public function __construct(public TestBillable $billable, public string $interval)
     {
+        $this->idempotency = new \GraystackIT\MollieBilling\Tests\Support\MollieIdempotencyMemory;
     }
 
     public function nextChargeAt(): ?CarbonImmutable
@@ -291,11 +295,12 @@ function longRunBoot(): void
     Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(function (mixed $key = null) {
         if (LongRunWorld::$current !== null) {
             LongRunWorld::$current->idempotencyKeys[] = $key;
+            LongRunWorld::$current->idempotency->setKey($key);
         }
 
         return Mollie::getFacadeRoot();
     });
-    Mollie::shouldReceive('send')->andReturnUsing(function ($request) {
+    $answer = function ($request) {
         $world = LongRunWorld::$current;
 
         if ($world === null) {
@@ -340,6 +345,8 @@ function longRunBoot(): void
 
             if (($world->loseAnswer[CreateSubscriptionRequest::class] ?? 0) > 0) {
                 $world->loseAnswer[CreateSubscriptionRequest::class]--;
+                // Mollie created it; a retry with the same key gets it back.
+                $world->idempotency->answerLost((object) ['id' => $world->subscriptionId]);
 
                 throw new RuntimeException('Connection reset — the answer was lost.');
             }
@@ -439,7 +446,14 @@ function longRunBoot(): void
             'nextPaymentDate' => $world->nextChargeAt()?->toDateString(),
             'amount' => (object) ['value' => $world->heldValue, 'currency' => LongRunWorld::$currency],
         ];
-    });
+    };
+
+    // A request answered from Mollie's idempotency memory was sent all the same.
+    Mollie::shouldReceive('send')->andReturnUsing(fn ($request) => LongRunWorld::$current === null
+        ? $answer($request)
+        : LongRunWorld::$current->idempotency->answer($request, $answer, function (object $request): void {
+            LongRunWorld::$current->requests[] = $request;
+        }));
 }
 
 /**

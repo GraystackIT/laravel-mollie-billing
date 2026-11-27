@@ -115,7 +115,7 @@ new class extends Component {
                 </flux:table.columns>
                 <flux:table.rows>
                     @foreach ($coupons as $coupon)
-                        <flux:table.row :key="$coupon->id">
+                        <flux:table.row :key="$coupon->id" dusk="coupon-row-{{ $coupon->id }}">
                             <flux:table.cell>
                                 <flux:checkbox wire:model.live="selected" value="{{ $coupon->id }}" />
                             </flux:table.cell>

@@ -183,3 +183,50 @@ it('gives an access grant one quota per period it covers and nothing after it en
     // Ends the day after a boundary: that boundary still starts a (one-day) period.
     'ends a day after a boundary' => [2, 1, 2],
 ]);
+
+it('keeps renewing a free plan that was resumed after its period turned over during the grace', function (): void {
+    // Cancelled on 20 March, a free plan runs a 30-day grace to 19 April — past its
+    // 1 April boundary, which the nightly pass rightly does not renew for a subscription
+    // that is running out. Resumed on 5 April it used to come back Active on the 1 March
+    // period: `nextBillingDate()` stuck on 1 April, which the pass's "renews tomorrow"
+    // test never matches again, so the quota was never refilled and every seat, addon or
+    // plan change was refused with "wait for the renewal" — for good.
+    $run = UsageLongRunHarness::boot();
+    $start = Carbon::parse('2027-03-01T00:00:00Z');
+    usageLongRunLocalBillable($run, $start);
+
+    $run->travelTo('2027-03-20 10:00:00');
+    $run->use('Tokens', 100);
+    $run->fresh()->cancelBillingSubscription();
+
+    for ($day = Carbon::parse('2027-03-21 02:00:00'); $day->lessThan(Carbon::parse('2027-04-05 02:00:00')); $day->addDay()) {
+        $run->travelTo($day);
+        $run->night();
+    }
+
+    expect($run->count('Tokens', 'period_credit'))->toBe(0);
+
+    $run->travelTo('2027-04-05 10:00:00');
+    $run->fresh()->resubscribeBillingPlan();
+
+    $billable = $run->fresh();
+
+    // Back on the period that is running, with its quota: what the night of 31 March
+    // would have done had the subscription not been cancelled then.
+    expect($billable->subscription_status)->toBe(SubscriptionStatus::Active)
+        ->and($billable->subscription_ends_at)->toBeNull()
+        ->and($billable->subscription_period_starts_at->toIso8601String())->toBe('2027-04-01T00:00:00+00:00')
+        ->and($billable->nextBillingDate()->toDateString())->toBe('2027-05-01')
+        ->and($run->count('Tokens', 'period_credit'))->toBe(1)
+        ->and($run->balance('Tokens'))->toBe(100);
+
+    // And it goes on renewing: the night of 30 April turns it over to 1 May.
+    for ($day = Carbon::parse('2027-04-06 02:00:00'); $day->lessThan(Carbon::parse('2027-05-02 02:00:00')); $day->addDay()) {
+        $run->travelTo($day);
+        $run->night();
+    }
+
+    expect($run->fresh()->subscription_period_starts_at->toDateString())->toBe('2027-05-01')
+        ->and($run->count('Tokens', 'period_credit'))->toBe(2)
+        ->and($run->requests)->toBe([]);
+});

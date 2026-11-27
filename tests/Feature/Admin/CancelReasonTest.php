@@ -146,3 +146,35 @@ it('trims the recorded reason', function (): void {
 
     expect(lastCancelAudit()['reason'])->toBe('Fraud review');
 });
+
+it('says there is nothing to cancel when the subscription ended after the tab was loaded', function (bool $immediately): void {
+    // The buttons are decided at render. Between that and the submit the expiry job ran
+    // (or a grace cancel reached its end, or another operator ended it), and
+    // CancelSubscription refuses an Expired row. Uncaught, that refusal left the action
+    // as a 500 with the modal still open and the operator told nothing.
+    $b = cancelReasonBillable();
+
+    $component = Livewire::test('mollie-billing::admin.billables.subscription-tab', ['billableId' => $b->getKey()])
+        ->call('openCancel', $immediately)
+        ->set('cancelNote', 'Customer asked by phone');
+
+    $b->forceFill(['subscription_status' => SubscriptionStatus::Expired])->save();
+
+    $component->call('confirmCancel')
+        ->assertSet('flash', null)
+        ->assertSet('error', 'There is no subscription to cancel.')
+        ->assertSet('showCancelModal', false);
+
+    expect($b->refresh()->subscription_status)->toBe(SubscriptionStatus::Expired)
+        ->and(lastCancelAudit())->toBe([]);
+})->with(['at period end' => false, 'force' => true]);
+
+it('offers no cancel for a billable that never subscribed', function (): void {
+    // `New` with a plan code set (a checkout that never completed) is refused by
+    // CancelSubscription like Expired is, so the buttons must not be offered for it.
+    $b = cancelReasonBillable();
+    $b->forceFill(['subscription_status' => SubscriptionStatus::New])->save();
+
+    Livewire::test('mollie-billing::admin.billables.subscription-tab', ['billableId' => $b->getKey()])
+        ->assertDontSeeHtml('wire:click="openCancel(');
+});

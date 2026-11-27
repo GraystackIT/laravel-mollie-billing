@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Exceptions;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -13,8 +14,15 @@ use RuntimeException;
  * Free plans cannot collect money — the customer must upgrade to a paid plan
  * first via the UpgradeLocalToMollie path before paid extras can be activated.
  */
-class LocalSubscriptionDoesNotSupportPaidExtrasException extends RuntimeException
+class LocalSubscriptionDoesNotSupportPaidExtrasException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.local_no_paid_extras';
+    }
+
     /**
      * @param  array<int, string>  $paidAddonCodes
      */

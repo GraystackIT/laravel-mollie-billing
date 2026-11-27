@@ -172,9 +172,9 @@ it('resolves a mismatch whose invoice was credited without the refunded_net cach
 
     // No second credit note for money that is already back with the customer …
     expect(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(1);
-    // … and the correction is still re-issued at the corrected country's rate.
-    expect($this->invoiceSpy->charges)->toHaveCount(1);
-    expect($this->invoiceSpy->charges[0]['original_invoice_id'])->toBe((int) $original->id);
+    // … and no correction charge either: that credit note was not the correction's own, so
+    // nothing remained paid to re-issue. Charging it collected a refunded supply again.
+    expect($this->invoiceSpy->charges)->toHaveCount(0);
 });
 
 it('refunds only the invoice that still has money on it', function (): void {
@@ -193,9 +193,10 @@ it('refunds only the invoice that still has money on it', function (): void {
     expect((int) $open->fresh()->refunded_net)->toBe(2000);
     expect((int) $credited->fresh()->refunded_net)->toBe(0);
 
-    // Both originals are corrected — being already refunded is no reason to skip
-    // the reissue at the corrected rate.
-    expect($this->invoiceSpy->charges)->toHaveCount(2);
-    expect(array_column($this->invoiceSpy->charges, 'original_invoice_id'))
-        ->toEqualCanonicalizing([(int) $credited->id, (int) $open->id]);
+    // Only the open invoice is re-issued. The credited one was refunded before the
+    // mismatch was resolved — by something other than the correction — so nothing remained
+    // paid on it (a retry after the correction's OWN refund still re-issues: see
+    // CountryCorrectionRechargeBasisTest).
+    expect($this->invoiceSpy->charges)->toHaveCount(1);
+    expect($this->invoiceSpy->charges[0]['original_invoice_id'])->toBe((int) $open->id);
 });

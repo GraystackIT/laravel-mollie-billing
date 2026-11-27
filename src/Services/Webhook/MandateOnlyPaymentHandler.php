@@ -190,7 +190,9 @@ class MandateOnlyPaymentHandler
             if (! $this->support->activationCompleted($billable)) {
                 // See FirstPaymentHandler: the retry job resumes this state.
                 if (ActivationRetry::resuming()) {
-                    $this->support->claimForResume($billable, $paymentId);
+                    if (! $this->support->claimForResume($billable, $paymentId)) {
+                        return;
+                    }
 
                     try {
                         $this->activateAfterMandate($payment, $billable, $metadata);
@@ -515,6 +517,7 @@ class MandateOnlyPaymentHandler
                 'extra_seats' => $extraSeats,
                 'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
+                'activating_payment_id' => (string) ($payment->id ?? ''),
             ]);
         } catch (\Throwable $e) {
             $this->support->reportSubscriptionActivationFailure(
@@ -753,6 +756,7 @@ class MandateOnlyPaymentHandler
                 'extra_seats' => $extraSeats,
                 'recurring_discount_net' => $recurringDiscountNet,
                 'mandate_id' => $billable->mollie_mandate_id,
+                'activating_payment_id' => (string) ($payment->id ?? ''),
                 'trial_days' => $trialDays,
                 'trial_ends_at' => $trialEndsAt,
             ]);

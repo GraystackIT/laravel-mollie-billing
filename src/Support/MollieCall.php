@@ -63,7 +63,10 @@ final class MollieCall
      *                                       one hour, and only when the parameters are
      *                                       identical (a mismatch is a 400). See
      *                                       {@see ChargeUsageOverageDirectly} for the one
-     *                                       caller that has such a key, and why.
+     *                                       caller that has such a key, and why. A 4xx binds
+     *                                       the key to that refusal for the hour as well, so
+     *                                       after a definite refusal the next attempt moves
+     *                                       the key on — {@see MollieRefusal}.
      */
     public static function send(object $request, ?string $idempotencyKey = null): mixed
     {

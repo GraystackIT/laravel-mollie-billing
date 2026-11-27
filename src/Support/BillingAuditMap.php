@@ -304,6 +304,14 @@ final class BillingAuditMap
                     'mollie_chargeback_id' => $e->mollieChargebackId,
                 ]),
 
+            Events\ChargebackOnRefundedPayment::class => self::make('chargeback_on_refunded_payment', AuditCategory::Invoice,
+                fn (Events\ChargebackOnRefundedPayment $e): array => [
+                    'serial' => $e->original->serial_number,
+                    'amount_cents' => $e->chargebackAmount,
+                    'uncredited_amount_cents' => $e->uncreditedAmount,
+                    'mollie_chargeback_id' => $e->mollieChargebackId,
+                ]),
+
             Events\InvoicePdfRegenerated::class => self::make('invoice_pdf_regenerated', AuditCategory::Invoice,
                 fn (Events\InvoicePdfRegenerated $e): array => [
                     'serial' => $e->invoice->serial_number,

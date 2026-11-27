@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Exceptions;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -16,8 +17,21 @@ use RuntimeException;
  * directly would silently set the new plan code without any payment flow —
  * a bug guarded by this exception.
  */
-class LocalSubscriptionUpgradeRequiresMolliePathException extends RuntimeException
+class LocalSubscriptionUpgradeRequiresMolliePathException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.local_upgrade_requires_checkout';
+    }
+
+    /** @return array<string, string|int|float> */
+    protected function defaultTranslationParameters(): array
+    {
+        return ['plan' => $this->targetPlanCode];
+    }
+
     public function __construct(
         public readonly Billable $billable,
         public readonly string $targetPlanCode,

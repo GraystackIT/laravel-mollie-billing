@@ -228,7 +228,7 @@ class PreviewService
                 $newInterval,
             );
         } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
-            $errors[] = ['type' => 'past_due_expansion', 'message' => $e->getMessage()];
+            $errors[] = ['type' => 'past_due_expansion', 'message' => \GraystackIT\MollieBilling\Support\ExceptionMessage::for($e)];
         }
 
         // The same for a subscription that has been cancelled or has expired: the change
@@ -244,13 +244,35 @@ class PreviewService
                 $newInterval,
             );
         } catch (\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
-            $errors[] = ['type' => 'subscription_ended', 'message' => $e->getMessage()];
+            $errors[] = ['type' => 'subscription_ended', 'message' => \GraystackIT\MollieBilling\Support\ExceptionMessage::for($e)];
         }
 
         // The change itself is refused (ValidateSubscriptionChange::assertIntervalChangeAllowed);
         // the preview says so instead of quoting a price for it.
         if ($intervalChanged && app(PlanWaiver::class)->marker($billable) !== null) {
             $errors[] = ['type' => 'interval_change_under_waiver'];
+        }
+
+        // Excess the new plan cannot absorb is charged with the change — through the mandate.
+        // Without one the change is refused (`DowngradeRequiresMandateException`), it is not
+        // "charged later": the screen quoted the excess as due now and then answered the
+        // confirm with a generic error. Same check the validator runs, so the two cannot
+        // disagree. A scheduled change is re-validated when it is applied and is refused
+        // there for the same reason, so this blocks both options.
+        $usageOverageRequiresMandate = false;
+        if ($planChanged || $intervalChanged) {
+            try {
+                app(ValidateSubscriptionChange::class)->assertUnresolvedOverageIsChargeable(
+                    $billable,
+                    $currentPlan,
+                    $currentInterval,
+                    $newPlan,
+                    $newInterval,
+                );
+            } catch (\GraystackIT\MollieBilling\Exceptions\DowngradeRequiresMandateException) {
+                $usageOverageRequiresMandate = true;
+                $errors[] = ['type' => 'usage_overage_requires_mandate'];
+            }
         }
         $prorataFactor = 0.0;
         $prorataChargeNet = 0;
@@ -477,6 +499,18 @@ class PreviewService
                 $proratedOldQuota = $usageProrata['prorated_old_quota'];
             }
 
+            // The part of the negative balance that is debt rather than consumption on the
+            // plan being left: what an in-flight overage charge is collecting, and excess a
+            // previous plan change left with its price. `WalletPlanChangeAdjuster::adjust()`
+            // keeps it out of the excess it bills; quoting it here showed the customer those
+            // units a second time, at this plan's price, on the screen they confirm.
+            if ($wallet !== null) {
+                $carried = app(\GraystackIT\MollieBilling\Services\Wallet\WalletPlanChangeAdjuster::class)
+                    ->carriedDebtUnits($billable, $wallet);
+                $excess = max(0, $excess - $carried);
+                $actuallyUsed = max(0, $actuallyUsed - $carried);
+            }
+
             $rolloverCredits = $rollover ? max(0, $planOnlyBalance - $currentQuota) : 0;
             $effectiveNewQuota = max(0, $newQuota + $rolloverCredits + $purchasedRemaining - $excess);
             $unresolvedOverage = max(0, $excess - $newQuota - $rolloverCredits - $purchasedRemaining);
@@ -522,6 +556,13 @@ class PreviewService
                 $usageOverageChargeGross = $usageOverageChargeNet;
             }
         }
+
+        // When another overage charge still holds the single slot, the change does not charge
+        // this excess: `handleExplicit()` refuses and `restoreUnchargedExcess()` leaves it on
+        // the wallet, with its price, for the next period-end sweep. Amount and price stand;
+        // the screen has to say it is collected then, not with the change (decision 8).
+        $usageOverageAwaitsChargeInFlight = $usageOverageChargeNet > 0
+            && app(\GraystackIT\MollieBilling\Services\Wallet\ChargeUsageOverageDirectly::class)->chargeIsInFlight($billable);
 
         // Seat comparison
         $currentIncludedSeats = $currentPlan !== '' ? $this->catalog->includedSeats($currentPlan) : 0;
@@ -569,6 +610,8 @@ class PreviewService
                 : 0),
             'usageOverageChargeNet' => $usageOverageChargeNet,
             'usageOverageChargeGross' => $usageOverageChargeGross,
+            'usageOverageAwaitsChargeInFlight' => $usageOverageAwaitsChargeInFlight,
+            'usageOverageRequiresMandate' => $usageOverageRequiresMandate,
             'couponDiscountNet' => $couponDiscountNet,
             'vatRate' => $vat['rate'],
             'vatAmount' => $recurringGross - $netForRecurring,

@@ -111,7 +111,13 @@ it('returns the customer to a first payment that is still open instead of creati
         };
     });
 
-    Livewire::test('mollie-billing::checkout')
+    $component = Livewire::test('mollie-billing::checkout');
+
+    // Opening the checkout asks once whether that payment is already paid; it is open.
+    expect($requests)->toBe([\Mollie\Api\Http\Requests\GetPaymentRequest::class]);
+    $requests = [];
+
+    $component
         ->set('plan_code', 'pro')
         ->set('interval', 'monthly')
         ->call('submit')
@@ -221,7 +227,14 @@ it('sends a pending first payment without a checkout link to the return page', f
         return (object) ['id' => 'tr_sepa', 'status' => 'pending'];
     });
 
-    Livewire::test('mollie-billing::checkout')
+    // Opening the checkout does not redirect for it: only a paid payment or an activation in
+    // flight does (decision 3, 26 November 2026). The submit still sends it to the return page.
+    $component = Livewire::test('mollie-billing::checkout')->assertNoRedirect();
+
+    expect($requests)->toBe([\Mollie\Api\Http\Requests\GetPaymentRequest::class]);
+    $requests = [];
+
+    $component
         ->set('plan_code', 'pro')
         ->set('interval', 'monthly')
         ->call('submit')

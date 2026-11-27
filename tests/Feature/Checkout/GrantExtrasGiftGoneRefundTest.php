@@ -450,3 +450,113 @@ it('sends no admin mail on a successful automatic refund, and still dispatches t
         ->where('subject_id', $billable->getKey())
         ->count())->toBe(1);
 });
+
+/** createRefund() throws before it reaches Mollie, `$throws` times — the lock store is down. */
+final class GiftGoneThrowingInvoiceService extends \GraystackIT\MollieBilling\Services\Billing\InvoiceService
+{
+    public static int $throws = 0;
+
+    public function createRefund(\GraystackIT\MollieBilling\Contracts\Billable $billable, array $refundLines, ?string $description = null): ?BillingInvoice
+    {
+        if (self::$throws > 0) {
+            self::$throws--;
+
+            throw new RuntimeException('Connection refused [tcp://cache:6379]');
+        }
+
+        return parent::createRefund($billable, $refundLines, $description);
+    }
+}
+
+/** Mollie's refund list for a payment, with the metadata each refund was created with. */
+function giftGoneListRefunds(BookingMatrix $m): void
+{
+    $m->intercept = function (object $request) use ($m) {
+        if (! $request instanceof \Mollie\Api\Http\Requests\GetPaginatedPaymentRefundsRequest) {
+            return null;
+        }
+
+        $paymentId = (string) BookingMatrix::prop($request, 'paymentId');
+        $sent = array_values(array_filter(
+            $m->sentOf(CreatePaymentRefundRequest::class),
+            fn (object $r): bool => (string) BookingMatrix::prop($r, 'paymentId') === $paymentId,
+        ));
+
+        // A page of the list: iterable, no `next` link.
+        return new \ArrayObject(array_map(function (object $refund, int $i) use ($sent): object {
+            $refund->metadata = (object) (BookingMatrix::prop($sent[$i], 'metadata') ?? []);
+
+            return $refund;
+        }, $m->refunds[$paymentId] ?? [], array_keys($m->refunds[$paymentId] ?? [])));
+    };
+}
+
+it('queues the refund when createRefund() throws rather than Mollie refusing, and the sweep posts it once', function (): void {
+    [$m, $billable, $admin] = giftGoneSetup();
+    GiftGoneThrowingInvoiceService::$throws = 0;
+    app()->singleton(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class, GiftGoneThrowingInvoiceService::class);
+    giftGoneListRefunds($m);
+
+    app(UpgradeLocalToMollie::class)->handleKeepingGrant($billable, ['sso'], 3);
+    $payment = $m->lastPayment();
+    app(CouponService::class)->revokeGrant(CouponRedemption::query()->sole(), 'test');
+
+    GiftGoneThrowingInvoiceService::$throws = 1;
+    $invoice = $m->settle($payment);
+
+    $pending = $billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [];
+
+    expect($m->sentOf(CreatePaymentRefundRequest::class))->toBe([])
+        ->and($pending)->toHaveCount(1)
+        ->and((int) $pending[0]['line']['parent_invoice_id'])->toBe((int) $invoice->id)
+        ->and($pending[0]['line']['refund_outcome_unknown'] ?? false)->toBeTrue();
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
+
+    (new SweepPendingRetriesJob)->handle();
+
+    expect($m->sentOf(CreatePaymentRefundRequest::class))->toHaveCount(1)
+        ->and((int) BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->sole()->amount_gross)->toBe(-2526)
+        ->and((int) $invoice->fresh()->refunded_net)->toBe((int) $invoice->amount_net)
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [])->toBe([]);
+
+    // A re-delivery and another sweep: nothing more.
+    $m->settle($payment);
+    (new SweepPendingRetriesJob)->handle();
+    expect($m->sentOf(CreatePaymentRefundRequest::class))->toHaveCount(1)
+        ->and(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(1);
+    Notification::assertNotSentTo($admin, AdminPlanChangeFailedNotification::class);
+});
+
+it('does not refund a gift-gone purchase twice when Mollie paid out and the credit note could not be written', function (): void {
+    [$m, $billable] = giftGoneSetup();
+    giftGoneListRefunds($m);
+
+    app(UpgradeLocalToMollie::class)->handleKeepingGrant($billable, ['sso'], 3);
+    $payment = $m->lastPayment();
+    app(CouponService::class)->revokeGrant(CouponRedemption::query()->sole(), 'test');
+
+    $failures = 1;
+    BillingInvoice::creating(function (BillingInvoice $note) use (&$failures): void {
+        if ($note->invoice_kind === InvoiceKind::Refund && $failures-- > 0) {
+            throw new RuntimeException('SQLSTATE[HY000]: General error: 2006 MySQL server has gone away');
+        }
+    });
+
+    $invoice = $m->settle($payment);
+
+    expect($m->sentOf(CreatePaymentRefundRequest::class))->toHaveCount(1)
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [])->toHaveCount(1)
+        ->and(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBeLessThanOrEqual(1);
+
+    // Hours later — Mollie no longer remembers the idempotency key.
+    $m->idempotency->honour = false;
+    Carbon::setTestNow(BillingTime::nowUtc()->addHours(3));
+    (new SweepPendingRetriesJob)->handle();
+
+    $creditNote = BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->sole();
+
+    expect($m->sentOf(CreatePaymentRefundRequest::class))->toHaveCount(1)
+        ->and(json_encode($creditNote->line_items))->toContain($m->refunds[BookingMatrix::paymentIdFor($payment)][0]->id)
+        ->and((int) $invoice->fresh()->refunded_net)->toBe((int) $invoice->amount_net)
+        ->and($billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [])->toBe([]);
+});

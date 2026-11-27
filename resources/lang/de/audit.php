@@ -58,7 +58,7 @@ return [
     'renewal_collected_for_ended_subscription' => 'Eine Verlängerung wurde für ein nicht mehr laufendes Abo eingezogen (:status) — muss erstattet werden',
     'renewal_undercollected' => 'Eine Abrechnungsperiode wurde unter dem Preis ihrer Konfiguration eingezogen — die Differenz wird gesondert nachbelastet',
     'payment_amount_mismatch' => 'Gezahlter Betrag weicht vom erwarteten Betrag ab',
-    'duplicate_payment_received' => 'Doppelte Zahlung erhalten und ignoriert',
+    'duplicate_payment_received' => 'Doppelte Zahlung erhalten — sie wird vollständig erstattet, wenn sie Geld eingezogen hat',
     'checkout_started' => 'Checkout begonnen',
     'checkout_abandoned' => 'Checkout abgebrochen',
     'one_time_order_completed' => 'Einmalkauf :product abgeschlossen',
@@ -75,6 +75,7 @@ return [
     'grant_extras_purchase_refunded' => 'Kauf von Extras nicht ausgeführt — der Gratiszeitraum war beendet; Zahlung :serial erstattet',
     'unwanted_payment_refunded' => 'Eine nicht mehr gewünschte Zahlung (:serial) wurde automatisch erstattet',
     'chargeback_reversed' => 'Rückbuchung zu Rechnung :serial zurückgenommen',
+    'chargeback_on_refunded_payment' => 'Zahlung zu Rechnung :serial zurückgebucht, obwohl sie erstattet war — doppelt ausgezahlt',
     'invoice_pdf_regenerated' => 'PDF der Rechnung :serial neu erzeugt',
 
     // Zahlungsmethode

@@ -364,6 +364,12 @@ $preview['usageChanges']['Tokens'] = [
 
 $preview['usageOverageChargeNet'];   // total usage overage charge (cents)
 $preview['usageOverageChargeGross']; // including VAT
+$preview['usageOverageAwaitsChargeInFlight']; // true: another overage charge is still open, so
+                                              // the change does not charge this now — the
+                                              // next debit does, once that one has completed
+$preview['usageOverageRequiresMandate'];      // true: no mandate, so the excess cannot be charged
+                                              // and the change is refused (also an error of
+                                              // type `usage_overage_requires_mandate`)
 ```
 
 ## Display Methods
@@ -511,11 +517,11 @@ is the ordinary case, not an exotic one — leaves a `pending` snapshot with `pa
 which `anotherChargeIsInFlight()` deliberately does not treat as in flight. So
 `RetryUsageOverageChargeJob` came back 60 seconds later and charged the same debt again.
 
-The charge therefore carries an **idempotency key** that is stable across the retries of one
-dunning cycle:
+The charge therefore carries an **idempotency key** that is stable across the retries of
+asking for one payment:
 
 ```
-usage-overage:{billable_type}:{billable_id}:{cycle_started_at}:{gross_in_cents}
+usage-overage:{billable_type}:{billable_id}:{cycle_started_at}:{gross_in_cents}[:after:{previous_payment_id}]
 ```
 
 Mollie replays the original response for a repeated key instead of acting twice, so the retry
@@ -524,7 +530,8 @@ its place:
 
 | Part | Why |
 |---|---|
-| `cycle_started_at` | The snapshot's `created_at`, which `persistPendingCharge()` inherits while a cycle continues and only re-mints after a cycle has failed. So p1 → p2 → p3 of one cycle share a key, and the next cycle's legitimate charge does not. |
+| `cycle_started_at` | The snapshot's `created_at`, which `persistPendingCharge()` inherits while a cycle continues and only re-mints after a cycle has failed. So the next cycle's legitimate charge never shares a key with this one. |
+| `previous_payment_id` | The cycle's payment before this one, from `usage_overage.previous_payment_ids` — absent for a cycle's first payment. p2 is a *new* payment after p1 failed, not a repeat of p1's request; a card fails within minutes, and with the cycle's key alone Mollie answered p2's request with p1 itself, so the cycle never made a second attempt. `persistPendingCharge()` moves the failed id out of `payment_id` into that list before it asks for the next payment, which also lets a lost answer to p2 be marked like one to p1. |
 | `gross_in_cents` | Mollie answers **400** to a reused key whose parameters differ. If more usage accrued between two attempts the amount moves, and this makes that a new key rather than a rejected request. |
 | the billable | Two customers can never collide. |
 
@@ -561,7 +568,7 @@ Mollie's payment list for that customer:
 | Mollie's answer | What happens |
 |---|---|
 | A payment matching the snapshot (metadata `type: overage` + billable, the same gross, created no earlier than the snapshot) | Its id is adopted into the snapshot and the ordinary flow takes over: poll the status, replay a lost `paid` delivery, write off a `failed` one. |
-| No such payment | The request never arrived. The marker is dropped and the debt is an ordinary un-charged one again, chargeable by the next cycle. |
+| No such payment | The request never arrived. The marker is dropped and the debt is an ordinary un-charged one again, chargeable by the next cycle — and, in the same pass, subject to the `HARD_LIMIT_DAYS` (14) limit for a payment that could not be created: past it the cycle is deferred to the renewals (past due for the debt) rather than retried by pass 3 every night. |
 | 404 / 410 for the customer | The customer was deleted at Mollie, so no payment of theirs survives either. Marker dropped, same as above. |
 | Mollie unreachable | Nothing is decided. Tomorrow's run asks again — an unanswered question is not evidence of absence. |
 

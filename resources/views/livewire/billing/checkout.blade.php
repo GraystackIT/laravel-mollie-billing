@@ -22,8 +22,6 @@ use Illuminate\Support\Facades\Log;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
-use Mollie\Api\Http\Requests\GetPaymentRequest;
-use GraystackIT\MollieBilling\Support\MollieCall;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     use ValidatesVatNumber;
@@ -69,6 +67,20 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public ?string $backUrl = null;
     public ?string $errorMessage = null;
     public bool $processing = false;
+
+    /**
+     * A changed order waits for an earlier first payment Mollie would not withdraw
+     * (`PendingPaymentForAnotherOrderException`): whether to say so, until when that payment
+     * stays payable (ISO-8601, UTC; null when Mollie did not say) and its checkout link to
+     * finish it (null when Mollie no longer offers one). Locked: the link is rendered as an
+     * href and only the server may put a Mollie URL there.
+     */
+    #[Locked]
+    public bool $pendingOtherOrder = false;
+    #[Locked]
+    public ?string $pendingOtherOrderUntil = null;
+    #[Locked]
+    public ?string $pendingOtherOrderUrl = null;
 
     /**
      * The billable created in the billing-address step (stored as ID + class for
@@ -121,6 +133,12 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     /** The billable the draft is filed for ("class:key", or "new" for a signup). */
     #[Locked]
     public string $draftSubject = 'new';
+
+    /**
+     * The customer took the promotion link's code off. It is then not put back by
+     * `adoptAutoApplyCoupon()` the next time the selection changes.
+     */
+    public bool $promotionRemoved = false;
 
     /** Something the draft keeps changed during this request. Per request, never serialised. */
     private bool $draftDirty = false;
@@ -187,6 +205,23 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             /** @var Model&Billable $existing */
             $this->billableId = (string) $existing->getKey();
             $this->billableClass = $existing->getMorphClass();
+        }
+
+        // Paid, and the subscription not there yet — the webhook still on its way, or the
+        // activation running or waiting for its retry (~7 h). `RequireActiveSubscription`
+        // sends exactly this customer here, and the submit can only lead to the return page
+        // (`PendingFirstPayment::redirectFor()`): go there now instead of walking them through
+        // a form for an order that cannot be placed. Only for a billable this visitor may act
+        // for — a refused one learns nothing about its state. A refused €0 authorisation and
+        // an activation that failed for good leave nothing in flight and show the checkout.
+        if ($existing !== null && ! $existing->hasAccessibleBillingSubscription()) {
+            $underway = app(\GraystackIT\MollieBilling\Services\Billing\PendingFirstPayment::class)->activationUnderway($existing);
+
+            if ($underway !== null) {
+                $this->redirect($underway, navigate: false);
+
+                return;
+            }
         }
 
         // The prefill, the lock and the step skip are the address question, and they stay
@@ -583,12 +618,18 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
      *
      * Validated like a typed code, so an expired or exhausted promotion is simply not
      * applied rather than surfacing an error on a page the customer never asked about.
+     *
+     * Tried again whenever the selection changes and on the confirm step, not only at
+     * mount: the promotion link arrives without a plan, so a code restricted to a plan,
+     * to an addon or to a minimum order fails against the empty selection — and was then
+     * never tried for the plan the campaign was for. The customer paid full price, and
+     * the service dropped the code from the session because the amount did not reflect it.
      */
     private function adoptAutoApplyCoupon(): void
     {
         $code = session('billing.auto_apply_coupon');
 
-        if (! is_string($code) || $code === '' || $this->applied_coupon !== null) {
+        if (! is_string($code) || $code === '' || $this->applied_coupon !== null || $this->promotionRemoved) {
             return;
         }
 
@@ -1500,6 +1541,8 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     private function refreshCouponAfterSelectionChange(): void
     {
         if ($this->applied_coupon === null) {
+            $this->adoptAutoApplyCoupon();
+
             return;
         }
 
@@ -1591,76 +1634,45 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function removeCoupon(): void
     {
         $this->draftDirty = true;
+
+        $promotion = session(StartSubscriptionCheckout::AUTO_APPLY_COUPON_SESSION_KEY);
+
+        if (is_string($promotion) && $this->applied_coupon !== null
+            && strtoupper($promotion) === strtoupper((string) $this->applied_coupon['code'])
+        ) {
+            $this->promotionRemoved = true;
+        }
+
         $this->applied_coupon = null;
         $this->couponError = null;
     }
 
     /**
-     * The hosted checkout URL of a first payment that is still awaiting the customer,
-     * or null when there is nothing to return to.
+     * Where to send the customer instead of creating a new first payment, or null.
      *
-     * A payment Mollie still reports as `open` with a checkout link (or `pending`, for a
-     * method that has left the browser) is this checkout, not a new one. Minting a second
-     * `sequenceType: first` payment for the same intent means two payments that can
-     * both be paid — the second one is caught by the activation gate, but only as a
-     * duplicate, after the money moved.
+     * The order handed over is the one `StartSubscriptionCheckout::handle()` is about to
+     * be given — the promotion link's code included, which that service falls back to —
+     * so the payment on record is reused only while it is for this very order. See
+     * `PendingFirstPayment`.
      *
-     * Every failure mode falls through to null: a Mollie hiccup must not block a
-     * customer from checking out, and the activation gate is still behind us.
+     * @throws \GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException
      */
-    private function reusablePendingCheckoutUrl(mixed $billable): ?string
+    private function reusablePendingCheckoutUrl(mixed $billable, int $amountGross): ?string
     {
-        $paymentId = $billable->getPendingFirstPaymentId();
+        $coupon = $this->applied_coupon['code'] ?? null;
 
-        if ($paymentId === null || $paymentId === '') {
-            return null;
+        if ($coupon === null || $coupon === '') {
+            $coupon = session(StartSubscriptionCheckout::AUTO_APPLY_COUPON_SESSION_KEY);
         }
 
-        try {
-            $payment = MollieCall::send(new GetPaymentRequest($paymentId));
-        } catch (\Throwable $e) {
-            Log::warning('Checkout could not probe the pending first payment', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $paymentId,
-                'error' => $e->getMessage(),
-            ]);
-
-            return null;
-        }
-
-        $status = (string) ($payment->status ?? '');
-
-        if (! in_array($status, ['open', 'pending'], true)) {
-            return null;
-        }
-
-        $url = method_exists($payment, 'getCheckoutUrl') ? $payment->getCheckoutUrl() : null;
-
-        if ($url) {
-            return $url;
-        }
-
-        // A `pending` payment has already left the hosted page (SEPA, vouchers), so it
-        // carries no checkout link — there is nothing to send the customer back to, but
-        // there is also nothing to charge them for twice. Send them to the return page,
-        // which is what polls this payment to completion.
-        if ($status === 'pending') {
-            return BillingRoute::url('return', $billable);
-        }
-
-        // `open` without a checkout link: the customer picked a method at Mollie and then
-        // left through "previous page". Mollie drops the link at that point (measured
-        // 20 November 2026: status `open`, method `creditcard`, no `_links.checkout`), so
-        // nobody can pay this payment any more and it only waits for its expiry. Sending the
-        // customer to the return page here was a dead end: that page polled the `open`
-        // payment, and every new attempt at the checkout landed on it again. A fresh payment
-        // is the way out; should the old one settle after all, the activation gate catches it.
-        Log::info('Pending first payment can no longer be paid; starting a new one', [
-            'billable_id' => $billable->getKey(),
-            'payment_id' => $paymentId,
+        return app(\GraystackIT\MollieBilling\Services\Billing\PendingFirstPayment::class)->redirectFor($billable, [
+            'plan_code' => (string) $this->plan_code,
+            'interval' => (string) $this->interval,
+            'addon_codes' => $this->addon_codes,
+            'extra_seats' => (int) $this->extra_seats,
+            'coupon_code' => $coupon !== null ? (string) $coupon : null,
+            'amount_gross' => $amountGross,
         ]);
-
-        return null;
     }
 
     /**
@@ -1952,6 +1964,14 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     private function revalidateCouponOnEnterConfirm(): void
     {
+        // Addons, seats and a minimum order are settled only now; a promotion code that
+        // needed one of them is applied here, before the total is shown.
+        if ($this->applied_coupon === null) {
+            $this->adoptAutoApplyCoupon();
+
+            return;
+        }
+
         $reason = $this->refreshAppliedCoupon();
         if ($reason !== null) {
             $this->couponError = $this->couponErrorMessage($reason);
@@ -2180,6 +2200,24 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return method_exists($billable, 'usesReverseCharge') && $billable->usesReverseCharge();
     }
 
+    /**
+     * Until when the earlier payment stays open, as the customer reads it: in the billable's
+     * display timezone, formatted in the app locale. Null when Mollie did not say.
+     */
+    public function pendingOtherOrderUntilLabel(): ?string
+    {
+        if ($this->pendingOtherOrderUntil === null) {
+            return null;
+        }
+
+        $billable = $this->resolveBillable();
+
+        return \GraystackIT\MollieBilling\Support\BillingTime::display(
+            \Carbon\CarbonImmutable::parse($this->pendingOtherOrderUntil),
+            $billable instanceof Billable ? $billable : null,
+        )?->locale(app()->getLocale())->translatedFormat(__('billing::checkout.pending_other_order_time_format'));
+    }
+
     // -------------------------------------------------------------------------
     // Final submit
     // -------------------------------------------------------------------------
@@ -2187,6 +2225,9 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function submit(StartSubscriptionCheckout $checkout, VatCalculationService $vat): mixed
     {
         $this->errorMessage = null;
+        $this->pendingOtherOrder = false;
+        $this->pendingOtherOrderUntil = null;
+        $this->pendingOtherOrderUrl = null;
 
         // Authorize FIRST — before validation, before anything mutates, and outside
         // the try below so the 403 is not swallowed by its catchall. Livewire actions
@@ -2337,13 +2378,17 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
             }
 
             try {
-                // A first payment still open at Mollie is the same checkout, not a new
-                // one. Sending the customer back to it keeps one payment per intent
-                // even when the two submits are seconds apart and the lock has already
-                // been released — a second `sequenceType: first` payment on the same
-                // mandate-to-be is exactly what the activation gate has to clean up
-                // afterwards, and it charges the customer twice if both are paid.
-                $reusable = $this->reusablePendingCheckoutUrl($billable);
+                // A first payment still open at Mollie for this order is the same
+                // checkout, not a new one. Sending the customer back to it keeps one
+                // payment per intent even when the two submits are seconds apart and the
+                // lock has already been released — a second `sequenceType: first`
+                // payment on the same mandate-to-be is exactly what the activation gate
+                // has to clean up afterwards, and it charges the customer twice if both
+                // are paid. One that is paid, or whose activation is still running, is
+                // followed on the return page; one for an order the customer has since
+                // changed is withdrawn first.
+                $amountGross = $this->totals($vat)['gross'];
+                $reusable = $this->reusablePendingCheckoutUrl($billable, $amountGross);
 
                 if ($reusable !== null) {
                     return $this->redirect($reusable, navigate: false);
@@ -2355,7 +2400,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     'addon_codes' => $this->addon_codes,
                     'extra_seats' => $this->extra_seats,
                     'coupon_code' => $this->applied_coupon['code'] ?? null,
-                    'amount_gross' => $this->totals($vat)['gross'],
+                    'amount_gross' => $amountGross,
                 ]);
 
                 // Inside the lock: the marker is what the reuse branch above reads, so
@@ -2375,12 +2420,25 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                     'class' => $billable->getMorphClass(),
                     'id' => (string) $billable->getKey(),
                 ]]);
+            } catch (\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
+                // An earlier payment for another order is still open and Mollie would not
+                // withdraw it (it never does for an open first payment — measured). Nothing
+                // new is created: the customer is told until when it stays open, and gets
+                // its link to finish it. See docs/decisions.md.
+                $this->pendingOtherOrder = true;
+                $this->pendingOtherOrderUntil = $e->expiresAt?->utc()->toIso8601String();
+                $this->pendingOtherOrderUrl = $e->checkoutUrl;
+
+                return null;
             } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
                 // Not a failure of the payment: this customer owes money and takes out
                 // nothing new until it is settled. Say that, not "payment failed".
-                $this->errorMessage = $e->getMessage();
+                $this->errorMessage = \GraystackIT\MollieBilling\Support\ExceptionMessage::for($e);
 
                 return null;
+            } catch (\GraystackIT\MollieBilling\Exceptions\ActivationInFlightException) {
+                // Paid already; the subscription is on its way. The return page follows it.
+                return $this->redirect(BillingRoute::url('return', $billable), navigate: false);
             } catch (\Throwable $e) {
                 report($e);
                 try {
@@ -2462,6 +2520,33 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     @if ($errorMessage)
         <flux:callout icon="exclamation-triangle" color="red" inline class="mt-4 mb-4">
             {{ $errorMessage }}
+        </flux:callout>
+    @endif
+
+    {{-- A changed order waits for an earlier payment Mollie would not withdraw --}}
+    @if ($pendingOtherOrder)
+        @php($until = $this->pendingOtherOrderUntilLabel())
+        <flux:callout icon="clock" color="amber" class="mt-4 mb-4" dusk="pending-other-order">
+            <flux:callout.heading>{{ __('billing::checkout.pending_other_order_heading') }}</flux:callout.heading>
+            <flux:callout.text>
+                <span dusk="pending-other-order-text">
+                    @if ($until !== null)
+                        {!! __('billing::checkout.pending_other_order_until', ['time' => '<strong dusk="pending-other-order-until">'.e($until).'</strong>']) !!}
+                    @else
+                        {{ __('billing::checkout.pending_other_order_open') }}
+                    @endif
+                    {{ $pendingOtherOrderUrl
+                        ? __('billing::checkout.pending_other_order_finish_or_wait')
+                        : __('billing::checkout.pending_other_order_wait') }}
+                </span>
+            </flux:callout.text>
+            @if ($pendingOtherOrderUrl)
+                <div class="mt-3">
+                    <flux:button size="sm" variant="primary" href="{{ $pendingOtherOrderUrl }}" dusk="pending-other-order-resume">
+                        {{ __('billing::checkout.pending_other_order_resume') }}
+                    </flux:button>
+                </div>
+            @endif
         </flux:callout>
     @endif
 

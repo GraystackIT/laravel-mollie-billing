@@ -550,6 +550,15 @@ return [
             'tests/Browser/Matrix/AdminRefundMatrixTest.php::test_pdf_download_and_regeneration',
         ],
     ],
+    'action:admin.billables.show@billableChanged' => [
+        'feature' => [
+            'tests/Feature/Admin/BillableHeaderRefreshTest.php::the page listens for the announcement and re-reads the billable for its header',
+        ],
+        'browser' => [
+            'tests/Browser/AdminHeaderRefreshTest.php::test_resuming_a_cancelled_subscription_turns_the_header_badge_active_without_a_reload',
+            'tests/Browser/AdminHeaderRefreshTest.php::test_cancelling_turns_the_header_badge_cancelled_without_a_reload',
+        ],
+    ],
     'action:admin.billables.show@mandate' => [
         'feature' => [
             'tests/Feature/Admin/OperationsAdminActionsTest.php::show: planName() answers the catalog name and mandate() what the inspector reports',

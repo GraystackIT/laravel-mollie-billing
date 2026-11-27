@@ -59,7 +59,7 @@ A renewal is plan-free when it falls before the gift's end, so a gift rounds up 
 - the tenant gets `GrantExtrasPurchaseRefundedNotification` ("your free period has ended, the amount is being refunded, you can book a plan"), the admins get an alert, and `GrantExtrasPurchaseRefunded` is dispatched and audited — each once per payment, whatever Mollie re-delivers;
 - if Mollie cannot be asked to pay the refund out, the line is parked under `subscription_meta.pending_refund_retries` and `RetryRefundLineJob` posts it later; the admin alert says the refund is still open.
 
-A second payment while a Mollie subscription already runs is still a duplicate (`DuplicatePaymentReceived`), and an ordinary upgrade from a Local plan (`UpgradeLocalToMollie::handle()`, no gift to keep) is not affected.
+A second payment while a Mollie subscription already runs is still a duplicate — booked and refunded in full (`UnwantedPaymentRefund`, reason `duplicate_payment`), with `DuplicatePaymentReceived` for the app, and an ordinary upgrade from a Local plan (`UpgradeLocalToMollie::handle()`, no gift to keep) is not affected.
 
 A gifted tenant who has no billing address yet cannot buy extras — the billing country decides the VAT. `handleKeepingGrant()` refuses with `BillingCountryRequiredException`, and the addons and seats screens show a hint with a link to the billing-details page.
 

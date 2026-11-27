@@ -264,9 +264,9 @@ new class extends Component {
         if ($purchase->eligible($billable) && $purchase->needsPayment($billable, $addonsAfter, $billable->getBillingSeatCount())) {
             try {
                 $url = $purchase->handle($billable, $addonsAfter, $billable->getBillingSeatCount());
-            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
+            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException|\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
                 // Not an error to report: the customer is told what to do first.
-                $this->toast($e->getMessage(), 'danger');
+                $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
 
                 return;
             } catch (\GraystackIT\MollieBilling\Exceptions\BillingCountryRequiredException) {
@@ -315,7 +315,7 @@ new class extends Component {
             );
         } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
             // Not an error to report: the customer is told what to do first.
-            $this->toast($e->getMessage(), 'danger');
+            $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
         } catch (\Throwable $e) {
             report($e);
             $this->toast(__('billing::portal.flash.error'), 'danger');
@@ -490,6 +490,14 @@ new class extends Component {
             'currencySymbol' => $currencySymbol,
             'catalog' => $catalog,
             'hasPendingPlanChange' => $billable?->hasPendingBillingPlanChange() ?? false,
+            // Cancelled at the period end and still running: no paid addon is booked into
+            // a period that ends anyway (decision 5) — the date the hint names, or null.
+            // A free plan says its own sentence already.
+            'graceEndsOn' => $billable !== null
+                && ! $billable->isLocalBillingSubscription()
+                && \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::appliesTo($billable)
+                    ? \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::endDate($billable)
+                    : null,
             'reverseCharge' => $reverseCharge,
             'showNetAndGross' => \GraystackIT\MollieBilling\Support\BillingPriceDisplay::forBillable($billable),
         ];
@@ -565,6 +573,14 @@ new class extends Component {
                 {{ __('billing::portal.error_past_due_expansion') }}
             </flux:callout>
         @endif
+        @if ($graceEndsOn)
+            <flux:callout icon="information-circle" color="zinc" class="mb-4" dusk="addons-grace-blocked">
+                <span>{{ __('billing::portal.error_subscription_ending_addons', ['date' => $graceEndsOn]) }}</span>
+                <flux:button :href="route(\GraystackIT\MollieBilling\Support\BillingRoute::name('index'), \GraystackIT\MollieBilling\MollieBilling::resolveUrlParameters($billable))" variant="primary" size="sm" icon="arrow-path" class="mt-3">
+                    {{ __('billing::portal.grace_withdraw_cancellation') }}
+                </flux:button>
+            </flux:callout>
+        @endif
         <div class="space-y-4">
             @foreach ($addons as $addon)
                 <flux:card class="relative p-0! hover:shadow-md transition">
@@ -594,7 +610,7 @@ new class extends Component {
                         {{-- Right: price + action --}}
                         <div class="flex items-center gap-6 sm:shrink-0">
                             @if ($addon['isActive'])
-                                <flux:badge size="sm" color="lime">{{ __('billing::portal.active') }}</flux:badge>
+                                <flux:badge size="sm" color="lime" dusk="addon-active-{{ $addon['code'] }}">{{ __('billing::portal.active') }}</flux:badge>
                             @endif
                             <div class="text-right">
                                 <div class="flex items-baseline gap-1">
@@ -628,8 +644,8 @@ new class extends Component {
                                             {{ __('billing::portal.addons_disable') }}
                                         </flux:button>
                                     </flux:modal.trigger>
-                                @elseif ($localBlocksThisAddon)
-                                    <flux:button class="w-full" size="sm" variant="ghost" disabled>
+                                @elseif ($localBlocksThisAddon || ($graceEndsOn && ! $addon['isFree'] && $addon['isAllowed']))
+                                    <flux:button class="w-full" size="sm" variant="ghost" disabled dusk="addon-enable-blocked-{{ $addon['code'] }}">
                                         {{ __('billing::portal.addons_enable') }}
                                     </flux:button>
                                 @elseif ($addon['isAllowed'])
@@ -651,7 +667,7 @@ new class extends Component {
                 </flux:card>
 
                 {{-- Enable confirm modal --}}
-                @if (! $addon['isActive'] && $addon['isAllowed'])
+                @if (! $addon['isActive'] && $addon['isAllowed'] && ! ($graceEndsOn && ! $addon['isFree']))
                     <flux:modal name="enable-addon-{{ $addon['code'] }}" class="max-w-md">
                         <div class="space-y-6">
                             <div class="space-y-2">

@@ -23,6 +23,7 @@ return [
             'activation_failed' => 'We received your payment, but your subscription could not be set up despite several attempts.',
             'change_cancelled' => 'We received the payment for a change to your subscription that you had cancelled in the meantime. The change was not carried out.',
             'subscription_ended' => 'We received the payment for a change to your subscription, but the subscription had ended in the meantime. The change was not carried out.',
+            'duplicate_payment' => 'We received a second payment for a subscription that was already active, for example from a second browser tab. Your subscription continues unchanged; the second payment is returned in full.',
         ],
     ],
     'scheduled_change_not_applied' => [

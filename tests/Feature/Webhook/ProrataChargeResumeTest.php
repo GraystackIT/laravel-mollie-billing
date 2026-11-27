@@ -669,6 +669,33 @@ it('hands a balance this run claimed but never charged to the operators, and let
     }
 })->with(['claimed by this run' => [true], 'another case' => [false]]);
 
+it('pays a refund line again whose booking a failed refund took back while the run was down', function (): void {
+    // The attempt that died had paid the line and booked it, token included. Mollie then
+    // reported that refund failed and RefundHandler reversed the booking: the token is
+    // still on the historical credit note, the money never left. Settling the line on it
+    // dropped the refund — the change went through and the customer was never refunded.
+    $billable = World::subscription('none', 'pro', 2);
+    World::change($billable, ['plan_code' => 'enterprise'], settle: null);
+
+    CrashingProrataChargeHandler::$crashBefore = 'refunds';
+    World::settle($billable, expectHttp: 500);
+    expect(count(World::$refunds['tr_cm_renewal_2'] ?? []))->toBe(1);
+
+    $dead = World::$refunds['tr_cm_renewal_2'][0];
+    $dead->status = 'failed';
+    expect(app(\GraystackIT\MollieBilling\Services\Billing\InvoiceService::class)
+        ->reverseBookedCredit($billable->refresh(), 'mollie_refund_id', (string) $dead->id))->not->toBeNull();
+
+    World::settle($billable);
+
+    expect(resumeOutcome($billable))->toMatchArray([
+        'plan' => 'enterprise',
+        'waiting' => [],
+        'refunds' => ['tr_cm_renewal_2' => ['40.64', '40.64']],
+    ]);
+    expect($billable->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [])->toBe([]);
+});
+
 it('does not send refunds again whose outcome an earlier attempt never booked', function (): void {
     // The attempt asked Mollie and died before the credit note: whether those lines were
     // paid is unknown, and the idempotency key protects them only for an hour.

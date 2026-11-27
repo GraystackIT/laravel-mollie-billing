@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\PaymentFailed;
 use GraystackIT\MollieBilling\Events\PaymentSucceeded;
 use GraystackIT\MollieBilling\Events\TrialConverted;
+use GraystackIT\MollieBilling\Models\BillingInvoice;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\SubscriptionPaymentFailedNotification;
 use GraystackIT\MollieBilling\Notifications\TrialConvertedNotification;
@@ -35,6 +36,20 @@ use Illuminate\Support\Facades\Notification;
 class SubscriptionPaymentHandler
 {
     use MutatesBillingMeta;
+
+    /**
+     * `subscription_meta` key: payment id => when a renewal arrived for a subscription that
+     * had ended, until it has been returned and the Mollie subscription cancelled.
+     *
+     * Written before the invoice, dropped once `reportRenewalForEndedSubscription()` is
+     * through. The invoice guard ends every re-delivery, so a first delivery that died
+     * between the invoice and that call — a throwing `InvoiceCreated` listener, a killed
+     * worker — left the customer charged, nothing returned and the subscription running at
+     * Mollie. The entry is what the re-delivery resumes from: the first delivery's own
+     * decision, not the status as it is now — a renewal booked while the subscription ran
+     * and delivered again after a later cancel is not one to give back.
+     */
+    public const ENDED_RENEWALS_KEY = 'renewals_after_end_unsettled';
 
     public function __construct(
         protected readonly WebhookSupport $support,
@@ -77,6 +92,75 @@ class SubscriptionPaymentHandler
     }
 
     /**
+     * Return the renewal, cancel at Mollie, tell the customer — then drop the entry that
+     * lets a re-delivery do it again. Each step is safe to repeat: the cancel takes Mollie's
+     * "already cancelled" for done, `UnwantedPaymentRefund` skips a refund that is credited
+     * or queued and announces once per payment.
+     */
+    protected function settleRenewalForEndedSubscription(Model&Billable $billable, object $payment, BillingInvoice $invoice): void
+    {
+        $this->support->reportRenewalForEndedSubscription($billable, $payment, $invoice);
+
+        $paymentId = (string) ($payment->id ?? '');
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId): ?array {
+            if (! isset($meta[self::ENDED_RENEWALS_KEY][$paymentId])) {
+                return null;
+            }
+
+            unset($meta[self::ENDED_RENEWALS_KEY][$paymentId]);
+
+            if ($meta[self::ENDED_RENEWALS_KEY] === []) {
+                unset($meta[self::ENDED_RENEWALS_KEY]);
+            }
+
+            return $meta;
+        });
+    }
+
+    /**
+     * A re-delivery of a renewal that arrived for an ended subscription and whose first
+     * delivery did not get as far as returning it. Returns whether it was one.
+     */
+    protected function resumeRenewalForEndedSubscription(Model&Billable $billable, object $payment): bool
+    {
+        $paymentId = (string) ($payment->id ?? '');
+        $stored = $billable->newQuery()
+            ->withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)
+            ->whereKey($billable->getKey())
+            ->first();
+
+        if ($paymentId === '' || ! isset(($stored?->getBillingSubscriptionMeta() ?? [])[self::ENDED_RENEWALS_KEY][$paymentId])) {
+            return false;
+        }
+
+        $invoice = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first();
+
+        if ($invoice === null) {
+            return false;
+        }
+
+        Log::warning('Webhook re-delivery: finishing the return of a renewal collected after the subscription ended', [
+            'payment_id' => $paymentId,
+            'billable_id' => $billable->getKey(),
+        ]);
+
+        $this->settleRenewalForEndedSubscription($billable, $payment, $invoice);
+
+        return true;
+    }
+
+    /**
+     * A PastDue billable that is still the trial it started as: every conversion nulls
+     * `trial_ends_at` and records `trial_converted_at`, and none has happened yet.
+     */
+    protected function isUnconvertedTrial(Billable $billable): bool
+    {
+        return $billable->getBillingTrialEndsAt() !== null
+            && empty($billable->getBillingSubscriptionMeta()['trial_converted_at'] ?? null);
+    }
+
+    /**
      * @param  array<string, mixed>  $metadata
      */
     public function paid(object $payment, Billable $billable, array $metadata): void
@@ -86,6 +170,10 @@ class SubscriptionPaymentHandler
         }
 
         if ($this->support->invoiceAlreadyExistsForPayment($payment)) {
+            if ($this->resumeRenewalForEndedSubscription($billable, $payment)) {
+                return;
+            }
+
             Log::info('Webhook re-delivery: invoice exists for recurring payment, skipping', [
                 'payment_id' => $payment->id ?? null,
                 'billable_id' => $billable->getKey(),
@@ -249,6 +337,36 @@ class SubscriptionPaymentHandler
         // (`$newPeriodStart` / `$newPeriodEnd` are resolved further up, where the discount
         // is priced as of the same cycle.)
 
+        // Decided before the invoice, and recorded: see ENDED_RENEWALS_KEY.
+        // The entry records the decision the invoice below is written under, so it follows
+        // this delivery's decision both ways. A first delivery that judged the renewal ended
+        // and died before its invoice left an entry behind; when the subscription was resumed
+        // in between, this delivery books the renewal live — and the stale entry made a later
+        // call of the same webhook (a partial refund) give back a period the customer paid
+        // for and uses, and cancel the subscription at Mollie.
+        $endedAtArrival = ! $this->isBillableState($billable);
+        $paymentId = (string) ($payment->id ?? '');
+
+        $this->mutateBillingMeta($billable, static function (array $meta) use ($paymentId, $endedAtArrival): ?array {
+            if ($endedAtArrival) {
+                $meta[self::ENDED_RENEWALS_KEY][$paymentId] = BillingTime::nowUtc()->toIso8601String();
+
+                return $meta;
+            }
+
+            if (! isset($meta[self::ENDED_RENEWALS_KEY][$paymentId])) {
+                return null;
+            }
+
+            unset($meta[self::ENDED_RENEWALS_KEY][$paymentId]);
+
+            if ($meta[self::ENDED_RENEWALS_KEY] === []) {
+                unset($meta[self::ENDED_RENEWALS_KEY]);
+            }
+
+            return $meta;
+        });
+
         $invoice = $this->salesInvoiceService->createForPayment(
             $payment,
             'subscription',
@@ -272,8 +390,8 @@ class SubscriptionPaymentHandler
         // entitled to a document for it (and an operator needs something to refund
         // against). Everything that would treat this as a live subscription is skipped,
         // and the operators are told.
-        if (! $this->isBillableState($billable)) {
-            $this->support->reportRenewalForEndedSubscription($billable, $payment, $invoice);
+        if ($endedAtArrival) {
+            $this->settleRenewalForEndedSubscription($billable, $payment, $invoice);
 
             return;
         }
@@ -367,11 +485,12 @@ class SubscriptionPaymentHandler
                     'billable' => $billable->getKey(),
                     'error' => $e->getMessage(),
                 ]);
-                $meta = $billable->getBillingSubscriptionMeta();
-                $meta['pending_subscription_patch'] = [
+                $patch = [
                     'reason' => 'recurring_coupon_expiry_reset',
-                    // Which discount this reset ends, so a retry cannot end a newer one.
-                    'coupon_id' => $meta['active_recurring_coupon']['coupon_id'] ?? null,
+                    // Which discount this reset ends, so a retry cannot end a newer one —
+                    // the one this renewal priced, hence read from this instance and not
+                    // from the row below, which may already carry a newer one.
+                    'coupon_id' => $billable->getBillingSubscriptionMeta()['active_recurring_coupon']['coupon_id'] ?? null,
                     'plan_code' => $planCode,
                     'interval' => $interval,
                     'addons' => $addonCodes,
@@ -379,7 +498,17 @@ class SubscriptionPaymentHandler
                     'first_attempt_at' => BillingTime::nowUtc()->toIso8601String(),
                     'last_error' => $e->getMessage(),
                 ];
-                $billable->forceFill(['subscription_meta' => $meta])->save();
+
+                // Locked, on the row as stored. Written back from this instance — loaded
+                // when the webhook started — it undid every write committed since: a seat
+                // change that PATCHed Mollie under the very lock this reset timed out on
+                // lost its `seat_count` (and the compare-and-set at the end then found the
+                // starting count and kept it), a cleared overage slot came back as pending.
+                $this->mutateBillingMeta($billable, static function (array $meta) use ($patch): array {
+                    $meta['pending_subscription_patch'] = $patch;
+
+                    return $meta;
+                });
             }
         }
 
@@ -408,8 +537,15 @@ class SubscriptionPaymentHandler
         $derivedSeatCount = $invoice->deriveSeatCount();
 
         $currentStatus = $billable->getBillingSubscriptionStatus();
-        $wasTrial = $currentStatus === SubscriptionStatus::Trial;
         $wasPastDue = $currentStatus === SubscriptionStatus::PastDue;
+        // A trial whose first charge failed (`failed()`) or never reported back within the
+        // grace days (`ProcessTrialLifecycleJob`) is PastDue without ever having converted —
+        // and the paid charge that recovers it IS its conversion. Asked of the status alone,
+        // that row became Active with `trial_ends_at`, the `trial_quota` grant and no
+        // `trial_converted_at`, and the next plan change rebalanced a paid full period
+        // against the trial's prorated grant (WalletPlanChangeAdjuster).
+        $wasTrial = $currentStatus === SubscriptionStatus::Trial
+            || ($wasPastDue && $this->isUnconvertedTrial($billable));
 
         $updates = ['subscription_period_starts_at' => $periodStartsAt];
 
@@ -833,11 +969,16 @@ class SubscriptionPaymentHandler
         if (! ($billable instanceof Model)) {
             return;
         }
-        $meta = $billable->getBillingSubscriptionMeta();
-        if (! array_key_exists('pending_first_charge_coupon', $meta)) {
-            return;
-        }
-        unset($meta['pending_first_charge_coupon']);
-        $billable->forceFill(['subscription_meta' => $meta])->save();
+        // Locked, on the row as stored — for the same reason as the coupon-expiry reset in
+        // paid(): this instance's meta is the one loaded when the webhook started.
+        $this->mutateBillingMeta($billable, static function (array $meta): ?array {
+            if (! array_key_exists('pending_first_charge_coupon', $meta)) {
+                return null;
+            }
+
+            unset($meta['pending_first_charge_coupon']);
+
+            return $meta;
+        });
     }
 }

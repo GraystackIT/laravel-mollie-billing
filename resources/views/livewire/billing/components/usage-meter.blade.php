@@ -155,9 +155,9 @@ new class extends Component {
     <div class="mt-2 flex items-center justify-between text-xs tabular-nums">
         {{-- Labelled "Trial" while the quota shown is the prorated trial grant, so the
              number is not read as the plan's full monthly allowance gone missing. --}}
-        <span class="text-zinc-400">{{ __($m['isTrial'] ? 'billing::portal.usage_trial_remaining' : 'billing::portal.usage_plan_remaining', ['remaining' => number_format($m['remainingIncluded']), 'total' => number_format($m['included'])]) }}@if ($m['carriedOver'] > 0) <span dusk="usage-meter-{{ $type }}-carried-over">{{ __('billing::portal.usage_carried_over', ['count' => number_format($m['carriedOver'])]) }}</span>@endif</span>
+        <span class="text-zinc-400" dusk="usage-meter-{{ $type }}-plan">{{ __($m['isTrial'] ? 'billing::portal.usage_trial_remaining' : 'billing::portal.usage_plan_remaining', ['remaining' => number_format($m['remainingIncluded']), 'total' => number_format($m['included'])]) }}@if ($m['carriedOver'] > 0) <span dusk="usage-meter-{{ $type }}-carried-over">{{ __('billing::portal.usage_carried_over', ['count' => number_format($m['carriedOver'])]) }}</span>@endif</span>
         @if ($m['purchasedBalance'] > 0)
-            <span class="text-sky-500">{{ __('billing::portal.usage_purchased_remaining', ['remaining' => number_format($m['remainingPurchased']), 'total' => number_format($m['purchasedBalance'])]) }}</span>
+            <span class="text-sky-500" dusk="usage-meter-{{ $type }}-purchased">{{ __('billing::portal.usage_purchased_remaining', ['remaining' => number_format($m['remainingPurchased']), 'total' => number_format($m['purchasedBalance'])]) }}</span>
         @endif
     </div>
 </div>

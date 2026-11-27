@@ -317,3 +317,47 @@ it('does not wait on a refusal that is not about a pending payment', function ()
 
     Bus::assertNotDispatched(SyncSeatsJob::class);
 });
+
+it('puts a seat change back on the queue when another change holds the subscription-change lock', function (): void {
+    Bus::fake();
+    Mollie::shouldReceive('send')->never();
+
+    // A portal plan change, ApplyScheduledChangesJob or a renewal's applyAtRenewal() is in
+    // the middle of its Mollie calls. update() refuses the seat change outright — and with
+    // tries = 1 that used to be a failed_jobs row and a member seated, never billed.
+    $billable = openJobPathsBillable();
+    $held = Cache::lock('billing:subscription-change:'.$billable->getKey(), 180);
+    expect($held->get())->toBeTrue();
+
+    SyncSeatsJob::byDelta(TestBillable::class, $billable->getKey(), 1)->handle(app(SyncSeats::class));
+
+    Bus::assertDispatched(SyncSeatsJob::class, function (SyncSeatsJob $copy) use ($billable): bool {
+        return $copy->delta === 1
+            && $copy->requeues === 1
+            && $copy->waits === 0
+            && (string) $copy->billableId === (string) $billable->getKey()
+            && $copy->delay === SyncSeatsJob::REQUEUE_DELAY_SECONDS;
+    });
+
+    expect($billable->fresh()->getBillingSeatCount())->toBe(3);
+
+    $held->release();
+});
+
+it('gives up on a subscription-change lock that never frees, loudly', function (): void {
+    Bus::fake();
+    Mollie::shouldReceive('send')->never();
+
+    $billable = openJobPathsBillable();
+    $held = Cache::lock('billing:subscription-change:'.$billable->getKey(), 180);
+    $held->get();
+
+    $job = new SyncSeatsJob(TestBillable::class, $billable->getKey(), 0, 1, SyncSeatsJob::MAX_REQUEUES);
+
+    expect(fn () => $job->handle(app(SyncSeats::class)))
+        ->toThrow(\GraystackIT\MollieBilling\Exceptions\SubscriptionChangeInProgressException::class);
+
+    Bus::assertNotDispatched(SyncSeatsJob::class);
+
+    $held->release();
+});

@@ -241,10 +241,30 @@ new class extends Component {
             $this->flash = __('billing::portal.flash.resubscribed');
             $this->flashError = false;
         } catch (\Throwable $e) {
-            report($e);
-            $this->flash = __('billing::portal.flash.error');
+            // The refusals a customer can act on are said as what they are: the old
+            // subscription still being cancelled at Mollie (try again in a few minutes), a
+            // resume already running in another tab, a row that is no longer cancelled (a
+            // stale page). Nothing has been written in any of them.
+            $refusal = $this->resubscribeRefusal($billable, $e);
+
+            if ($refusal === null) {
+                report($e);
+            }
+
+            $this->flash = $refusal ?? __('billing::portal.flash.error');
             $this->flashError = true;
         }
+    }
+
+    private function resubscribeRefusal(Billable $billable, \Throwable $e): ?string
+    {
+        return match (true) {
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\PreviousSubscriptionStillRunningException => __('billing::portal.flash.resubscribe_previous_still_running'),
+            $e instanceof \GraystackIT\MollieBilling\Exceptions\SubscriptionChangeInProgressException => __('billing::portal.flash.resubscribe_in_progress'),
+            $billable instanceof \Illuminate\Database\Eloquent\Model
+                && $billable->fresh()?->getBillingSubscriptionStatus() !== SubscriptionStatus::Cancelled => __('billing::portal.flash.resubscribe_not_cancelled'),
+            default => null,
+        };
     }
 
     public function forceImmediateMollieCharge(MollieSubscriptionGate $gate): void
@@ -408,7 +428,9 @@ new class extends Component {
             'gross' => BillingMoney::format($inv->amount_gross, $inv->currency),
             'status' => $inv->status->label(),
             'statusColor' => $inv->status->color(),
-            'pdfUrl' => $inv->hasPdf() ? $inv->getDownloadUrl() : null,
+            // Not gated on hasPdf(): a document not rendered yet (deferred, or a render that
+            // failed) is rendered by the download route on the click — decision 13.
+            'pdfUrl' => $inv->getDownloadUrl(),
         ])->all();
 
         // Through the catalog, never the config file: apps may rebind
@@ -473,26 +495,26 @@ new class extends Component {
             && $resolvedMismatch->resolved_at->lessThanOrEqualTo($endsAt);
         $reactivateInGrace = $endsAt?->isFuture() ?? false;
 
-        $invoicesUnderMismatch = $openMismatch !== null
-            ? $b->billingInvoices()
-                ->where('mismatch_id', $openMismatch->id)
-                ->where('amount_net', '>', 0)
-                ->get()
+        // Exactly what resolving will refund: the invoices it corrects that still have
+        // something left, each with what is left of it. A refund made before the mismatch
+        // (goodwill, a refund by line) is not paid out again, and an invoice refunded in
+        // full is not refunded or reissued at all — so neither is named here.
+        $refundsOnResolve = $openMismatch !== null
+            ? collect(app(CountryMatchService::class)->refundsOnResolve($b, $openMismatch))
             : collect();
-        $mismatchInvoiceCount = $invoicesUnderMismatch->count();
+        $mismatchInvoiceCount = $refundsOnResolve->count();
 
-        // Every one of these invoices is about to be refunded and reissued, so the
-        // figure has to name the same money the refunds will move. Grouping by the
+        // The figure has to name the same money the refunds will move. Grouping by the
         // invoice's own currency is what keeps that true: a single sum rendered with one
         // symbol turned 20.00 GBP plus 10.00 EUR into "€30.00", an amount nobody is
         // owed. The `:count` above stays a count over all of them.
-        $mismatchInvoiceTotal = $invoicesUnderMismatch
-            ->groupBy(fn ($invoice): string => BillingMoney::normalizeCurrency($invoice->currency))
+        $mismatchInvoiceTotal = $refundsOnResolve
+            ->groupBy(fn (array $refund): string => BillingMoney::normalizeCurrency($refund['invoice']->currency))
             // The query is unordered, so without this the two amounts swap places between
             // renders of the same data.
             ->sortKeys()
             ->map(fn ($group, string $currency): string => BillingMoney::format(
-                (int) $group->sum('amount_gross'),
+                (int) $group->sum('gross'),
                 $currency,
             ))
             ->join(' + ');
@@ -629,11 +651,11 @@ new class extends Component {
                 </div>
             </flux:callout>
         @elseif ($d['isPastDue'])
-            <flux:callout icon="exclamation-triangle" color="red" inline>
+            <flux:callout icon="exclamation-triangle" color="red" inline dusk="past-due-banner">
                 {{ __('billing::portal.past_due_banner') }}
             </flux:callout>
         @elseif ($d['isCancelled'] && $d['subscriptionEndsFuture'])
-            <flux:callout icon="information-circle" color="zinc" inline>
+            <flux:callout icon="information-circle" color="zinc" inline dusk="cancelled-banner">
                 {{ __('billing::portal.cancelled_banner', ['date' => $d['subscriptionEnds']]) }}
             </flux:callout>
         @endif
@@ -719,7 +741,7 @@ new class extends Component {
 
         {{-- Country correction re-charge in progress --}}
         @if ($d['hasPendingCorrections'])
-            <flux:callout variant="secondary" icon="arrow-path">
+            <flux:callout variant="secondary" icon="arrow-path" dusk="country-recharge-pending">
                 {{ __('billing::portal.country_mismatch.recharge_pending') }}
             </flux:callout>
         @endif
@@ -734,7 +756,7 @@ new class extends Component {
                     <div class="flex items-center gap-3">
                         <flux:heading size="xl">{{ $d['planName'] }}</flux:heading>
                         @if ($d['hasSubscription'])
-                            <flux:badge size="sm" :color="$d['statusColor']">{{ $d['statusLabel'] }}</flux:badge>
+                            <flux:badge size="sm" :color="$d['statusColor']" dusk="subscription-status">{{ $d['statusLabel'] }}</flux:badge>
                         @endif
                     </div>
                     @if ($d['interval'])
@@ -785,7 +807,25 @@ new class extends Component {
                                 <flux:text class="mt-1 font-semibold">{{ $d['subscriptionEnds'] }}</flux:text>
                             @else
                                 <flux:subheading size="sm" class="text-zinc-400 dark:text-zinc-500">{{ __('billing::portal.next_billing') }}</flux:subheading>
-                                @if ($billable && $billable->isLocalBillingSubscription() && $d['status']?->value !== 'cancelled')
+                                @if ($d['isCancelled'])
+                                    {{-- Nothing is billed any more: the period end is when the
+                                         subscription ends, not a charge, so no date of a charge
+                                         and no amount — and the way back while there is one. --}}
+                                    <flux:text class="mt-1 font-semibold" dusk="next-billing-ends">
+                                        @if ($d['subscriptionEnds'] === null)
+                                            —
+                                        @elseif ($d['subscriptionEndsFuture'])
+                                            {{ __('billing::portal.next_billing_subscription_ends_on', ['date' => $d['subscriptionEnds']]) }}
+                                        @else
+                                            {{ __('billing::portal.next_billing_subscription_ended_on', ['date' => $d['subscriptionEnds']]) }}
+                                        @endif
+                                    </flux:text>
+                                    @if ($d['subscriptionEndsFuture'])
+                                        <flux:button size="xs" variant="ghost" icon="arrow-path" class="mt-1 -ms-2" wire:click="resubscribe" dusk="next-billing-withdraw-cancellation">
+                                            {{ __('billing::portal.grace_withdraw_cancellation') }}
+                                        </flux:button>
+                                    @endif
+                                @elseif ($billable && $billable->isLocalBillingSubscription())
                                     <flux:text class="mt-1 font-semibold text-zinc-500 dark:text-zinc-400">{{ __('billing::portal.free_plan_recurring_charge') }}</flux:text>
                                 @else
                                     <flux:text class="mt-1 font-semibold">{{ $d['nextBilling'] }}</flux:text>
@@ -989,7 +1029,7 @@ new class extends Component {
                         </flux:select>
                     </div>
 
-                    <flux:callout variant="secondary" icon="information-circle">
+                    <flux:callout variant="secondary" icon="information-circle" dusk="country-fix-confirm-note">
                         {{ __('billing::portal.country_mismatch.confirm_note', [
                             'count' => $d['mismatch']['invoice_count'],
                             'total' => $d['mismatch']['invoice_total_gross'],

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Exceptions;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -17,10 +18,13 @@ use RuntimeException;
  * addon and a plan or interval change (which starts a fresh, fully charged period) stay
  * available.
  *
- * The message is the customer-facing text, translated.
+ * The message is the customer-facing text in English, for the log; a screen shows the same
+ * sentence in the reader's language through its translation key.
  */
-class PastDueExpansionNotAllowedException extends RuntimeException
+class PastDueExpansionNotAllowedException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
     /** "Nothing new can be booked until the open payment is settled." */
     public const BOOKING = 'billing::portal.error_past_due_booking';
 
@@ -54,6 +58,9 @@ class PastDueExpansionNotAllowedException extends RuntimeException
         // Seats and addons keep their own sentence; everything else that is a booking —
         // a plan change, a product, a new checkout, extras on a grant — says the
         // general one (`self::BOOKING`).
-        parent::__construct((string) __($messageKey ?? 'billing::portal.error_past_due_expansion'));
+        $key = $messageKey ?? 'billing::portal.error_past_due_expansion';
+
+        parent::__construct((string) __($key, [], 'en'));
+        $this->withTranslation($key);
     }
 }

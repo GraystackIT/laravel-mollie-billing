@@ -242,6 +242,42 @@ class FakeMollie
     }
 
     /**
+     * The customer's bank pulls a paid payment back: a chargeback of `$amountValue` (all of
+     * the payment unless given). Like Mollie, the payment's status stays `paid`; only
+     * `amountChargedBack` and the payment's chargeback list change. Returns the id.
+     */
+    public static function chargeback(string $paymentId, ?string $amountValue = null): string
+    {
+        $payment = self::payment($paymentId);
+        $id = WorkbenchSetting::nextId('chb');
+
+        DB::table('fake_mollie_chargebacks')->insert([
+            'id' => $id,
+            'payment_id' => $paymentId,
+            'amount_value' => $amountValue ?? (string) $payment['amount_value'],
+            'amount_currency' => (string) $payment['amount_currency'],
+            'reversed_at' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return $id;
+    }
+
+    /**
+     * The merchant disputed the chargeback and won: Mollie states `reversedAt` on it.
+     *
+     * `amountChargedBack` on the payment is left as it was. Whether Mollie lowers it after a
+     * reversal is not measured (docs/decisions.md, "Chargebacks"); leaving it is the harder
+     * case for the webhook, whose outcome signature then does not move.
+     */
+    public static function reverseChargeback(string $chargebackId): void
+    {
+        DB::table('fake_mollie_chargebacks')->where('id', $chargebackId)
+            ->update(['reversed_at' => now(), 'updated_at' => now()]);
+    }
+
+    /**
      * Deliver the legacy webhook for a payment to the package's controller —
      * inline, not over HTTP: the Dusk server is a single PHP process, so a
      * self-request would deadlock. The controller then fetches the payment back
@@ -289,9 +325,51 @@ class FakeMollie
             'mandateId' => $row['mandate_id'],
             'subscriptionId' => $row['subscription_id'],
             'countryCode' => $row['country_code'],
+            // Mollie answers whether an open payment can still be cancelled; most methods
+            // say no while they are under way. The fake says no unless a test switches it
+            // on (`payments_cancelable`), so the default stays what the suite was built on.
+            'isCancelable' => $row['status'] === 'open' && WorkbenchSetting::get('payments_cancelable') === '1',
             'paidAt' => $row['paid_at'],
             '_links' => $links,
-        ];
+        ] + self::expiresAt($row) + self::chargedBack($row);
+    }
+
+    /**
+     * `expiresAt`, on an open interactive payment only — as the API sends it. Mollie keeps
+     * an open first payment payable for 15 minutes after its creation (measured, see
+     * `SandboxBrowserTestCase::completeMollieCheckout()`).
+     *
+     * @return array<string, string>
+     */
+    private static function expiresAt(array $row): array
+    {
+        if ($row['status'] !== 'open' || $row['sequence_type'] === 'recurring' || empty($row['created_at'])) {
+            return [];
+        }
+
+        return ['expiresAt' => \Carbon\CarbonImmutable::parse((string) $row['created_at'], 'UTC')->addMinutes(15)->toIso8601String()];
+    }
+
+    /**
+     * `amountChargedBack`, present only on a payment with a chargeback — as the API leaves
+     * it out otherwise.
+     *
+     * @return array<string, mixed>
+     */
+    private static function chargedBack(array $row): array
+    {
+        $values = DB::table('fake_mollie_chargebacks')->where('payment_id', $row['id'])->pluck('amount_value');
+
+        if ($values->isEmpty()) {
+            return [];
+        }
+
+        $minor = $values->sum(fn ($value): int => (int) round(((float) $value) * 100));
+
+        return ['amountChargedBack' => [
+            'value' => number_format($minor / 100, 2, '.', ''),
+            'currency' => $row['amount_currency'],
+        ]];
     }
 
     public static function customerJson(array $row): array
@@ -351,6 +429,20 @@ class FakeMollie
             'metadata' => json_decode((string) ($row['metadata'] ?? '[]'), true),
             'canceledAt' => $row['canceled_at'],
             'createdAt' => $row['created_at'],
+        ];
+    }
+
+    public static function chargebackJson(array $row): array
+    {
+        return [
+            'resource' => 'chargeback',
+            'id' => $row['id'],
+            'amount' => ['value' => $row['amount_value'], 'currency' => $row['amount_currency']],
+            'settlementAmount' => ['value' => '-'.$row['amount_value'], 'currency' => $row['amount_currency']],
+            'reason' => ['code' => 'MD06', 'description' => 'Refund request by end customer'],
+            'paymentId' => $row['payment_id'],
+            'createdAt' => $row['created_at'],
+            'reversedAt' => $row['reversed_at'],
         ];
     }
 

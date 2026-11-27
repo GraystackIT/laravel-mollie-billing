@@ -14,6 +14,7 @@ use Illuminate\Support\ServiceProvider;
 use Mollie\Api\MollieApiClient;
 use Mpociot\VatCalculator\VatCalculator;
 use Workbench\App\FakeMollie\FakeMollieHttpAdapter;
+use Workbench\App\Http\IdentifyWorkbenchTenant;
 use Workbench\App\Models\AdminUser;
 use Workbench\App\Support\SharedClock;
 use Workbench\App\Support\WorkbenchSetting;
@@ -140,6 +141,79 @@ class WorkbenchServiceProvider extends ServiceProvider
         }
     }
 
+    /**
+     * Opt-in mailbox (`mailbox` = 1): every notification either process sends is written to
+     * `workbench_mailbox` — class, channel and recipient. Mail itself goes to the log, and a
+     * notification the Dusk server sends (an operator's refund in the admin panel) is out of
+     * reach of `Notification::fake()` in the test process.
+     *
+     * `admin_mailbox` (an address) gives the SERVER an operator to notify: the package's
+     * `notifyAdmin()` answers nobody unless an app says who that is, and a test process
+     * cannot set a callback in the other process. The test process sets its own callback
+     * when it wants one, as before.
+     */
+    private function recordMailbox(): void
+    {
+        \Illuminate\Support\Facades\Event::listen(
+            \Illuminate\Notifications\Events\NotificationSent::class,
+            static function (\Illuminate\Notifications\Events\NotificationSent $event): void {
+                try {
+                    if (WorkbenchSetting::get('mailbox') !== '1') {
+                        return;
+                    }
+
+                    $notifiable = $event->notifiable;
+                    $recipient = $notifiable instanceof \Illuminate\Notifications\AnonymousNotifiable
+                        ? (string) json_encode($notifiable->routes)
+                        : ($notifiable instanceof \Illuminate\Database\Eloquent\Model
+                            ? $notifiable::class.'#'.$notifiable->getKey()
+                            : get_debug_type($notifiable));
+
+                    \Illuminate\Support\Facades\DB::table('workbench_mailbox')->insert([
+                        'notification' => $event->notification::class,
+                        'channel' => (string) $event->channel,
+                        'recipient' => $recipient,
+                        'created_at' => now(),
+                    ]);
+                } catch (\Throwable) {
+                    // No table yet (migrate:fresh is running): nothing to record.
+                }
+            },
+        );
+
+        if (PHP_SAPI !== 'cli-server') {
+            return;
+        }
+
+        try {
+            $admin = WorkbenchSetting::get('admin_mailbox');
+        } catch (\Throwable) {
+            return;
+        }
+
+        if (is_string($admin) && $admin !== '') {
+            MollieBilling::notifyAdminUsing(static fn (): array => [
+                (new \Illuminate\Notifications\AnonymousNotifiable)->route('mail', $admin),
+            ]);
+        }
+
+        // `billing_admins_mailbox` = 1 gives the SERVER the customer's billing admins: the
+        // billable's own address. Without it `notifyBillingAdmins()` answers nobody there, and
+        // the mails a portal action sends the customer (a cancellation, say) could not be
+        // counted at all.
+        try {
+            $billingAdmins = WorkbenchSetting::get('billing_admins_mailbox');
+        } catch (\Throwable) {
+            return;
+        }
+
+        if ($billingAdmins === '1') {
+            MollieBilling::notifyBillingAdminsUsing(static fn ($billable): array => [
+                (new \Illuminate\Notifications\AnonymousNotifiable)->route('mail', (string) ($billable->email ?? 'billing@workbench.test')),
+            ]);
+        }
+    }
+
     private function applyConfigOverrides(): void
     {
         try {
@@ -168,18 +242,45 @@ class WorkbenchServiceProvider extends ServiceProvider
     {
         $this->bindIpGeolocation();
         $this->applyClientIpOverride();
+        $this->recordMailbox();
 
         // The portal needs no Laravel auth — the billable comes from the session
         // the `/_wb/act-as/{billable}` route sets, and authorization is "you are
         // acting as exactly this billable". The admin panel authenticates a real
         // user (AdminUser) through the default guard instead.
-        MollieBilling::resolveBillableUsing(function ($request = null): ?TestBillable {
+        //
+        // On the tenant-prefixed mount (`tenant_mount` = 1) the billable comes from the URL
+        // instead, as `IdentifyWorkbenchTenant` found it — a multi-tenant app's shape.
+        $tenantMount = self::tenantMount();
+
+        MollieBilling::resolveBillableUsing(function ($request = null) use ($tenantMount): ?TestBillable {
+            if ($tenantMount) {
+                return app()->bound(IdentifyWorkbenchTenant::CONTAINER_KEY)
+                    ? app(IdentifyWorkbenchTenant::CONTAINER_KEY)
+                    : null;
+            }
+
             $id = session('wb_billable');
 
             return $id === null ? null : TestBillable::find($id);
         });
 
+        // Who may act for a billable. By default: whoever acts as exactly this billable.
+        // `wb_member` (a list of ids, `/_wb/member-of/{ids}`) separates the user's
+        // memberships from the tenant the session points at — a member of one organization
+        // whose session (or URL) names another. `deny_billing_access` = 1 revokes the
+        // billing permission for every request from then on, mid-session.
         MollieBilling::authUsing(function ($request, $billable): bool {
+            if (self::settingIs('deny_billing_access', '1')) {
+                return false;
+            }
+
+            $members = session('wb_member');
+
+            if (is_array($members)) {
+                return in_array((string) $billable->getKey(), array_map('strval', $members), true);
+            }
+
             return (string) session('wb_billable') === (string) $billable->getKey();
         });
 
@@ -241,6 +342,12 @@ class WorkbenchServiceProvider extends ServiceProvider
         // Webhook outside the web group: no session, no CSRF — like production.
         MollieBilling::webhookRoutes();
 
+        if ($tenantMount) {
+            $this->registerTenantMount();
+
+            return;
+        }
+
         Route::middleware('web')->group(function (): void {
             MollieBilling::dashboardRoutes();
             MollieBilling::checkoutRoutes();
@@ -248,6 +355,56 @@ class WorkbenchServiceProvider extends ServiceProvider
 
             require dirname(__DIR__, 2).'/routes/web.php';
         });
+    }
+
+    /**
+     * Opt-in (`tenant_mount` = 1, Dusk server only): the portal and the checkout mounted the
+     * way a multi-tenant app mounts them — under `{organization:slug}`, named `tenant.` —
+     * with `urlParametersUsing()` for the URLs built without a request (Mollie's redirect,
+     * a queued mail). Off by default, so every other scenario keeps `/billing`.
+     *
+     * The test process never mounts it: it boots before the test writes the setting, and
+     * the URLs it builds (webhooks it delivers) are the server's business anyway.
+     */
+    private function registerTenantMount(): void
+    {
+        MollieBilling::urlParametersUsing(static fn ($billable): array => $billable instanceof TestBillable
+            ? ['organization' => IdentifyWorkbenchTenant::slugOf($billable)]
+            : []);
+
+        if (class_exists(\Livewire\Livewire::class)) {
+            \Livewire\Livewire::addPersistentMiddleware([IdentifyWorkbenchTenant::class]);
+        }
+
+        Route::middleware(['web', IdentifyWorkbenchTenant::class])
+            ->prefix('{organization:slug}')
+            ->name('tenant.')
+            ->group(function (): void {
+                MollieBilling::dashboardRoutes();
+                MollieBilling::checkoutRoutes();
+            });
+
+        Route::middleware('web')->group(function (): void {
+            MollieBilling::promotionRoutes();
+
+            require dirname(__DIR__, 2).'/routes/web.php';
+        });
+    }
+
+    /** Whether this request runs the tenant-prefixed mount (see registerTenantMount()). */
+    public static function tenantMount(): bool
+    {
+        return PHP_SAPI === 'cli-server' && self::settingIs('tenant_mount', '1');
+    }
+
+    /** A cross-process switch, read safely while `migrate:fresh` has no table yet. */
+    public static function settingIs(string $key, string $value): bool
+    {
+        try {
+            return WorkbenchSetting::get($key) === $value;
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     private function configureApplication(): void

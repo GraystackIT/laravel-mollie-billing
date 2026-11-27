@@ -490,3 +490,70 @@ it('tells an operator about a mandate without a subscription only when the retri
     );
     Notification::assertSentToTimes(new AnonymousNotifiable, AdminPlanChangeFailedNotification::class, 1);
 });
+
+it('gives the mandate back when a trial could not be activated after every retry, so the next checkout still offers the trial', function (): void {
+    $world = activationRetryTrialWorld('2027-01-10 10:00:00');
+    $world->refuse[CreateSubscriptionRequest::class] = PHP_INT_MAX;
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_lr_trial'])->assertStatus(200);
+    $world->billable = $world->billable->fresh();
+
+    // The €0 authorisation saved its mandate before the subscription was refused.
+    expect($world->billable->mollie_mandate_id)->toBe('mdt_longrun')
+        ->and($world->billable->hasAccessibleBillingSubscription())->toBeFalse();
+
+    Bus::fake([\GraystackIT\MollieBilling\Jobs\RevokeMollieMandateJob::class]);
+
+    activationRetryJob($world, 'tr_lr_trial')->failed(new RuntimeException('Mollie keeps refusing'));
+    $billable = $world->billable->fresh();
+
+    // Left in place, the mandate denied every later checkout the trial the customer never
+    // had (StartSubscriptionCheckout and trialApplies() grant one only without a mandate),
+    // and the first period was charged in full. Like GrantExtrasPurchaseRefund: not kept,
+    // and revoked at Mollie rather than left behind unreferenced.
+    expect($billable->hasMollieMandate())->toBeFalse()
+        ->and($billable->getBillingSubscriptionMeta())->not->toHaveKey(ActivationRetry::META_KEY);
+    Bus::assertDispatched(
+        \GraystackIT\MollieBilling\Jobs\RevokeMollieMandateJob::class,
+        fn ($job): bool => $job->mollieCustomerId === 'cst_longrun' && $job->mandateId === 'mdt_longrun',
+    );
+});
+
+it('does not give back a mandate that a newer activation adopted while the old attempt asked Mollie', function (string $newerMandate): void {
+    $world = activationRetryTrialWorld('2027-01-10 10:00:00');
+    $world->refuse[CreateSubscriptionRequest::class] = PHP_INT_MAX;
+
+    $this->postJson(route('billing.webhook'), ['id' => 'tr_lr_trial'])->assertStatus(200);
+    $world->billable = $world->billable->fresh();
+    expect($world->billable->mollie_mandate_id)->toBe('mdt_longrun');
+
+    Bus::fake([\GraystackIT\MollieBilling\Jobs\RevokeMollieMandateJob::class]);
+
+    // While the spent ladder looks the payment up at Mollie — nothing held, as it must be —
+    // a second checkout completes: a new mandate and a Mollie subscription are written.
+    $billableId = $world->billable->getKey();
+    $world->intercept = function (object $request) use ($billableId, $world, $newerMandate): mixed {
+        if ($request instanceof \Mollie\Api\Http\Requests\GetPaymentRequest) {
+            $world->intercept = null;
+            $other = TestBillable::query()->findOrFail($billableId);
+            $meta = $other->getBillingSubscriptionMeta();
+            $meta['mollie_subscription_id'] = 'sub_newer';
+            $other->forceFill(['mollie_mandate_id' => $newerMandate, 'subscription_meta' => $meta])->save();
+        }
+
+        return null;
+    };
+
+    activationRetryJob($world, 'tr_lr_trial')->failed(new RuntimeException('Mollie keeps refusing'));
+    $billable = $world->billable->fresh();
+
+    // The old attempt's view (mandate mdt_longrun, no subscription) is stale by now: the
+    // newer subscription and the mandate it charges against are kept, nothing is revoked —
+    // revoking the adopted mandate would have Mollie cancel the newer subscription.
+    expect($billable->mollie_mandate_id)->toBe($newerMandate)
+        ->and($billable->getBillingSubscriptionMeta()['mollie_subscription_id'] ?? null)->toBe('sub_newer');
+    Bus::assertNotDispatched(\GraystackIT\MollieBilling\Jobs\RevokeMollieMandateJob::class);
+})->with([
+    'a new mandate' => ['mdt_newer'],
+    'the same mandate, adopted' => ['mdt_longrun'],
+]);

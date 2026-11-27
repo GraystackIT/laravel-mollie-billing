@@ -26,6 +26,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Data\Money as MollieMoney;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
+use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
 
 /**
  * Collects what a period was charged too little — as its own payment, with its own
@@ -179,18 +180,43 @@ class UndercollectionCharge
                 webhookUrl: route(BillingRoute::webhook()),
             ), sprintf('undercollection:%s:%s:%s:%d', $billable->getMorphClass(), (string) $billable->getKey(), $key, $amountGross));
         } catch (\Throwable $e) {
-            Log::error('The balance of an undercollected period could not be charged', [
-                'billable_id' => $billable->getKey(),
-                'invoice_id' => $invoice?->getKey(),
-                'shortfall_net' => $shortfall,
-                'error' => $e->getMessage(),
-            ]);
+            // A refusal and a lost answer throw alike: Mollie may hold the payment. Asked
+            // before anything is said — read as "not created", the operators were told to
+            // charge by hand a balance Mollie was collecting, a double charge. An unanswered
+            // question is not "none" either (`InvoiceService::resolveChargeInCreation()`).
+            try {
+                $payment = $this->createdBefore($billable, $key);
+                $lookupFailed = null;
+            } catch (\Throwable $lookupError) {
+                $payment = null;
+                $lookupFailed = $lookupError;
+            }
 
-            $this->record($billable, $key, ['outcome' => 'reported', 'obstacle' => 'payment_not_created', 'error' => mb_substr($e->getMessage(), 0, 300)]);
-            $this->announce($billable, $invoice, $expectedNet, $collectedNet, $shortfall, $reason, null);
-            $this->tellAdmins($billable, $invoice, $shortfall, $reason, 'payment_not_created');
+            if ($payment === null) {
+                $obstacle = $lookupFailed === null ? 'payment_not_created' : 'payment_unknown';
 
-            return true;
+                Log::error('The balance of an undercollected period could not be charged', [
+                    'billable_id' => $billable->getKey(),
+                    'invoice_id' => $invoice?->getKey(),
+                    'shortfall_net' => $shortfall,
+                    'obstacle' => $obstacle,
+                    'error' => $e->getMessage(),
+                    'lookup_error' => $lookupFailed?->getMessage(),
+                ]);
+
+                $this->record($billable, $key, [
+                    'outcome' => 'reported',
+                    'obstacle' => $obstacle,
+                    'error' => mb_substr($e->getMessage(), 0, 300),
+                    // Kept for a payment that may still arrive: `paid()` books it with
+                    // the lines and the period it was priced for, not from fallback lines.
+                    ...($lookupFailed !== null ? $this->chargedDetails($lines, $shortfall, $amountGross, $currency, $reason, $invoice) : []),
+                ]);
+                $this->announce($billable, $invoice, $expectedNet, $collectedNet, $shortfall, $reason, null);
+                $this->tellAdmins($billable, $invoice, $shortfall, $reason, $obstacle);
+
+                return true;
+            }
         }
 
         $paymentId = is_object($payment) ? (string) ($payment->id ?? '') : '';
@@ -198,16 +224,7 @@ class UndercollectionCharge
         $this->record($billable, $key, [
             'outcome' => 'charged',
             'payment_id' => $paymentId,
-            // `line` is the first one: what the screens and `configurationLeft()` read.
-            'line' => $lines[0],
-            'lines' => $lines,
-            'amount_net' => $shortfall,
-            'amount_gross' => $amountGross,
-            'currency' => $currency,
-            'reason' => $reason,
-            'invoice_id' => $invoice?->getKey(),
-            'period_start' => $invoice?->period_start?->toIso8601String(),
-            'period_end' => $invoice?->period_end?->toIso8601String(),
+            ...$this->chargedDetails($lines, $shortfall, $amountGross, $currency, $reason, $invoice),
         ]);
 
         Log::info('Charging the balance of an undercollected period', [
@@ -222,6 +239,89 @@ class UndercollectionCharge
         $this->tellCustomer($billable, $amountGross, $currency, $reason);
 
         return true;
+    }
+
+    /**
+     * What a case records about the balance it charges.
+     *
+     * @param  list<array<string, mixed>>  $lines
+     * @return array<string, mixed>
+     */
+    private function chargedDetails(array $lines, int $shortfall, int $amountGross, string $currency, string $reason, ?BillingInvoice $invoice): array
+    {
+        return [
+            // `line` is the first one: what the screens and `configurationLeft()` read.
+            'line' => $lines[0],
+            'lines' => $lines,
+            'amount_net' => $shortfall,
+            'amount_gross' => $amountGross,
+            'currency' => $currency,
+            'reason' => $reason,
+            'invoice_id' => $invoice?->getKey(),
+            'period_start' => $invoice?->period_start?->toIso8601String(),
+            'period_end' => $invoice?->period_end?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * The payment Mollie holds for a case whose creation threw — or null when it holds
+     * none. Found by the case key in its metadata.
+     *
+     * @throws \Throwable when Mollie cannot be asked
+     */
+    private function createdBefore(Billable $billable, string $key): ?object
+    {
+        $customerId = (string) ($billable->getMollieCustomerId() ?? '');
+
+        if ($customerId === '') {
+            return null;
+        }
+
+        $payments = MollieCall::send(new GetPaginatedCustomerPaymentsRequest($customerId, limit: 50));
+
+        if (! is_iterable($payments)) {
+            $payments = is_object($payments) ? ($payments->data ?? ($payments->payments ?? [])) : [];
+        }
+
+        foreach (is_iterable($payments) ? $payments : [] as $payment) {
+            $metadata = (array) json_decode((string) json_encode($payment->metadata ?? []), true);
+
+            if ((string) ($metadata[self::METADATA_KEY] ?? '') === $key
+                && (string) ($metadata['billable_id'] ?? '') === (string) $billable->getKey()
+            ) {
+                return $payment;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * A payment of a case that was recorded without one — its creation's answer was lost —
+     * is that case's payment: recorded as charged, so the screens follow it from here.
+     *
+     * @param  array<string, mixed>  $case
+     */
+    private function adoptArrivedPayment(Model $billable, string $key, array $case, object $payment): void
+    {
+        if ($key === '' || $case === [] || ($case['outcome'] ?? null) === 'charged') {
+            return;
+        }
+
+        $this->mutateBillingMeta($billable, function (array $meta) use ($key, $payment): ?array {
+            $current = $meta[self::META_KEY][$key] ?? null;
+
+            if (! is_array($current) || ($current['outcome'] ?? null) === 'charged') {
+                return null;
+            }
+
+            unset($current['obstacle'], $current['error']);
+            $current['outcome'] = 'charged';
+            $current['payment_id'] = (string) $payment->id;
+            $meta[self::META_KEY][$key] = $current;
+
+            return $meta;
+        });
     }
 
     /**
@@ -247,6 +347,7 @@ class UndercollectionCharge
 
         $key = (string) ($metadata[self::METADATA_KEY] ?? '');
         $case = (array) ($billable->getBillingSubscriptionMeta()[self::META_KEY][$key] ?? []);
+        $this->adoptArrivedPayment($billable, $key, $case, $payment);
         // One line per component since the balance of seats and addons names them;
         // a case claimed before that carries its single `line`.
         $lines = array_values(array_filter((array) ($case['lines'] ?? []), 'is_array'));
@@ -310,6 +411,8 @@ class UndercollectionCharge
         if (! empty($case['failed_at']) && ! empty($case['left_at'])) {
             return;
         }
+
+        $this->adoptArrivedPayment($billable, $key, $case, $payment);
 
         if ($key !== '') {
             $this->record($billable, $key, [

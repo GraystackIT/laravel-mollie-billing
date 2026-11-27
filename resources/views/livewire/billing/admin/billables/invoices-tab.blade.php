@@ -4,10 +4,12 @@ use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsLineAmountException;
+use GraystackIT\MollieBilling\Exceptions\RefundInProgressException;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
 use GraystackIT\MollieBilling\Services\Billing\RefundInvoiceService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\ExceptionMessage;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Livewire\WithPagination;
@@ -158,6 +160,25 @@ new class extends Component {
             + (int) str_pad($fracPart, $digits, '0');
     }
 
+    /**
+     * The rule for writing an amount, spoken for the invoice's currency: the key itself for
+     * two decimals, `<key>_whole` for a currency without any (JPY), `<key>_digits` with
+     * `:digits` for any other scale (KWD). "Up to two decimals" on a yen invoice was refused
+     * by the very parser it described.
+     *
+     * @param  array<string, mixed>  $replace
+     */
+    public static function amountRuleText(string $key, ?string $currency, array $replace = []): string
+    {
+        $digits = BillingMoney::fractionDigits($currency);
+
+        return (string) match ($digits) {
+            2 => __($key, $replace),
+            0 => __($key.'_whole', $replace),
+            default => __($key.'_digits', $replace + ['digits' => $digits]),
+        };
+    }
+
     public function billable(): mixed
     {
         $class = config('mollie-billing.billable_model');
@@ -261,7 +282,7 @@ new class extends Component {
 
         $amountCents = $this->parseAmountToMinor($raw, $invoice->currency);
         if ($amountCents === false) {
-            $this->error = __('billing::admin.billables.invoices.flash.invalid_amount', [
+            $this->error = self::amountRuleText('billing::admin.billables.invoices.flash.invalid_amount', $invoice->currency, [
                 // The example the operator is meant to retype has to be typable: on a
                 // zero-decimal currency "10,50" is exactly what this parser rejects.
                 'example' => BillingMoney::number(10.5, $invoice->currency),
@@ -349,10 +370,11 @@ new class extends Component {
             $this->error = $remaining > 0
                 ? __('billing::admin.billables.invoices.flash.exceeds_remaining', ['amount' => BillingMoney::format($remaining, $invoice->currency)])
                 : __('billing::admin.billables.invoices.flash.already_refunded');
-        } catch (InvalidRefundTargetException $e) {
-            $this->error = $e->getMessage();
-        } catch (\InvalidArgumentException $e) {
-            $this->error = $e->getMessage();
+        } catch (InvalidRefundTargetException|\InvalidArgumentException|RefundInProgressException $e) {
+            // A refusal, said in the operator's language — the exception message is the
+            // English one for the log. A refund already running on this invoice is not a
+            // failure to report either: the operator waits for it and looks again.
+            $this->error = ExceptionMessage::forOperator($e);
         } catch (\Throwable $e) {
             report($e);
             $this->error = __('billing::admin.billables.invoices.flash.refund_failed');
@@ -467,9 +489,9 @@ new class extends Component {
                                 </flux:table.cell>
                                 <flux:table.cell align="end">
                                     @php
-                                        $pdfUrl = $inv->hasPdf()
-                                            ? route(\GraystackIT\MollieBilling\Support\BillingRoute::admin('invoice.download'), ['invoice' => $inv])
-                                            : null;
+                                        // Not gated on hasPdf(): the download route renders a missing
+                                        // document on the click (decision 13).
+                                        $pdfUrl = route(\GraystackIT\MollieBilling\Support\BillingRoute::admin('invoice.download'), ['invoice' => $inv]);
                                     @endphp
                                     <div class="flex items-center justify-end gap-1">
                                         @if ($refundable && ! $fullyRefunded)
@@ -531,7 +553,7 @@ new class extends Component {
                 <div>
                     <flux:heading size="lg">{{ $modalTitle }}</flux:heading>
                     <flux:text class="text-zinc-500 dark:text-zinc-400">
-                        {{ __('billing::admin.billables.invoices.modal.description') }}
+                        {{ $this::amountRuleText('billing::admin.billables.invoices.modal.description', $currencyCode) }}
                     </flux:text>
                 </div>
 
@@ -582,7 +604,7 @@ new class extends Component {
                             autocomplete="off"
                             wire:model="refundAmount"
                             :label="__('billing::admin.billables.invoices.modal.amount_label')"
-                            :placeholder="BillingMoney::number(10.5)"
+                            :placeholder="BillingMoney::number(10.5, $currencyCode)"
                             :suffix="$currencyCode"
                             required
                         />
@@ -598,8 +620,8 @@ new class extends Component {
                         />
                     </div>
                     <flux:text size="sm" class="text-zinc-500 dark:text-zinc-400">
-                        {{ __('billing::admin.billables.invoices.modal.hint', [
-                            'example' => BillingMoney::number(10.5),
+                        {{ $this::amountRuleText('billing::admin.billables.invoices.modal.hint', $currencyCode, [
+                            'example' => BillingMoney::number(10.5, $currencyCode),
                             'remaining' => $moneyFormat($remainingNet),
                         ]) }}
                         @if ($chosenLine !== null)

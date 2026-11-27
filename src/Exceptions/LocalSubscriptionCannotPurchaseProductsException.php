@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Exceptions;
 
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -15,8 +16,15 @@ use RuntimeException;
  * conflicts with the package's contract: paid extras (add-ons, seats, products)
  * require an upgrade to a paid plan via UpgradeLocalToMollie first.
  */
-class LocalSubscriptionCannotPurchaseProductsException extends RuntimeException
+class LocalSubscriptionCannotPurchaseProductsException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.local_cannot_purchase_products';
+    }
+
     public function __construct(
         public readonly Billable $billable,
         public readonly string $productCode,

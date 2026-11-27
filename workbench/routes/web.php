@@ -29,8 +29,33 @@ Route::get('/_wb/act-as/{billable}', function (int $billable) {
     abort_unless(TestBillable::whereKey($billable)->exists(), 404);
     session(['wb_billable' => $billable]);
 
+    // On the tenant-prefixed mount the portal lives under the organization's slug, and the
+    // user is a member of exactly this one (see WorkbenchServiceProvider::registerTenantMount()).
+    if (\Workbench\App\Providers\WorkbenchServiceProvider::tenantMount()) {
+        session(['wb_member' => [$billable]]);
+
+        return redirect()->to('/'.\Workbench\App\Http\IdentifyWorkbenchTenant::slugOf(TestBillable::findOrFail($billable)).'/billing');
+    }
+
     return redirect()->route('billing.index');
 })->name('wb.act-as');
+
+// The user's memberships, apart from the tenant the session points at (`wb_billable`):
+// `MollieBilling::authUsing()` then admits exactly these billables. Comma-separated ids.
+Route::get('/_wb/member-of/{ids}', function (string $ids) {
+    session(['wb_member' => array_values(array_filter(explode(',', $ids), 'strlen'))]);
+
+    return response('MEMBER-OF '.$ids);
+})->name('wb.member-of');
+
+// Point the session's tenant resolver at another billable WITHOUT authorizing anything —
+// what a stale or tampered "current organization" in an app's session looks like. Fetched
+// from the page the user has open, so that page's next click carries it.
+Route::get('/_wb/point-tenant/{billable}', function (int $billable) {
+    session(['wb_billable' => $billable]);
+
+    return response('TENANT '.$billable);
+})->name('wb.point-tenant');
 
 Route::get('/_wb/admin-login', function () {
     $admin = AdminUser::query()->firstOrCreate(
@@ -72,6 +97,13 @@ Route::get('/_wb/logout', function (Request $request) {
 // app protects with `billing.active`. The portal is exempt from that middleware, so
 // without this the suite had nothing to prove the gate against.
 Route::get('/_wb/app', fn () => response('APP-AREA-OK'))->middleware('billing.active')->name('wb.app');
+
+// A page of "the application" behind the package's feature gate — what a consuming app
+// protects with `billing.feature:<key>`. Softdrinks is an addon's only feature, so this is
+// where "is the addon really on?" is answered the way the application asks it.
+Route::get('/_wb/feature/softdrinks', fn () => response('FEATURE-SOFTDRINKS-OK'))
+    ->middleware('billing.feature:softdrinks')
+    ->name('wb.feature.softdrinks');
 
 // ── Fake Mollie hosted checkout ─────────────────────────────────────────────
 

@@ -9,6 +9,7 @@ use GraystackIT\MollieBilling\Enums\InvoiceKind;
 use GraystackIT\MollieBilling\Enums\InvoiceStatus;
 use GraystackIT\MollieBilling\Enums\RefundReasonCode;
 use GraystackIT\MollieBilling\Events\InvoiceRefunded;
+use GraystackIT\MollieBilling\Exceptions\InvalidBillingInputException;
 use GraystackIT\MollieBilling\Exceptions\InvalidRefundTargetException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsInvoiceAmountException;
 use GraystackIT\MollieBilling\Exceptions\RefundExceedsLineAmountException;
@@ -25,7 +26,11 @@ use Illuminate\Support\Facades\Notification;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
+use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Support\MollieCall;
+use GraystackIT\MollieBilling\Support\MollieRefusal;
+use Illuminate\Database\Eloquent\Model;
 
 /**
  * Issue refunds against paid Mollie invoices.
@@ -39,6 +44,23 @@ use GraystackIT\MollieBilling\Support\MollieCall;
  */
 class RefundInvoiceService
 {
+    use MutatesBillingMeta;
+
+    /**
+     * Longest reason text sent along as refund metadata. Mollie takes 1 KB of metadata in
+     * all; a longer operator note is left out (the reason code still goes).
+     */
+    private const METADATA_REASON_TEXT_MAX_BYTES = 500;
+
+    /**
+     * The metadata the refund being posted carries — set for the length of one
+     * {@see callMollieRefund()} only, so that method's signature (an override seam) stays
+     * as it is.
+     *
+     * @var array<string, string>|null
+     */
+    private ?array $refundMetadata = null;
+
     public function __construct(
         private readonly InvoiceService $invoices,
         private readonly WalletUsageService $wallet,
@@ -64,7 +86,7 @@ class RefundInvoiceService
      */
     public function refund(BillingInvoice $invoice, array $request): BillingInvoice
     {
-        $reasonCode = $request['reason_code'] ?? throw new \InvalidArgumentException('reason_code is required.');
+        $reasonCode = $request['reason_code'] ?? throw new InvalidBillingInputException('reason_code is required.', 'billing::exceptions.refund.reason_required');
         $reasonText = $request['reason_text'] ?? null;
         $walletCredits = $request['wallet_credits'] ?? [];
         $notifyUser = $request['notify_user'] ?? true;
@@ -72,15 +94,16 @@ class RefundInvoiceService
         $lineIndex = isset($request['line_index']) ? (int) $request['line_index'] : null;
 
         if ($lineIndex !== null && $lineItems !== null) {
-            throw new \InvalidArgumentException('line_index and line_items cannot be combined: a refund by line builds its own credit line.');
+            throw new InvalidBillingInputException('line_index and line_items cannot be combined: a refund by line builds its own credit line.', 'billing::exceptions.refund.line_and_items');
         }
 
         if ($reasonCode === RefundReasonCode::Other && ($reasonText === null || trim($reasonText) === '')) {
-            throw new \InvalidArgumentException('reason_text is required when reason_code is Other.');
+            throw new InvalidBillingInputException('reason_text is required when reason_code is Other.', 'billing::exceptions.refund.reason_text_required');
         }
 
         if ($invoice->status !== InvoiceStatus::Paid) {
-            throw new InvalidRefundTargetException('Only paid invoices can be refunded.');
+            throw (new InvalidRefundTargetException('Only paid invoices can be refunded.'))
+                ->withTranslation('billing::exceptions.refund.only_paid');
         }
 
         // Its own payment, or — for a settled plan-switch document — the payment its charges
@@ -89,7 +112,8 @@ class RefundInvoiceService
         // the same condition. Refusing it here left the operator a button that could only
         // answer with an error.
         if ($invoice->refundablePaymentId() === null) {
-            throw new InvalidRefundTargetException('Invoice has no Mollie payment to refund against: it collected none, and no invoice it was settled out of did.');
+            throw (new InvalidRefundTargetException('Invoice has no Mollie payment to refund against: it collected none, and no invoice it was settled out of did.'))
+                ->withTranslation('billing::exceptions.refund.no_payment');
         }
 
         // The admin alert for a failed Mollie refund has to survive the rollback
@@ -187,7 +211,7 @@ class RefundInvoiceService
                 $refundAmountNet = $request['amount_net'] ?? $lineRemaining ?? $fresh->remainingRefundableNet();
 
                 if ($refundAmountNet <= 0) {
-                    throw new \InvalidArgumentException('Refund amount must be positive.');
+                    throw new InvalidBillingInputException('Refund amount must be positive.', 'billing::exceptions.refund.amount_positive');
                 }
 
                 if ($refundAmountNet > $fresh->remainingRefundableNet()) {
@@ -239,7 +263,7 @@ class RefundInvoiceService
             // refund of the same amount: a retry of a failed attempt sees the same figure,
             // a genuine second refund sees the first one's increment. So Mollie replays
             // the original refund for the former and creates a new one for the latter.
-            $idempotencyKey = sprintf(
+            $stableKey = sprintf(
                 // The payment id is in the key because the invoice's row id means nothing to
                 // Mollie: two installations on one Mollie account (staging beside production,
                 // a restored database) both have an invoice 1, and Mollie answers the second
@@ -251,6 +275,24 @@ class RefundInvoiceService
                 (int) $plan['already_refunded_net'],
                 $reasonCode->value,
             );
+
+            // …moved on by every refusal Mollie gave this same refund. A 4xx binds its key to
+            // the refusal for an hour (measured 26 November 2026), so the operator's retry
+            // once the balance is topped up got the refusal replayed. A timeout, a 5xx or a
+            // lost answer leaves the count alone: that retry has to replay. See MollieRefusal.
+            $refusals = MollieRefusal::refusalsFor(
+                self::refusalRecords($plan['billable'])[(string) $invoice->getKey()] ?? null,
+                $stableKey,
+            );
+            $idempotencyKey = MollieRefusal::key($stableKey, $refusals);
+
+            // The reason goes to Mollie with the refund. When this call's answer is lost (or
+            // Phase 3 fails), Mollie's payment webhook books the refund instead — and without
+            // it booked every such refund as "synced from Mollie dashboard", reason Other.
+            // A country correction's own refund then read as one made *before* the
+            // correction, and the retry charged nothing again — see
+            // InvoiceService::creditedOutsideCorrection().
+            $this->refundMetadata = self::metadataFor($reasonCode, $reasonText);
 
             try {
                 Mollie::setIdempotencyKey($idempotencyKey);
@@ -264,12 +306,18 @@ class RefundInvoiceService
             } catch (\Throwable $e) {
                 Log::warning('Mollie refund failed for invoice '.$invoice->id, ['exception' => $e->getMessage()]);
 
+                if (MollieRefusal::isDefinite($e)) {
+                    $this->recordRefusal($plan['billable'], $invoice, $stableKey);
+                }
+
                 if ($plan['billable'] !== null) {
                     $mollieFailure = ['billable' => $plan['billable'], 'exception' => $e, 'invoice' => $invoice];
                 }
 
                 throw $e;
             } finally {
+                $this->refundMetadata = null;
+
                 // Whatever happened. The SDK clears the key from a *response*, and a 4xx is
                 // converted to a throw before that runs — so a rejected refund left its key
                 // on the shared client and the next mutating request through it carried it,
@@ -326,22 +374,35 @@ class RefundInvoiceService
                 return $creditNote;
             });
 
+            if ($refusals > 0) {
+                $this->forgetRefusals($plan['billable'], $invoice);
+            }
+
             // ── Phase 4: the document, then the announcements ────────────────────────────
             // Both outside every transaction. The money has left Mollie by now, so anything
             // throwing here — a render failure, an app listener on InvoiceRefunded pushing to
             // a CRM — must not be able to undo the booking. It used to roll back the credit
             // note and the `refunded_net` increment while the customer kept the refund, and
             // the admin's retry click then paid it out a second time.
+            //
+            // Nor reach the caller: the refund succeeded, and a throw here told the admin
+            // screen and SupersededRenewalRefund it had failed — the operator retried under a
+            // new key (`already_refunded_net` had moved) and paid again, and the customer was
+            // never told. Each announcement is isolated, so one failing does not skip the next.
             $this->invoices->issueCreditNoteDocument($creditNote, $invoice->refresh());
 
             if ($plan['billable'] !== null) {
-                event(new InvoiceRefunded($plan['billable'], $invoice, $creditNote, $request));
+                InvoiceService::announceBooked(new InvoiceRefunded($plan['billable'], $invoice, $creditNote, $request));
 
                 if ($notifyUser) {
-                    $recipients = MollieBilling::notifyBillingAdmins($plan['billable']);
+                    try {
+                        $recipients = MollieBilling::notifyBillingAdmins($plan['billable']);
 
-                    if (! empty($recipients)) {
-                        Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $plan['billable'], $creditNote));
+                        if (! empty($recipients)) {
+                            Notification::send($recipients, MollieBilling::resolveNotification(RefundProcessedNotification::class, $plan['billable'], $creditNote));
+                        }
+                    } catch (\Throwable $e) {
+                        rescue(static fn () => report($e), null, false);
                     }
                 }
             }
@@ -350,6 +411,79 @@ class RefundInvoiceService
         } finally {
             $lock->release();
         }
+    }
+
+    /**
+     * `subscription_meta` key: invoice id => the refusal record of its refund in progress
+     * (`['key' => stable key, 'refusals' => n, 'at' => …]`, {@see MollieRefusal}).
+     */
+    public const REFUSALS_META_KEY = 'refund_key_refusals';
+
+    /** A record older than this is dropped on the next write — Mollie keeps a key an hour. */
+    private const REFUSAL_RECORD_TTL_HOURS = 24;
+
+    /** @return array<string, mixed> */
+    private static function refusalRecords(?Billable $billable): array
+    {
+        return $billable === null ? [] : (array) ($billable->getBillingSubscriptionMeta()[self::REFUSALS_META_KEY] ?? []);
+    }
+
+    /**
+     * Count a definite refusal of this refund where the next attempt reads it.
+     *
+     * Never throws: the refusal itself is what the caller has to see. Without a billable to
+     * keep it on, the next attempt keeps the old key — refused again inside the hour, as
+     * before this rule, and never paid twice.
+     */
+    private function recordRefusal(?Billable $billable, BillingInvoice $invoice, string $stableKey): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        rescue(function () use ($billable, $invoice, $stableKey): void {
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($invoice, $stableKey): array {
+                $cutoff = BillingTime::nowUtc()->subHours(self::REFUSAL_RECORD_TTL_HOURS);
+                $records = array_filter(
+                    (array) ($meta[self::REFUSALS_META_KEY] ?? []),
+                    static fn ($record): bool => is_array($record) && BillingTime::toUtc((string) ($record['at'] ?? '1970-01-01'))->greaterThan($cutoff),
+                );
+
+                $id = (string) $invoice->getKey();
+                $records[$id] = MollieRefusal::recordRefusal($records[$id] ?? null, $stableKey);
+                $meta[self::REFUSALS_META_KEY] = $records;
+
+                return $meta;
+            });
+        }, null, true);
+    }
+
+    /** The refund went through: its refusals are history. */
+    private function forgetRefusals(?Billable $billable, BillingInvoice $invoice): void
+    {
+        if (! $billable instanceof Model) {
+            return;
+        }
+
+        rescue(function () use ($billable, $invoice): void {
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($invoice): ?array {
+                $records = (array) ($meta[self::REFUSALS_META_KEY] ?? []);
+
+                if (! array_key_exists((string) $invoice->getKey(), $records)) {
+                    return null;
+                }
+
+                unset($records[(string) $invoice->getKey()]);
+
+                if ($records === []) {
+                    unset($meta[self::REFUSALS_META_KEY]);
+                } else {
+                    $meta[self::REFUSALS_META_KEY] = $records;
+                }
+
+                return $meta;
+            });
+        }, null, true);
     }
 
     /**
@@ -472,7 +606,8 @@ class RefundInvoiceService
     public function refundOverageUnits(BillingInvoice $invoice, string $usageType, int $units, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
         if ($invoice->invoice_kind !== InvoiceKind::Overage) {
-            throw new InvalidRefundTargetException('refundOverageUnits only applies to overage invoices.');
+            throw (new InvalidRefundTargetException('refundOverageUnits only applies to overage invoices.'))
+                ->withTranslation('billing::exceptions.refund.only_overage');
         }
 
         $this->assertRefundableUnits($invoice, [$usageType => $units]);
@@ -499,7 +634,8 @@ class RefundInvoiceService
     public function refundOverageUnitsBulk(BillingInvoice $invoice, array $unitsPerType, RefundReasonCode $reason, ?string $reasonText = null): BillingInvoice
     {
         if ($invoice->invoice_kind !== InvoiceKind::Overage) {
-            throw new InvalidRefundTargetException('refundOverageUnitsBulk only applies to overage invoices.');
+            throw (new InvalidRefundTargetException('refundOverageUnitsBulk only applies to overage invoices.'))
+                ->withTranslation('billing::exceptions.refund.only_overage');
         }
 
         $this->assertRefundableUnits($invoice, $unitsPerType);
@@ -543,13 +679,17 @@ class RefundInvoiceService
 
         foreach ($unitsPerType as $type => $units) {
             if (! is_int($units) || $units <= 0) {
-                throw new \InvalidArgumentException("Units to refund for {$type} must be a positive integer.");
+                throw new InvalidBillingInputException("Units to refund for {$type} must be a positive integer.", 'billing::exceptions.refund.units_positive', ['type' => (string) $type]);
             }
 
             $refundable = ($billed[(string) $type] ?? 0) - (int) ($credited[(string) $type] ?? 0);
 
             if ($units > $refundable) {
-                throw new \InvalidArgumentException("Cannot refund {$units} units of {$type}: only {$refundable} remain refundable on this invoice.");
+                throw new InvalidBillingInputException(
+                    "Cannot refund {$units} units of {$type}: only {$refundable} remain refundable on this invoice.",
+                    'billing::exceptions.refund.units_exceed',
+                    ['units' => $units, 'type' => (string) $type, 'remaining' => max(0, $refundable)],
+                );
             }
         }
     }
@@ -563,7 +703,8 @@ class RefundInvoiceService
             }
         }
 
-        throw new InvalidRefundTargetException("Usage type {$usageType} not found in invoice line items.");
+        throw (new InvalidRefundTargetException("Usage type {$usageType} not found in invoice line items."))
+            ->withTranslation('billing::exceptions.refund.usage_type_not_found', ['type' => $usageType]);
     }
 
     /**
@@ -653,8 +794,27 @@ class RefundInvoiceService
             paymentId: $paymentId,
             description: $description,
             amount: new Money($currency, InvoiceService::molliePrice($grossCents, $currency)),
+            metadata: $this->refundMetadata,
         ));
 
         return is_object($refund) ? ($refund->id ?? null) : null;
+    }
+
+    /**
+     * The refund metadata that lets `RefundHandler` book a refund of ours under its own
+     * reason when it is the one to book it ({@see \GraystackIT\MollieBilling\Services\Webhook\RefundHandler::reasonOf()}).
+     *
+     * @return array<string, string>
+     */
+    private static function metadataFor(RefundReasonCode $reasonCode, ?string $reasonText): array
+    {
+        $metadata = ['reason_code' => $reasonCode->value];
+        $reasonText = $reasonText === null ? '' : trim($reasonText);
+
+        if ($reasonText !== '' && strlen($reasonText) <= self::METADATA_REASON_TEXT_MAX_BYTES) {
+            $metadata['reason_text'] = $reasonText;
+        }
+
+        return $metadata;
     }
 }

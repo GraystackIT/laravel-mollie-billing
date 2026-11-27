@@ -4,10 +4,24 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Exceptions;
 
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
-class NonEuCountryException extends RuntimeException
+class NonEuCountryException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.non_eu_country';
+    }
+
+    /** @return array<string, string|int|float> */
+    protected function defaultTranslationParameters(): array
+    {
+        return ['country' => $this->country];
+    }
+
     public function __construct(
         public readonly string $country,
     ) {

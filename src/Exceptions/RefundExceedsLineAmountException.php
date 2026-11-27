@@ -12,6 +12,11 @@ namespace GraystackIT\MollieBilling\Exceptions;
  */
 class RefundExceedsLineAmountException extends RefundExceedsInvoiceAmountException
 {
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.refund_exceeds_line';
+    }
+
     public function __construct(
         public readonly int $lineIndex,
         public readonly int $remainingNet,

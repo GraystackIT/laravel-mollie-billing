@@ -134,6 +134,57 @@ class InvoicesPortalMatrixTest extends BrowserTestCase
         });
     }
 
+    /**
+     * Decision 13: the PDF link is shown for an invoice whose document is not on the disk
+     * yet (a deferred render still to come, or one that failed), and the click renders it.
+     */
+    public function test_the_pdf_link_of_an_invoice_without_a_document_renders_it_on_the_click(): void
+    {
+        $billable = $this->opsSubscriber('starter');
+        $invoice = $this->opsRenew($billable, '11.78');
+        $serial = (string) $invoice->serial_number;
+        $disk = Storage::disk((string) $invoice->pdf_disk);
+
+        // What a failed or not-yet-run render leaves: the booking, and no document.
+        $disk->delete((string) $invoice->pdf_path);
+        $invoice->forceFill(['pdf_disk' => null, 'pdf_path' => null])->save();
+        expect($invoice->fresh()->hasPdf())->toBeFalse();
+
+        $download = route('billing.invoice.download', ['invoice' => $invoice]);
+        $downloadPath = (string) parse_url($download, PHP_URL_PATH);
+
+        $this->browse(function (Browser $browser) use ($billable, $invoice, $downloadPath): void {
+            // The dashboard's recent invoices list offers it …
+            $this->actAs($browser, $billable, '/billing');
+            $browser->waitFor('a[href$="'.$downloadPath.'"]', 15);
+
+            // … and so does the invoice page, pointing at the download route.
+            $browser->visit('/billing/invoices')
+                ->waitFor('[dusk="invoice-'.$invoice->id.'-pdf"]', 15)
+                ->pause(300);
+            $this->shot($browser, 'PDF link before the document exists');
+
+            $href = (string) $browser->attribute('[dusk="invoice-'.$invoice->id.'-pdf"]', 'href');
+            expect((string) parse_url($href, PHP_URL_PATH))->toBe($downloadPath);
+
+            $first = $this->opsFetch($browser, $href);
+            $second = $this->opsFetch($browser, $href);
+
+            expect($first['status'])->toBe(200)
+                ->and($first['head'])->toStartWith('%PDF')
+                ->and($second['status'])->toBe(200)
+                ->and($second['length'])->toBe($first['length']);
+        });
+
+        $invoice->refresh();
+
+        // Rendered and kept, under the serial the booking drew.
+        expect($invoice->hasPdf())->toBeTrue()
+            ->and(Storage::disk((string) $invoice->pdf_disk)->exists((string) $invoice->pdf_path))->toBeTrue()
+            ->and((string) $invoice->serial_number)->toBe($serial)
+            ->and($this->pdfText($invoice))->toContain($this->squash($serial));
+    }
+
     public function test_an_empty_invoice_page_says_so(): void
     {
         $billable = $this->opsSubscriber('starter');

@@ -23,6 +23,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
+use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
+use Mollie\Api\Http\Requests\GetPaymentRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 /**
@@ -41,6 +43,12 @@ use Mollie\Laravel\Facades\Mollie;
  *    it, and the assertions read the **ledger** (`transactions`) rather than the balance;
  *  - Mollie is faked at the facade. Every `CreatePaymentRequest` is counted, which is the
  *    package-independent answer to "how many times was this customer charged".
+ *
+ * The fake honours idempotency keys the way the sandbox measured the real API does
+ * (`tests/Sandbox/MollieRequestContractTest.php`): a key repeated within one hour with the
+ * same amount is answered with the payment it first created, and with a different amount it
+ * is refused. A fake that ignored keys let a retry that reused its predecessor's key look
+ * like a new payment, which the real API never makes.
  */
 final class UsageLongRunHarness
 {
@@ -55,6 +63,26 @@ final class UsageLongRunHarness
 
     /** When set, `CreatePaymentRequest` throws this instead of answering. */
     public ?\Throwable $failPaymentCreationWith = null;
+
+    /**
+     * When set, `CreatePaymentRequest` creates the payment and *then* throws this — the
+     * response was lost on its way back, the ordinary read timeout.
+     */
+    public ?\Throwable $losePaymentCreationAnswerWith = null;
+
+    /**
+     * Every payment the fake created, by id, as Mollie holds it — including one whose answer
+     * was lost and that the package therefore never recorded.
+     *
+     * @var array<string, array{gross: int, metadata: array<string, mixed>, created_at: string}>
+     */
+    public array $createdPayments = [];
+
+    /** @var array<string, array{payment_id: string, gross: int, at: string}> Mollie's key cache */
+    private array $idempotencyKeys = [];
+
+    /** The key `MollieCall::send()` set for the request about to be sent. */
+    private ?string $pendingIdempotencyKey = null;
 
     private int $sequence = 0;
 
@@ -71,28 +99,110 @@ final class UsageLongRunHarness
 
         $harness = new self;
 
-        Mollie::shouldReceive('setIdempotencyKey')->withAnyArgs()->andReturnSelf();
+        Mollie::shouldReceive('setIdempotencyKey')->andReturnUsing(function ($key = null) use ($harness) {
+            $harness->pendingIdempotencyKey = is_string($key) ? $key : null;
+
+            return Mollie::getFacadeRoot();
+        });
         Mollie::shouldReceive('resetIdempotencyKey')->withAnyArgs()->andReturnSelf();
         Mollie::shouldReceive('send')->andReturnUsing(fn ($request) => $harness->answer($request));
 
         return $harness;
     }
 
-    public function answer(object $request): object
+    public function answer(object $request): mixed
     {
         $this->requests[] = $request::class;
 
+        // A key belongs to the one request it was set for: `MollieCall::send()` clears it
+        // afterwards on the real client, which this facade double does not model.
+        $key = $this->pendingIdempotencyKey;
+        $this->pendingIdempotencyKey = null;
+
         if ($request instanceof CreatePaymentRequest) {
+            $gross = BillingMoney::minorFromMollieAmount(
+                (string) (new \ReflectionProperty(CreatePaymentRequest::class, 'amount'))->getValue($request)->value,
+                'EUR',
+            );
+
+            // Mollie's idempotency, as measured on 26 November 2026
+            // (tests/Sandbox/MollieIdempotencyContractTest): within the hour a repeated key is
+            // answered with its first answer — a refusal included — and the same key with
+            // other parameters is a 400.
+            $cached = $key !== null ? ($this->idempotencyKeys[$key] ?? null) : null;
+
+            if ($cached !== null && Carbon::parse($cached['at'], 'UTC')->addHour()->greaterThan(Carbon::now('UTC'))) {
+                if ($cached['gross'] !== $gross) {
+                    throw new \RuntimeException('[400] You are using an idempotency key that you used before with different parameters');
+                }
+
+                if (isset($cached['refusal'])) {
+                    throw $cached['refusal'];
+                }
+
+                // Mollie replays the first answer: no second payment.
+                return (object) ['id' => $cached['payment_id'], 'status' => 'open'];
+            }
+
             if ($this->failPaymentCreationWith !== null) {
+                // A refusal (4xx) binds the key; an outage does not.
+                $code = (int) $this->failPaymentCreationWith->getCode();
+
+                if ($key !== null && $this->failPaymentCreationWith instanceof \Mollie\Api\Exceptions\ApiException && $code >= 400 && $code < 500) {
+                    $this->idempotencyKeys[$key] = ['payment_id' => null, 'gross' => $gross, 'refusal' => $this->failPaymentCreationWith, 'at' => Carbon::now('UTC')->toIso8601String()];
+                }
+
                 throw $this->failPaymentCreationWith;
             }
 
             $this->paymentRequests++;
+            $id = 'tr_run_'.(++$this->sequence);
 
-            return (object) ['id' => 'tr_run_'.(++$this->sequence), 'status' => 'open'];
+            $this->createdPayments[$id] = [
+                'gross' => $gross,
+                'metadata' => (array) json_decode((string) json_encode($request->payload()->all()['metadata'] ?? []), true),
+                'created_at' => Carbon::now('UTC')->toIso8601String(),
+            ];
+
+            if ($key !== null) {
+                $this->idempotencyKeys[$key] = ['payment_id' => $id, 'gross' => $gross, 'at' => Carbon::now('UTC')->toIso8601String()];
+            }
+
+            if ($this->losePaymentCreationAnswerWith !== null) {
+                throw $this->losePaymentCreationAnswerWith;
+            }
+
+            return (object) ['id' => $id, 'status' => 'open'];
+        }
+
+        if ($request instanceof GetPaymentRequest) {
+            $id = (string) (new \ReflectionProperty(GetPaymentRequest::class, 'id'))->getValue($request);
+
+            if (isset($this->createdPayments[$id])) {
+                return $this->molliePayment($id);
+            }
+        }
+
+        if ($request instanceof GetPaginatedCustomerPaymentsRequest) {
+            // Newest first, as Mollie lists them.
+            return array_map(fn (string $id): object => $this->molliePayment($id), array_reverse(array_keys($this->createdPayments)));
         }
 
         return (object) ['id' => 'obj_run_'.(++$this->sequence), 'status' => 'active'];
+    }
+
+    /** A created payment as Mollie would return it. */
+    private function molliePayment(string $id): object
+    {
+        $created = $this->createdPayments[$id];
+
+        return (object) [
+            'id' => $id,
+            'status' => $this->overagePayments[$id]['status'] ?? 'open',
+            'amount' => (object) ['value' => BillingMoney::mollieAmount($created['gross'], 'EUR'), 'currency' => 'EUR'],
+            'createdAt' => $created['created_at'],
+            'metadata' => $created['metadata'],
+        ];
     }
 
     /**
@@ -261,10 +371,18 @@ final class UsageLongRunHarness
     /** Deliver the webhook for an overage payment: `paid`, or a terminal failure. */
     public function resolveOverage(string $paymentId, string $status = 'paid'): void
     {
-        $payment = $this->overagePayments[$paymentId];
+        // A payment whose create answer was lost is known to Mollie but was never recorded
+        // from the snapshot: its webhook comes all the same, carrying what Mollie holds.
+        $payment = $this->overagePayments[$paymentId] ?? [
+            'lines' => (array) ($this->createdPayments[$paymentId]['metadata']['line_items'] ?? []),
+            'net' => 0,
+            'gross' => (int) $this->createdPayments[$paymentId]['gross'],
+            'created_at' => $this->createdPayments[$paymentId]['created_at'],
+            'status' => 'open',
+        ];
         $billable = $this->fresh();
 
-        $this->overagePayments[$paymentId]['status'] = $status;
+        $this->overagePayments[$paymentId] = [...$payment, 'status' => $status];
 
         app(MollieWebhookController::class)->replayDelivery((object) [
             'id' => $paymentId,

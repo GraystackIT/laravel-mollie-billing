@@ -374,7 +374,7 @@ it('ends at a Local free plan and cancels at Mollie when the paid plan carried e
     World::assertNothingOverRefunded($billable);
 })->with(['none', 'pct50', 'fixed', 'waiver-date-paid']);
 
-it('refuses what costs money on a cancelled subscription before anything is charged, and says why', function (array $payload) {
+it('refuses what costs money on a cancelled subscription before anything is charged, and says why', function (array $payload, string $sentence) {
     $billable = World::subscription('none', 'pro', 3, ['storage'], used: 1);
     $billable->forceFill(['subscription_status' => SubscriptionStatus::Cancelled, 'subscription_ends_at' => $billable->nextBillingDate()])->save();
     $sent = count(World::$sent);
@@ -383,16 +383,20 @@ it('refuses what costs money on a cancelled subscription before anything is char
 
     expect(array_column($preview['errors'], 'type'))->toContain('subscription_ended')
         ->and(fn () => app(UpdateSubscription::class)->update($billable, $payload))
-        ->toThrow(\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException::class, __('billing::portal.error_subscription_ended'));
+        // A seat or a paid addon in the grace period names the end date and the way back
+        // (decision 5); a plan or interval move keeps the general sentence.
+        ->toThrow(\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException::class, __($sentence, [
+            'date' => \GraystackIT\MollieBilling\Exceptions\SubscriptionEndingBookingNotAllowedException::endDate($billable),
+        ]));
 
     expect(count(World::$sent))->toBe($sent)
         ->and($billable->refresh()->getBillingSeatCount())->toBe(3)
         ->and($billable->getBillingSubscriptionPlanCode())->toBe('pro');
 })->with([
-    'a seat more' => [['seats' => 4]],
-    'a paid addon' => [['addons' => ['storage', 'sso']]],
-    'another plan' => [['plan_code' => 'enterprise', 'interval' => 'monthly', 'apply_at' => 'immediate']],
-    'the other interval' => [['plan_code' => 'pro', 'interval' => 'yearly', 'apply_at' => 'immediate']],
+    'a seat more' => [['seats' => 4], 'billing::portal.error_subscription_ending_seats'],
+    'a paid addon' => [['addons' => ['storage', 'sso']], 'billing::portal.error_subscription_ending_addons'],
+    'another plan' => [['plan_code' => 'enterprise', 'interval' => 'monthly', 'apply_at' => 'immediate'], 'billing::portal.error_subscription_ended'],
+    'the other interval' => [['plan_code' => 'pro', 'interval' => 'yearly', 'apply_at' => 'immediate'], 'billing::portal.error_subscription_ended'],
 ]);
 
 it('still lets a cancelled subscription give up a seat or an addon, crediting what was paid', function (array $payload) {

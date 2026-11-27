@@ -170,3 +170,116 @@ it('leaves the Mollie cancellation to the retry sweep when Mollie cannot be reac
 
     Notification::assertSentOnDemandTimes(AdminPlanChangeFailedNotification::class, 0);
 });
+
+it('finishes the refund and the cancel on the re-delivery when the first delivery died after the invoice', function (): void {
+    $world = endedRenewalWorld(['billing_country' => 'DE'], '34.51');
+    $captured = [];
+    Event::listen(UnwantedPaymentRefunded::class, function (UnwantedPaymentRefunded $e) use (&$captured): void {
+        $captured[] = $e;
+    });
+
+    // An application listener on InvoiceCreated throws once — the invoice is committed,
+    // nothing after it has run, the webhook answers 500.
+    $thrown = false;
+    Event::listen(\GraystackIT\MollieBilling\Events\InvoiceCreated::class, function () use (&$thrown): void {
+        if (! $thrown) {
+            $thrown = true;
+
+            throw new RuntimeException('A listener of the application failed.');
+        }
+    });
+
+    $payment = longRunCreateCharge($world);
+    Carbon::setTestNow(Carbon::parse((string) $payment->paidAt, 'UTC'));
+    test()->postJson(route('billing.webhook'), ['id' => $payment->id])->assertStatus(500);
+
+    expect(BillingInvoice::query()->where('mollie_payment_id', $payment->id)->exists())->toBeTrue()
+        ->and($world->cancelled)->toBeFalse();
+
+    // Mollie delivers it again.
+    longRunDeliver($world, $payment, '2027-02-15 11:00:00');
+
+    $invoice = BillingInvoice::query()->where('mollie_payment_id', $payment->id)->sole();
+    $creditNote = BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->sole();
+
+    expect($world->cancelled)->toBeTrue()
+        ->and(collect($world->requests)->contains(fn ($r) => $r instanceof CancelSubscriptionRequest))->toBeTrue()
+        ->and((int) $creditNote->amount_gross)->toBe(-(int) $invoice->amount_gross)
+        ->and($invoice->fresh()->isFullyRefunded())->toBeTrue()
+        ->and($captured)->toHaveCount(1)
+        ->and($captured[0]->reason)->toBe(UnwantedPaymentRefund::REASON_RENEWAL_AFTER_END);
+
+    // And only once: a third delivery changes nothing.
+    longRunDeliver($world, $payment, '2027-02-16 11:00:00');
+
+    expect(collect($world->requests)->filter(fn ($r) => $r instanceof CreatePaymentRefundRequest)->count())->toBe(1)
+        ->and($captured)->toHaveCount(1);
+});
+
+it('never returns a renewal that was booked while the subscription ran, when it is delivered again after a cancel', function (): void {
+    $world = longRunStart('monthly', '2027-01-15 10:00:00', '34.51', [], ['billing_country' => 'DE']);
+
+    $payment = longRunRenew($world);
+
+    // The customer cancels afterwards; Mollie re-delivers the renewal that was booked.
+    $world->billable->fresh()->forceFill(['subscription_status' => SubscriptionStatus::Cancelled])->save();
+    longRunDeliver($world, $payment, '2027-02-20 09:00:00');
+
+    expect(collect($world->requests)->filter(fn ($r) => $r instanceof CreatePaymentRefundRequest)->count())->toBe(0)
+        ->and(BillingInvoice::query()->where('invoice_kind', InvoiceKind::Refund)->count())->toBe(0);
+});
+
+it('never returns a renewal judged ended by a first delivery that died before its invoice, once a re-delivery booked it live', function (): void {
+    $world = endedRenewalWorld(['billing_country' => 'DE'], '34.51');
+
+    // The invoice cannot be written once (a serial or database error): the first delivery
+    // has decided "ended", nothing after that decision has happened, the webhook answers 500.
+    $thrown = false;
+    BillingInvoice::creating(function () use (&$thrown): void {
+        if (! $thrown) {
+            $thrown = true;
+
+            throw new RuntimeException('The invoice could not be written.');
+        }
+    });
+
+    $payment = longRunCreateCharge($world);
+    Carbon::setTestNow(Carbon::parse((string) $payment->paidAt, 'UTC'));
+    test()->postJson(route('billing.webhook'), ['id' => $payment->id])->assertStatus(500);
+
+    expect(BillingInvoice::query()->where('mollie_payment_id', $payment->id)->exists())->toBeFalse();
+
+    // Before Mollie delivers it again, the customer resumes the subscription.
+    $world->billable->fresh()->forceFill([
+        'subscription_status' => SubscriptionStatus::Active,
+        'subscription_ends_at' => null,
+    ])->save();
+
+    longRunDeliver($world, $payment, '2027-02-15 11:00:00');
+
+    // Booked as the live renewal it now is.
+    expect(BillingInvoice::query()->where('mollie_payment_id', $payment->id)->exists())->toBeTrue()
+        ->and($world->billable->getBillingSubscriptionStatus())->toBe(SubscriptionStatus::Active)
+        ->and($world->billable->getBillingPeriodStartsAt()->toDateString())->not->toBe('2027-01-15')
+        ->and($world->billable->getBillingSubscriptionMeta())
+        ->not->toHaveKey(\GraystackIT\MollieBilling\Services\Webhook\SubscriptionPaymentHandler::ENDED_RENEWALS_KEY);
+
+    // Mollie calls the same payment webhook again later — an operator refunded 5.00 of it in
+    // the Mollie dashboard. The renewal the customer paid for and uses is not given back, and
+    // the subscription is not cancelled.
+    $returned = [];
+    Event::listen(UnwantedPaymentRefunded::class, function (UnwantedPaymentRefunded $e) use (&$returned): void {
+        $returned[] = $e;
+    });
+    Event::listen(RenewalCollectedForEndedSubscription::class, function (RenewalCollectedForEndedSubscription $e) use (&$returned): void {
+        $returned[] = $e;
+    });
+
+    $world->payments[$payment->id]->amountRefunded = (object) ['value' => '5.00', 'currency' => 'EUR'];
+    longRunDeliver($world, $payment, '2027-02-20 09:00:00');
+
+    expect(collect($world->requests)->filter(fn ($r) => $r instanceof CreatePaymentRefundRequest)->count())->toBe(0)
+        ->and(collect($world->requests)->contains(fn ($r) => $r instanceof CancelSubscriptionRequest))->toBeFalse()
+        ->and($world->cancelled)->toBeFalse()
+        ->and($returned)->toBe([]);
+});

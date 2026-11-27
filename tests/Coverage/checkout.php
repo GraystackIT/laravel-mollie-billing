@@ -694,6 +694,14 @@ return [
             'tests/Browser/Matrix/CheckoutOptionsMatrixTest.php::test_changing_the_country_reprices_and_a_vat_number_is_checked_as_it_is_typed',
         ],
     ],
+    'action:checkout@pendingOtherOrderUntilLabel' => [
+        'feature' => [
+            'tests/Feature/Checkout/PendingPaymentWaitNoticeTest.php::shows the expiry in the customer',
+        ],
+        'browser' => [
+            'tests/Browser/CheckoutPendingPaymentWaitTest.php::test_back_from_mollie_with_a_changed_order_shows_until_when_the_earlier_payment_stays_open_and_links_to_it',
+        ],
+    ],
     'action:checkout@stepDescription' => [
         'feature' => [
             'tests/Feature/Coverage/CheckoutCatalogAndActionsTest.php::actions checkout@next, @back, @displayStep',

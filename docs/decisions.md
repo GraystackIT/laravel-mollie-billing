@@ -303,6 +303,139 @@ needs an exclusive lock, and the suite went from two failures to forty-five and 
 `database disk image is malformed`. `busy_timeout` alone is what works. See
 `docs/browser-testing.md`.
 
+### The test Mollies honour idempotency keys by default (26 November 2026)
+
+Mollie replays the first response for a key it has seen within the hour and refuses the key
+with other parameters (measured: `MollieRequestContractTest`) or on another URL (400 "used
+before on a different URL", `MollieSettledPaymentContractTest`); a repeated subscription create
+comes back as the same subscription (`MollieChargedSubscriptionContractTest`). The fakes now do
+the same unless told otherwise, because a fake that takes a reused key as a new operation hides
+exactly the bug a stable key exists to prevent — a retry that pays, refunds or subscribes twice —
+and lets a key reused for a *different* operation pass, which the real API refuses.
+
+- `FakeMollieHttpAdapter` (browser and concurrency suites): every POST, PATCH and DELETE, keyed
+  on the header the SDK sends; `honour_idempotency_keys` = `0` switches it off. It used to be
+  opt-in, for create-payment only, and switched on by `UsageDeepTest` alone.
+- The feature suite's stateful facade doubles — `ChangeMatrixWorld`, `BookingMatrix`,
+  `RenewalLongRun` — through `tests/Support/MollieIdempotencyMemory`; `->honour = false`
+  switches it off. `UsageLongRunHarness` already modelled it for create-payment. The per-test
+  `Mollie::shouldReceive('send')` stubs and the SDK's `MockMollieClient` (`MollieBilling::fake()`)
+  answer canned responses per request class and are left alone: there is no state a key could
+  protect.
+
+Judgement calls: only a 2xx answer binds a key (an outage or refusal lever must not stick to the
+key its retry sends again; what Mollie does with a key whose first request it refused is not
+measured), except a lost answer, which binds it because Mollie acted. A replay is the response as
+it was then, not the resource as it is now. The status for "other parameters" is not measured —
+the contract test only asserts the refusal; the browser fake answers 422, as before, and so does
+the feature memory (the code comments and `UsageLongRunHarness` say 400; no caller branches on it).
+**Superseded on 26 November 2026** — all three measured, see the next entry: other parameters
+are a 400, a refused request binds its key, and a PATCH is not keyed at all.
+
+No package code was found reusing a key for a different operation: every feature directory that
+uses the doubles (Subscription, Webhook, Checkout, Portal, Wallet, Billing, Coupons, Lifecycle,
+OneTimeOrder, Catalog, Testing) and five browser classes stayed green with the default on.
+Red before: `tests/Browser/FakeMollieIdempotencyTest.php` (4 of 7 red against the opt-in fake),
+`tests/Feature/Testing/MollieIdempotencyInWorldsTest.php` (9 of 9 red against the doubles without
+the memory).
+
+### What Mollie does with a key, a cancel and a revoke — measured (26 November 2026)
+
+Every assumption the fakes and the code comments made about Mollie that no run had measured,
+measured against the real test API: `tests/Sandbox/MollieIdempotencyContractTest` (8 cases) and
+`tests/SandboxBrowser/MollieSettledPaymentContractTest::test_a_refund_sent_twice_with_one_key_is_one_refund`
+(refunds need a settled payment). Each asserts the answer of that day.
+
+| Question | Answer |
+|---|---|
+| Same key, other parameters — `POST /payments`, `POST /customers/{id}/subscriptions`, `POST /payments/{id}/refunds` | **400** Bad Request, "You are using an idempotency key that you used before with different parameters. Please send a unique idempotency key with each request.", no `field`. Not 422, as both fakes answered |
+| Same key on another URL (payment → subscriptions; customer A → customer B) | **400**, "…used before on a different URL…" — the 16 November measurement holds |
+| A request Mollie refused (422) — sent again, identical, with the same key, after its reason had gone | **the refusal again** (422, same detail) — the same request with a fresh key is taken. A 4xx binds its key like a 2xx. Another request with that key: 400 "other parameters" |
+| A replay after the resource changed (subscription PATCHed to 12.00 and cancelled) | the first answer as it was: 10.00, `active` — not the resource as it is now |
+| A PATCH with a reused key | **not keyed**: the same key with another body is taken, and a repeat of the first PATCH is applied again (13.00 → 15.00 → 12.00) |
+| A DELETE (cancel subscription) with a reused key | replayed: 200 with the cancelled subscription, where a fresh key gets the 422 of a second cancel |
+| Same refund key twice | one refund, same id; one listed |
+| Refund above what is left | 422 "The specified amount cannot be refunded", field `amount.value` |
+| Cancel an open first payment — no method picked; created with `creditcard`; with `eps`; at €0.00 | **refused**, 422 "The payment cannot be cancelled"; `isCancelable: false` up front, status stays `open`. (`banktransfer` cannot be a first payment at all.) |
+| Cancel a pending recurring direct debit | taken: `isCancelable: true`, status `canceled` |
+| Revoke a mandate a subscription charges | the subscription is `canceled` at once, with `canceledAt`; the mandate reads back **410 Gone** |
+
+Not measurable here: whether a 5xx binds a key (no request provokes one), and the one-hour
+lifetime (a run would wait an hour; the fakes keep 60 minutes as documented).
+
+**What follows for the fakes** (the test-side change, nothing in `src/`):
+`FakeMollieHttpAdapter`, `MollieIdempotencyMemory` and `UsageLongRunHarness` answer other
+parameters with the measured 400 and text, remember a 4xx answer for its key (a 5xx still binds
+nothing — an outage lever must not stick to its retry), and key POST and DELETE only.
+`FakeMollieHttpAdapter::cancelPayment()` cancels only what the payment reports `isCancelable`
+(the `payments_cancelable` lever) — it used to cancel any open payment while reporting
+`isCancelable: false`; a revoked mandate reads 410. `CheckoutDeepTest`'s two withdraw scenarios
+switch `payments_cancelable` on, to keep pinning that branch.
+Red before: `tests/Browser/FakeMollieIdempotencyTest.php` 5 of 11 red against the unfixed fake
+(other-parameters status, refusal binding, PATCH keyed, open first payment cancelled, revoked
+mandate 404); `tests/Feature/Testing/MollieIdempotencyInWorldsTest.php` 4 of 10 red against the
+unfixed memory (422 ×3, refusal not bound). Both green after.
+
+**What follows for the package** — measured facts the code relies on, for the maintainer:
+
+- *The code comments were right, the fakes wrong:* `MollieCall::send()`, `RefundInvoiceService`,
+  `UsageLongRunHarness` and the CHANGELOG said 400; no caller branches on the status.
+- **`PendingFirstPayment::withdraw()` never succeeds against real Mollie.** No open first payment
+  can be cancelled through the API, so "Back from Mollie with a changed order" always ends in
+  `PendingPaymentForAnotherOrderException`: the customer is told to finish the earlier payment
+  or wait for its expiry (15 minutes). That is the designed fallback and it is safe — no second
+  payment next to a payable one — but the withdraw-and-continue path the browser suite showed as
+  the normal case is unreachable. Whether to offer something else (e.g. create the new payment
+  and rely on the automatic refund of a duplicate) is a product decision; nothing was changed.
+- *A refused request binds its key for an hour.* A keyed request retried within the hour after a
+  4xx gets the same refusal even when its reason is gone. Where this can bite: a refund line
+  (`InvoiceService::createCreditNote`, stable `refundToken`) or an admin refund
+  (`RefundInvoiceService`, key on gross + already refunded + reason) retried within the hour after
+  Mollie refused it — the retry is refused again, without a second refund. It errs on the safe
+  side; nothing was changed. **Seen in the suite:** `RefundDeepTest`'s "a refund Mollie refuses …
+  can be retried once" went red against the corrected fake — the operator's retry from the same
+  panel, right after the refusal, got the 422 again and a second failure mail. Real Mollie does
+  exactly that. The test now retries an hour later (shared clock +61 min) and says why; whether a
+  retry after a refusal should carry a new key (e.g. the refused attempt's number) is the
+  maintainer's call. **Decided the same day:** it does — see "A refusal moves the idempotency
+  key on; nothing else does"; `RefundDeepTest` retries at once again.
+- *Revoking a mandate cancels its subscriptions at once* — the reason `RevokePreviousMandate`
+  first moves the subscription with `rebindMandate()` is now a measured fact, not documentation.
+- *The clean-ups* cancel what Mollie lets them: a pending recurring direct debit is taken. The
+  prorata paths (`UpdateSubscription`, `CleanupStalePendingProrataChangeJob`, `InvoiceService`)
+  ask `isCancelable` first, which agrees with the answer; `CleanupStalePendingOverageChargeJob`
+  sends the cancel and keeps the slot on a refusal. Both hold as measured.
+
+### A changed order waits for the earlier payment, and says until when (26 November 2026)
+
+Measured the same day (entry above): Mollie never cancels an open first payment, so "back from
+Mollie with a changed order" always ends in `PendingPaymentForAnotherOrderException`. The
+maintainer kept the safe wait — no second payment beside a payable first one — and decided it
+has to be *shown*:
+
+- **The checkout says until when.** `PendingFirstPayment` hands the exception the payment's
+  own `expiresAt` from the `GetPaymentRequest` it already made (Mollie sends it on an open
+  payment; the hosted-checkout sandbox test asserts it is there). Only when an answer has no
+  `expiresAt` does it fall back to `createdAt` + `PendingFirstPayment::FIRST_PAYMENT_EXPIRY_MINUTES`
+  (15, measured); with neither, the notice says "a few more minutes". The time is shown in
+  the billable's display timezone (`BillingTime::display()`), formatted for the app locale
+  (`checkout.pending_other_order_time_format`).
+- **It offers the earlier payment's checkout link** ("Zur früheren Zahlung") — paying it books
+  the *earlier* order, and the text says so. No link, no button: the exception carries null
+  when Mollie gave none. (Today that cannot happen: an open payment without a link is not
+  payable any more and gets a new payment instead — see `redirectFor()`.) The notice state on
+  the component is `#[Locked]`, because the link is rendered as an `href`.
+- **The withdraw stays** for a payment that reports `isCancelable: true` (the fake's
+  `payments_cancelable` lever; `CheckoutDeepTest`'s two withdraw scenarios). One that reports
+  `isCancelable: false` is no longer sent a cancel that is known to be refused; one that says
+  nothing is still asked, as before.
+- **Only the checkout shows the notice.** The plan page's upgrade, the addons and seats
+  screens and the extras purchase still show the exception's message alone; the data is on
+  the exception for them when wanted.
+
+Pinned by `tests/Feature/Checkout/PendingPaymentWaitNoticeTest.php` and
+`tests/Browser/CheckoutPendingPaymentWaitTest.php`.
+
 ### Grace on cancellation during a trial is the trial end
 
 `CancelSubscription::graceBoundary()` returns `trial_ends_at` whenever it lies in the
@@ -317,6 +450,264 @@ config with no upper bound, and a 45-day trial on a monthly plan then gave the c
 of the 45 free days they were promised. `TrialCancelGraceBoundaryTest` pins all three
 shapes — short trial, long trial, and a trial that has already converted (where the
 paid period wins).
+
+### A cancel at period end keeps only the access there is (25 November 2026)
+
+`graceBoundary()` special-cased only a trial that is still running. A trial whose first
+charge failed is past due with `trial_ends_at` behind it and `subscription_period_starts_at`
+still at the mandate capture, so a cancel at period end — the admin's button (offered for
+past due), or the dashboard action called directly — took the default, `nextBillingDate()`:
+a year on a yearly plan, as `cancelled` with an end ahead, which is access. A resume on top
+of it passed `paid_period_ends_at` = that date to `CreateSubscription`, which wrote Active,
+cleared the dunning keys and set Mollie's first charge a year out — for a customer who had
+paid nothing. A chargeback (`markPastDue` moves only the status) handed back the rest of the
+charged-back period the same way.
+
+**Rule:** a graceful cancel of a billable with no access (`! hasAccessibleBillingSubscription()`)
+is an immediate one — ends now, overage pass included, which is what the past-due auto-cancel
+does a few weeks later anyway. Past due for an overage debt *only* keeps its access (the
+plan is paid), so it keeps its grace to the period end. A failed ordinary renewal was never
+affected — its period was not advanced, so the boundary is already behind — and is covered
+by the same rule. `PastDueCancelGraceTest`: the failed first charge and the chargeback red
+before (end 10 February / 15 March, resume succeeded), the debt-only control green.
+
+The admin tab reports what was written, not what was ticked (26 November 2026):
+`confirmCancel()` flashed "grace period applies" for a cancel at period end the service had
+turned into an immediate one, and the operator told the customer about access that was gone.
+It now reads the end date back. `SubscriptionTabCancelAndRevokeTest` › "says the cancel took
+effect now …", red before.
+
+### A second cancel at period end changes nothing (25 November 2026)
+
+`CancelSubscription::handle()` refused only `new` and `expired`. A second graceful cancel
+of a cancelled row (a stale tab, another billing member) ran the whole method again and
+recorded the grace date as `cancelled_from.ends_at` — the "end before the cancel" a resume
+restores. A free plan without an end date therefore came back from a resume with the
+30-day expiry, and `PrepareUsageOverageJob` pass 1 expired it on that date, plan and addons
+wiped. `SubscriptionCancelled` and the customer mail went out a second time.
+
+A cancel at period end of a `cancelled` row now returns without writing or announcing
+anything — a no-op rather than a refusal, so the transition matrix cell stays `cancelled`
+and an internal caller (the country-mismatch cancel, a plan waiver ending) meeting a row
+that is already running out is not logged as a failure. An immediate cancel of a cancelled
+row still goes through: it ends the grace. `ResubscribeSubscriptionTest` › "keeps the
+unlimited free plan through a second cancel …", red before (end date restored, two events).
+
+### A resume leaves one subscription at Mollie (26 November 2026)
+
+`ResubscribeSubscription` creates a **new** Mollie subscription. Two paths made that a
+second one beside a subscription that still collects:
+
+- **The cancel it undoes never reached Mollie.** `CancelSubscription` ends the row locally
+  whatever Mollie answers and parks a failed cancel under `pending_subscription_cancel` for
+  the hourly sweep (24 hours, then an operator mail). A resume in that window created the
+  new subscription with its first charge at the paid period's end — which is the old one's
+  next charge too. Once the sweep gave up, the customer paid twice every period.
+- **Two resumes at once** (a second tab, a second operator, the admin's Resubscribe and the
+  customer's): the method had no serialisation, both read `cancelled` before either wrote,
+  and each created a subscription. Livewire sends one tab's double click one after the
+  other, so this needs two requests from two places — exactly what an operator and a
+  customer are.
+
+**Rule:** a resume takes the `billing:subscription-change:{id}` cache lock every change to
+the subscription takes, and decides on the row re-read under it; a loser is refused with
+`SubscriptionChangeInProgressException`, as an overlapping change is, and one arriving after
+the first has finished finds the row no longer cancelled. On the Mollie branch the pending
+cancel is sent once more first, outside any transaction: done (or the subscription already
+gone) clears the marker; anything else throws `PreviousSubscriptionStillRunningException`
+with nothing written, so the same click works once Mollie answers. Refusing rather than
+adopting the old subscription is deliberate: after a 503 nobody knows whether Mollie
+cancelled it, and a cancelled subscription cannot be revived.
+
+The dashboard and the admin tab name the three refusals (still being cancelled at Mollie,
+another change running, no longer cancelled) instead of "an error occurred" / "Error (Code:
+0)". `ResubscribeOneSubscriptionTest`: all four cases red before (a second create each time,
+no cancel retried); `LifecycleDeepTest` (browser) › the 503 cancel, the double click and two
+operators at once.
+
+### A cancel forgets what the gate remembered of the subscription (26 November 2026)
+
+`MollieSubscriptionGate` keeps a 60-second snapshot of the Mollie subscription, and the
+checkout sends a customer whose subscription Mollie still runs back to the dashboard. A
+past-due dashboard asks the gate for its "charge now" banner, so after an immediate cancel —
+the operator's, or a cancel at period end with no access to keep — `billing.active` sent the
+customer to the checkout and the checkout sent them straight back, for a minute, with the
+subscription already cancelled at Mollie. `MollieSubscriptionReplacer` already forgot the
+snapshots it changed; the cancel did not. `CancelSubscription`, `RetrySubscriptionCancelJob`
+and the resume's own retry of a pending cancel now drop it once Mollie has taken the cancel
+(or answered that it was gone). `CancelForgetsSubscriptionSnapshotTest`, both cases red before;
+`LifecycleDeepTest` › the operator's cancel of a failed trial reaches the checkout.
+
+### A recurring code that ends before the first renewal leaves no marker (26 November 2026)
+
+A paid first payment made with a recurring code is honoured even if the code was switched
+off while the payment travelled (`FirstPaymentCouponPricing::afterPayment()`): the
+redemption is counted and the invoice books the discount. The Mollie subscription is
+created at the full price, because `price()` sets `recurring_discount_net` to 0 for an
+inactive code. But the redemption still wrote the `active_recurring_coupon` marker, and only
+`isMarkerStillRedeemable()` reading the coupon's **live** `active` flag kept it quiet. An
+operator who switched the campaign back on for new customers revived it: every renewal of
+this customer booked a coupon line for a discount Mollie never collected, took it back off
+with an `adjustment` and fired `PaymentAmountMismatch`.
+
+**Rule (maintainer decision 6):** where `price()` zeroes the recurring discount because of
+the code's own state, the payment is redeemed and **no marker is written** — `price()`
+returns `recurring_marker => false`, and `redeem()` passes `skip_marker`. The marker exists
+only where Mollie was priced with the discount.
+
+**The code's own end date is treated the same.** The hazard is a different one there — the
+marker snapshots `valid_until`, so editing the code later revives nothing — but the marker
+is not dead either: `price()` measures `valid_until` against the next charge *at the current
+hour*, while the renewal asks at the *start of the charge's day*
+(`SubscriptionPaymentHandler::paid()`, `$chargeDay`). A code ending at noon on the day of the
+first renewal priced Mollie at the full amount, and its marker, capped at that noon, was
+still valid at midnight: the same coupon line, adjustment and mismatch. The trial path
+already wrote its marker only for a recurring discount above 0, so both paths now agree.
+
+Not changed: a code whose `discount_periods` is spent by the first payment (one period) also
+prices Mollie at the full amount and still gets a marker — that marker's own count
+(`discount_periods` kept in it, the redemption rows) refuses it at once and nothing revives
+it. An app's own `price()` that returns no `recurring_marker` key keeps the marker, as before.
+
+`FirstPaymentCodeChangedInFlightTest` › "writes no recurring marker for a code switched off in
+flight …" and "… whose end date falls before the first renewal": both red before — the marker
+was present, and with that assertion taken out the renewal invoice carried a `coupon` line
+(and its `adjustment`) for 59.50 collected. `BookingMatrixCouponsTest` › "books the paid
+amount when a coupon dies between payment and webhook" still counts one redemption.
+
+### A refusal is shown in the reader's language, its message stays English (26 November 2026)
+
+The admin screens showed a service's refusal as `$e->getMessage()`: a German operator read
+"There is no subscription to cancel.", "Only paid invoices can be refunded.", "A coupon with
+the code WINTER26 already exists." on an otherwise German page. A handful of customer-facing
+exceptions had gone the other way and put the *translated* sentence into the message, so the
+log read German whenever the request did.
+
+**Rule (maintainer decision 12):** the exception message is English and is for the log. What
+a screen shows comes from `Support\ExceptionMessage`, which reads the translation key the
+exception carries (`Exceptions\TranslatableException`, implemented by
+`Exceptions\Concerns\CarriesTranslation`):
+
+- an exception with one meaning names its sentence itself (`SubscriptionChangeInProgressException`,
+  `RefundInProgressException`, `SeatCountExceedsMaximumException`, …);
+- the two thrown for many reasons — `InvalidSubscriptionStateException` and
+  `InvalidRefundTargetException` — get theirs at the throw site with `->withTranslation()`;
+- an input refusal of the services the admin forms call (coupons, refunds, extensions, the
+  country fix) is an `InvalidBillingInputException`, which is an `\InvalidArgumentException`
+  so every existing `catch` and test keeps working;
+- `PastDueExpansionNotAllowedException`, `SubscriptionEndedChangeNotAllowedException`,
+  `ActivationInFlightException` and `PendingPaymentForAnotherOrderException` keep their
+  portal/checkout keys, but their message is now that sentence's `en` text.
+
+The sentences live in `resources/lang/{en,de}/exceptions.php`. They reach operators and
+customers alike, so the German ones address nobody directly (no "du", no "Sie"). The `en`
+sentence is the old message wherever that was readable, so English screens did not change.
+
+Anything without a key falls back: `ExceptionMessage::for()` says the generic "The action
+could not be completed." — for customers, who must not read an internal message;
+`ExceptionMessage::forOperator()` says "The action was refused: <message>" — for the admin,
+where an operator acting on an app's own refusal needs what it said, even in English. An
+operator's refusal that the service *can* say is no longer reported to the error tracker:
+the invoices tab now catches `RefundInProgressException` (it went to `report()` and the
+generic "refund failed"), and the resume, the revoke and the country fix show a translatable
+refusal instead of reporting it.
+
+Deliberately not changed: `InvalidCouponException` carries a reason *code*, which the portal
+screens already map to their own sentences; the grant screen still shows the code. The PDF
+re-render error keeps its technical detail inside the translated `pdf_error` sentence. A bare
+`\InvalidArgumentException` in `InvoiceService` (unknown metadata type, unknown currency) is a
+programming error, not a refusal.
+
+`ServiceExceptionTranslationTest` (admin cancel of an ended subscription, refund of an unpaid
+invoice, refund while another runs, taken coupon code, trial extension on a cancelled
+subscription — each asserting the German sentence under `de`; the customer exception's English
+message): all seven red before. `ExceptionTranslationGuardTest` keeps every throw of the two
+many-reasons exceptions keyed and the four admin-facing services free of bare
+`\InvalidArgumentException` (run against the unfixed sources it found 23 unkeyed throws and 27
+bare ones). `TranslationKeysExistTest` checks every literal key in both locales and the
+`exceptions.php` key and placeholder parity. Browser: `AdminCouponFormMatrixTest` › the form says
+why in the operator's language — red with the old `getMessage()` line, green with the fix.
+
+### The German customer texts say "du" (26 November 2026)
+
+The German portal and checkout mixed both registers, sometimes on one screen: the dashboard
+tiles said "deine Zahlungsmethode", the coupon card under them "Geben Sie einen beliebigen
+Code ein"; the checkout opened on "Wählen Sie den passenden Plan"; half the mails said
+"Deine Testphase", the refund and undercollection mails "Ihre Zahlung".
+
+**Rule (maintainer decision 11):** every German text a customer reads addresses them as
+"du" — lower-case `du`/`dein`/`dir`/`dich` inside a sentence, capitalised only at its start.
+That covers `portal.php`, `checkout.php`, `errors.php` and the customer notifications in
+`notifications.php`. Not changed: `admin.php` and `audit.php` address the operator and keep
+their "Sie"; the `[Admin]` notifications address nobody; `exceptions.php` reaches both and
+deliberately addresses nobody (see the entry above). The country-correction reasons in
+`portal.php` are printed on the customer's credit note and corrected invoice, so they say
+"du" too. Keys and placeholders are unchanged; only the wording moved, so no app override
+breaks — but an app that published and edited the German files keeps its own copy.
+
+"Sie" is also the third person, which a pattern cannot tell from the polite form: three
+portal sentences keep it ("Diese Änderung … Sie wird in der kommenden Nacht erneut
+versucht", the dropped-payment note, the not-yet-applied flash). The guard lists them by
+exact wording, so a polite "Sie" slipped into the same sentence still fails.
+
+`tests/Feature/Coverage/GermanInformalAddressTest.php` walks every customer-facing German
+file and refuses "Sie", "Ihnen" and every form of "Ihr": red before in four of them
+(`checkout` 33 keys, `portal` 32, `notifications` 19, `errors` 3), green after. Browser:
+`PortalAdminLocaleTenantTest` › the German checkout and portal address the customer as du —
+walks the checkout's plan, add-on and confirm steps and every portal page in German and
+asserts the du-wording literally and no polite pronoun on screen; red with the old
+`checkout.php` ("Did not see expected text [Wähle den passenden Plan]"), green after.
+
+### An automatic refund whose run throws is queued, not left to a re-delivery (26 November 2026)
+
+`UnwantedPaymentRefund::refund()` and `GrantExtrasPurchaseRefund::refund()` wrapped
+`InvoiceService::createRefund()` in a catch that logged and returned null. A Mollie error
+never reaches that catch — `createRefund()` queues the line itself — but everything *around*
+the Mollie call does: the refund lock's cache store, the token lookup's bookkeeping, and the
+credit note's write after Mollie has paid out. Such a throw ended in nothing queued while
+`announceOnce()` logged "queued for retry"; the refund happened only if Mollie called the
+webhook again and `resume()` ran. Covers every caller: duplicate first payment, activation
+failed for good, prorata of a cancelled change / ended subscription, renewal after end
+(`UnwantedPaymentRefund`), and the gift-gone purchase (`GrantExtrasPurchaseRefund`).
+
+**Rule:** a throw from `createRefund()` parks the line in `pending_refund_retries`
+(`Services\Webhook\Concerns\QueuesThrownRefund`) — the existing queue: hourly
+`SweepPendingRetriesJob`, `RetryRefundLineJob` with its backoff and 7-day window, and its one
+admin mail (`AdminPlanChangeFailedNotification`) at the dead letter. No second ladder.
+
+- **Marked `refund_outcome_unknown`.** The throw does not say whether Mollie holds the refund,
+  so the retry lists the payment's refunds and adopts the one carrying the token instead of
+  posting again — the lost-answer path `createRefund()` already had.
+- **One token per payment.** `fullRefundToken()` derives the token from the payment id and the
+  invoice, instead of `createRefund()`'s random one: every attempt at the one full refund — the
+  first, the queued retry, a re-delivery that finds nothing queued — has the same idempotency
+  key and metadata. A re-delivery that finds an invoice this service booked, no credit note and
+  nothing queued also asks Mollie first (an earlier run may have died after the call).
+- **The log says what is true:** "queued for retry" only when an entry is there; otherwise
+  "could not be queued — posted on the next webhook delivery" (the queue write itself failed).
+- **`refunded_net` is written after the credit note, not before.** Found by the lost-answer
+  test: `createRefund()` raised the counter, then the credit note's write failed, and the retry
+  that adopted the refund added it again — `refunded_net` at twice the payment (5800 for 2900).
+  The counter is now written once the credit note is persisted; `effectiveRefundedNet()`
+  already derives from credit notes, so a lost counter write stays harmless.
+
+Red before: `tests/Feature/Webhook/UnwantedPaymentRefundThrowRetryTest.php` — 4 of 4 red against
+the unfixed service ("actual size 0 matches expected size 1": nothing queued), the lost-answer
+case red again on `refunded_net` 5800 vs 2900 until the counter moved behind the credit note.
+`GrantExtrasGiftGoneRefundTest` › "queues the refund when createRefund() throws…" and "does not
+refund a gift-gone purchase twice…" — red against the unfixed `GrantExtrasPurchaseRefund`.
+Real API: `tests/SandboxBrowser/UnwantedPaymentRefundRetryContractTest` pays on Mollie's hosted
+test page, fails the credit note after the real refund, and checks that Mollie lists the refund
+with its token metadata and that the retry adopts it (one refund at Mollie) — passed on
+26 November 2026 (14 assertions): Mollie lists the refund's `metadata.refund_token`, and the
+retry booked the credit note on the existing refund without a second `CreatePaymentRefund`.
+
+Judgement call: the "earlier run" flag reaches `refund()` as a property set by `settle()`, not
+as a new parameter — `refund()` is protected and overridden (a test subclass already did), so
+a changed signature would be a fatal error for an app's subclass. Not covered: a first payment
+whose activation failed (invoice booked by the handler, not by this service) does not ask
+Mollie on a second `settle()` with nothing queued; the stable token still replays within
+Mollie's one-hour key window.
 
 ### `plans.*.tier` is the app's field, not the package's
 
@@ -422,7 +813,9 @@ So the third state is explicit: `usage_overage.payment_unknown_at`. Every path t
 otherwise re-derive the debt asks `paymentMayExist()` first, and only
 `CleanupStalePendingOverageChargeJob` may resolve it — against Mollie's payment list for the
 customer, never on a guess. An idempotency key is *not* sufficient here: Mollie caches one for
-one hour, which covers the retry ladder (`[60, 300, 900]`) and not the nightly sweep. See
+one hour, which covers the retry ladder (`[60, 300, 900]`) and not the nightly sweep. The same
+applies to every payment of a dunning cycle, not only its first — see
+[A dunning retry is a new payment](#a-dunning-retry-is-a-new-payment-and-the-snapshot-says-which-one-is-live-25-november-2026). See
 `docs/usage-billing.md` for the four outcomes and
 `tests/Feature/Wallet/LostOveragePaymentReconciliationTest.php` for the pins.
 
@@ -711,6 +1104,22 @@ reported in one of those states is reversed by `InvoiceService::reverseBookedCre
 and calls the payment webhook when a refund fails. The fix is correct if it does and inert
 if it does not; a `tests/Sandbox` probe would settle it.
 
+### The invoice archive's tiles net a reversal against the credits (26 November 2026)
+
+The portal's invoice archive sums three tiles: *total paid* (every `paid` row with a positive
+gross), *credits* (every `refunded` row with a negative gross) and *spent* (the balance). A
+reversal document — a `Refund`-kind row, status `paid`, positive amounts — matched the first
+rule: after a chargeback that was disputed and won, a renewal paid once read "total paid
+23.56" for 11.78, and "credits 11.78" for a credit that no longer stood. *Spent* came out
+right only because the two errors cancelled.
+
+**Rule:** *total paid* counts charges only (no `Refund`-kind row); a reversal is netted
+against *credits* (never below zero), and *spent* is the balance of the two. The rows
+themselves are unchanged — the reversal is listed with its own `CR-` serial, positive, as
+the document it is. Found by `RefundDeepTest` (browser, chargeback and reversal);
+`tests/Feature/Portal/InvoiceArchiveTilesAfterReversalTest.php`, red before (both cases),
+green after.
+
 ### Plan-change refunds share the per-invoice refund lock
 
 `InvoiceService::createRefund()` posts its refunds line by line and writes the credit note
@@ -732,10 +1141,103 @@ calls stay outside one.
   `pending_refund_retries` and `RetryRefundLineJob` posts it later, re-reading the
   remaining balance.
 - The webhook that loses gets `RefundInProgressException` → 500 → Mollie re-delivers, and
-  the refund id is on record by then.
+  the refund id is on record by then — when the Mollie call answered. When its answer was
+  lost, see the next entry.
 
 `tests/Feature/Refund/PlanChangeRefundWebhookRaceTest.php` forces the interleaving
 deterministically (the webhook arrives inside the second line's Mollie call).
+
+### A refund line whose answer was lost is recognised, not paid again
+
+A refund line whose Mollie call threw (a read timeout after Mollie had created the refund)
+went to `pending_refund_retries` with its token and no refund id. Mollie's payment webhook
+for that refund then booked it as "synced from Mollie dashboard", and `RetryRefundLineJob`
+posted the line again: under the same key Mollie replayed the refund and a second credit
+note was written for it (80.00 credited for 40.00 returned); once the headroom clamp changed
+the amount, or the retry came after Mollie's one-hour key cache, the key was new and the
+customer was paid a second time; and with the invoice used up by the sync, the line failed
+"Nothing left to refund" for seven days and dead-lettered as "permanently failed" — for a
+refund that had gone out. The token alone protected nothing past the first hour.
+
+Now, in `InvoiceService::createRefund()`, under the per-invoice refund lock:
+
+- **The token goes to Mollie as refund metadata** (`refund_token`), and `RefundHandler`
+  stamps it onto the credit note it books for that refund (the document is deferred, so it
+  is on the note before `CreditNoteIssued` runs).
+- **A line whose token is already on a credit note is settled** — not posted, not failed,
+  not re-queued — whoever booked it. Checked before the headroom, so a used-up invoice
+  does not turn a paid refund into a dead letter.
+- **A line whose earlier call threw is looked up at Mollie first.** It carries
+  `refund_outcome_unknown` (`ProrataLine::$refundOutcomeUnknown`, serialised only when
+  set); the payment's refund list is read through `MolliePaymentCredits` and a refund
+  carrying the token (not `failed`/`canceled`) is adopted and booked at the amount Mollie
+  paid, instead of posting again. The same rule as "A lost create-payment answer is
+  marked, never guessed": a key is not enough once a retry ladder runs past the hour.
+- **A refund id Mollie returns that is already on a credit note is not booked again** — a
+  replay of a refund the webhook synced from a note without a token (one created before the
+  metadata was sent).
+
+Only a line that is *known* to have been sent is looked up, so a first attempt costs no
+extra call. **Not covered:** `ProrataChargeHandler`'s resume of a run that died between the
+Mollie call and the credit note still relies on the key (within the hour) — that line is not
+in `pending_refund_retries` and carries no flag.
+
+`tests/Feature/Refund/RefundRetryAfterLostAnswerTest.php`.
+
+### A listener cannot fail a refund that has been paid
+
+`CreditNoteIssued`, `InvoiceRefunded` and `RefundProcessedNotification` are sent after the
+money has left Mollie and the credit note is committed. A synchronous app listener that threw
+there reached the caller: `RetryRefundLineJob` failed and the queue retried the same line —
+clamped to what was left, so under a new idempotency key: a second payout with nobody
+involved — and the admin modal ("the payment provider rejected the request") and
+`SupersededRenewalRefund` ("could not be refunded automatically") reported a refund as failed
+that had gone out, while the customer's notification was skipped. An operator retry was then
+a new Mollie refund, because `already_refunded_net` in its key had moved.
+
+Now every such announcement goes through `InvoiceService::announceBooked()` (credit-note
+documents, `createRefund()`, `RefundInvoiceService` phase 4), which reports a listener's
+failure instead of propagating it — the rule `WalletCredited` already follows. The customer
+notification in phase 4 is guarded on its own, so a failing event listener does not skip it.
+`InvoiceRefunded` in the webhook handlers is left as it is: a throw there is a 500 and a
+re-delivery that the dedup absorbs, not a misreported refund.
+
+`tests/Feature/Refund/RefundListenerFailureTest.php`.
+
+### A chargeback on a refunded payment is reported, once
+
+A SEPA payer can reverse a debit the merchant has already refunded. `creditNetForGross()`
+then finds nothing (or only the rest) left to credit, and `ChargebackHandler` logged a
+warning and moved on: no credit note — correct, the invoice is already credited — but also
+no operator mail, no event and no record, so every re-delivery logged again and nobody
+disputed the chargeback with the proof of the refund, which is the one way to get the
+second payout back.
+
+Now the part of a chargeback beyond what was still creditable (`uncreditedGross()`, measured
+only when something had been credited before, with the cent of reconciliation slack
+tolerated) is reported: `ChargebackOnRefundedPayment` (audited) and an operator mail naming
+the payment, the chargeback id, the amount and the part already refunded. Once per
+chargeback — its id goes into `subscription_meta.chargebacks_on_refunded_payment` through
+`MutatesBillingMeta`, since a chargeback with nothing left to credit leaves no credit note to
+dedup on. **Judgement calls:** no zero-amount credit note (a tax document for nothing), and
+no `past_due` for a chargeback with nothing left to credit — the payment had been given back,
+so there is nothing to dun for. A partial one (rest credited) goes past due as before.
+
+**The report cannot stop the past-due transition (26 November 2026).** It runs inside the
+booking loop, before `markPastDue()`. A throwing `ChargebackOnRefundedPayment` listener or
+mail transport made the delivery a 500; the re-delivery found the chargeback booked (its
+credit note carries the id), booked nothing, and returned before `markPastDue()` — Active
+access on money the bank had pulled back, no `PaymentFailed`. The event now goes through
+`InvoiceService::announceBooked()` and the mail is guarded the same way: a failure is
+reported, never propagated. *Judgement call:* the id is noted before the send, so a failed
+mail is not retried (at most once, like every other operator mail here); the warning logged
+just before it carries the same facts. *Not changed:* `InvoiceRefunded` in this handler stays
+unguarded, as the section "A listener cannot fail a refund that has been paid" decided for
+the webhook handlers — note that for a chargeback its re-delivery does not reach
+`markPastDue()` either. "puts the billable past due although the report … fails"
+(listener, mail), red before (status stayed Active).
+
+`tests/Feature/Webhook/ChargebackAfterRefundTest.php`.
 
 ### OSS scope follows the VAT charged; credit notes inherit their original's validation
 
@@ -767,10 +1269,126 @@ the original's rate on the line, and the per-rate-group scope files them correct
 
 | Finding | Why it stands |
 |---|---|
-| A reversed chargeback (`reversedAt`) leaves its credit note and `PastDue` in place | How Mollie reports `amountChargedBack` after a reversal is not known; `reverseBookedCredit()` takes a reference key and would serve `mollie_chargeback_id` once that is measured. |
 | `ProrataChargeHandler` derives `seat_count` from the charge invoice and falls back to the included seats when the seats line is missing | Only reachable with an unpriced or sub-cent seat line. |
 | The renewal writes back the `seat_count` it read at the start | A pure interleaving with `SyncSeats`; no deterministic reproduction. |
 | An invoice may book one cent more than Mollie collected | That is the documented reconciliation slack; no real trigger found. |
+
+### A country correction re-issues what remained paid, and moves no units (25 November 2026)
+
+`resolve()` refunds what is left of each linked invoice at the old country's rate and charges
+it again at the new one. Three things went wrong around that:
+
+- **The charge cloned the original at full value.** A refund made before the resolve — a
+  goodwill credit, a refund by line, a plan change's credit — leaves less to refund, but
+  `issueCorrectionCharge()` re-charged the whole invoice: 2000 net with 500 given back was
+  refunded 1500 + AT VAT and charged 2000 + DE VAT, so the goodwill was collected again over
+  the mandate. An invoice refunded *in full* before the resolve (a cancellation, an unwanted
+  payment) was skipped by the refund step and still charged in full.
+  `CountryCorrectionEffectiveRefundTest` asserted that ("being already refunded is no reason
+  to skip the reissue") against a spy that never looked at the amount; it now asserts the
+  opposite.
+- **The refund credited an overage invoice's units back.** `refundFully()` returns the
+  units of an overage invoice, which is right for a refund of the service and wrong for a
+  tax re-issue: the usage was consumed and is charged again right after, so the wallet
+  gained the units for free.
+- **The reissue's lines carried `parent_invoice_id`.** That key marks a credit against
+  another invoice, and every reader of a document's *own* charges skips such lines
+  (`originalLineParts()`, `ProrataComposer::paidLineNet()`). A reissue therefore had no
+  charge lines to refund by: a full refund credited 0 % VAT and paid back only the net, a
+  dashboard refund booked the VAT on no document, and it offered nothing to refund by line.
+
+**Rules now:**
+
+- The reissue charges what remained paid. Its lines are the original's at the new rate plus
+  one negative `refunded` line per original line that was credited before the correction,
+  at that line's new rate and naming it in `applies_to` — so it reads, folds and prorates
+  like any invoice with a reduction. An invoice with nothing left is not re-issued at all.
+  `InvoiceService::creditedOutsideCorrection()` computes it.
+- *Judgement call:* the correction's own refund is recognised by its credit note's reason
+  (`RefundReasonCode::BillingError` with `CountryMatchService::CORRECTION_REFUND_REASON`),
+  not by new state. A resolve that refunded an invoice and stopped before charging it (another
+  invoice's refund threw) still owes the whole reissue on the retry, and every correction
+  credit note ever written carries that reason, so the rule holds for history too. An
+  operator who books a manual refund with exactly that reason and text is read as the
+  correction — that is the one input that defeats it.
+- *The correction's own refund keeps its reason when the webhook books it (26 November
+  2026).* When the refund call lost its answer (or phase 3 failed), `resolve()` threw, the
+  mismatch stayed Pending, and Mollie's payment webhook booked the refund as "synced from
+  Mollie dashboard", reason Other. The retry then read it as a refund made before the
+  correction: nothing remained paid, nothing was charged again — the customer kept the
+  whole refund. `RefundInvoiceService` now sends `reason_code` (and `reason_text`, up to
+  500 bytes — Mollie takes 1 KB of metadata) as refund metadata, and `RefundHandler` books a
+  refund carrying it under that reason; a dashboard refund has none and is booked as
+  before. The metadata is set through a property for the length of `callMollieRefund()`,
+  whose signature is an override seam (tests and apps replace it) and stays unchanged; an
+  override that ignores it books as before. `CountryCorrectionLostRefundAnswerTest`, red
+  before (no charge sent).
+- The correction refunds money only (`refund()` with no `wallet_credits`), never units.
+- Reissue lines reference the corrected invoice through `corrects_invoice_id`, like the
+  undercollection's `completes_invoice_id`. *Not migrated:* reissues written before this
+  change keep `parent_invoice_id` on their lines and keep refunding net only; refund one of
+  those with explicit `line_items` carrying `vat_amount`.
+
+`CountryCorrectionRechargeBasisTest` (partial refund before → 17.85 not 23.80; full refund
+before → no charge; the correction's own earlier refund → full charge; overage → wallet
+unchanged) and `CountryCorrectionReissueRefundTest` (full refund pays 119.00, dashboard
+refund maps to 19.00 VAT, lines offered), red before except the retry control.
+
+### The portal's confirmation names what the correction refunds (26 November 2026)
+
+The country-fix modal says "*n* invoice(s) totalling *x* will be refunded and reissued". It
+counted every invoice linked to the mismatch and summed their original gross, while
+`resolve()` refunds only what is left of each and skips an invoice with nothing left. Found
+by the browser suite: Pro + Softdrinks (40.34) with the Softdrinks line refunded (5.83)
+before a second renewal (40.34) flagged the mismatch — the modal promised 80.68, the
+correction refunded 34.51 + 40.34 = 74.85. An invoice refunded in full before was counted
+and summed although nothing happens to it.
+
+**Rule:** the figure is `CountryMatchService::refundsOnResolve()` — the same targets
+`resolve()` corrects (reissues excluded), only those with a remaining refundable net, each
+with that net plus `InvoiceService::creditNoteVat()` on it, which is what
+`RefundInvoiceService` pays back for a refund without an amount. Still grouped per currency.
+*Judgement call:* the count follows the same set, so it counts invoices that will actually be
+refunded and reissued, not every invoice the mismatch was flagged against. The operator's
+resolve modal ("*n* invoices will be refunded and reissued") counts the same set, for the same
+reason; each linked invoice stays visible on the invoices tab.
+
+`Feature/Vat/CountryFixModalNamesRefundsTest` (partly refunded → 74.85 not 80.68; refunded in
+full → "1 invoice(s) … 40.34", and 1 in the operator modal), red before;
+`Browser/CountryCorrectionDeepTest::test_a_partly_refunded_invoice_is_reissued_at_what_remained_paid_not_at_its_original_value`.
+
+### Every writer of `country_corrections` re-reads it under the lock (25 November 2026)
+
+`CountryCorrectionHandler::failed()` saved the whole `subscription_meta` of the instance it
+was handed. The hourly sweeper hands over a billable loaded a chunk and several Mollie round
+trips earlier, so the save deleted every key written since — a correction a re-resolve had
+just issued among them. That payment, once paid, found no pending state:
+`createCorrectionInvoice()` threw, `paid()` logged and returned, and the webhook answered 200
+for money on no document; the next resolve then charged the same supply period again.
+`issueCorrectionCharge()` had the mirror image: it wrote its snapshot of the map (taken
+before its Mollie call) over the one read under the lock, and brought back an entry the
+previous charge's paid webhook had just cleared — the dashboard kept showing a pending
+re-charge and the sweeper polled a paid payment every hour, because `paid()` returned on the
+existing invoice without clearing the entry.
+
+**Rules:** both go through `mutateBillingMeta()` and touch only their own key; `paid()`
+clears a stale entry when the reissue already exists; and `paid()` *rethrows* a failed
+booking, so the webhook answers 5xx and Mollie re-delivers (the reissue's payment id keeps
+that idempotent). The sweeper catches it per payment and tries again next hour, so one
+payment cannot stop the sweep. `CountryCorrectionMetaRaceTest`, red before.
+
+### A serial's year is the year's last digits, one per `Y` (25 November 2026)
+
+`Y` is documented as one digit slot per character, so `YYYY` is how an operator asks for the
+full year. `InvoiceNumberGenerator` read the two-digit year and padded it to the slot: every
+invoice and credit note said year `0026`. A single `Y` received two digits, which shifted
+the counter one character off the offset `extractCounter()` reads it from, so the next serial
+was computed from the wrong characters. The slot now takes the last *n* digits of the
+four-digit year (`YY` → 26, unchanged; `YYYY` → 2026; `Y` → 6).
+
+*Behaviour change:* an install that already issued `0026` serials continues in a new range
+(`IN-2026-00001`); the old serials stay unique and nothing collides. `InvoiceSerialRangeTest`,
+red before.
 
 ### A prorata credit is the unused share of what was paid, not of the list price
 
@@ -894,6 +1512,30 @@ they switch locally only when their charge clears and keep their PATCH there.
 
 Judgement call: Phase 2 still PATCHes for a seat/addon change. It is the same amount and therefore
 idempotent, and it repairs a first PATCH that failed without waiting for the retry job.
+
+### An accepted change supersedes the last one's outcome (26 November 2026)
+
+`plan_change_failed_at` (+ `_reason`) and `plan_change_unfinished` were only ever written.
+The plan page reads them as "how did the change I am watching end" and looks only at their
+age — 24 hours for a declined charge, 7 days for one the clean-up gave up — and the addon
+page reads the stamp for 30 minutes. So the customer whose upgrade charge was declined, who
+did as told and upgraded again ten minutes later and paid, was told on the poll that saw the
+change land that the payment had failed and to try again, with the danger callout beside the
+new plan for the rest of the day; a later change after an unfinished one was announced as
+"could not be completed — do not start it again". A successful addon after a declined one
+was a "payment failed" toast.
+
+**Rule:** the markers describe the latest attempt. `UpdateSubscription::runUpdate()` drops
+them (`SubscriptionMetaHygiene::PLAN_CHANGE_OUTCOME_KEYS`) once a new change has passed
+validation and its coupons — in its own short locked write (`MutatesBillingMeta`), and
+*before* any Mollie call, so a new charge declined at once writes its own stamp after the
+drop, never under it. A refused change leaves them. The record of the earlier attempt is the
+`PlanChangeFailed` event, the audit log and the operators' mail, which this does not touch;
+for an unfinished change the operators also keep `orphaned_prorata_payment`. Clearing the
+unfinished notice when the customer goes ahead anyway is deliberate: the page reports the
+change the customer is watching, and the earlier one is the operators' to settle.
+`tests/Feature/Portal/StalePlanChangeOutcomeTest.php`: the paid retry, the unfinished
+predecessor and the addon red before; the declined retry (still reported as declined) green.
 
 ### Known limits, not changed — plan changes and proration
 
@@ -1022,6 +1664,107 @@ Judgement calls in it:
   `chargeDeferredOverage()` already charged a billable with a mandate regardless of
   source, so this is the same rule one period later rather than a new one.
 
+### The plan-change preview quotes the excess the change bills (26 November 2026)
+
+`WalletPlanChangeAdjuster::adjust()` keeps two kinds of debt out of the excess it prices:
+units an in-flight period-end overage charge is collecting, and excess an earlier plan change
+left on the wallet with its price (`deferred_overage`). Both are part of the negative balance
+and neither is consumption on the plan being left. `PreviewService` read the bare balance and
+quoted them again. Pro → Starter the morning after the sweep's SEPA charge for 30 SMS: the
+screen said 50 units at 15 ct would be charged, the change carried the 30 and billed 20 —
+the customer confirmed a figure 4.50 net too high, and "used" read 70 for a period in which
+40 were used.
+
+Both now ask one method, `WalletPlanChangeAdjuster::carriedDebtUnits()`, and the preview
+subtracts it from the excess and from the "used" figure. Pinned by
+`tests/Feature/Wallet/PlanChangePreviewCarriedDebtTest.php` (both kinds of debt, red before:
+50 quoted against 20 billed, 40 against 15) and `tests/Browser/UsageDeepTest.php` (the
+downgrade on the plan screen while the sweep's payment is open, then that payment and the
+next sweep: the excess is billed once, at the old plan's 15 ct, as a `deferred_price` line).
+
+Judgement call: the preview still lists the excess under what is due now although, with the
+overage slot taken, it is collected by the next sweep instead (`restoreUnchargedExcess()`). The
+amount and the price are right, and so is the line: the customer owes it. *When* it is
+collected is now said (decision 8 of 26 November 2026): `PreviewService` sets
+`usageOverageAwaitsChargeInFlight` from `ChargeUsageOverageDirectly::chargeIsInFlight()` — the
+same test `handleExplicit()` refuses on, read-only and without its warning log — and the plan
+screen adds, under the overage lines of both "due now" blocks, "The overage will be charged
+with the next debit, once the current one has completed." (de: "Der Mehrverbrauch wird mit der
+nächsten Abbuchung berechnet, sobald die laufende abgeschlossen ist."). A pending snapshot
+whose payment already has its invoice is not in flight — `handleExplicit()` charges then — and
+the sentence stays away. The figures are deliberately left in the total: taking them out
+would quote a "due now" that is lower than what the customer owes for the change. Pinned by
+`tests/Feature/Wallet/PlanChangePreviewOverageInFlightTest.php` (red before: the flag was
+absent and neither sentence rendered) and by the dusk element
+`overage-after-charge-in-flight` in `tests/Browser/UsageDeepTest.php`.
+
+### Without a mandate the plan-change preview says the change is refused, not "charged later" (26 November 2026)
+
+Reported as: the preview without a mandate does not say the overage is charged later.
+Measured, it is not charged later at all. `ValidateSubscriptionChange::validateWalletUsage()`
+refuses an immediate change whose excess the new plan cannot absorb when the billable has no
+mandate (`DowngradeRequiresMandateException`); `WalletPlanChangeAdjuster::chargeDeferredOverage()`'s
+`no_mandate` branch (`restoreUnchargedExcess()`) sits behind that check and is reached only
+if the mandate disappears between validation and charge. A change scheduled for the period
+end is accepted, but `ScheduleSubscriptionChange` applies it through `update()` as
+`immediate`, so it is refused there for the same reason and dropped as `not_available`.
+The preview quoted the excess under "due now" and offered both buttons; the confirm then
+answered with the generic error toast.
+
+So the truthful text is a refusal, not a later date. `PreviewService` now runs the
+validator's own check — split out as the public
+`ValidateSubscriptionChange::assertUnresolvedOverageIsChargeable()`, which
+`validateWalletUsage()` delegates to, so the two cannot disagree — for a plan or interval
+change, sets `usageOverageRequiresMandate` and adds the blocking error
+`usage_overage_requires_mandate`. The plan screen renders
+`portal.error_usage_overage_requires_mandate` (dusk `change-refused-overage-needs-mandate`)
+and disables the button; `applyChange()` answers a refusal that gets past the preview with
+the same sentence. Judgement call: both options are blocked, scheduling included, because a
+scheduled change would be refused when applied unless a mandate arrives first — and with a
+mandate the customer can change at once. Not covered: a seat-only change on the same plan
+runs the same validator check; its screen is not the plan screen and is left as it was.
+Pinned by `tests/Feature/Wallet/PlanChangePreviewOverageNoMandateTest.php` (red before,
+with the `PreviewService` hunks removed: 5 of 6 failed — the flag was absent and neither
+sentence rendered; the with-mandate control passed both ways) and by
+`tests/Browser/UsageDeepTest.php::test_a_downgrade_with_excess_and_no_mandate_is_refused_on_the_plan_screen`
+(red before: waited 15 s for `change-refused-overage-needs-mandate`; green after, no payment
+created, plan unchanged).
+
+### The admin billable header asks Mollie for the mandate once per page load (26 November 2026)
+
+The header refresh (`billing-admin-billable-changed`, see "Admin billable header follows the
+tab's actions") re-renders the page after every tab action, and `mandate()` called
+`MollieMandateInspector::inspect()` each time — one extra `GetMandateRequest` per admin
+action, for a status or plan refresh that cannot change the mandate. The page now keeps the
+summary as a locked `MandateSummary::snapshot()` together with the mandate id it was fetched
+for, and asks Mollie again only when `mollie_mandate_id` differs (including none → some). A
+full page load starts empty and always fetches, so a mandate revoked at Mollie shows on the
+next load. A failed lookup (null) is kept too: the header says "unavailable" until a reload,
+as it did for that render before. Pinned by
+`tests/Feature/Admin/BillableHeaderMandateFetchTest.php` (red before: 2 GetMandate
+requests after one tab action instead of 1; the second test — a changed id fetches, no id
+does not, every full load does — passed before and after, guarding against over-caching).
+That a real mandate survives the kept snapshot unchanged is measured against the Mollie test
+API in `tests/Sandbox/MollieRequestContractTest.php::test_it_reads_a_mandate_the_way_the_inspector_expects`.
+
+### A change waiting for its payment is called a change, not an upgrade (26 November 2026)
+
+Any plan or interval change whose pro-rata charge exceeds its credit waits for that charge —
+not only an upgrade. Pro → Starter with eight extra seats is a downgrade by base price
+(`BillingPolicy::isUpgrade()` is false) and still collects more than the Pro month it
+replaces. The plan screen announced every one of them as "An upgrade to the :plan plan is
+awaiting payment confirmation", and the toast/callout for a declined charge — shared with the
+addons screen, where no plan is involved at all — as "Your plan upgrade could not be
+completed". Decision 7: neutral wording. `portal.pending_plan_change_notice` is now "The
+change to :plan is awaiting your payment." / "Der Wechsel zu :plan wartet auf deine Zahlung.",
+and `portal.flash.plan_change_failed` "Your change could not be completed because the payment
+failed. …" / "Deine Änderung konnte nicht durchgeführt werden, da die Zahlung fehlgeschlagen
+ist. …". Keys and placeholders are unchanged, so nothing that references them moved; the
+dashboard shows neither text. Pinned by
+`tests/Feature/Subscription/PendingChangeNeutralWordingTest.php` (red before in both locales:
+the old upgrade sentences rendered), and rendered in the browser by
+`PendingChangeCancelTest` / `ChangesInFlightTest`, which assert the keys.
+
 ### `billing:sync-purchased-balance` clamps at a plan change too
 
 The replay clamps the running purchased total wherever the live bookkeeping does. It knew
@@ -1033,6 +1776,81 @@ balance: 500 "purchased", 490 of them plan quota, re-credited on top of every la
 points now, and leaving a clamp point also caps the total at the balance it left behind —
 a plan change that nets an excess against the new quota can leave less than it found.
 Pinned by `tests/Feature/Commands/SyncPurchasedBalanceAfterPlanChangeTest.php`.
+
+### A dunning retry is a new payment, and the snapshot says which one is live (25 November 2026)
+
+Three findings about the second and third payment of an overage dunning cycle, all with
+one root: after a payment failed, `usage_overage.payment_id` went on naming it while
+`RetryUsageOverageChargeJob` asked Mollie for the next one, and the idempotency key was the
+cycle's alone.
+
+- **The retry was answered with the failed payment.** A card refuses within minutes, inside
+  the hour Mollie keeps a key, and the next payment's request had the same key and the same
+  parameters as the failed one's — so Mollie replayed p1. The job stored p1 again, reported
+  *Charged* and stopped; p1's webhook had already come. One attempt per cycle instead of
+  three, the snapshot `pending` until `CleanupStalePendingOverageChargeJob` wrote it off 72 h
+  later, and `OverageBillingFailedNotification` never sent, because only `giveUp()` sends it.
+  (SEPA was spared only because its failure arrives after the hour.) Every test fake ignored
+  the key, which is why the suite expected three payments seconds apart.
+- **A retry that could not create its payment was lost.** With p1 in the slot,
+  `markPaymentUnknown()` saw "an id is there" and set nothing, pass 3 skipped the row for the
+  same reason, and the stale sweep polled p1, found it failed and deferred the cycle. If the
+  create had in fact reached Mollie (answer lost), that payment p2 settled later on top of the
+  units `deferFailedCycle()` had credited back: the customer got them for free.
+- **The stale sweep's own cancellation started a new cycle.** It cancels a payment stuck for a
+  fortnight and defers the cycle; Mollie's `canceled` webhook for that payment then ran the
+  retry job, which never looked at the status and charged the deferred lines at once —
+  without `RECOLLECT_AFTER_DAYS`, and counted as one of `MAX_RENEWAL_RECOLLECTIONS` although no
+  renewal had come.
+
+What applies now:
+
+1. `payment_id` names the payment **in flight**, nothing else. `persistPendingCharge()` moves
+   an id still in the slot to `usage_overage.previous_payment_ids`
+   (`ChargeUsageOverageDirectly::PREVIOUS_PAYMENTS_KEY`) when the next payment is asked for.
+   So a create that throws is marked `payment_unknown_at` like a cycle's first one, and the
+   whole "a lost create-payment answer is marked, never guessed" rule holds for every payment
+   of a cycle. The dunning budget is unaffected: it counts ids in
+   `usage_overage_counted_payments`, which the job writes before it retries.
+2. The key carries the payment before it: `usage-overage:{class}:{id}:{cycle}:{gross}:after:{id}`
+   (no suffix for a cycle's first payment, which keeps its measured shape). It moves exactly
+   when a new payment is meant, and stays put across the queue retries of asking for that one.
+3. `CleanupStalePendingOverageChargeJob` skips the cycle's earlier payments when it looks a
+   lost one up (same metadata, same amount, same window — p1 matched), and for a later payment
+   waits `RECONCILE_UNKNOWN_AFTER_HOURS` from the marker, not from the cycle's start. Measured
+   from the cycle it reconciled mid-ladder, and a queued re-entry of the retry job then found
+   the adopted payment in the slot, counted it as failed and created the next one.
+4. `RetryUsageOverageChargeJob` returns at once for `usage_overage_status = failed`. A cycle
+   that is over is the renewals' to collect again; nothing else in the job's reach may start
+   one.
+
+Follow-up (26 November 2026, review finding): moving p1 out of the slot also removed the
+only terminal path of a retry Mollie refuses *for good* — a SEPA payment that failed with
+MD01 and an invalidated mandate behind it. Before, the sweep polled p1 after 72 h, found it
+failed and deferred the cycle. Now the slot was empty, `reconcileUnknownPayment()` found
+nothing (p1 skipped as a previous payment), dropped the marker and **returned**, so the
+`HARD_LIMIT_DAYS` write-off for "no payment could be created" — whose own comment says it
+exists to end exactly this daily retry — was unreachable whenever a marker stood, and pass 3
+re-marked it every night: three refused creates and an admin mail a day, `pending` for ever,
+never past due. *Rule:* "Mollie holds no such payment" (also: no customer, 404/410) is an
+answer, and the pass goes on to the no-id branch's hard limit after it. That also ends the
+same loop for a cycle's *first* payment, which had it since the marker was introduced.
+*Judgement:* the limit stays the cycle's 14 days, not the 72 h the p1 poll used to give —
+a transient create failure after p1 must still get its nightly retries ("marks a retry whose
+payment could not be created, and the nightly pass tries again"), and telling a refused
+mandate from a 5xx by the error code is not settled anywhere. Pinned by
+`OverageDunningRetryPaymentTest` › ends a cycle whose retry Mollie refuses for good (red
+before: `pending` after three weeks of nights). *Not changed:* the sweep does not take the
+retry job's `WithoutOverlapping` lock, so a retry whose create is in flight at 04:15 can
+race the write-off — the same window the existing hard-limit branch always had.
+
+Not changed: if the cancelled payment's webhook were processed *before* the sweep's
+`writeOff()` committed, the retry would still see a pending cycle and create the next payment
+while the sweep then defers it. The cancel call and the write-off run back to back in one
+process, against a webhook that has to cross Mollie and the queue — not worth a cross-process
+lock. Pinned by `tests/Feature/Wallet/OverageDunningRetryPaymentTest.php`; the long-run harness
+(`tests/Support/UsageLongRunHarness.php`) now answers keys as the sandbox measured, so every
+long-run dunning test exercises the key.
 
 ### Known limits, not changed — wallet and overage
 
@@ -1805,7 +2623,7 @@ run") pinned the flip for Local `Active` and was narrowed to `New` and `Trial`.
 | The anchor of a paid subscription is the renewal's `paidAt` | Already decided; the long run confirms the consequence is contained: with lags of 1–7 days over twelve periods every period is credited once and billed once, whichever of sweep and renewal comes first. | `UsageLongRunSepaTest` |
 | A cycle the dunning gave up on is written off by the renewal that recovers the billable — **superseded on 16 November 2026**, see [An overage nobody could collect stands, and the renewals try again](#an-overage-nobody-could-collect-stands-and-the-renewals-try-again-case-10) | Unchanged from round 1. Three failed payments, PastDue, renewal paid the next day: Active, wallet reset to the quota, no fourth attempt. The following period's overage is an ordinary new cycle. | `UsageLongRunLifecycleTest` (recovery) |
 | An immediate cancellation makes one more attempt at a written-off debt — since 16 November 2026 the debt is *standing*, not written off, and this attempt is one of its collection cycles | `CancelSubscription(immediately)` charges what the wallets owe. After a dunning episode that ended in auto-cancel this is a fourth payment on a method that failed three times, with its own two retries: six requests in all, none after expiry. It is the last moment the debt can be collected at all. | `UsageLongRunLifecycleTest` (stays past due) |
-| Resuming a cancelled subscription credits nothing | It restores the paid period; the next quota comes with the next renewal. | `UsageLongRunLifecycleTest` (resubscribe) |
+| Resuming a cancelled subscription credits nothing — *except a Local one whose period turned over during the grace, 25 November 2026* | It restores the paid period; the next quota comes with the next renewal. A Local grace is 30 days, not the rest of a period, and the nightly pass does not renew a cancelled row: resumed on the old anchor, `nextBillingDate()` stayed in the past for good — case C matches only "renews tomorrow", so no refill ever came, and `guardPeriodNotLapsed()` refused every change with "wait for the renewal". `ResubscribeSubscription` now does the turn-over the pass skipped: anchor on the period running now (on the anchor day, several boundaries give one period), that period's quota through `WebhookSupport::creditPeriodQuota()` — not for a grant that ends by that boundary. Red before (anchor stayed 1 March). | `UsageLongRunLifecycleTest` (resubscribe); `UsageLongRunLocalTest` › "keeps renewing a free plan that was resumed after its period turned over during the grace" |
 | A Local period that starts on the 31st keeps the 31st — *revised 16 November 2026* | The nightly pass turns a free plan or a gift without extras over on its anchor day, like a Mollie renewal: 31 Jan → 28 Feb (29 Feb in a leap year) → 31 Mar → 30 Apr, one refill per period on the day it begins. `PrepareUsageOverageJob::resetLocalQuota()` derives the day with `BillingAnchor::forCycle()` and records it beside the new period start; `nextBillingDate()` — and with it the boundary night, the refill and every prorata window — ends on it. Earlier the clamp to the 28th stuck for good; seen red (3 cases) against the unchanged job. | `UsageLongRunLocalTest` › "keeps a Local period on its anchor day through the short months" (free plan from 31 Dec 2027 through the leap February to March 2029, free plan from the 30th, gift without extras ending 15 May) |
 
 Green from the start, and kept as a guard: card subscription over twelve periods (every
@@ -2009,7 +2827,8 @@ no subscription. The duplicate condition is now "a Mollie subscription is runnin
 other state proceeds, and `activate()` books a payment with no gift left to carry as a
 regular upgrade (the rule already documented under "Buying extras on a gift prices
 itself"). `BookingMatrixGrantExtrasTest`, which also pins that a genuine second payment is
-still a duplicate.
+still a duplicate — since 26 November 2026 booked and refunded as one, see
+[A duplicate first payment is refunded automatically](#a-duplicate-first-payment-is-refunded-automatically-26-november-2026).
 
 ##### One price for a one-time order: page, payment and invoice
 
@@ -2268,7 +3087,9 @@ lies after the next charge (deferred or regular).
   a single-use campaign code whose only redemption is revoked is deactivated too, and has to
   be switched back on by hand.
 - **`redeem()` still does not look at `active`.** A payment made with a code is honoured even
-  if the code was switched off while the payment travelled; `validate()` is the gate.
+  if the code was switched off while the payment travelled; `validate()` is the gate. Since
+  26 November 2026 such a redemption writes no recurring marker — see "A recurring code that
+  ends before the first renewal leaves no marker".
 - **A deactivated 100 % coupon keeps the running period free.** That is the equivalent of
   "cleared on the next renewal" for a partial discount.
 - **Revoking appended free periods removes the whole waiver** — unchanged, documented.
@@ -2493,7 +3314,8 @@ conditions `carryGrantOver()` needs to write a waiver, so there is no state in w
 neither a waiver is written nor a refund issued.
 
 Not affected: a second payment while a Mollie subscription already runs is still a
-`DuplicatePaymentReceived`; an upgrade without `keep_grant` is booked as before; a purchase
+duplicate (`DuplicatePaymentReceived`; booked and refunded since 26 November 2026, see
+[A duplicate first payment is refunded automatically](#a-duplicate-first-payment-is-refunded-automatically-26-november-2026)); an upgrade without `keep_grant` is booked as before; a purchase
 whose gift still runs is booked as before.
 
 ##### Judgement call — booked and credited, not refunded without a document
@@ -3712,6 +4534,14 @@ what the page renders. An `expired` billable flipped back to `cancelled` and its
 was mailed a second cancellation. Both throw `InvalidSubscriptionStateException`; nothing
 is written and nothing is sent.
 
+The admin subscription tab's `confirmCancel()` did not catch that refusal (26 November
+2026): a tab loaded while the subscription ran still offers the buttons after the expiry
+job, a grace end or another operator has ended it, and the submit left the action as a 500
+with the modal open. It is caught like every other action there — the modal closes and the
+operator reads "There is no subscription to cancel." — and `canCancel` excludes `new` as
+well, which the service refuses like `expired`. `CancelReasonTest` › "says there is nothing
+to cancel …" and "offers no cancel for a billable that never subscribed", red before.
+
 ##### Smaller ones
 
 - **`UsageLimitReached` left no audit row when the booking was refused.** On a hard cap
@@ -4584,7 +5414,8 @@ that already is the anchor day.
   a second cancel was retried for 24 hours and then mailed.
 - **While a replacement is pending**, `MollieSubscriptionGate` neither drops the cancelled id
   (no `MollieSubscriptionReferenceCleared`) nor lets a checkout start; a customer who cancels in
-  between ends it — the retry drops the marker and creates nothing.
+  between ends it — the retry drops the marker and creates nothing. A downgrade to a free plan
+  in between ends it too (26 November 2026, see [Renewal review round](#renewal-review-round-26-november-2026)).
 - **The replacement retry never gives up**; the operators are told once, after 24 hours
   (`AdminPlanChangeFailedNotification`). Dropping the marker would make a customer without a
   running subscription permanent and invisible — the one case where a mail is the exception
@@ -5163,3 +5994,1088 @@ Second pass over the merged branch, four more, each with a test that failed with
 - **A page past the last one showed the empty state** while invoices matched, with no way
   back but changing a filter. The list now shows the last page instead.
 - **README promised case-insensitivity on every database** — qualified for SQLite.
+
+## Checkout: one payment per order, and what a failed activation leaves behind (25 November 2026)
+
+Six findings of a review of the checkout, each reproduced by a feature test before it was
+changed.
+
+### What was wrong, and the rule now
+
+- **A first payment on record is reused only for the same order.** `reusablePendingCheckoutUrl()`
+  decided on status and checkout link alone. Back from Mollie, another plan (interval, addons,
+  seats, code), confirm → redirected to the OLD payment, whose metadata the activation books:
+  the old order at the old price. *Rule:* `Services\Billing\PendingFirstPayment::redirectFor()`
+  compares what activation reads — plan, interval, addons, seats, the `upgrade_from_local` /
+  `keep_grant` flags — and, for a payment that collects money, the amount (a code's effect
+  shows there). The code itself is compared only on a €0 authorisation, where the amount
+  cannot tell; there the order's code is the form's, else the promotion link's, exactly as
+  `StartSubscriptionCheckout` falls back. A payment whose metadata names no plan is not one
+  this package wrote for an order and is reused as before.
+- **Paid, not yet activated, is not "no subscription".** The checkout and
+  `StartSubscriptionCheckout` looked only at `hasAccessibleBillingSubscription()`. With the
+  webhook not there yet, or `CreateSubscription` failed and waiting on the retry ladder
+  (~7 h), a customer redirected to the checkout (`RequireActiveSubscription` does exactly that)
+  paid a second time. *Rule:* `WebhookSupport::activationInFlight()` (a retry marker, or a
+  fresh activation claim) and a payment on record that Mollie reports `paid` send the customer
+  to the return page; the service throws `ActivationInFlightException` for an app's own
+  checkout. *Follow-up (review 3):* a €0 authorisation whose activation was **refused**
+  (`reportSkippedActivation()` — typically a 100% code that lost its cover before the
+  webhook) also leaves a retry marker, and every retry is refused the same way: the customer
+  was kept from buying at full price for the whole ladder (~7 h) with no money collected.
+  Such a marker now carries `refused_without_charge` and does not count. Every other marker
+  still does — see the judgement call below.
+- **The plan page's upgrade and the purchase of extras on a gift ask the same question.**
+  They released their submit lock once the payment existed and never looked at the payment on
+  record; the plan page's comment claimed the lock covered "browser-Back from Mollie and click
+  again", which it cannot. Both call `PendingFirstPayment` under the lock.
+- **A payment-method change revoked the mandate the subscription was bound to.**
+  `CreateSubscription` passes `mandateId` on purpose (commit 141d422); `RevokePreviousMandate`
+  then revoked that mandate and nothing moved the subscription. Mollie cancels the
+  subscriptions of a revoked mandate (its documentation — measured on 26 November 2026: at once,
+  see "What Mollie does with a key, a cancel and a revoke — measured"), or
+  cannot charge them. *Rule:* for an accessible Mollie subscription the listener first PATCHes
+  its `mandateId` through `MollieSubscriptionPatcher::rebindMandate()` (the one PATCH door; no
+  start date, so a charged subscription takes it), and only then queues the revoke.
+  *Follow-up (review 3):* "accessible" was the wrong question. Past due on a failed renewal
+  (or a trial whose first charge failed) is not accessible, yet Mollie still runs or has
+  suspended the subscription — and that is exactly when the customer is told to review their
+  payment method. The old mandate was revoked at once. *Rule:* a Mollie subscription with an
+  id on record is moved when it is accessible or `MollieSubscriptionGate::hasLiveMollieSubscription()`
+  says it is `active`, `pending` or `suspended`. Only an id the gate dropped (Mollie: cancelled,
+  completed, 404/410) means "over"; a lookup that fails leaves the id and the PATCH is tried,
+  so a Mollie outage keeps the old mandate rather than revoking it.
+- **An activation that failed for good left its mandate on file.** `RetrySubscriptionActivationJob::failed()`
+  refunded a paid first payment and mailed the operators, but a trial's €0 authorisation kept
+  its mandate — and `StartSubscriptionCheckout` / `trialApplies()` grant a trial only without
+  one, so the next checkout charged the first period in full. *Rule:* the payment's own mandate
+  is cleared and revoked (`RevokeMollieMandateJob`), the same reason `GrantExtrasPurchaseRefund`
+  gives.
+- **A restricted promotion code was tried once, against nothing.** `adoptAutoApplyCoupon()` ran
+  at mount only, with no plan and a subtotal of 0; a code restricted to a plan, an addon or a
+  minimum order failed silently and was never tried again, and the service then dropped it
+  from the session. *Rule:* tried again on every change of plan or interval and on entering
+  the confirm step.
+
+### Judgement calls
+
+- **An open payment for another order is withdrawn, not left beside the new one.** Not every
+  method can be cancelled while open; when Mollie refuses the `CancelPaymentRequest`, nothing
+  new is created and the customer is told to finish the earlier payment or wait for its
+  expiry (`PendingPaymentForAnotherOrderException`). A second payment next to a payable first
+  one is the double charge this exists to prevent (a duplicate that gets through anyway is
+  refunded automatically since 26 November 2026 — see *Decided by the maintainer* below). Whether Mollie cancels an `open` payment that has not picked a method is not
+  measured; if it does not, a changed order waits for the old payment's expiry.
+  **Measured on 26 November 2026: it does not** — no open first payment can be cancelled (no
+  method, card, eps, €0.00: 422 "The payment cannot be cancelled"), so a changed order always
+  waits; see "What Mollie does with a key, a cancel and a revoke — measured".
+- **A `pending` payment for another order still goes to the return page.** It has left the
+  browser and may settle; the order it carries is booked. Unchanged.
+- **A failed rebinding keeps the old mandate.** A second valid mandate costs nothing; a
+  subscription on a revoked one costs the customer the subscription. A Mollie subscription
+  with an id on record that is accessible, or that Mollie still runs (see the follow-up
+  above), is moved; a checkout that recovers an ended subscription revokes the old mandate at
+  once, as before (the new subscription is created on the new one).
+- **Only a refused €0 activation is let past the checkout guard, not every €0 one.** A trial
+  whose `CreateSubscription` failed on a Mollie hiccup is €0 too, but its retry will most
+  likely activate it, and a second checkout beside it now finds a mandate — so no trial, and
+  a full charge next to the trial about to start (the case under `mayActivate()`). A refused
+  marker is recognised by how it was written (`scheduleActivationRetry(…, refused: true)`
+  from `reportSkippedActivation()`, and only for a payment that collected nothing), not by
+  its reason text. Accepted: when the operator restores the code's cover while the customer
+  pays in full, whichever activation comes second meets the gate as a duplicate — booked and
+  refunded, see *Decided by the maintainer* below. A marker written before this change carries
+  no flag and still counts.
+- **The mandate is given back on the refunding path too**, not only for a trial: a refunded
+  first payment that leaves its mandate behind denies the next checkout its trial the same way.
+  Only the payment's own mandate (`GetPaymentRequest` → `mandateId` equal to the one on file),
+  and only while no `mollie_subscription_id` is on record.
+- **A promotion code the customer removed is not put back** by a later change of plan
+  (`$promotionRemoved`, component state). A reload still re-applies it at mount, as before,
+  and `StartSubscriptionCheckout` still falls back to the session code on the trial path —
+  both unchanged.
+
+### The checkout goes to the return page when it opens, not only on submit (26 November 2026)
+
+Maintainer's decision 3 of 26 November 2026. With a paid first payment whose activation was
+still in flight, `RequireActiveSubscription` sent the customer to the checkout and the
+checkout rendered every step; only the final submit asked `PendingFirstPayment` and went to
+the return page. The customer walked through plans, addons and the confirm step for an order
+that could not be placed. *Rule:* `checkout::mount()` asks
+`PendingFirstPayment::activationUnderway()` — the order-independent half of `redirectFor()`,
+sharing its `activationInFlight()` check and its probe of the payment on record — and
+redirects to the return page when an activation is running (fresh `activation_claim`),
+waiting for its retry (`activation_retries`), or the payment on record is `paid` and not yet
+booked. The submit keeps its own check for a form opened before the activation started.
+
+- *Red before:* `tests/Feature/Checkout/CheckoutRedirectsWhileActivatingTest.php` — the
+  retry-marker, fresh-claim and paid-webhook-pending cases failed against the unfixed
+  component (200, no redirect); its five controls passed before and after. Browser:
+  `CheckoutDeepTest::test_a_checkout_while_the_paid_first_payment_awaits_activation_…` and
+  `…_after_mollie_took_the_money_but_before_the_webhook_…` timed out waiting for
+  `/billing/return` with the mount check disabled; `…_form_opened_before_the_activation_started_…`
+  pins the submit guard and passes either way.
+- *Judgement call — what does not redirect at mount.* A refused €0 authorisation
+  (`refused_without_charge`) and an activation that failed for good leave nothing in flight
+  (`activationInFlight()` is false, the webhook dropped `pending_first_payment_id`), so the
+  customer can check out again. An `open` payment is judged at the submit, against the order
+  the form then holds (same order → its link, another → withdrawn), and so is a `pending` one
+  (SEPA, bank transfer), which the submit still sends to the return page — the decision named
+  an activation in flight, and a `pending` payment can take days; *open question* whether it
+  should redirect at mount too. A probe that fails shows the checkout (never locked out by a
+  lookup), and a billable the visitor may not act for is not asked about at all.
+- *Cost accepted:* a checkout opened with a payment on record now makes one
+  `GetPaymentRequest` at mount (outside any transaction), and the submit asks again — the
+  answer can change in between. Four existing feature tests that counted the submit's Mollie
+  calls now reset the count after the mount; three that set the in-flight state before
+  mounting now open the form first, then set it, then submit.
+
+### Decided by the maintainer (26 November 2026)
+
+- **A duplicate first payment is refunded automatically.** This was left open here ("kept
+  unbooked … needs a way to tell which payment activated the subscription"). The rule now
+  follows flows.md §13: the duplicate is booked and returned through `UnwantedPaymentRefund`
+  (reason `duplicate_payment`), both at the gate and in `RetrySubscriptionActivationJob`.
+  See [A duplicate first payment is refunded automatically](#a-duplicate-first-payment-is-refunded-automatically-26-november-2026).
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Checkout/PendingFirstPaymentReuseTest` › changed order → cancelled and a new payment | redirected to `tr_old` |
+| › changed order, Mollie refuses the cancel → message, nothing created | redirected to `tr_old` |
+| › payment on record `paid` → return page | a second payment was created |
+| › activation waiting for its retry → return page | a second payment was created |
+| › the service refuses while an activation is in flight | no exception, payment created |
+| `Portal/UpgradeAndExtrasPaymentReuseTest` › plan page, same upgrade again | redirected to `tr_second` |
+| › gift extras, same purchase again | returned `tr_second` |
+| `Webhook/PaymentMethodChangeRebindsSubscriptionTest` › subscription moved before the revoke | no `UpdateSubscriptionRequest` |
+| › rebinding fails → old mandate kept | revoke dispatched |
+| › past-due subscription Mollie still runs (`active`, `suspended`) moved before the revoke | no `UpdateSubscriptionRequest`, revoke at once |
+| › past due, Mollie cannot be asked → old mandate kept | revoke dispatched |
+| `Checkout/RefusedAuthorisationDoesNotBlockCheckoutTest` › 100% code lost its cover → checkout at full price | redirected to the return page |
+| › the service does not refuse a refused authorisation | `ActivationInFlightException` |
+| `Webhook/ActivationRetryTest` › mandate given back when a trial failed for good | `hasMollieMandate()` true |
+| `Checkout/PromotionCodeAfterPlanChoiceTest` › restricted code applied once its plan is picked | `applied_coupon` null |
+
+Guards that stay green: the same-order reuse, `pending` → return page, "revoked at once
+when no subscription runs on it", "revokes at once when the past-due subscription is over at
+Mollie", and `RefusedAuthorisationDoesNotBlockCheckoutTest` › still holds the checkout while a
+€0 authorisation waits for a retry that can finish it.
+
+## Renewal review round (26 November 2026)
+
+Five findings about renewals and what hangs off them, each reproduced by a feature test that
+was red against the unfixed code before anything was changed.
+
+### What was wrong, and the rule now
+
+- **A free-plan downgrade during a pending replacement brought the paid subscription back.**
+  A replacement waiting between its cancel and its create (`pending_subscription_replacement`,
+  `old_cancelled = true`) survived a downgrade to the free plan: `cancelForFreeDowngrade()` met
+  "has been cancelled" and counted it as done, phase 3 made the billable Local and Active, and
+  the marker is not one of `SubscriptionMetaHygiene`'s keys. The retry then asked only the
+  status — Active — and created the paid subscription again for a Local billable: charged and
+  fully refunded every period by `SupersededRenewalRefund`, never cancelled, and counted as
+  live by the checkout gate. *Rule:* a Local billable has no Mollie subscription to move.
+  `MollieSubscriptionReplacer` abandons the replacement (and cancels one it created meanwhile)
+  for a Local billable whatever its status, and `UpdateSubscription`'s free-downgrade write
+  drops the marker together with `mollie_subscription_id` once the cancel went through, so the
+  gate is free at once. The marker stays out of `SubscriptionMetaHygiene` — an activation is
+  not a reason to forget a replacement.
+- **A trial recovered from past due never converted.** `SubscriptionPaymentHandler::paid()`
+  asked only `status === Trial`. A trial whose first charge failed (`failed()`), or whose
+  outcome did not come within the grace days (`ProcessTrialLifecycleJob`), is PastDue; the paid
+  charge that recovers it became an ordinary renewal: `trial_ends_at` stayed, no
+  `trial_converted_at`, no `TrialConverted`, and the `trial_quota` grant stayed — so the next
+  plan change rebalanced a paid full period against the trial's prorated grant
+  (`WalletPlanChangeAdjuster`: overage under-billed, rollover over-credited). *Rule:* a PastDue
+  billable with `trial_ends_at` set and no `trial_converted_at` is an unconverted trial, and the
+  paid charge converts it. *Judgement:* the adjuster keeps reading `trial_quota` without a
+  status gate — for an unconverted PastDue trial the grant is still the right baseline.
+- **The coupon-expiry reset's failure path wrote back a stale meta.** When the reset PATCH
+  failed, `pending_subscription_patch` was added to the meta the handler loaded when the webhook
+  started and saved without a lock — undoing every write committed since (a seat change that
+  PATCHed Mollie under the lock this reset timed out on lost its `seat_count`, and the final
+  compare-and-set then found the starting count and kept it; a cleared overage slot came back).
+  *Rule:* locked read-modify-write (`mutateBillingMeta`), the coupon id taken from what this
+  renewal priced. `clearPendingTrialCouponSlot()` had the same unlocked pattern and follows the
+  same rule. *Not changed:* the reset still takes the `pending_subscription_patch` slot when a
+  different patch waits there, as before — which of two waiting patches matters more is not
+  settled by this finding. `CouponService::clearActiveRecurringCouponMarker()` (the success
+  path) is still an unlocked save of the instance's meta; it has seven callers and was left for
+  its own change.
+- **A lost create-payment answer for an undercollection balance was read as "refused".**
+  `UndercollectionCharge::settle()` recorded any throw as `payment_not_created` and told the
+  operators to charge by hand — while Mollie collected the payment it had created. The payment
+  was then booked from fallback lines without a period, and the admin tab kept "not possible"
+  next to a paid balance. *Rule:* the same as [A lost create-payment answer is marked, never
+  guessed](#a-lost-create-payment-answer-is-marked-never-guessed): a throw asks Mollie's payment
+  list for the case's payment (metadata `undercollection` = the case key). Found: it is the
+  case's payment, recorded `charged` and announced to the customer as usual. Not found:
+  `payment_not_created`, as before. The list not readable: `payment_unknown` — the operators
+  are told to look at Mollie first, the case keeps its lines and period, and a payment of that
+  case that arrives later is adopted by `paid()` / `failed()`. *Judgement:* no retry ladder of
+  its own; the operator mail is the fallback for the case Mollie cannot be asked, as it was for
+  a refusal. The customer is not told about a payment that may not exist.
+- **A renewal collected after the end was kept when the first delivery died behind the
+  invoice.** `paid()` writes the invoice, then returns the payment and cancels at Mollie
+  (`reportRenewalForEndedSubscription()`). A throwing `InvoiceCreated` listener or a killed
+  worker in between, and the re-delivery stopped at the invoice guard: charged, nothing
+  returned, the subscription still running at Mollie, nobody told. *Rule:* the decision is
+  recorded before the invoice (`SubscriptionPaymentHandler::ENDED_RENEWALS_KEY`, payment id →
+  time) and dropped once the refund and the cancel are through; a re-delivery that finds it
+  finishes them. Every step is safe to repeat (cancel: "already cancelled" is done; refund:
+  skipped once credited or queued; announcement: once per payment). *Judgement:* keyed on the
+  first delivery's decision, not on the status at re-delivery — a renewal booked while the
+  subscription ran and delivered again after a later cancel must not be given back.
+  `RenewalCollectedForEndedSubscription` can be dispatched a second time when the first run
+  died after it. *Follow-up (review finding):* the entry follows the decision of the delivery
+  that writes the invoice, both ways. A first delivery that judged the renewal ended and died
+  *before* the invoice left its entry; when the subscription was resumed before the
+  re-delivery, that re-delivery booked the renewal live (invoice, period, quota) and the stale
+  entry then made a later call of the same webhook — a partial refund changes the outcome
+  signature — refund the rest and cancel at Mollie. `paid()` now drops this payment's entry
+  when it takes the live path. *Judgement:* the re-delivery's status decides, not the dead
+  first delivery's: nothing of that decision was carried out, and the invoice and period
+  are written under the second one. *Not changed:* a *live* renewal whose first delivery dies behind the invoice
+  is still not resumed (no period advance, no quota) — that is the general shape of the
+  renewal handler, not this finding.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Billing/ChargedSubscriptionReplacementTest` › drops a pending replacement when the customer downgrades to a free plan | `subscriptionsCreated` 2 |
+| `Webhook/PastDueTrialRecoveryConvertsTest` | `trial_quota` still there |
+| `Webhook/RenewalCouponResetFailureKeepsConcurrentMetaTest` | the concurrent write undone |
+| `Subscription/UndercollectionLostAnswerTest` › takes over the payment whose answer was lost | status `not_possible` |
+| › unknown when Mollie cannot be asked, adopted when it arrives | obstacle `payment_not_created` |
+| `Webhook/EndedSubscriptionRenewalRefundTest` › finishes the refund and the cancel on the re-delivery | no credit note |
+| `Webhook/EndedSubscriptionRenewalRefundTest` › never returns a renewal judged ended by a first delivery that died before its invoice (follow-up) | a `CreatePaymentRefundRequest` on the partial-refund call |
+
+Guard that stays green: `EndedSubscriptionRenewalRefundTest` › never returns a renewal booked
+while the subscription ran, delivered again after a cancel.
+
+## Plan, seat and addon changes review round (26 November 2026)
+
+Three findings about changes in flight, each reproduced by a feature test that was red
+against the unfixed code before anything was changed.
+
+### What was wrong, and the rule now
+
+- **A pre-announced upgrade applied early left Mollie at the target's price when it did not
+  go through.** A scheduled Starter → Pro on the same interval is announced to Mollie when it
+  is scheduled (`scheduled_change.mollie_prepatched`). "Apply now" mid-period (or a dispatcher
+  run ahead of the boundary) replays it as an immediate change, which carries a prorata charge
+  and waits for it — the plan is not switched — and `apply()` then cleared `scheduled_change`
+  and with it the only record that Mollie held Pro's amount. When the charge was declined
+  (`ProrataChargeHandler::failed()`; `revertRecurringAmount()` deliberately leaves plan changes
+  alone) or the customer withdrew the waiting change (`tryCancelPendingPlanChange()`), the
+  customer stayed on Starter and every renewal was collected at Pro's price, refunded down
+  afterwards by `SupersededRenewalRefund` — or not at all if that refund failed. *Rule:* when
+  `apply()`'s `update()` comes back `pendingPaymentConfirmation` for a pre-patched change,
+  Mollie is put back to what the customer is on now (`restoreRecurringAmount()`, retry queued if
+  the PATCH fails). That is exactly where an ordinary immediate upgrade waits from: Phase 2
+  PATCHes it forward when the charge clears, and every path that gives the change up has
+  nothing to undo. *Judgement:* restore at apply time, not on the failure paths — carrying the
+  marker into `pending_prorata_change` would have to be read by `failed()`, the withdraw, the
+  stale clean-up and the cancel, and would leave a renewal during a SEPA wait collected at the
+  new plan's price for a customer still on the old one. One PATCH more on the success path.
+  *Known window:* a Phase 2 that switches the plan *and* PATCHes between `apply()`'s refresh
+  and its own PATCH would be overwritten with the old amount; it needs the charge to settle and
+  its webhook to complete within milliseconds of its creation. `applyAtRenewal()` is not
+  affected — at the boundary there is no prorata and nothing waits.
+- **Cancelling the subscription with a seat or addon change in flight kept the seats and the
+  addon unpaid.** A seat or addon change writes `seat_count` / `active_addon_codes` at once and
+  only its charge waits (flows.md § 9). `CancelSubscription` voids that charge through
+  `tryCancelPendingPlanChange()`, which cancelled the payment (or recorded the orphan marker) and
+  cleared the pending state but, unlike `withdrawPendingChangeForPayment()`, never called
+  `restoreUnpaidChange()`; the `canceled` webhook then found nothing pending, a payment that
+  settled anyway was refunded in full by `reportOrphanedCharge()`, and one that had settled
+  before the cancel was refunded in full by `reportUnapplicableCharge()` — the seats and the
+  addon's features stayed through the grace period, and over a resubscribe. *Rule:* whoever
+  takes a pending change off puts back what it wrote. `tryCancelPendingPlanChange()` calls
+  `restoreUnpaidChange()` with the stored intent after clearing (locally and, while the
+  subscription still runs, at Mollie; a no-op for a plan or interval change, which wrote nothing
+  before its charge). `reportUnapplicableCharge()` restores the local half while the
+  subscription is `Cancelled` — not when it is `Expired`, where the expiry pass has wiped seats
+  and addons and restoring them would hand them back to a subscription that has ended; no
+  PATCH, the subscription no longer runs at Mollie.
+- **A seat job that met another change's change lock was lost.** `SyncSeatsJob` caught only
+  `InvalidSubscriptionStateException`. While a portal plan or addon change,
+  `ApplyScheduledChangesJob` or a renewal's `applyAtRenewal()` held
+  `billing:subscription-change:{id}` across its Mollie calls, `update()` refused the seat change
+  with `SubscriptionChangeInProgressException` and, with `tries = 1`, it became a `failed_jobs`
+  row: a member seated, the seat never billed. *Rule:* the same as the seat-lock timeout —
+  nothing has happened at that point, so the job queues a copy of itself a minute on, on the
+  same `MAX_REQUEUES` budget; past it, or on a sync run (where the delay is ignored and the copy
+  would block on the seat lock this run still holds), it fails as before. *Not changed:* the job
+  still resolves a delta's target before `update()` takes the change lock, so a portal seat
+  change (absolute, without the seat lock) committed in between is overwritten by the target —
+  moving the job to `update()`'s closure form changes `SyncSeats`' signature and is left for its
+  own change.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Subscription/PrepatchedChangeAppliedEarlyTest` › … charge is declined | Mollie held 60.00 (Pro), expected 24.00 |
+| › … upgrade is withdrawn | Mollie held 60.00 (Pro), expected 24.00 |
+| `Subscription/CancelWithSeatOrAddonChargeInFlightTest` (3 cases × seat / addon) | `seat_count` 3 / addon still active, all six |
+| `Jobs/OperationsOpenJobPathsTest` › puts a seat change back … subscription-change lock | `SubscriptionChangeInProgressException` thrown, nothing queued |
+
+Guards that stay green: `PrepatchedChangeAppliedEarlyTest` › still moves Mollie to the new plan
+when the charge is paid; `OperationsOpenJobPathsTest` › gives up on a subscription-change lock
+that never frees, loudly.
+
+### "Apply now" announced a waiting upgrade as changed (26 November 2026)
+
+Found by the browser suite (`tests/Browser/ChangesInFlightTest.php`, gaps 15 and 16 of the
+second browser review). `applyScheduledNow()` decided its toast only by whether
+`scheduled_change` was gone after `apply()`. Mid-period a scheduled upgrade carries a prorata
+charge and becomes a *waiting* change — `scheduled_change` goes, `pending_plan_change` comes —
+so the customer read "Plan changed." beside the notice "An upgrade to Business is awaiting
+payment confirmation", on a page whose header still said Pro; when the charge was then
+declined, the same page said the payment had failed. *Rule:* a change that waits for its
+payment is not announced by the action that started it. `applyScheduledNow()` returns without
+a toast when `pending_plan_change` is set after `apply()`, exactly as `applyChange()` does on
+`pendingPaymentConfirmation`; the render that sees the change resolve announces "changed" or
+"failed" (`wasPending`). *Judgement:* no "being updated" toast either — the waiting notice with
+its cancel button is already on screen, and the plan screen's own immediate upgrade has never
+shown one.
+
+| Test | Red before |
+|---|---|
+| `Portal/ApplyScheduledNowAwaitingPaymentTest` › does not announce an upgrade applied now as changed while it waits for its payment | toasts contained "Plan changed." |
+| `Browser/ChangesInFlightTest` › scheduled upgrade applied now and withdrawn / declined (both) | "Plan changed." among the page's toasts after "Apply now" |
+
+Guard that stays green: `ApplyScheduledNowAwaitingPaymentTest` › still announces a scheduled
+change applied now that needs no payment as changed. The toast is Flux's and the feature
+suite runs without it, so the feature test puts a recorder in `\Flux`'s place (the two calls
+`InteractsWithFluxUi` makes); booting Flux's real provider there failed eighteen later Portal
+tests in the same process, its facade alias outliving the application it was bound in.
+
+## Coupons and gifts review round (26 November 2026)
+
+Three findings about a code or a gift whose circumstances changed after it was given, each
+reproduced by a feature test that was red against the unfixed code before anything was
+changed.
+
+### What was wrong, and the rule now
+
+- **Revoking a gift that had run out took away what the tenant held afterwards.** Nothing
+  marks a full-grant redemption when the nightly pass expires its subscription: it stays
+  un-revoked and listed in the admin subscription tab with a revoke button.
+  `revokeFullGrant()` subtracted `grant_days_added` from whatever `subscription_ends_at`
+  the billable had *now*. After the tenant took the free plan (`ends_at` null) the wipe
+  branch ran and set the free plan to Expired; after a second gift the first gift's 30
+  days came off the second, or wiped it. *Rule:* the grants of a subscription end with it.
+  `PrepareUsageOverageJob` pass 1 (in one transaction with the expiry) and the wipe branch
+  of `revokeFullGrant()` call `CouponService::endGrantsWithSubscription()`, which stamps
+  `grant_applied_snapshot.subscription_ended_at` on the billable's live `full`,
+  `addon_only` and `plan_waiver` redemptions. `revokeGrant()` revokes a stamped redemption
+  as a record only (row revoked, slot freed, one-off code switched off, `GrantRevoked`) and
+  touches nothing on the billable. *Not covered:* a gift that ran out before this change
+  carries no stamp, and revoking it still acts on the billable as before. *Not changed:*
+  a grant redeemed for zero days (a gift without an end date) still revokes to Expired
+  through the null-end branch — that subscription *is* the gift.
+- **Revoking finished free plan periods removed a later, running waiver.**
+  `revokePlanWaiverPeriods()` called `PlanWaiver::remove()` on a Mollie subscription without
+  asking whose waiver was in the slot. PLANFREE-A (one period) ran out, its marker was
+  cleared, PLANFREE-B (three periods) wrote a marker of its own; revoking A removed B's and
+  re-priced Mollie to the full plan, B's redemption still listed as active. The same for a
+  gift's waiver. *Rule:* the waiver is removed only when this redemption's periods went
+  into it — it started the marker, or was appended to it: `applied_at` not before the
+  marker's `first_applied_at` (less the minute `isMarkerStillRedeemable()` already allows
+  for a row written a moment before its marker). Otherwise the revoke is a record only.
+  Unchanged and still pinned: revoking appended periods removes the whole waiver. A marker
+  without `first_applied_at` (older release) is taken to be the redemption's, as before.
+  *Follow-up (review 3):* periods given on a **Local gift** are added to its end date, and
+  `carryGrantOver()` makes that extended end the waiver's when the tenant buys extras and
+  keeps the gift. Such a redemption predates the waiver's `first_applied_at`, so the rule
+  above called the waiver "given later" and the revoke was a record only — the tenant kept
+  every revoked period. It is the same free time, not a later waiver. *Rule:* a `plan_waiver`
+  redemption whose snapshot says `source = local`, with `grant_days_added`, against a gift
+  waiver (`isGift()`, a `redemption_id`) it predates, has its days taken off that waiver's
+  end (`PlanWaiver::shortenByDays()`, never before today) — what the Local branch does to
+  `subscription_ends_at`. *Judgement:* the gift stays and keeps its own rule for its end. When
+  the shortened gift no longer reaches the next charge, the revoke takes the step
+  `finishGrantCarryOver()` takes for a gift that ends before the first renewal: `end` →
+  `CancelSubscription` (`grant_expired`) with the covered period; `continue_paid` → marker
+  removed and Mollie re-priced to the full amount. Both after the revoke's transaction
+  commits. Not the whole waiver removed, as for appended periods: that would also take the
+  gift's own days, which nobody revoked. A shortened gift that still reaches the next
+  charge changes nothing at Mollie; its renewal handles its end.
+- **A code changed while the first payment travelled was dropped at the webhook.**
+  `FirstPaymentCouponPricing::price()` ran the full `validate()` again, so a campaign that
+  filled up, a code switched off, or a `valid_until` that passed between checkout and
+  `paid` made it return null: the invoice booked the full plan plus a payment adjustment,
+  `PaymentAmountMismatch` fired, no redemption and no marker were written, and the Mollie
+  subscription was created at the full price — although the customer had paid the
+  discounted amount and been promised the discounted periods. The documented compensation
+  (`compensateFailedRedemption()`, "the campaign filled up while the payment travelled")
+  was reachable only in the milliseconds between `price()` and `redeem()`. *Rule:* the
+  checkout is the gate for the campaign's own state. The paid first-payment paths
+  (`FirstPaymentHandler`, `LocalToMollieUpgradeHandler`) price through
+  `FirstPaymentCouponPricing::afterPayment()`, which passes `paid_with_code` to `validate()`:
+  `active`, `valid_from`, `valid_until` and `max_redemptions` are not asked again; plan,
+  interval, addons, the per-billable limit and the recurring slot still are. A full
+  campaign then meets `redeem()`'s lock and is compensated (marker written,
+  `CouponRedemptionRecordMissing`). *Judgement:* a code switched off in flight honours the
+  payment made with it but creates the Mollie subscription without the recurring discount
+  — switching a code off is how an operator ends a discount at the next renewal
+  (`isMarkerStillRedeemable()` reads `active`), and a subscription holding a discount the
+  renewal will not honour books an adjustment every period. An expired code is capped by
+  its own date, as at the checkout. *Judgement:* `afterPayment()` is a copy with a flag,
+  not a new parameter of `price()` — apps rebind this service, and a subclass overriding
+  `price()` with today's signature must stay compatible. *Not changed:* the €0 paths
+  (mandate-only full coverage, the trial signup, the pending trial coupon at the trial's
+  end) still validate in full — no money moved there, and the full-coverage skip is
+  reported as documented under `MandateOnlyPaymentHandler`. Whether a trial customer keeps
+  a code switched off during the trial is a product decision left open.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Coupons/GrantRevocationTest` › leaves the free plan a tenant took after the gift ran out … | plan wiped to Expired, source none |
+| › takes nothing off a later gift … | the second gift's end moved 30 days earlier |
+| `Coupons/PlanWaiverLifecycleAuditTest` › leaves a later waiver alone … | B's marker removed, Mollie PATCHed to full price |
+| `Webhook/FirstPaymentCodeChangedInFlightTest` (campaign full / switched off / expired) | no coupon line, adjustment line, all three |
+| `Coupons/PlanWaiverCarriedIntoGiftRevokeTest` › takes revoked free periods off a gift they were carried into (`continue_paid`) | marker unchanged, no PATCH |
+| › ends the subscription with the shortened gift when the gift was given to end | marker unchanged, still Active |
+| › only shortens a carried gift that still reaches the next charge | `valid_until` unchanged |
+
+Guards that stay green: `GrantRevocationTest` › still takes its days off a running
+subscription that a second gift extended; `PlanWaiverLifecycleAuditTest` › still removes
+the whole waiver when appended free periods are revoked; `PlanWaiverCarriedIntoGiftRevokeTest`
+› leaves a waiver alone whose free periods were given on Mollie after a carried gift ended.
+
+## Portal and admin at their edges — browser review (26 November 2026)
+
+Gaps 48–55 of the second browser review, driven in Chrome (`Browser/PortalAdminEdgeTest`,
+`Browser/PortalAdminLocaleTenantTest`). One defect, the rest pinned as they are.
+
+### What was wrong, and the rule now
+
+- **The refund dialog described a yen amount as "up to two decimals".** On a JPY invoice
+  the dialog's description, its hint and the refusal all said "with up to two decimals",
+  and the example in the hint and the field's placeholder were formatted for the
+  *configured* currency — "10.50" on a shop configured in EUR, which the parser then
+  refused on the yen invoice with a message repeating the wrong rule. The amount itself was
+  always read at the currency's scale (¥500 is refunded as ¥500 net, ¥595 at Mollie — the
+  November fix holds). *Rule:* the dialog's wording is the invoice currency's:
+  `invoices-tab::amountRuleText()` picks the key for two decimals, `<key>_whole` for a
+  currency without minor units, `<key>_digits` (`:digits`) for any other scale (KWD); the
+  example and placeholder are formatted in the invoice's currency. *Judgement:* the existing
+  keys keep their exact wording and placeholders for two-decimal currencies, so an app that
+  overrode them keeps its text; only the new variants need translating.
+
+### Deliberate — pinned, not changed
+
+- **A booking refused by the country gate from an open tab lands on the dashboard without
+  the gate's flash.** The gate is Livewire persistent middleware, so the update answers with
+  its redirect; `fetch` follows it, the dashboard GET consumes the `billing_status` flash,
+  and Livewire then navigates to the same URL again. What the customer sees is the mismatch
+  banner, whose text says that plans, add-ons and seats cannot be bought while the
+  correction is pending. Opening the page fresh shows the flash. Nothing is booked either
+  way.
+- **An operator's cancel on a row that expired meanwhile is refused in the prompt** with
+  `CancelSubscription`'s own message ("There is no subscription to cancel.") — English, as
+  the exception is written; no audit entry, the row stays Expired.
+- **A crafted `purchase()` on a free Local plan or an access grant** (also with a 100 % code
+  set on the component, the inline-complete path) is refused by
+  `StartOneTimeOrderCheckout` before any coupon or Mollie call and answered with the generic
+  error toast: the page itself offers no purchase action, so only a crafted call gets there.
+- **The return page shows nothing of another organization**, by tenant prefix or by
+  `?organization=`: no polling, and Mollie is never asked about the other organization's
+  pending first payment (counted by the fake per payment). A signed-in member opening it
+  with another organization's id sees their own state.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Feature/Admin/InvoicesTabRefundDecimalsHintTest` › whole number on a JPY invoice (configured EUR / JPY) | "two decimals" shown, `description_whole` missing |
+| › refuses a decimal yen amount with the whole-number rule | the two-decimals refusal |
+| › names three decimals on a KWD invoice | "two decimals" shown |
+
+Guards green from the start: the EUR wording in English and German
+(`InvoicesTabRefundDecimalsHintTest`). `Browser/PortalAdminEdgeTest` › a refund of 500 yen
+asserts the wording in Chrome as well; it was written after the fix was found and run
+green against the fixed component only.
+
+## Admin billable header follows the tab's actions (26 November 2026)
+
+Decision 10 of the maintainer's list: the status badge in the admin billable page's header
+must update after a status change made in a tab.
+
+### What was wrong, and the rule now
+
+- **After a resume the header kept saying "Cancelled" until a reload** (and "Active" after a
+  cancel). The page `admin.billables.show` renders the header — name, status badge, plan
+  card, mandate card — and mounts each tab as a keyed child component; a tab action
+  re-rendered only the tab. *Rule:* every action of the subscription tab that reached a
+  service (extend trial, extend by days, free plan periods, extend gift, cancel, resume,
+  revoke grant) dispatches the Livewire event `billing-admin-billable-changed` (the tab's
+  `CHANGED_EVENT`) from a `finally`, and the page listens with `#[On]`, re-reads the billable
+  and re-renders its header. The keyed tabs are not re-rendered by it, so the tab's flash
+  stays.
+- *Judgement:* a **refusal from the service is announced too**, not only a success. A
+  refusal there usually means the subscription moved under the open page (another operator,
+  the expiry job, a webhook) — "no longer cancelled" on a resume — and the header is exactly
+  as stale as the tab's buttons were. A refusal of the tab's own input (no reason, no date,
+  a non-number) reaches no service and is not announced.
+- *Not changed:* the invoices and wallet tabs do not announce. A refund and a wallet credit
+  change neither the status, the plan nor the mandate (`RefundInvoiceService` and
+  `WalletUsageService` never write `subscription_status`), so the header has nothing to show.
+  A future tab action that does must dispatch the same event.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Feature/Admin/BillableHeaderRefreshTest` › announces a cancel (now / at period end), a resume, a resume refused on a stale page, a trial extension, extend by days, free plan periods, a revoked grant | event never dispatched (8 cases) |
+| › the page listens for the announcement and re-reads the billable | `SupportEvents::getListenerEventNames()` of the page lacks the event |
+| `Browser/AdminHeaderRefreshTest` › resuming a cancelled subscription turns the header badge active without a reload | badge stayed `cancelled` (10 s wait timed out) |
+| › cancelling turns the header badge cancelled without a reload | badge stayed `active` |
+
+Guards green from the start: a cancel without a reason and an extension with `0` days are
+not announced. The browser test reads the badge through a new `data-billable-status` hook on
+the header, added before the red run; it also proves the page was not reloaded (a marker on
+`window` survives).
+
+## A duplicate first payment is refunded automatically (26 November 2026)
+
+Maintainer decision 1 of 26 November 2026, replacing the open point "A duplicate first
+payment that reaches the gate is still kept unbooked" (section of 25 November above).
+
+### What was wrong, and the rule now
+
+- **A second first payment that met the gate was kept without a document.**
+  `FirstPaymentHandler` and `LocalToMollieUpgradeHandler` (which also serves the purchase of
+  extras on a gift) answered `ActivationGate::Duplicate` with `DuplicatePaymentReceived` only:
+  money collected, no invoice, no credit note, no refund. *Rule:* flows.md §13 — every payment
+  becomes an invoice, a payment nobody wants becomes that invoice's credit note.
+  `WebhookSupport::settleDuplicatePayment()` books it and returns it in full through
+  `UnwantedPaymentRefund` (reason `duplicate_payment`, customer mail with its own sentence),
+  then dispatches `DuplicatePaymentReceived` — which apps still get. Outside the gate's
+  transaction, since the refund is a Mollie call. A re-delivery meets the invoice guard and
+  `UnwantedPaymentRefund::resume()` (posts a refund that is not through and not queued,
+  announces nothing twice); the refund Mollie then reports is deduplicated by
+  `RefundHandler` on the refund id the credit note carries.
+- **The retry job could not tell its own activation from somebody else's.**
+  `RetrySubscriptionActivationJob` read `activationCompleted()` billable-wide: when payment B
+  activated while payment A waited for its retry, A's marker was cleared and A's booked
+  invoice was never refunded. *Rule:* `CreateSubscription` records which payment activated
+  the subscription (`subscription_meta.activated_by_payment_id`,
+  `CreateSubscription::ACTIVATED_BY_META_KEY`) in the **same save** that writes
+  `mollie_subscription_id` — the field `activationCompleted()` reads — so the two can never
+  disagree, also not after a crash. The four webhook activation paths pass the payment id
+  (`activating_payment_id`). `WebhookSupport::activatedByAnotherPayment()` answers the job's
+  question; when it is true, the job settles A as a duplicate (if A collected money) before
+  it clears the marker, in `handle()` and in `failed()` alike, and no operator is mailed —
+  nothing is left for a person to do.
+- **A resumed activation could run over the subscription another payment had just
+  activated.** The handlers' resume branch checked `activationCompleted()` without the row
+  lock and then claimed. B activating in between made A's replay adopt B's Mollie
+  subscription (same plan and interval) and re-run the activation for A — the record then
+  named A, and B's payment was the one nobody would ever refund. *Rule:*
+  `WebhookSupport::claimForResume()` re-checks under the row lock and returns false — the
+  handler stands down; the job then finds B on record and refunds A.
+
+### Judgement calls
+
+- **No record, no refund.** A subscription activated before this change has no
+  `activated_by_payment_id`; it cannot be told apart from "this payment activated it", and
+  refunding the payment that bought the running subscription is the worse mistake. Such a
+  retry clears its marker as before. A subscription created without a payment
+  (`ResubscribeSubscription`) records `null` — "not this payment" — so a payment waiting for
+  its retry beside it is refunded.
+- **The event after the booking, wrapped.** `DuplicatePaymentReceived` used to be the whole
+  reaction and was dispatched bare. It now follows the refund and goes through
+  `WebhookSupport::safely()`: a listener that throws must not cost the customer the refund,
+  and a re-delivery would not dispatch it again anyway (the invoice guard answers first).
+  The retry-job case dispatches it too — it is the same fact, found later.
+- **An app that refunded on `DuplicatePaymentReceived` itself must stop** — the package
+  now does it. Noted in the CHANGELOG.
+- **A €0 mandate-only duplicate is unchanged**: `MandateOnlyPaymentHandler` still only
+  dispatches the event — there is nothing to return. Its activations write the record too.
+- **The duplicate's mandate is not revoked.** At the gate the duplicate never adopts its
+  mandate; in the retry case A's mandate was replaced on the billable by B's. A second valid
+  mandate at Mollie costs nothing (the same reasoning as "A failed rebinding keeps the old
+  mandate" above).
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Webhook/DuplicateFirstPaymentRefundTest` › second first payment at the gate → invoice, credit note, one refund; re-deliveries add nothing | no invoice for `tr_lr_second` (`ModelNotFoundException`) |
+| › retry for A after B activated → A refunded (dataset `retry`, `retries spent`) | no credit note (`ModelNotFoundException`), both datasets |
+| › the retry for the payment that did activate keeps it | `activated_by_payment_id` null (no record) |
+| › no record (subscription from before) → nothing refunded | green before — pins the conservative choice |
+| › a resumed activation stands down when B activated between check and claim | record named `tr_lr_first`: A's replay adopted B's subscription |
+| `Webhook/LocalUpgradeGateAndRoundingTest` › second upgrade payment booked and refunded | was "reported, not booked" (1 invoice) — updated |
+| `Checkout/BookingMatrixGrantExtrasTest` › gift extras and free → paid duplicates booked and refunded | were "1 invoice" — updated |
+| `Browser/RefundDeepTest` › a second first payment for a running subscription is booked and returned in full (invoices page shows payment and credit note) | no invoice for the payment (`ModelNotFoundException`), run with the old duplicate branch |
+
+## The overage final invoice of an immediate cancellation states the real end (26 November 2026)
+
+Maintainer decision 4 of 26 November 2026.
+
+### What was wrong, and the rule now
+
+- **The overage charged by an immediate cancellation was invoiced up to a billing date that
+  never came.** `CancelSubscription` (immediately — also the past-due auto-cancel and the
+  dashboard's "end trial") writes `subscription_ends_at = now` and then runs
+  `ChargeUsageOverageDirectly::handle()`. `persistPendingCharge()` stamped the new lines and
+  the snapshot with `nextBillingDate()` as the period end, and `SingleChargeHandler` books the
+  invoice and every line from the snapshot: period 1–31 March, cancelled on 12 March, the
+  invoice (header, lines, PDF "Leistungszeitraum") said 1–31 March. *Rule:* the end of the
+  current usage period is `ChargeUsageOverageDirectly::currentUsagePeriodEnd()` — the next
+  billing date, unless the subscription is cancelled or expired **and its end has already
+  passed** and lies before that date; then it is 00:00 UTC of the day after the end.
+- *Judgement — why the day after, not the end instant.* Period ends are exclusive bounds and
+  the invoice prints the day before the bound, whatever the hour ("Service periods are UTC
+  billing days" above). Stored as the end instant (12 March 10:00), the PDF would print
+  1–11 March, dropping the day the service was still used on. 00:00 UTC of 13 March prints
+  1–12 March, the same convention as every other period boundary. Never later than the next
+  billing date (cancelled on the period's last day keeps the boundary), and an end that lies
+  before the period began leaves the boundary alone.
+- *Judgement — only an end that has passed.* A graceful cancel is charged by the last sweep
+  the day before its end (`PrepareUsageOverageJob` case B), with the end still ahead and equal
+  to the next billing date: unchanged. Normal renewal overage: unchanged. A line that already
+  carries a period (a retry, a standing debt collected with the final charge) keeps its own,
+  as before. A charge created *before* the cancellation (the sweep the night before, still in
+  flight) keeps the period it was stamped with.
+- *Not changed:* the `UsageDeepTest` trial-ending scenario used to leave "where it ends" open;
+  it now asserts the cancellation's day, which there is the boundary's own day.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Webhook/ImmediateCancelOveragePeriodTest` › invoices the overage of an immediate cancellation up to the day it ended (snapshot, invoice, line `period_end`, PDF "Leistungszeitraum: 01.03.2026 – 12.03.2026") | snapshot `period_end` `2026-04-01 00:00:00`, expected `2026-03-13 00:00:00` |
+| › an immediate cancellation on the period's first day is that one day ("Leistungsdatum: 01.03.2026") | `period_end` `2026-04-01`, expected `2026-03-02` |
+| › on the period's last day keeps the boundary; graceful cancel keeps the full period; renewal overage keeps the full period | green before — pins the unchanged cases |
+| `Browser/ImmediateCancelOverageInvoiceTest` › operator cancels now on 20 February, the overage invoice ends 21 February 00:00 and the admin invoice detail shows `2027-02-11 – 2027-02-21` | `period_end` `2027-03-11 09:00:00` (run with the old `nextBillingDate()` stamp) |
+
+## No paid addon or extra seat in the grace period of a cancellation (26 November 2026)
+
+Maintainer decision 5 of 26 November 2026: booking during the grace period (cancelled at the
+period end, access until `subscription_ends_at`) is blocked in the service and on the
+screens, with a hint; switching an addon off stays possible.
+
+### What was wrong, and the rule now
+
+- **The service already refused; the screens offered the booking anyway.** Since c3ed432
+  `ValidateSubscriptionChange::assertSubscriptionStillRuns()` throws
+  `SubscriptionEndedChangeNotAllowedException` for an added seat or paid addon on a
+  cancelled subscription — `EnableAddon`'s closure path and `SyncSeats` both go through it,
+  nothing reached Mollie. The task text assumed `EnableAddon` still charged a prorata; that
+  was not reproducible (`ChangeMatrixRemainingCellsTest` › "refuses what costs money on a
+  cancelled subscription" was already green). What was wrong: the addons screen still
+  showed "Book" with a confirm dialog and a due-now amount, the seats stepper still counted
+  up, and only the click answered — with a sentence that neither named the end date nor
+  matched the dashboard's way back.
+- *Rule:* in the grace period (`SubscriptionEndingBookingNotAllowedException::appliesTo()`:
+  status Cancelled, end still ahead) the refusal for an added paid addon or seat is the new
+  `SubscriptionEndingBookingNotAllowedException` — "Dein Abo endet am :date. Nimm die
+  Kündigung zurück, um Zusatzoptionen zu buchen." / "… um weitere Plätze zu buchen."
+  (`portal.error_subscription_ending_addons` / `_seats`). The addons screen shows that hint
+  with a "Kündigung zurücknehmen" button to the dashboard (`BillingRoute::name('index')`,
+  where "Abo reaktivieren" withdraws it), renders paid addons' book button disabled and
+  drops their confirm dialog. The seats screen shows the seats hint and stops the stepper
+  (button and `increment()`) at the booked count; fewer seats stay possible.
+
+### Judgement calls
+
+- **A subclass, not a sibling.** The task asked for a dedicated exception; it extends
+  `SubscriptionEndedChangeNotAllowedException` instead of standing beside it, so every
+  existing `catch` (addons, seats, plan-change screens, `StartGrantExtrasPurchase` callers,
+  `PreviewService`'s `subscription_ended` error) handles it unchanged and only the sentence
+  is more precise. A sibling class would have had to be added to all of them, and one
+  missed `catch` turns the hint back into "something went wrong". Its message is English
+  for the log like its parent; screens read the key through `ExceptionMessage`.
+- **Seats are blocked the same way** — the same reasoning (a pro-rata charge for a period
+  that ends) and the service already refused them. Only the sentence and the stepper are new.
+- **A plan or interval change keeps the general sentence** (`error_subscription_ended`): it
+  is not an add-on booking, and an *expired* subscription has no cancellation to withdraw,
+  so neither gets the dated hint.
+- **An addon that bills nothing stays bookable** in the grace period, as the service already
+  allowed (`addonIsFree()`): it charges nothing for the ending period.
+- **A Local (free) subscription is left to its own sentence** (`free_plan_no_paid_extras`);
+  the grace hint is shown for Mollie subscriptions only, so the page never shows both.
+- **Admin paths are exempt — there is nothing to exempt.** The admin panel has no addon or
+  seat booking; it grants addons through coupons (`addon_only` grants, `CouponService`),
+  which write `active_addon_codes` without charging. A gift charges nothing for the ending
+  period, so the reason for the block does not apply. An operator who wants to sell the
+  customer more withdraws the cancellation (the admin resubscribe) first, like the customer.
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Feature/Portal/BookingDuringCancellationGraceTest` › refuses a paid addon in the grace period with the end date and the way back (en, de) | `SubscriptionEndingBookingNotAllowedException` did not exist; the refusal said `error_subscription_ended` |
+| › refuses an extra seat in the grace period the same way (en, de) | same |
+| › the addons screen offers no paid booking in the grace period, says until when and links … (en, de) | hint missing — run with the view's `graceEndsOn` forced to null: "To contain: Your subscription ends on 01. Feb 2026. …" |
+| › the seats screen does not count above the booked seats and says why (en, de); › a seat count typed past the booked seats is refused with the hint | hint missing / flash said `error_subscription_ended` |
+| › keeps the general refusal for a plan change; › still lets the grace period switch an addon off and book a free one; › keeps offering paid addons to a running subscription; › a stale page click books nothing | pin the unchanged cases (the first run: 10 red, 3 green of 13; none of these asserts new behaviour) |
+| `Browser/BookingDuringCancellationGraceTest` › addons screen (hint, disabled button, no dialog, link → dashboard "Resubscribe"); › switching off still works; › seats stepper stops at the booked count | `NoSuchElementException` for `[dusk="addons-grace-blocked"]` / `[dusk="seats-grace-blocked"]`, run with `graceEndsOn` forced to null |
+| `Feature/Subscription/ChangeMatrixRemainingCellsTest` › refuses what costs money on a cancelled subscription | expectations updated: seat and paid addon now carry the dated sentences |
+| `Browser/Matrix/ChangeMatrixTest` › cancelled cells | `knownReasons()` gained the two dated sentences (the part after the date) |
+
+## The "Next billing" tile of a cancelled subscription names no charge (26 November 2026)
+
+Maintainer decision 9 of 26 November 2026: the dashboard tile "Nächste Abrechnung" of a
+cancelled subscription says "Abo endet am :date" without an amount, with a link to withdraw
+the cancellation.
+
+### What was wrong, and the rule now
+
+- **The tile named the period end as a billing date.** For every status except a Local
+  subscription and an access grant, the tile rendered `$b->nextBillingDate()` — for a
+  cancelled subscription in its grace period that is the day it *ends*, presented under
+  "Next billing" as a charge that will never come. (The "Next charge" block above it already
+  said "No further charge – the subscription ends on :date" via `NextChargeSummary`'s
+  `STATE_ENDING`; the tile contradicted it.)
+- *Rule:* for status Cancelled the tile keeps its heading and shows, instead of a date,
+  "Subscription ends on :date" / "Abo endet am :date"
+  (`portal.next_billing_subscription_ends_on`) while the end is ahead, with a
+  "Withdraw cancellation" / "Kündigung zurücknehmen" button (`portal.grace_withdraw_cancellation`,
+  the same words as the addons and seats screens) that calls the dashboard's own
+  `resubscribe` action. A cancelled subscription whose end has passed (not yet expired by
+  the nightly job) says "Subscription ended on :date" / "Abo endete am :date"
+  (`portal.next_billing_subscription_ended_on`) and offers nothing to withdraw. No amount is
+  shown in either. Active, trial, past due, Local free plans and access grants are unchanged.
+
+### Judgement calls
+
+- **"Possibly a scheduled cancel" does not exist as a state.** `CancelSubscription::handle()`
+  always moves the row to `Cancelled` at once — graceful or immediate only decides
+  `subscription_ends_at`. There is no Active-with-pending-cancel status, so `isCancelled` is
+  the one condition. A plan waiver whose subscription ends with the free period (`on_expiry`
+  = `end`) still charges paid extras on the next date, so its tile keeps the date; the
+  waiver notice above says when it ends. An endTrial cancellation has `subscription_ends_at`
+  = now, so it shows "ended on" without a withdraw button, matching the header (no
+  "Resubscribe" there either).
+- **The tile's button is a second door to the same action, not a new one.** The header keeps
+  its "Resubscribe" button; the tile's is the one next to the sentence that raises the
+  question. Both call `resubscribe()` with its authorisation and refusals — a Local cancelled
+  subscription gets the button too, exactly as it already got the header button.
+- **The heading stays "Next billing".** Only the value changes, so the tile grid keeps its
+  shape and the answer to "next billing?" is "none: it ends on …".
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Feature/Portal/DashboardNextBillingTileTest` › says when a cancelled subscription in its grace period ends, with no billing date, and offers to withdraw the cancellation; › says the same in German; › withdraws the cancellation through the tile's action; › says when a cancelled subscription ended, without a billing date or a withdraw action | 4 red of 7 on the unfixed view: "To contain: Subscription ends on 20. Mar 2026" / "Abo endet am …" / `dusk="next-billing-withdraw-cancellation"` / "Subscription ended on 05. Mar 2026" |
+| › keeps the billing date for an active, a trial and a past-due subscription | pin the unchanged cases (green before and after) |
+| `Browser/PortalDashboardTest` › the next billing tile of a cancelled subscription says when it ends and withdraws the cancellation | run with the view's cancelled branch forced off: "Waited 10s for [[dusk="next-billing-ends"]] to appear in the DOM." |
+
+## The invoice PDF link is always shown; a missing document is rendered on the click (26 November 2026)
+
+Decision 13 of the maintainer's list.
+
+### What was wrong, and the rule now
+
+- **The link was hidden while the document was not on the disk.** The portal dashboard
+  (`'pdfUrl' => $inv->hasPdf() ? … : null`), the portal invoice list (`@if
+  ($invoice->hasPdf())`), the admin billable's invoices tab and the admin refund detail
+  (credit note and original invoice) all gated the link on `hasPdf()`. A credit note or
+  one-time-order invoice is rendered *after* its booking commits (`deferDocument`), and a
+  failed render leaves no pointer at all — in both cases the customer saw the charge and no
+  way to the document, although `getDownloadUrl()` and `InvoiceDownloadController` were
+  already built to render a missing document on request (row above: "`getDownloadUrl()` is
+  not gated on `hasPdf()`"). *Rule:* every invoice row carries the link. Every row is
+  persisted with its serial (`persistWithSerial()`), so every row is one that will have a
+  document; there is no "will never have a PDF" case to keep hiding. The admin's all-invoices
+  list already offered it ungated.
+- **The deferred render and the click now share one lock.** `ensureStoredPdf()` (the click)
+  serialised clicks per invoice with `billing:invoice-pdf-regenerate:{id}`; the deferred
+  render after a commit (`issueInvoiceDocument()`, `storeInvoiceDocument()`,
+  `issueCreditNoteDocument()`) took no lock. With the link visible from the moment the row
+  exists, a click can land between the commit and that render: both wrote the same
+  deterministic path, and the later write truncated the file the click was streaming.
+  *Rule:* those three go through `InvoiceService::renderDeferredDocument()`, which takes the
+  same lock and keeps a document that a click stored while it waited (the caller's model is
+  told the stored disk and path; nothing is rendered twice).
+
+### Judgement calls
+
+- **No serial number is ever drawn by a render.** `generateAndStorePdf()` only reads
+  `serial_number`; the serial is drawn once, by `persistWithSerial()`, when the row is
+  booked. So the click can never cost a serial, with or without the lock — the lock is
+  about a readable file, not about the books.
+- **A lock the deferred render cannot get in 15 s does not skip the render.** It renders
+  anyway, as before the change: an invoice without its document is the worse outcome than
+  two identical renders overlapping. The click's own path is unchanged (`ensureStoredPdf()`
+  logs and 404s when it cannot produce the document).
+- **The non-deferred render inside `createInvoice()` goes through the same door**
+  (`issueInvoiceDocument()`), so it takes the lock too. Nobody can contend for a row that is
+  not committed yet, so that costs one uncontended lock and one `exists()` on the disk.
+- **Authorisation of the download routes is unchanged** — a foreign tenant is refused before
+  anything is rendered (pinned below).
+
+### Tests: red before, green after
+
+| Test | Red before |
+|---|---|
+| `Feature/Invoice/InvoicePdfOnDemandTest` › portal invoice list / portal dashboard: offers the PDF link for an invoice whose document is not rendered yet | red on the gated views: "To contain: invoices/1/download" |
+| › admin billable invoices tab: offers the download link …; › admin refund detail: offers the credit note and the original invoice link … | red on the gated views (asserted on the gated Flux buttons, which the feature suite renders verbatim) |
+| › deferred credit-note document: renders under the same per-invoice lock a download click takes | red before: lock not held during the render (`[false]` instead of `[true]`) |
+| › deferred invoice document: does not render again what a download click already rendered | red before: "Failed asserting that 2 is identical to 1" (rendered twice) |
+| › download: renders and stores a missing document on the click, keeping the serial number; › an admin click on the admin route renders it too; › a second click serves the stored document instead of rendering again; › authorization is unchanged | pin the existing controller behaviour (green before and after) |
+| `Browser/Matrix/InvoicesPortalMatrixTest` › the PDF link of an invoice without a document renders it on the click | run against the gated dashboard and invoice views: `TimeoutException` waiting for the link |
+
+## A refusal moves the idempotency key on; nothing else does (26 November 2026)
+
+Measured the same day ("What Mollie does with a key, a cancel and a revoke — measured"): a
+request Mollie refuses with a 4xx binds its idempotency key to that refusal for an hour. The
+stable keys the money paths use — there so that a retry after a *lost answer* is replayed
+instead of paying twice — therefore also made a retry after a *refusal* fail for an hour after
+its reason had gone. Every automatic retry ladder below runs inside that hour.
+
+### The rule (maintainer's decision)
+
+After a **definite refusal** the next attempt of the operation sends a new key: the stable key
+plus `:refused-<n>`, n the refusals counted so far (`Support\MollieRefusal::key()`). After a
+timeout, a 5xx or an answer that never arrived the key stays the same — Mollie may have acted,
+and only that key lets it say so. The count is bound to the stable key it was counted for
+(`['key' => …, 'refusals' => n, 'at' => …]`), so a moved amount or a new payment of the cycle
+starts from none; and a key nothing ever refused is byte-identical to before.
+
+"Definite" (`MollieRefusal::isDefinite()`): an `ApiException` with a 4xx status, except
+- **408** — the SDK's request timeout, not an answer about the request;
+- **409** — a conflict: Mollie may be processing the same key, or something already exists
+  (the code comments speak of a "duplicate refund" 409); a new key would make it a second one;
+- a refusal of **the key itself** ("used before with different parameters / on a different
+  URL") — something already happened under that key.
+429 counts as definite: rate-limited, nothing was done. Not measured: whether a 5xx binds a key;
+it is treated as unknown either way, which is the safe side.
+
+### Call sites
+
+| Key | Retried by | Done |
+|---|---|---|
+| `invoice-refund:…` (`RefundInvoiceService`) | the operator, from the panel | count in `subscription_meta.refund_key_refusals.{invoice id}`, written with `MutatesBillingMeta` after Phase 2 threw (no transaction is open there), dropped when the refund books, records older than 24 h pruned on write. An invoice with no billable keeps the old key — refused again inside the hour, never paid twice |
+| `refund:…:{refund_token}` (`InvoiceService::createRefund()`: plan-change lines, `UnwantedPaymentRefund`, `GrantExtrasPurchaseRefund`, `ProrataChargeHandler`) | `RetryRefundLineJob` (1, 5, 30 min …), the hourly sweep | count on the line (`ProrataLine::$refundKeyRefusals`, serialised as `refund_key_refusals` only when set). The job re-reads it from the stored `pending_refund_retries` entry: the queue re-runs a job with its original payload, so the ladder itself never saw the count. `refund_outcome_unknown` stays set after a refusal (an *earlier* attempt's answer may have been lost), and the `refund_token` metadata never changes, so `refundCreatedWithToken()` still finds a refund whichever key created it |
+| `usage-overage:…` (`ChargeUsageOverageDirectly`) | `RetryUsageOverageChargeJob` (1, 5, 15 min) | count on the snapshot (`usage_overage.key_refusals`), carried by `persistPendingCharge()` until a payment id is stored. `payment_unknown_at` is still written on a refusal — unchanged, deliberately: the stale sweep's reconciliation stays the one that frees the slot; only the key changes |
+| `subscription-replace:…` (`MollieSubscriptionReplacer`) | `RetrySubscriptionReplacementJob` (1, 5, 15, 30, 60 min) | count on the marker (`pending_subscription_replacement.key_refusals`); a new replacement writes a fresh marker. "Same description exists" (422) is not a refusal of ours to count — it is how a lost create is found, as before |
+| `unassigned-refund:…` (`RefundUnassignedPaymentsJob`) | the next daily run | **not changed**: a day later the key is long gone; and the amount in it is read from Mollie on every run |
+| `undercollection:…` (`UndercollectionCharge`) | nobody — one attempt per case, claimed; a failure goes to the operators | **not changed**: no retry sends the key again |
+
+### Tests: red before, green after
+
+Each run against the source without the fix (the six files swapped back) and with it.
+| Test | Before the fix |
+|---|---|
+| `Feature/Refund/RefusedRefundKeyRotationTest` › admin refund: refused → retried at once with a new key, one refund; › the key moves on with every refusal; › lost answer after a refusal is replayed, not refunded twice | red: the retry got the 422 replayed ("Failed asserting that ApiException … is null") |
+| › refund line: refused → `RetryRefundLineJob` at once, new key, one refund, `refund_token` unchanged; › the key moves on across one job's queue ladder; › lost answer after a refusal → adopted, not refunded twice | red: "Refund line retry rejected" — the replayed 422 |
+| › admin refund / refund line: outage (503) → same key, one refund; › admin refund: lost answer → same key, one refund | green before and after: pin that only a refusal moves the key |
+| `Feature/Wallet/OverageRefusedKeyRotationTest` › refused → retry at once, new key, one payment; › key moves on per refusal; › lost answer after a refusal → same key, one payment | red: the 422 replayed |
+| › outage → same key, one payment | green before and after (pin) |
+| `Feature/Billing/ReplacementRefusedKeyRotationTest` › refused → `RetrySubscriptionReplacementJob` at once, new key, one successor; › lost answer after a refusal → same key, one successor | red: "Failed asserting that 1 is identical to 2" (no successor) |
+| › outage → same key, one successor | green before and after (pin) |
+| `Browser/RefundDeepTest` › a refund Mollie refuses … can be retried once | the 61-minute clock jump is gone again: the operator's retry right after the refusal pays once |
+
+The test double is `tests/Support/KeyedMollieWorld` (refunds and payments over
+`MollieIdempotencyMemory`); the replacement runs in `RenewalLongRun`. No sandbox case was added:
+`MollieIdempotencyContractTest` already measures that the same request with a fresh key is taken
+after a refusal, and the suffix is just a fresh key.
+
+## The renewal replay canary and what test mode does with a recurring payment (26 November 2026)
+
+`tests/SandboxBrowser/RenewalReplayCanaryTest` replays renewals Mollie's scheduler really
+created into the webhook controller, once a day (docs/sandbox-testing.md). Measured while
+building it, against the real test API:
+
+- **A test-mode recurring direct debit never settles by itself.** All 153 on the account were
+  still `pending`, the oldest created on 17 April 2026; the existing canary's charges of 16
+  and 17 November were `pending` ten days later. The earlier docs said "pending hours after
+  creation" — it is indefinitely. A test-mode recurring payment carries
+  `_links.changePaymentState` (Mollie's test-mode page with `final_state` = `paid` | `failed`);
+  the canary settles through it, which is also how scenario 6 (a failed renewal → dunning) is
+  reachable at all: `failed` arrives with `bankReasonCode` `MS03`.
+- **A subscription started today is charged the same evening:** created 20:51 UTC with today's
+  start date, its charge existed at 21:05 UTC (`pending`). A dress rehearsal of the canary with
+  that (`MOLLIE_BILLING_RENEWAL_REPLAY_FIRST_CHARGE=today`, then reset) booked every scenario's
+  first renewal as asserted — invoice at the collected amount, period from `createdAt`, wallets
+  reset and topped up, the downgrade's 12.00, the coupon line, the failed renewal past due.
+- **Recurring card payments are `paid` within a second** (266 on the account, none failed).
+- **Shortest interval:** `1 day` is taken (also `2 days`, `1 week`); `12 hours` and `0 days`
+  are refused (422).
+- **A placeholder `webhookUrl` is refused in test mode** (`https://renewal-replay.invalid/…` →
+  422 "unreachable from Mollie's point of view", payment and subscription alike).
+  `http://example.com/…` — what `SandboxTestCase` forces — is taken.
+
+Judgement calls:
+
+- **Monthly, not "1 day".** The package knows monthly and yearly only and books a month per
+  charge; a daily Mollie subscription would make every charge look like a new month and test
+  nothing the package promises. The canary therefore waits a month between renewals; its first
+  renewals are on the day after the first visit, which `CreateSubscription`'s
+  `paid_period_ends_at` arranges through the package's own code.
+- **Direct-debit mandate + `changePaymentState`, not a card mandate.** A card mandate needs a
+  hosted first payment and its recurring charges cannot be made to fail; the API mandate plus
+  Mollie's own test switch gives both outcomes without a hand-written row.
+- **`past_due_max_days` = 2 in the canary's world**, so the failed renewal reaches
+  auto-cancel and expiry within the week instead of a month.
+- **Jobs once per UTC day**, as the scheduler would run them. That is what makes "a second
+  visit the same day changes nothing" true and assertable.
+- **Opt-in by `MOLLIE_BILLING_CANARY_STATE`.** Without it the test is skipped and creates
+  nothing; a world at Mollie with no state file looking at it is what the reset cannot find.
+
+Seen in passing, not acted on (they concern `SubscriptionCanaryTest`): its `daily`
+subscription (`times: 10`) reads `canceled` with `canceledAt` at its tenth charge, not
+`completed` — the canary's "…not completed" check will report it on its next visit; and the
+canary's mandate now reads **410** while `monthly`, `month_end` and `pinned` read `pending`
+with no `nextPaymentDate`, so the existing canary will see no further charges.
+
+## The renewal replay canary moves to GitHub Actions and reads Mollie's real webhooks (27 November 2026)
+
+Decided by the maintainer on 27 November 2026: the renewal replay canary runs daily for twelve
+months and more without the maintainer's Mac, and observes Mollie's **real** webhook deliveries,
+Mollie's retries included (docs/sandbox-testing.md, "The cloud canary").
+
+What was decided, and why:
+
+- **An always-on receiver of its own, not the package's app.** Mollie cannot reach a CI runner.
+  A small PHP app in its own repository (`mollie-canary-receiver`) records every POST on a
+  persistent SQLite file and is read back over `GET /deliveries` with a bearer token. The canary
+  sets the app's root URL to the receiver's, so every URL the package builds — the webhook above
+  all — goes there through the package's own URL generation; without `CANARY_RECEIVER_URL` it
+  stays `https://example.com` and every delivery synthetic, as before.
+- **The real deliveries ARE the replay.** They are POSTed into the webhook route in arrival order
+  (the same `id=` form body). A payment the visit books must have at least one delivery at or
+  after its final status change (the settle on Mollie's test page, else `paidAt`/`failedAt`);
+  none within the wait → "Mollie did not deliver", plus a synthetic POST so the other checks
+  still run — a missing delivery must not hide a booking bug. Only payments whose own
+  `webhookUrl` is the receiver's are held to this: a payment created before the PATCH below
+  could never have been delivered there.
+- **The existing subscriptions are PATCHed once, with nothing but `webhookUrl`.** Through
+  `MollieCall::send` — not `MollieSubscriptionPatcher`, whose door exists for start dates; no
+  start date goes along, so the "…already charged" refusal cannot apply. Measured on
+  27 November 2026 on a throwaway subscription (start date today, created and removed for this):
+  a PATCH of only the `webhookUrl` is taken both before the first charge and after it (charge
+  created 8 minutes later, `pending`), GET reads the new URL back, and the start date and
+  `nextPaymentDate` stay as they were. The charge created after the first PATCH carried the
+  PATCHed URL, so a renewal follows the subscription's current `webhookUrl`.
+- **A later delivery of a booked payment must change nothing** while the payment's status is
+  the booked one — the package's idempotency, now against Mollie's own re-deliveries.
+- **Retry probes are standalone payments, not billables.** Weekly, 1.00 € each, paid on the
+  hosted test page, webhook URLs on the receiver's `/probe/…` paths: 503 three times then 200,
+  500 forever, and a held-back answer twice where the receiver enables it (off by default: on a
+  128 MB host a sleeping PHP worker can starve the health check, and the host's own request
+  timeout is undocumented). Read 30 hours after payment — Mollie documents 10 calls, the tenth
+  26 hours after the first, and a 15-second timeout
+  ([docs.mollie.com/reference/webhooks](https://docs.mollie.com/reference/webhooks), read
+  27 November 2026). The first reading is the baseline (count, outcomes, intervals, whether a
+  200 ends the chain); a later one that differs is red. Intervals get max(120 s, 50 %) of play
+  because the baseline is a single sample of a scheduler whose jitter nobody has measured; the
+  count, the outcomes and "a 200 ends it" are held exactly.
+- **State on an orphan branch, `canary-state`.** JSON, SQLite file and invoice PDFs, committed
+  after every visit by the workflow (bot identity, `[skip ci]`). A binary SQLite commit a day
+  grows the repository by roughly the compressed file size (≈ 300 KB uncompressed today) — the
+  price of a world that survives without a machine.
+- **Red → one issue labelled `canary`**, commented on by every further red visit and closed by
+  the next green one; a visit that leaves `last_problems` is red even if the test exited 0.
+
+Not verified here, only after merge: the workflow itself (scheduled runs exist only on the
+default branch), the receiver on its host, Mollie actually delivering to it, and whether the
+daily bot commit on `canary-state` counts as "repository activity" for GitHub's 60-day rule.
+
+Retry baseline: _not measured yet — copied here from `retry_probes.baseline` on
+`canary-state` when the first probe set has been read._
+
+## A failed activation gives its mandate back only on a billable that has not moved on (27 November 2026)
+
+Reported by review: `RetrySubscriptionActivationJob::giveBackMandate()` read the mandate,
+customer and `mollie_subscription_id` off the billable, called `GetPaymentRequest` — rightly
+with nothing held — and then cleared `mollie_mandate_id` and dispatched `RevokeMollieMandateJob`
+on that earlier reading. Reproduced (`ActivationRetryTest` › "does not give back a mandate that
+a newer activation adopted…"): a second checkout that activated during the lookup kept
+`sub_newer` but its mandate column became null; with the same mandate adopted, it was also
+revoked, and Mollie cancels the subscriptions of a revoked mandate.
+
+- *Rule:* after the Mollie call, the billable is re-read under `lockForUpdate` in a short
+  transaction; the mandate is cleared only if it is still this payment's, the customer is the
+  same and there is still no Mollie subscription. The revoke is dispatched after the commit and
+  only when the clear happened. Any other state means another activation has moved on — the
+  mandate is left alone and **not** revoked, even when it is no longer the one on file: an
+  unreferenced leftover mandate costs nothing, revoking one a subscription charges ends that
+  subscription.
+
+## A reversed booking does not settle a refund line (27 November 2026)
+
+Reported by review: a refund line whose Mollie answer was lost waits in
+`pending_refund_retries`; the payment webhook books the refund it created (`RefundHandler`
+stamps the line's `refund_token` onto the credit note); Mollie then reports that refund
+`canceled` or `failed`, and `RefundHandler` reverses the booking. `RetryRefundLineJob` found
+the token on the historical credit note and settled the line on it — no payout, no retry left,
+and the only trace an `AdminRefundFailedNotification` for a refund the package itself still
+owed. Reproduced (`RefundRetryAfterReversalTest`, both reversal cases red, 0 live refunds).
+
+- *Rule:* `InvoiceService::createRefund()` settles a line on its token only when a booking
+  carrying it **stands**. A token line whose `mollie_refund_id` has a reversal line
+  (`reverses_credit`, same id — the reversal drops the token, so the id is the link) settles
+  nothing; the line is posted again. That is the same answer `refundCreatedWithToken()` already
+  gives when it finds the dead refund at Mollie before anything booked it, so both paths agree.
+- *The key moves on.* After the reversal restored the headroom the line sends the same amount,
+  and within the hour Mollie would replay the canceled refund under the old key (the retry was
+  then silently swallowed by the "replayed refund id already on the books" check). On a
+  reversed booking the line counts one more `refund_key_refusals` and is marked
+  `refund_outcome_unknown`, so the token lookup runs first — a live refund an earlier retry
+  created is adopted, not paid twice. The token itself never changes.
+- *The plan-change resume reads the books the same way.* `ProrataChargeHandler::
+  withoutSettledRefundLines()` treated any token on a credit note as settled: a run that died
+  after paying its refund lines, whose refund Mollie then reported dead, applied the change on
+  re-delivery and never refunded the customer (reproduced: `ProrataChargeResumeTest` › "pays a
+  refund line again whose booking a failed refund took back…", one refund instead of two).
+  Both now go through `InvoiceService::refundTokenBookings()` (one read of the credit notes for
+  every token). A re-opened line is **not** an "outcome unknown" line under
+  `refunds_started_at`: its refund was booked and then reported dead, so it goes to
+  `createRefund()`, which asks Mollie for a live refund with its token before posting under a
+  moved key. Only lines with no booking at all still stop the run with `refunds_unknown`.
+- *Accepted:* the operator still gets `AdminRefundFailedNotification` for the reversal while
+  the retry posts the line again. The re-posted refund shows as a new credit note, and the
+  invoice's refundable remainder already counts it.
+
+`tests/Feature/Refund/RefundRetryAfterReversalTest.php` — red before (2 of 3: "posts the line
+again … canceled — within the key hour", "… failed — after the key hour"), green after; with the
+key rotation alone taken out, the within-the-hour case is red again. The resume test is red
+with the handler's unfixed reading and with only the `standing` check taken out again.
+
+## A refund retry that throws puts its line back (27 November 2026)
+
+Reported by review (CodeRabbit): `RetryRefundLineJob::handle()` merged what the stored
+`pending_refund_retries` entry knew into the line, removed the entry, and called
+`InvoiceService::createRefund()`. That re-appends a line Mollie rejected, but it can also
+**throw** — a credit note that cannot be written after Mollie paid out, a lock-wait timeout.
+The entry was then gone; the queue re-ran the job with its *dispatch* payload, which lacked the
+refusal count and the outcome-unknown mark: the token lookup was skipped and the line went out
+under a key Mollie no longer held — a second payout once the hour had passed. Reproduced:
+`RefundRetryThrowKeepsEntryTest` › "keeps the stored entry when the booking throws…" red (no
+entry after the throw). The note's "refund lock held" example does not throw: that path files
+the line as failed and re-appends it.
+
+- *Rule:* a throw out of `createRefund()` puts the entry back unless `createRefund()` already
+  re-appended it — with the merged state, `refund_outcome_unknown` forced true (the throw may
+  come after Mollie acted; only the token lookup tells), the original `first_attempt_at`, and the
+  throw as `error`. The exception is rethrown for the queue's backoff. A line booked before the
+  throw is found on the books by its token on the next run and not posted again.
+- *The token is merged too, and minted by the job.* A payload dispatched before the first Mollie
+  call (the lock was held) carries no token; the merge took refusals and the unknown mark from the
+  stored entry but not the token, so the next run minted a fresh one and the lookup could never
+  find the refund an earlier attempt created (red: "takes the token from the stored entry…",
+  one extra POST). The job now takes the stored token and mints one itself before
+  `createRefund()`, so the entry it writes back carries the token the refund was sent with (a
+  clamped line is sent as a copy).
+- *Accepted:* removing the entry up front stays — it is what makes a re-append unambiguously
+  this attempt's failure. A failure to write the entry back is logged and the original throw
+  still reaches the queue.
+
+Red before (2 of 2) with the unfixed job copied back, green after; `tests/Feature/Refund` and
+`tests/Feature/Jobs` green.

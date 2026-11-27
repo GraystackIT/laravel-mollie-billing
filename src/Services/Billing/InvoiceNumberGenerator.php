@@ -15,7 +15,7 @@ class InvoiceNumberGenerator
      *
      * The format is read from config (e.g. 'PP-YYCCCCCC'):
      *   P = prefix character (padded to slot length)
-     *   Y = year digit (padded to slot length)
+     *   Y = year digit (the last digits of the year, one per slot: YY → 26, YYYY → 2026)
      *   C = counter digit (padded to slot length)
      *
      * Counter resets per year.
@@ -46,7 +46,7 @@ class InvoiceNumberGenerator
         // neighbouring year's digits while `created_at` — which the OSS export and the
         // invoice PDF both use — said otherwise. Sequence integrity was never at risk;
         // the document just contradicted itself.
-        $year = (int) BillingTime::nowUtc()->format('y');
+        $year = BillingTime::nowUtc()->format('Y');
 
         $allocate = function () use ($format, $prefix, $year): string {
             $prefixLen = substr_count($format, 'P');
@@ -60,7 +60,11 @@ class InvoiceNumberGenerator
             // rejected it, persistWithSerial() retried three identical times and rethrew, so
             // every invoice from that point on failed for money Mollie had already collected.
             $prefixStr = str_pad(substr($prefix, 0, max(0, $prefixLen)), $prefixLen, ' ', STR_PAD_RIGHT);
-            $yearStr = str_pad((string) $year, $yearLen, '0', STR_PAD_LEFT);
+            // The last `$yearLen` digits of the four-digit year — one digit per `Y`, as the
+            // config documents. Reading the two-digit year and padding it printed `YYYY` as
+            // 0026 on every tax document, and a single `Y` received two digits, which moved
+            // the counter off the offset extractCounter() reads it from.
+            $yearStr = $yearLen === 0 ? '' : str_pad(substr($year, -min($yearLen, strlen($year))), $yearLen, '0', STR_PAD_LEFT);
 
             // A bounded range rather than LIKE 'IN-25______'. The counter slot is
             // fixed-width and zero-padded, so lexicographic order equals numeric

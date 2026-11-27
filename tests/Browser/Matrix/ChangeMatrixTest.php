@@ -961,6 +961,10 @@ class ChangeMatrixTest extends BrowserTestCase
             'pending_change' => (string) __('billing::portal.pending_change_blocks_modifications'),
             'interval_waiver' => (string) __('billing::portal.error_interval_change_under_waiver'),
             'cancelled' => (string) __('billing::portal.error_subscription_ended'),
+            // In the grace period the addons and seats screens say until when, and that
+            // the cancellation is to be withdrawn first (decision 5) — the part after the date.
+            'cancelled_addons' => \Illuminate\Support\Str::after((string) __('billing::portal.error_subscription_ending_addons', ['date' => '§']), '§'),
+            'cancelled_seats' => \Illuminate\Support\Str::after((string) __('billing::portal.error_subscription_ending_seats', ['date' => '§']), '§'),
         ];
     }
 

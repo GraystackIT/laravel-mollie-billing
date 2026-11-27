@@ -14,6 +14,7 @@ use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\MollieBilling;
 use GraystackIT\MollieBilling\Notifications\GrantExtrasPurchaseRefundedNotification;
 use GraystackIT\MollieBilling\Services\Billing\InvoiceService;
+use GraystackIT\MollieBilling\Services\Webhook\Concerns\QueuesThrownRefund;
 use GraystackIT\MollieBilling\Services\Vat\VatCalculationService;
 use GraystackIT\MollieBilling\Support\BillingMoney;
 use GraystackIT\MollieBilling\Support\BillingTime;
@@ -51,6 +52,7 @@ use Illuminate\Support\Facades\Notification;
 class GrantExtrasPurchaseRefund
 {
     use MutatesBillingMeta;
+    use QueuesThrownRefund;
 
     /** Line flag marking the invoice of a purchase that was not carried out. */
     public const LINE_FLAG = 'purchase_not_executed';
@@ -116,9 +118,12 @@ class GrantExtrasPurchaseRefund
         /** @var Model&Billable $billable */
         $paymentId = (string) ($payment->id ?? '');
 
-        $invoice = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first()
-            ?? $this->bookPayment($payment, $billable, $metadata);
+        $booked = BillingInvoice::query()->where('mollie_payment_id', $paymentId)->first();
+        $invoice = $booked ?? $this->bookPayment($payment, $billable, $metadata);
 
+        // Booked on an earlier run, with no credit note and nothing queued: that run may
+        // have reached Mollie before it died. Asked, not guessed.
+        $this->earlierAttempt = self::isRefusedPurchase($booked);
         $creditNote = $this->refund($billable, $invoice);
 
         $this->announceOnce($payment, $billable->refresh(), $invoice->refresh(), $creditNote);
@@ -178,6 +183,9 @@ class GrantExtrasPurchaseRefund
      * holds the per-invoice refund lock, stamps the Mollie refund id onto the credit note
      * and, when Mollie cannot be reached, parks the line under `pending_refund_retries`
      * for `RetryRefundLineJob`. Null when no credit note exists yet.
+     *
+     * When createRefund() itself throws — the lock store, the credit note's write — the
+     * line is parked by {@see QueuesThrownRefund} instead.
      */
     protected function refund(Billable $billable, BillingInvoice $invoice): ?BillingInvoice
     {
@@ -191,31 +199,39 @@ class GrantExtrasPurchaseRefund
         $line = (array) ($invoice->line_items[0] ?? []);
         $now = BillingTime::nowUtc();
 
+        $refundLine = new ProrataLine(
+            originalInvoice: $invoice,
+            originalLineItemIndex: 0,
+            kind: 'grant_extras',
+            code: isset($line['code']) ? (string) $line['code'] : null,
+            label: (string) ($line['label'] ?? 'Purchase not carried out'),
+            quantity: 1,
+            amountNet: -(int) $invoice->amount_net,
+            vatRate: (float) ($line['vat_rate'] ?? 0.0),
+            amountVat: -(int) $invoice->amount_vat,
+            amountGross: -(int) $invoice->amount_gross,
+            periodStart: $now,
+            periodEnd: $now,
+            daysActive: 0,
+            daysRemaining: 0,
+            isCouponCovered: false,
+            direction: 'refund',
+        );
+
+        // One refund per payment: every attempt carries the same token.
+        $refundLine->refundToken = self::fullRefundToken($invoice);
+        $refundLine->refundOutcomeUnknown = $this->earlierAttempt;
+
         try {
-            return $this->invoices->createRefund($billable, [new ProrataLine(
-                originalInvoice: $invoice,
-                originalLineItemIndex: 0,
-                kind: 'grant_extras',
-                code: isset($line['code']) ? (string) $line['code'] : null,
-                label: (string) ($line['label'] ?? 'Purchase not carried out'),
-                quantity: 1,
-                amountNet: -(int) $invoice->amount_net,
-                vatRate: (float) ($line['vat_rate'] ?? 0.0),
-                amountVat: -(int) $invoice->amount_vat,
-                amountGross: -(int) $invoice->amount_gross,
-                periodStart: $now,
-                periodEnd: $now,
-                daysActive: 0,
-                daysRemaining: 0,
-                isCouponCovered: false,
-                direction: 'refund',
-            )], 'Purchase of extras not carried out — the free period had ended');
+            return $this->invoices->createRefund($billable, [$refundLine], 'Purchase of extras not carried out — the free period had ended');
         } catch (\Throwable $e) {
             Log::error('Refund of a refused grant-extras purchase threw', [
                 'billable_id' => $billable->getKey(),
                 'invoice_id' => $invoice->getKey(),
                 'error' => $e->getMessage(),
             ]);
+
+            $this->queueThrownRefund($billable, $invoice, $refundLine, $e);
 
             return null;
         }
@@ -316,11 +332,16 @@ class GrantExtrasPurchaseRefund
         // `RetryRefundLineJob` tells an admin — once — when the retries are used up and the
         // line moves to the dead letter. Same rule as `UnwantedPaymentRefund`.
         if ($creditNote === null) {
-            \Illuminate\Support\Facades\Log::warning('Refund of a grant-extras purchase is queued for retry', [
-                'billable_id' => $billable->getKey(),
-                'payment_id' => $paymentId,
-                'invoice_id' => $invoice->getKey(),
-            ]);
+            // Said only when it is true: the queue write can fail as well.
+            $queued = $this->refundIsQueued($billable->refresh(), $invoice);
+
+            Log::warning($queued
+                ? 'Refund of a grant-extras purchase is queued for retry'
+                : 'Refund of a grant-extras purchase is not through and could not be queued — it is posted on the next webhook delivery', [
+                    'billable_id' => $billable->getKey(),
+                    'payment_id' => $paymentId,
+                    'invoice_id' => $invoice->getKey(),
+                ]);
         }
 
         // The first payment captured a mandate at Mollie. The billable does not adopt it —

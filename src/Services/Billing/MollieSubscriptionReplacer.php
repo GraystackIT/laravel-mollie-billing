@@ -7,6 +7,7 @@ namespace GraystackIT\MollieBilling\Services\Billing;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use GraystackIT\MollieBilling\Contracts\Billable;
+use GraystackIT\MollieBilling\Enums\SubscriptionSource;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Events\MollieSubscriptionReplaced;
 use GraystackIT\MollieBilling\Jobs\RetrySubscriptionReplacementJob;
@@ -15,6 +16,7 @@ use GraystackIT\MollieBilling\Support\BillingRoute;
 use GraystackIT\MollieBilling\Support\BillingTime;
 use GraystackIT\MollieBilling\Support\Concerns\MutatesBillingMeta;
 use GraystackIT\MollieBilling\Support\MollieCall;
+use GraystackIT\MollieBilling\Support\MollieRefusal;
 use GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
@@ -214,7 +216,9 @@ class MollieSubscriptionReplacer
 
         // The customer cancelled while the replacement waited: there is nothing to replace
         // any more. CancelSubscription cancelled the id the billable carried, which is the
-        // old one, so nothing is left running.
+        // old one, so nothing is left running. The same holds for a downgrade to a free
+        // plan: the billable is Active again, but Local — and a Local billable has no Mollie
+        // subscription to move. Its status alone let the retry create the paid one again.
         if (! self::billableState($stored)) {
             $this->dropMarker($billable);
 
@@ -253,7 +257,11 @@ class MollieSubscriptionReplacer
         $start = $start->lessThan($tomorrow) ? $tomorrow : $start;
 
         $amount = new Money((string) $marker['amount']['currency'], (string) $marker['amount']['value']);
-        $key = 'subscription-replace:'.$oldId.':'.$start->toDateString().':'.$amount->value.':'.$marker['interval'];
+        $stableKey = 'subscription-replace:'.$oldId.':'.$start->toDateString().':'.$amount->value.':'.$marker['interval'];
+        // Moved on by every definite refusal of this create (a 4xx binds its key for an hour —
+        // measured 26 November 2026 — and RetrySubscriptionReplacementJob's ladder runs inside
+        // that hour). A timeout, 5xx or lost answer keeps it. See MollieRefusal.
+        $key = MollieRefusal::key($stableKey, MollieRefusal::refusalsFor($marker['key_refusals'] ?? null, $stableKey));
 
         try {
             $created = MollieCall::send(new CreateSubscriptionRequest(
@@ -268,6 +276,10 @@ class MollieSubscriptionReplacer
             ), $key);
         } catch (\Throwable $e) {
             if (! MollieSubscriptionAnswer::sameDescriptionExists($e)) {
+                if (MollieRefusal::isDefinite($e)) {
+                    $this->recordKeyRefusal($billable, $stableKey);
+                }
+
                 throw $e;
             }
 
@@ -297,14 +309,31 @@ class MollieSubscriptionReplacer
 
         event(new MollieSubscriptionReplaced($billable, $oldId, $newId, $start, (string) ($marker['reason'] ?? '')));
 
-        // Cancelled in the meantime, by a path that knew only the old id: the new one has
-        // to go as well, or it would charge a customer who has left.
+        // Cancelled — or downgraded to a free plan — in the meantime, by a path that knew
+        // only the old id: the new one has to go as well, or it would charge a customer who
+        // has left.
         if (! self::billableState(self::fresh($billable) ?? $stored)) {
             app(\GraystackIT\MollieBilling\Services\Webhook\WebhookSupport::class)
                 ->cancelMollieSubscriptionById($billable, $customerId, $newId);
         }
 
         return $newId;
+    }
+
+    /** Count a definite refusal of the create on the marker. Never throws. */
+    private function recordKeyRefusal(Model&Billable $billable, string $stableKey): void
+    {
+        rescue(function () use ($billable, $stableKey): void {
+            $this->mutateBillingMeta($billable, static function (array $meta) use ($stableKey): ?array {
+                if (! is_array($meta[self::META_KEY] ?? null)) {
+                    return null;
+                }
+
+                $meta[self::META_KEY]['key_refusals'] = MollieRefusal::recordRefusal($meta[self::META_KEY]['key_refusals'] ?? null, $stableKey);
+
+                return $meta;
+            });
+        }, null, true);
     }
 
     /** A replacement an earlier attempt created and whose answer was lost. */
@@ -370,8 +399,13 @@ class MollieSubscriptionReplacer
         });
     }
 
+    /** Whether the billable still runs a Mollie subscription that is worth moving. */
     private static function billableState(Billable $billable): bool
     {
+        if ($billable->getBillingSubscriptionSource() === SubscriptionSource::Local->value) {
+            return false;
+        }
+
         return in_array($billable->getBillingSubscriptionStatus(), [
             SubscriptionStatus::Active,
             SubscriptionStatus::Trial,

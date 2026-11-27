@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GraystackIT\MollieBilling\Exceptions;
 
+use GraystackIT\MollieBilling\Exceptions\Concerns\CarriesTranslation;
 use RuntimeException;
 
 /**
@@ -25,8 +26,26 @@ use RuntimeException;
  * (or `addonOffersInterval()`) first, and the services throw this rather than
  * trusting a zero.
  */
-class IntervalNotOfferedException extends RuntimeException
+class IntervalNotOfferedException extends RuntimeException implements TranslatableException
 {
+    use CarriesTranslation;
+
+    protected function defaultTranslationKey(): ?string
+    {
+        return 'billing::exceptions.interval_not_offered';
+    }
+
+    /** @return array<string, string|int|float> */
+    protected function defaultTranslationParameters(): array
+    {
+        return [
+            'code' => $this->targetCode,
+            'interval' => \Illuminate\Support\Facades\Lang::has('billing::enums.subscription_interval.'.$this->interval)
+                ? (string) __('billing::enums.subscription_interval.'.$this->interval)
+                : $this->interval,
+        ];
+    }
+
     public function __construct(
         public readonly string $targetCode,
         public readonly string $interval,

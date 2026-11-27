@@ -36,10 +36,13 @@ use Throwable;
  *
  * "Counts payments" literally: each unsettled payment id is counted once, tracked in
  * `usage_overage_counted_payments`. ChargeUsageOverageDirectly::persistPendingCharge()
- * keeps the old id when its Mollie call fails, so every queue attempt re-entered with
- * the same unsettled payment and incremented again — one genuinely failed payment plus
- * two transient Mollie 5xx errors spent the whole budget in ~6 minutes and dunned a
- * payment method that had been touched exactly once.
+ * used to keep the old id when its Mollie call failed, so every queue attempt re-entered
+ * with the same unsettled payment and incremented again — one genuinely failed payment
+ * plus two transient Mollie 5xx errors spent the whole budget in ~6 minutes and dunned a
+ * payment method that had been touched exactly once. It now moves the old id to the
+ * snapshot's `previous_payment_ids` before asking for the next payment, so a re-entry
+ * finds no id at all; counting by id stays, because it is what holds the budget to
+ * distinct failed collections whichever way the job is re-entered.
  */
 class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
 {
@@ -134,6 +137,22 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
         $billable = $this->billableClass::withoutGlobalScope(\GraystackIT\MollieBilling\Scopes\BillingScope::class)->find($this->billableId);
 
         if ($billable === null) {
+            return;
+        }
+
+        // A cycle that is over is not retried. Its debt stands for the next renewals
+        // (`deferFailedCycle()`), which collect it after RECOLLECT_AFTER_DAYS of rest; the
+        // failure webhook of one of its payments arriving afterwards is not a reason to try
+        // again. The one that always arrives is Mollie's `canceled` for the payment the stale
+        // sweep has just cancelled before deferring the cycle — and `retry()` charged the
+        // deferred lines at once from here: a fresh cycle seconds after the deferral, without
+        // the rest, and counted as one of the renewals' recollections although no renewal had
+        // come. Only `handle()` and an operator's `collectStandingDebtNow()` start one.
+        if (($billable->getBillingSubscriptionMeta()['usage_overage_status'] ?? null) === ChargeUsageOverageDirectly::STATUS_FAILED) {
+            Log::info('RetryUsageOverageChargeJob: the overage cycle is already over — its debt waits for a renewal', [
+                'billable_id' => $billable->getKey(),
+            ]);
+
             return;
         }
 
@@ -253,10 +272,13 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
 
     /**
      * Reached when `tries` runs out — three create-payment failures in a row with the
-     * snapshot's `payment_id` still empty. Nothing was collected and nothing was dunned,
-     * so the status stays `pending` for tomorrow's PrepareUsageOverageJob pass to pick
-     * up; without this the job just landed in failed_jobs and the negative wallet balance
-     * went unbilled with nobody told.
+     * snapshot's `payment_id` still empty (a retry after a failed payment empties it too:
+     * the failed id moves to `previous_payment_ids`). Nothing was collected and nothing was
+     * dunned, so the status stays `pending`: the snapshot is marked `payment_unknown_at`,
+     * `CleanupStalePendingOverageChargeJob` asks Mollie whether one of the attempts arrived
+     * after all, and if none did, tomorrow's PrepareUsageOverageJob pass picks it up. Without
+     * this the job just landed in failed_jobs and the negative wallet balance went unbilled
+     * with nobody told.
      */
     public function failed(?Throwable $exception): void
     {

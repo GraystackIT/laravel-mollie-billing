@@ -181,25 +181,88 @@ class RefundHandler
             // VAT under-declared, later legitimate refunds refused as "exceeds remaining".
             // Every line is stamped, not just the first: a mixed-rate note has one line
             // per credited original line and the dedup check scans them all.
+            //
+            // The document is deferred, so the token below is on the note before
+            // CreditNoteIssued can run.
             $creditNote = $this->salesInvoiceService->createCreditNote(
                 $original,
                 $netAmount,
                 externalReference: ['key' => 'mollie_refund_id', 'value' => $refundId],
+                deferDocument: true,
             );
 
-            $creditNote->refund_reason_code = RefundReasonCode::Other;
-            $creditNote->refund_reason_text = 'synced from Mollie dashboard';
+            // A refund RefundInvoiceService posted itself, booked here because its answer was
+            // lost or its own booking failed, carries its reason as metadata. Booked under
+            // that reason, not as a dashboard refund: a country correction's own refund
+            // filed as Other read as one made before the correction, and the retry of the
+            // resolve then charged nothing again.
+            [$reasonCode, $reasonText] = self::reasonOf($refund);
+
+            $creditNote->refund_reason_code = $reasonCode;
+            $creditNote->refund_reason_text = $reasonText;
+
+            // A refund the package posted itself whose answer was lost: createRefund() sent
+            // the line's token as metadata, and the line waits in `pending_refund_retries`.
+            // With the token on this note the retry recognises the refund as booked, instead
+            // of posting it a second time — see InvoiceService::createRefund().
+            $token = self::refundToken($refund);
+
+            if ($token !== null) {
+                $creditNote->line_items = array_map(
+                    static fn ($line): mixed => is_array($line) ? [...$line, 'refund_token' => $token] : $line,
+                    (array) $creditNote->line_items,
+                );
+            }
+
             $creditNote->save();
 
             $original->refunded_net = $reconciledBaseNet + $netAmount;
             $original->save();
 
+            $this->salesInvoiceService->issueCreditNoteDocument($creditNote, $original);
+
             event(new InvoiceRefunded($billable, $original, $creditNote, [
-                'reason_code' => RefundReasonCode::Other,
-                'reason_text' => 'synced from Mollie dashboard',
+                'reason_code' => $reasonCode,
+                'reason_text' => $reasonText,
                 'mollie_refund_id' => $refundId,
             ]));
         }
+    }
+
+    /**
+     * The reason a refund is booked under: the one RefundInvoiceService sent along as
+     * metadata, or — for a refund made in Mollie's dashboard, which carries none — Other,
+     * "synced from Mollie dashboard".
+     *
+     * @return array{0: RefundReasonCode, 1: ?string}
+     */
+    private static function reasonOf(object $refund): array
+    {
+        $metadata = $refund->metadata ?? null;
+        $read = static fn (string $key): mixed => is_object($metadata) ? ($metadata->{$key} ?? null) : (is_array($metadata) ? ($metadata[$key] ?? null) : null);
+
+        $code = is_string($read('reason_code')) ? RefundReasonCode::tryFrom($read('reason_code')) : null;
+
+        if ($code === null) {
+            return [RefundReasonCode::Other, 'synced from Mollie dashboard'];
+        }
+
+        $text = $read('reason_text');
+        $text = is_string($text) && trim($text) !== '' ? $text : null;
+
+        // Other needs a text everywhere else in the package.
+        return [$code, $text ?? ($code === RefundReasonCode::Other ? 'synced from Mollie dashboard' : null)];
+    }
+
+    /**
+     * The token InvoiceService::createRefund() sent along as refund metadata, if any.
+     */
+    private static function refundToken(object $refund): ?string
+    {
+        $metadata = $refund->metadata ?? null;
+        $token = is_object($metadata) ? ($metadata->refund_token ?? null) : (is_array($metadata) ? ($metadata['refund_token'] ?? null) : null);
+
+        return is_string($token) && $token !== '' ? $token : null;
     }
 
     /**

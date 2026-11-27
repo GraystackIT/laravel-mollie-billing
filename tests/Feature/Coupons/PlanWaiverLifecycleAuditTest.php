@@ -440,6 +440,46 @@ it('leaves a paying subscription alone when a superseded grant is revoked', func
         ->and(WaiverAuditMollie::$sent)->toBe([]);
 });
 
+it('leaves a later waiver alone when free periods that have already run out are revoked', function (): void {
+    // PLANFREE-A: one free period. Its renewal was waived, and the renewal after it found
+    // the marker expired and returned Mollie to the full price — redemption A stays listed
+    // with a revoke button.
+    $billable = waiverAuditPaying();
+    $first = app(AdminExtensionService::class)->freePlanPeriods($billable, 1);
+    app(CouponService::class)->clearActiveRecurringCouponMarker($billable->fresh());
+
+    // Two months later the operator gives PLANFREE-B: three free periods, a marker of its own.
+    $this->travel(60)->days();
+    $second = app(AdminExtensionService::class)->freePlanPeriods($billable->fresh(), 3);
+    $waiverBefore = app(PlanWaiver::class)->marker($billable->fresh());
+    expect((int) ($waiverBefore['coupon_id'] ?? 0))->toBe((int) $second->coupon_id);
+
+    WaiverAuditMollie::$sent = [];
+    app(CouponService::class)->revokeGrant($first->fresh(), 'audit');
+
+    $billable->refresh();
+
+    // B's three periods were given separately; revoking A takes nothing of them back.
+    expect(app(PlanWaiver::class)->marker($billable))->toBe($waiverBefore)
+        ->and(WaiverAuditMollie::$sent)->toBe([])
+        ->and($first->fresh()->isRevoked())->toBeTrue()
+        ->and($second->fresh()->isRevoked())->toBeFalse();
+});
+
+it('still removes the whole waiver when appended free periods are revoked', function (): void {
+    // Documented: periods appended to a running waiver share its marker, so revoking
+    // them takes the waiver away. The appended redemption's coupon is not the marker's.
+    $billable = waiverAuditPaying();
+    app(AdminExtensionService::class)->freePlanPeriods($billable, 1);
+    $this->travel(2)->days();
+    $appended = app(AdminExtensionService::class)->freePlanPeriods($billable->fresh(), 2);
+
+    app(CouponService::class)->revokeGrant($appended->fresh(), 'audit');
+
+    expect(app(PlanWaiver::class)->marker($billable->fresh()))->toBeNull()
+        ->and(WaiverAuditMollie::amount(WaiverAuditMollie::lastPatch()))->toBe('60.00');
+});
+
 // ── The single slot ─────────────────────────────────────────────────────────
 
 it('refuses a recurring coupon while a waiver holds the slot, and says why', function (): void {

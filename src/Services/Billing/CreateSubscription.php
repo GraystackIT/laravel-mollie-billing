@@ -45,6 +45,9 @@ use GraystackIT\MollieBilling\Support\MollieCall;
  */
 class CreateSubscription
 {
+    /** `subscription_meta` key: the id of the payment that activated this subscription. */
+    public const ACTIVATED_BY_META_KEY = 'activated_by_payment_id';
+
     public function __construct(
         private readonly SubscriptionCatalogInterface $catalog,
         private readonly VatCalculationService $vatService,
@@ -52,7 +55,7 @@ class CreateSubscription
     }
 
     /**
-     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string,trial_days?:int,trial_ends_at?:\Carbon\CarbonInterface,paid_period_ends_at?:\Carbon\CarbonInterface}  $spec
+     * @param  array{plan_code:string,interval:string,addon_codes?:array<int,string>,extra_seats?:int,recurring_discount_net?:int,mandate_id?:string,trial_days?:int,trial_ends_at?:\Carbon\CarbonInterface,paid_period_ends_at?:\Carbon\CarbonInterface,activating_payment_id?:string}  $spec
      *         `trial_days` is set exclusively by the trial-activation webhook path.
      *         When present and > 0, the Mollie subscription's startDate is pushed
      *         out to `now + trial_days` (no charge during the trial), the local
@@ -200,6 +203,17 @@ class CreateSubscription
         $meta = SubscriptionMetaHygiene::withoutDunningEpisode($billable->getBillingSubscriptionMeta());
         $meta['seat_count'] = $totalSeats;
         $meta['mollie_subscription_id'] = (string) ($subscription->id ?? '');
+
+        // Which payment this subscription was bought with — written in the same save
+        // that makes the activation complete (`WebhookSupport::activationCompleted()`
+        // reads `mollie_subscription_id`), so the two can never disagree. A retry for a
+        // payment whose activation failed reads it to tell "my payment activated" from
+        // "another payment did, mine is unwanted" (RetrySubscriptionActivationJob). A
+        // subscription created without a payment (ResubscribeSubscription) records null:
+        // not this payment either. A missing key means "from before this record existed".
+        $meta[self::ACTIVATED_BY_META_KEY] = isset($spec['activating_payment_id']) && (string) $spec['activating_payment_id'] !== ''
+            ? (string) $spec['activating_payment_id']
+            : null;
 
         // The one stored answer to "when does Mollie next collect" for a subscription
         // whose charge does not follow its period — see Support\ChargeDeferral. A fresh

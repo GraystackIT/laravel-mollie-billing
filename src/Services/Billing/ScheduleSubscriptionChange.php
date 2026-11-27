@@ -178,11 +178,13 @@ class ScheduleSubscriptionChange
             // ever telling anyone. A cancelled customer wanting a different plan has to
             // resubscribe; that path exists.
             if (! $this->isApplicable($billable)) {
-                throw new InvalidSubscriptionStateException(
+                $status = $billable->getBillingSubscriptionStatus();
+
+                throw (new InvalidSubscriptionStateException(
                     'Cannot schedule a subscription change while the subscription is '
-                    .($billable->getBillingSubscriptionStatus()?->value ?? 'in no billable state')
+                    .($status?->value ?? 'in no billable state')
                     .'. Resubscribe first.'
-                );
+                ))->withTranslation('billing::exceptions.state.schedule_not_running', ['status' => $status?->label() ?? '—']);
             }
 
             $currentPlan = $billable->getBillingSubscriptionPlanCode() ?? '';
@@ -936,10 +938,27 @@ class ScheduleSubscriptionChange
                     : $billable->getActiveBillingAddonCodes(),
             );
 
-            app(UpdateSubscription::class)->update($billable, $dto);
+            $result = app(UpdateSubscription::class)->update($billable, $dto);
 
             // Clear scheduled change on success.
             $this->clearAppliedChange($billable);
+
+            // Applied before its period end — "Apply now", or a dispatcher run ahead of the
+            // boundary — an upgrade carries a prorata charge and waits for it like any
+            // immediate one: the plan is not switched yet. Mollie, though, still holds the
+            // target's amount from the announcement, and `mollie_prepatched` — the only
+            // record of that — has just gone with the scheduled change. A declined charge
+            // or a withdrawn waiting change then left the customer on the old plan while
+            // every renewal was collected at the new one's price (refunded down after the
+            // fact by SupersededRenewalRefund, or not at all if that refund failed). So
+            // Mollie is put back to what the customer is on now, which is exactly where an
+            // ordinary immediate upgrade waits from; Phase 2 PATCHes it forward once the
+            // charge clears, and every path that gives the change up has nothing to undo.
+            if (($result['pendingPaymentConfirmation'] ?? false) === true
+                && ($scheduledChange['mollie_prepatched'] ?? false) === true
+            ) {
+                $this->restoreRecurringAmount($billable->refresh(), (array) $scheduledChange);
+            }
         } catch (\Throwable $e) {
             // Whoever gives this change up later has to know that a payment is on its way.
             $this->rememberPaymentOfFailedAttempt($billable, $paymentBefore, $tokenBefore);

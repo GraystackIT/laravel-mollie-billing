@@ -235,6 +235,20 @@ class SyncSeatsJob implements ShouldQueue, ShouldBeUnique
 
         try {
             $service->handle($billable, $target);
+        } catch (\GraystackIT\MollieBilling\Exceptions\SubscriptionChangeInProgressException $e) {
+            // Another change — a portal plan or addon change, ApplyScheduledChangesJob, a
+            // renewal's applyAtRenewal() — holds `billing:subscription-change:{id}` across its
+            // Mollie calls, and update() refuses rather than queues. Nothing has happened at
+            // that point, exactly as with the seat lock above, so the change goes back on the
+            // queue on the same budget instead of becoming a failed_jobs row and a seat in use
+            // that is never billed. Not on a sync run: the delay is ignored there and the copy
+            // would block on the seat lock this run still holds.
+            if ($this->requeues >= self::MAX_REQUEUES || \GraystackIT\MollieBilling\Support\BillingQueue::isSyncRun($this->job)) {
+                throw $e;
+            }
+
+            self::dispatch($this->billableClass, $this->billableId, $this->seats, $this->delta, $this->requeues + 1, $this->waits)
+                ->delay(self::REQUEUE_DELAY_SECONDS);
         } catch (\GraystackIT\MollieBilling\Exceptions\InvalidSubscriptionStateException $e) {
             if (! $this->waitsForPendingChange($billable)) {
                 throw $e;
