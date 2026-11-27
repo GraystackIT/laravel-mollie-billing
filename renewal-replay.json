@@ -697,8 +697,93 @@
             ],
             "problems": [],
             "log": []
+        },
+        {
+            "at": "2026-11-27T19:35:15+00:00",
+            "created_world": false,
+            "jobs_ran": false,
+            "observations": [
+                "renewal: Mollie subscription sub_yTvneFcB5r now posts to the receiver (was http://example.com/billing/webhook)",
+                "overage: Mollie subscription sub_TGHgeTdUug now posts to the receiver (was http://example.com/billing/webhook)",
+                "scheduled_change: Mollie subscription sub_Hfn7Ck87HM now posts to the receiver (was http://example.com/billing/webhook)",
+                "recurring_coupon: Mollie subscription sub_RypzvpzfAT now posts to the receiver (was http://example.com/billing/webhook)",
+                "failed_renewal: Mollie subscription sub_YrMKwVJWLB now posts to the receiver (was http://example.com/billing/webhook)",
+                "Retry probes started (503x3, 500always); read after 30 h"
+            ],
+            "problems": [],
+            "log": []
         }
     ],
-    "last_checked_at": "2026-11-27T08:15:49+00:00",
-    "last_problems": []
+    "last_checked_at": "2026-11-27T19:35:15+00:00",
+    "last_problems": [],
+    "receiver": {
+        "webhooks": {
+            "sub_yTvneFcB5r": {
+                "scenario": "renewal",
+                "from": "http://example.com/billing/webhook",
+                "at": "2026-11-27T19:34:55+00:00",
+                "outcome": "patched",
+                "to": "http://mollie-canary-receiver-fe08pck7.fra1.preview.ploi.it/billing/webhook"
+            },
+            "sub_TGHgeTdUug": {
+                "scenario": "overage",
+                "from": "http://example.com/billing/webhook",
+                "at": "2026-11-27T19:34:55+00:00",
+                "outcome": "patched",
+                "to": "http://mollie-canary-receiver-fe08pck7.fra1.preview.ploi.it/billing/webhook"
+            },
+            "sub_Hfn7Ck87HM": {
+                "scenario": "scheduled_change",
+                "from": "http://example.com/billing/webhook",
+                "at": "2026-11-27T19:34:56+00:00",
+                "outcome": "patched",
+                "to": "http://mollie-canary-receiver-fe08pck7.fra1.preview.ploi.it/billing/webhook"
+            },
+            "sub_RypzvpzfAT": {
+                "scenario": "recurring_coupon",
+                "from": "http://example.com/billing/webhook",
+                "at": "2026-11-27T19:34:56+00:00",
+                "outcome": "patched",
+                "to": "http://mollie-canary-receiver-fe08pck7.fra1.preview.ploi.it/billing/webhook"
+            },
+            "sub_i6ukddsa8V": {
+                "scenario": "cancel_at_period_end",
+                "from": "http://example.com/billing/webhook",
+                "at": "2026-11-27T19:34:57+00:00",
+                "outcome": "left alone: canceled"
+            },
+            "sub_YrMKwVJWLB": {
+                "scenario": "failed_renewal",
+                "from": "http://example.com/billing/webhook",
+                "at": "2026-11-27T19:34:58+00:00",
+                "outcome": "patched",
+                "to": "http://mollie-canary-receiver-fe08pck7.fra1.preview.ploi.it/billing/webhook"
+            }
+        },
+        "foreign_deliveries": 1,
+        "cursor": 10
+    },
+    "retry_probes": {
+        "sets": [
+            {
+                "created_at": "2026-11-27T19:35:00+00:00",
+                "tag": "20261127T193500",
+                "probes": {
+                    "503x3": {
+                        "payment_id": "tr_2DT4DLF2QpCosUR3Q7AaJ",
+                        "path": "/probe/503/3/20261127T193500-503x3",
+                        "created_at": "2026-11-27T19:35:01+00:00",
+                        "paid_at": "2026-11-27T19:35:08+00:00"
+                    },
+                    "500always": {
+                        "payment_id": "tr_CnQjPEZXwbbAB9nwQ7AaJ",
+                        "path": "/probe/500/always/20261127T193500-500always",
+                        "created_at": "2026-11-27T19:35:10+00:00",
+                        "paid_at": "2026-11-27T19:35:13+00:00"
+                    }
+                },
+                "completed_at": null
+            }
+        ]
+    }
 }
