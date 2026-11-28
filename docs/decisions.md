@@ -7238,6 +7238,13 @@ before (7 history reads where 2 are expected; the refund list fetched 3 times, e
   stands or was reversed meanwhile; the running tracker counted it either way). One read per
   batch, after every Mollie call — it also sees a booking that landed while a later line was
   posted, which the old per-line check right after each call did not.
+- *A reversed refund id re-opens the line (CodeRabbit, third round).* Same rule as "A reversed
+  booking does not settle a refund line", applied to the refund id where no token links the
+  booking: when the final look finds the line's refund booked *and* reversed by another actor,
+  or Mollie replays a refund whose booking was reversed, the line goes to
+  `pending_refund_retries` with its token, one more `refund_key_refusals` and
+  `refund_outcome_unknown` — RefundHandler's reversal only notifies the operator, it queues
+  nothing. A standing booking is still dropped as booked.
 - *The snapshot expires with half the lease (CodeRabbit, second round).* A token read as
   `standing` settles a line without posting or retrying it, so a snapshot older than the lease
   could drop an owed refund another actor had reversed meanwhile. Once a line's lock was taken

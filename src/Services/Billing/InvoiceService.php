@@ -2919,8 +2919,8 @@ class InvoiceService
 
     /**
      * Every refund the billable's credit notes have booked, read in one query: the state
-     * of each refund-line token (see {@see refundTokenBookings()}) and every Mollie refund
-     * id a credit-note line carries.
+     * of each refund-line token (see {@see refundTokenBookings()}), every Mollie refund id a
+     * credit-note line carries, and those of them a reversal took back.
      *
      * {@see createRefund()} reads this once per refund lock instead of once per question
      * per line. Each lookup used to load and decode every credit note of the billable
@@ -2930,11 +2930,11 @@ class InvoiceService
      * the invoice it guards (RefundHandler and RefundInvoiceService take the same lock),
      * and the credit note this run writes is persisted only after its last Mollie call.
      *
-     * @return array{tokens: array<string, 'standing'|'reversed'>, refund_ids: array<string, true>}
+     * @return array{tokens: array<string, 'standing'|'reversed'>, refund_ids: array<string, true>, reversed_refund_ids: array<string, true>}
      */
     private function creditNoteBookings(Billable $billable): array
     {
-        $empty = ['tokens' => [], 'refund_ids' => []];
+        $empty = ['tokens' => [], 'refund_ids' => [], 'reversed_refund_ids' => []];
 
         if (! ($billable instanceof Model)) {
             return $empty;
@@ -2983,7 +2983,7 @@ class InvoiceService
                 : 'standing';
         }
 
-        return ['tokens' => $tokens, 'refund_ids' => $refundIds];
+        return ['tokens' => $tokens, 'refund_ids' => $refundIds, 'reversed_refund_ids' => $reversedRefundIds];
     }
 
     /**
@@ -3011,6 +3011,24 @@ class InvoiceService
         }
 
         return null;
+    }
+
+    /**
+     * The retry entry for a line whose refund a reversal took back: still owed, so posted
+     * again — under a moved key (within the hour Mollie would replay the dead refund under
+     * the old one) and after a token lookup (a live refund an earlier attempt created is
+     * adopted, not paid twice). The token stays. See "A reversed booking does not settle a
+     * refund line" in docs/decisions.md.
+     *
+     * @return array{line: array<string, mixed>, error: string, first_attempt_at: string}
+     */
+    private function reopenedRefundLine(ProrataLine $line, string $error): array
+    {
+        $line->mollieRefundId = null;
+        $line->refundKeyRefusals++;
+        $line->refundOutcomeUnknown = true;
+
+        return ['line' => $line->toArray(), 'error' => $error, 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
     }
 
     /**
@@ -3263,7 +3281,7 @@ class InvoiceService
         // once per line and question — see creditNoteBookings(). Dropped whenever another
         // invoice's lock is taken: until that lock was ours, the webhook could still book
         // against that invoice.
-        /** @var array{tokens: array<string, 'standing'|'reversed'>, refund_ids: array<string, true>}|null $books */
+        /** @var array{tokens: array<string, 'standing'|'reversed'>, refund_ids: array<string, true>, reversed_refund_ids: array<string, true>}|null $books */
         $books = null;
         /** @var array<string, list<object>> $mollieRefunds */
         $mollieRefunds = [];
@@ -3564,6 +3582,14 @@ class InvoiceService
                 // Mollie answers a repeated key with the refund it already holds — and the
                 // webhook may have booked that one since, from a refund that carried no token
                 // to recognise the line by. One refund, one credit note.
+                if ($adopted === null && $line->mollieRefundId !== null && isset($books['reversed_refund_ids'][(string) $line->mollieRefundId])) {
+                    // Replayed a refund whose booking a reversal took back: it paid nothing,
+                    // and the line is still owed — posted again, never settled on it.
+                    $failedLines[] = $this->reopenedRefundLine($line, 'Mollie replayed a refund whose booking was reversed');
+
+                    continue;
+                }
+
                 if ($adopted === null && $line->mollieRefundId !== null && isset($books['refund_ids'][(string) $line->mollieRefundId])) {
                     Log::info('Mollie replayed a refund that is already on the books — not booked again', [
                         'billable' => $billable->getKey(),
@@ -3607,15 +3633,31 @@ class InvoiceService
             // A dropped line's net is no longer this run's to count: the other actor's booking
             // either stands (and is on the books already) or was reversed meanwhile (and
             // credits nothing). The counters are then recomputed from the books.
+            //
+            // One the other actor booked and then reversed paid nothing, and nothing else
+            // re-opens it — RefundHandler's reversal notifies the operator, it does not queue
+            // the line. Such a line goes to the retry queue, as a reversed token does above.
             if ($persistedLines !== []) {
-                $bookedNow = $this->creditNoteBookings($billable)['refund_ids'];
+                $booksNow = $this->creditNoteBookings($billable);
                 $linesBefore = count($persistedLines);
 
-                $persistedLines = array_values(array_filter($persistedLines, function (ProrataLine $line) use ($bookedNow, $billable): bool {
+                $persistedLines = array_values(array_filter($persistedLines, function (ProrataLine $line) use ($booksNow, $billable, &$failedLines): bool {
                     $refundId = (string) ($line->mollieRefundId ?? '');
 
-                    if ($refundId === '' || ! isset($bookedNow[$refundId])) {
+                    if ($refundId === '' || ! isset($booksNow['refund_ids'][$refundId])) {
                         return true;
+                    }
+
+                    if (isset($booksNow['reversed_refund_ids'][$refundId])) {
+                        Log::warning('Refund was booked and reversed by another actor during the batch — queued again', [
+                            'billable' => $billable->getKey(),
+                            'original_invoice_id' => $line->originalInvoice?->getKey(),
+                            'mollie_refund_id' => $refundId,
+                        ]);
+
+                        $failedLines[] = $this->reopenedRefundLine($line, 'Refund booked and reversed during the batch');
+
+                        return false;
                     }
 
                     Log::info('Refund was booked by another actor during the batch — not booked again', [

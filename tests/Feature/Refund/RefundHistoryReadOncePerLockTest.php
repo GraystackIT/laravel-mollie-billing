@@ -409,4 +409,41 @@ it('counts refunded_net from the books when a dropped line was booked and revers
     expect(collect($note->line_items)->pluck('mollie_refund_id')->all())->toBe(['re_second'])
         // Only line 1 refunded money: line 0's credit and its reversal cancel.
         ->and((int) $invoice->fresh()->refunded_net)->toBe(1000);
+
+    // Line 0 is still owed: queued again under its token, with the key moved and the
+    // token lookup armed — never dropped because a reversed booking carried its refund id.
+    $retries = $billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [];
+
+    expect($retries)->toHaveCount(1)
+        ->and($retries[0]['line']['refund_token'])->toBe('tok0')
+        ->and($retries[0]['line']['mollie_refund_id'])->toBeNull()
+        ->and($retries[0]['line']['refund_key_refusals'] ?? 0)->toBe(1)
+        ->and($retries[0]['line']['refund_outcome_unknown'] ?? false)->toBeTrue();
+});
+
+it('queues a line again when Mollie replays a refund whose booking was reversed', function (): void {
+    $billable = historyOnceBillable();
+    $invoice = historyOnceInvoice($billable);
+
+    // A dead refund: booked without a token (synced from Mollie), then reversed.
+    historyOnceNote($billable, $invoice, [
+        ['mollie_refund_id' => 're_dead'],
+        ['mollie_refund_id' => 're_dead', 'reverses_credit' => true],
+    ]);
+
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnSelf();
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(CreatePaymentRefundRequest::class))
+        ->andReturn((object) ['id' => 're_dead']);
+
+    $line = historyOnceRetriedLine($invoice, 0);
+    $line->refundOutcomeUnknown = false;
+
+    expect(app(InvoiceService::class)->createRefund($billable, [$line], 'Plan change'))->toBeNull();
+
+    $retries = $billable->fresh()->getBillingSubscriptionMeta()['pending_refund_retries'] ?? [];
+
+    expect($retries)->toHaveCount(1)
+        ->and($retries[0]['line']['refund_token'])->toBe('tok0')
+        ->and($retries[0]['line']['refund_key_refusals'] ?? 0)->toBe(1);
 });
