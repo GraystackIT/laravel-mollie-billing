@@ -7207,3 +7207,34 @@ not mistaken for a death), reported a revoked mandate once, rebuilt on the next 
 reset removed both worlds. Not verified here, only in the cloud: the workflow itself (retry,
 verdict, issue, artifact), the receiver-failure paths against a real outage.
 
+
+## `createRefund()` reads the refund history once per refund lock (28 November 2026)
+
+Reported by review (performance, v1.1.0, `InvoiceService` call sites at the token lookup and the
+"Mollie replayed a refund that is already on the books" check): every refund line asked its
+questions from scratch. `refundTokenBooking()` and `refundIdOnBooks()` each loaded and decoded
+every credit note of the billable, and a line whose earlier answer was lost asked a third time
+after `refundCreatedWithToken()` — which itself paged the payment's whole refund list through
+Mollie again for every line of the same payment. A plan change with plan, seat and addon lines
+on a billable with a long refund history re-read that history up to nine times, and asked Mollie
+three times, while holding the refund lock. Measured: `RefundHistoryReadOncePerLockTest` red
+before (7 history reads where 2 are expected; the refund list fetched 3 times, expected once).
+
+- *Rule:* `creditNoteBookings()` reads token states and booked refund ids in one query; the
+  Mollie refund list is fetched once per payment. Both are held for the run of `createRefund()`
+  and the books are dropped whenever another invoice's refund lock is taken.
+- *Why the snapshot is safe under the lock:* RefundHandler and RefundInvoiceService take the same
+  per-invoice lock before they book, and the credit note `createRefund()` writes is persisted only
+  after its last Mollie call — so nothing that could change an answer for a line lands between
+  the read and the line. Refunds this run creates at Mollie carry other lines' tokens and do not
+  change the lookup for the next one. Before a lock is ours the webhook can still book against
+  that invoice, hence the drop on every new lock.
+- *Not narrowed in SQL:* the token and refund id live inside `line_items` JSON, and
+  `whereJsonContains` is not portable to SQLite — same reasoning as `refundChildren()`. The
+  original invoice's own `refundChildren()` read (one per instance) is a separate memo and stays.
+- *Removed:* `refundTokenOnBooks()` (no caller), `refundTokenBooking()`, `refundIdOnBooks()`,
+  `creditNoteLineExists()`. `refundTokenBookings()` stays public for ProrataChargeHandler.
+
+Red before (2 of 2) with the unfixed `InvoiceService` restored, green after;
+`tests/Feature/Refund`, `tests/Feature/Webhook`, `tests/Feature/Billing`, `tests/Feature/Coverage`
+green.

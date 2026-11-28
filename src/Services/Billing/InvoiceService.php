@@ -2882,32 +2882,6 @@ class InvoiceService
     }
 
     /**
-     * Whether a credit note of this billable carries a refund line's token on a booking
-     * that still stands — written by {@see createRefund()} itself, or by RefundHandler from
-     * the token the refund carried in its Mollie metadata.
-     *
-     * A booking whose refund Mollie later reported `failed` or `canceled` has been taken
-     * back by {@see reverseBookedCredit()} (a mirror line under the same `mollie_refund_id`,
-     * `reverses_credit` set; the mirror drops the token). The token is still on the
-     * historical note, but the money never left — that booking settles nothing.
-     */
-    private function refundTokenOnBooks(Billable $billable, string $token): bool
-    {
-        return $this->refundTokenBooking($billable, $token) === 'standing';
-    }
-
-    /**
-     * What the books hold for a refund line's token: a booking that stands, only bookings
-     * a reversal took back, or nothing.
-     *
-     * @return 'standing'|'reversed'|null
-     */
-    private function refundTokenBooking(Billable $billable, string $token): ?string
-    {
-        return $this->refundTokenBookings($billable, [$token])[$token] ?? null;
-    }
-
-    /**
      * What the books hold for each of these refund-line tokens, read from the billable's
      * credit notes in one query: `standing` when a booking carrying the token still stands,
      * `reversed` when every booking carrying it was taken back by
@@ -2924,8 +2898,34 @@ class InvoiceService
     {
         $wanted = array_flip(array_filter($tokens, static fn (mixed $t): bool => is_string($t) && $t !== ''));
 
-        if ($wanted === [] || ! ($billable instanceof Model)) {
+        if ($wanted === []) {
             return [];
+        }
+
+        return array_intersect_key($this->creditNoteBookings($billable)['tokens'], $wanted);
+    }
+
+    /**
+     * Every refund the billable's credit notes have booked, read in one query: the state
+     * of each refund-line token (see {@see refundTokenBookings()}) and every Mollie refund
+     * id a credit-note line carries.
+     *
+     * {@see createRefund()} reads this once per refund lock instead of once per question
+     * per line. Each lookup used to load and decode every credit note of the billable
+     * again — three times per retried line — so a plan change with plan, seat and addon
+     * lines, on a billable with a long refund history, re-read that history up to nine
+     * times while holding the refund lock. Within one lock nothing else can book against
+     * the invoice it guards (RefundHandler and RefundInvoiceService take the same lock),
+     * and the credit note this run writes is persisted only after its last Mollie call.
+     *
+     * @return array{tokens: array<string, 'standing'|'reversed'>, refund_ids: array<string, true>}
+     */
+    private function creditNoteBookings(Billable $billable): array
+    {
+        $empty = ['tokens' => [], 'refund_ids' => []];
+
+        if (! ($billable instanceof Model)) {
+            return $empty;
         }
 
         $lines = BillingInvoice::query()
@@ -2935,62 +2935,58 @@ class InvoiceService
             ->get(['line_items'])
             ->flatMap(fn (BillingInvoice $note): array => array_values(array_filter((array) $note->line_items, 'is_array')));
 
-        $reversedRefundIds = $lines
-            ->filter(fn (array $line): bool => BillingInvoice::creditSign($line) === -1)
-            ->map(fn (array $line): mixed => $line['mollie_refund_id'] ?? null)
-            ->filter(fn (mixed $id): bool => is_string($id) && $id !== '')
-            ->flip();
+        $refundIds = [];
+        $reversedRefundIds = [];
 
-        $found = [];
+        foreach ($lines as $line) {
+            $refundId = $line['mollie_refund_id'] ?? null;
+
+            if (! is_string($refundId) || $refundId === '') {
+                continue;
+            }
+
+            // Any line, the reversal's mirror included: "already on the books" asks whether
+            // a credit note carries the id at all.
+            $refundIds[$refundId] = true;
+
+            if (BillingInvoice::creditSign($line) === -1) {
+                $reversedRefundIds[$refundId] = true;
+            }
+        }
+
+        $tokens = [];
 
         foreach ($lines as $line) {
             $token = $line['refund_token'] ?? null;
 
-            if (! is_string($token) || ! isset($wanted[$token]) || BillingInvoice::creditSign($line) === -1
-                || ($found[$token] ?? null) === 'standing') {
+            if (! is_string($token) || $token === '' || BillingInvoice::creditSign($line) === -1
+                || ($tokens[$token] ?? null) === 'standing') {
                 continue;
             }
 
             $refundId = $line['mollie_refund_id'] ?? null;
 
-            $found[$token] = is_string($refundId) && $refundId !== '' && $reversedRefundIds->has($refundId)
+            $tokens[$token] = is_string($refundId) && $refundId !== '' && isset($reversedRefundIds[$refundId])
                 ? 'reversed'
                 : 'standing';
         }
 
-        return $found;
-    }
-
-    /**
-     * Whether a credit note of this billable already carries this Mollie refund id.
-     */
-    private function refundIdOnBooks(Billable $billable, string $refundId): bool
-    {
-        return $refundId !== '' && $this->creditNoteLineExists($billable, 'mollie_refund_id', $refundId);
-    }
-
-    private function creditNoteLineExists(Billable $billable, string $key, string $value): bool
-    {
-        /** @var Model&Billable $billable */
-        return BillingInvoice::query()
-            ->where('billable_type', $billable->getMorphClass())
-            ->where('billable_id', $billable->getKey())
-            ->where('invoice_kind', InvoiceKind::Refund)
-            ->get(['line_items'])
-            ->contains(fn (BillingInvoice $note): bool => collect((array) $note->line_items)
-                ->contains(fn ($line): bool => is_array($line) && ($line[$key] ?? null) === $value));
+        return ['tokens' => $tokens, 'refund_ids' => $refundIds];
     }
 
     /**
      * The refund an earlier attempt created for this token at Mollie, if there is one.
      *
-     * Read from the payment's refund list (every page, through MollieCall), matched on the
-     * token {@see createRefund()} sends as refund metadata. A refund Mollie reports as
-     * `failed` or `canceled` did not pay out and does not count — the line is posted again.
+     * Matched on the token {@see createRefund()} sends as refund metadata, in the payment's
+     * refund list (every page, through MollieCall), which the caller fetches once per
+     * payment and refund lock. A refund Mollie reports as `failed` or `canceled` did not
+     * pay out and does not count — the line is posted again.
+     *
+     * @param  iterable<object>  $refunds
      */
-    private function refundCreatedWithToken(string $paymentId, string $token): ?object
+    private function refundCreatedWithToken(iterable $refunds, string $token): ?object
     {
-        foreach (app(MolliePaymentCredits::class)->refunds((object) ['id' => $paymentId]) as $refund) {
+        foreach ($refunds as $refund) {
             $metadata = $refund->metadata ?? null;
             $carried = is_object($metadata) ? ($metadata->refund_token ?? null) : (is_array($metadata) ? ($metadata['refund_token'] ?? null) : null);
 
@@ -3211,6 +3207,15 @@ class InvoiceService
         /** @var array<int|string, array{0: BillingInvoice, 1: int, 2: ?string}> $refundedNetWrites */
         $refundedNetWrites = [];
 
+        // What the books hold and what Mollie lists, read once per refund lock rather than
+        // once per line and question — see creditNoteBookings(). Dropped whenever another
+        // invoice's lock is taken: until that lock was ours, the webhook could still book
+        // against that invoice.
+        /** @var array{tokens: array<string, 'standing'|'reversed'>, refund_ids: array<string, true>}|null $books */
+        $books = null;
+        /** @var array<string, list<object>> $mollieRefunds */
+        $mollieRefunds = [];
+
         try {
             foreach ($effective as $line) {
                 $original = $line->originalInvoice;
@@ -3231,6 +3236,7 @@ class InvoiceService
 
                 if (! array_key_exists($lockInvoiceId, $refundLocks)) {
                     $refundLocks[$lockInvoiceId] = $this->acquireRefundLock($lockInvoiceId);
+                    $books = null;
                 }
 
                 if ($refundLocks[$lockInvoiceId] === null) {
@@ -3258,7 +3264,8 @@ class InvoiceService
                 // nothing out, and settling the line on it dropped an owed refund with no
                 // retry left. Such a line is posted again, as when the lookup below finds
                 // the dead refund at Mollie before anything booked it.
-                $tokenBooking = $line->refundToken !== null ? $this->refundTokenBooking($billable, $line->refundToken) : null;
+                $books ??= $this->creditNoteBookings($billable);
+                $tokenBooking = $line->refundToken !== null ? ($books['tokens'][$line->refundToken] ?? null) : null;
 
                 if ($tokenBooking === 'standing') {
                     Log::info('Refund line already on the books — not posted again', [
@@ -3288,14 +3295,15 @@ class InvoiceService
 
                 if ($line->refundOutcomeUnknown && $line->refundToken !== null) {
                     try {
-                        $adopted = $this->refundCreatedWithToken($refundPaymentId, $line->refundToken);
+                        $mollieRefunds[$refundPaymentId] ??= app(MolliePaymentCredits::class)->refunds((object) ['id' => $refundPaymentId]);
+                        $adopted = $this->refundCreatedWithToken($mollieRefunds[$refundPaymentId], $line->refundToken);
                     } catch (\Throwable $e) {
                         $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
 
                         continue;
                     }
 
-                    if ($adopted !== null && $this->refundIdOnBooks($billable, (string) $adopted->id)) {
+                    if ($adopted !== null && isset($books['refund_ids'][(string) $adopted->id])) {
                         continue;
                     }
                 }
@@ -3483,7 +3491,7 @@ class InvoiceService
                 // Mollie answers a repeated key with the refund it already holds — and the
                 // webhook may have booked that one since, from a refund that carried no token
                 // to recognise the line by. One refund, one credit note.
-                if ($adopted === null && $line->mollieRefundId !== null && $this->refundIdOnBooks($billable, (string) $line->mollieRefundId)) {
+                if ($adopted === null && $line->mollieRefundId !== null && isset($books['refund_ids'][(string) $line->mollieRefundId])) {
                     Log::info('Mollie replayed a refund that is already on the books — not booked again', [
                         'billable' => $billable->getKey(),
                         'original_invoice_id' => $originalKey,
