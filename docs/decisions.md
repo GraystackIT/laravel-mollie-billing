@@ -7229,12 +7229,23 @@ before (7 history reads where 2 are expected; the refund list fetched 3 times, e
   the read and the line. Refunds this run creates at Mollie carry other lines' tokens and do not
   change the lookup for the next one. Before a lock is ours the webhook can still book against
   that invoice, hence the drop on every new lock.
+- *The snapshot is not trusted past the lock's lease (CodeRabbit).* The refund lock has a fixed
+  120-second lease that nothing renews, so a batch that outlives it lets RefundHandler book a
+  refund the batch just created. Before the credit note is written the books are read once more
+  and a line whose `mollie_refund_id` is now booked is dropped (its net stays in the
+  `refunded_net` write: the webhook's note books that refund). One read per batch, after every
+  Mollie call — it also sees a booking that landed while a later line was posted, which the old
+  per-line check right after each call did not.
+- *A cached refund is re-read before it is adopted (CodeRabbit).* When the refund list was read
+  for an earlier line, the refund a later line would adopt is fetched again by id
+  (`GetPaymentRefundRequest`): a queued refund that failed meanwhile is not booked, the line is
+  posted again. Only reached by a line whose earlier answer was lost.
 - *Not narrowed in SQL:* the token and refund id live inside `line_items` JSON, and
   `whereJsonContains` is not portable to SQLite — same reasoning as `refundChildren()`. The
   original invoice's own `refundChildren()` read (one per instance) is a separate memo and stays.
 - *Removed:* `refundTokenOnBooks()` (no caller), `refundTokenBooking()`, `refundIdOnBooks()`,
   `creditNoteLineExists()`. `refundTokenBookings()` stays public for ProrataChargeHandler.
 
-Red before (2 of 2) with the unfixed `InvoiceService` restored, green after;
-`tests/Feature/Refund`, `tests/Feature/Webhook`, `tests/Feature/Billing`, `tests/Feature/Coverage`
+Red before (2 of 2; the two CodeRabbit cases 2 of 2 against the first fix) with the unfixed
+`InvoiceService` restored, green after; `tests/Feature/Refund`, `tests/Feature/Webhook`, `tests/Feature/Billing`, `tests/Feature/Coverage`
 green.

@@ -38,6 +38,7 @@ use GraystackIT\MollieBilling\Support\ProrataLine;
 use Mollie\Api\Http\Data\Money as MollieMoney;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
+use Mollie\Api\Http\Requests\GetPaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
@@ -3295,8 +3296,18 @@ class InvoiceService
 
                 if ($line->refundOutcomeUnknown && $line->refundToken !== null) {
                     try {
+                        $listedForThisLine = ! array_key_exists($refundPaymentId, $mollieRefunds);
                         $mollieRefunds[$refundPaymentId] ??= app(MolliePaymentCredits::class)->refunds((object) ['id' => $refundPaymentId]);
                         $adopted = $this->refundCreatedWithToken($mollieRefunds[$refundPaymentId], $line->refundToken);
+
+                        // Listed for an earlier line: the status may have moved since — a
+                        // queued refund can have failed meanwhile, and booking it would pay
+                        // nothing out while the line stopped being retried. Asked again for
+                        // this one refund, which is rare: only a lost answer gets here.
+                        if ($adopted !== null && ! $listedForThisLine) {
+                            $current = MollieCall::send(new GetPaymentRefundRequest($refundPaymentId, (string) $adopted->id));
+                            $adopted = $this->refundCreatedWithToken([$current], $line->refundToken);
+                        }
                     } catch (\Throwable $e) {
                         $failedLines[] = ['line' => $line->toArray(), 'error' => $e->getMessage(), 'first_attempt_at' => BillingTime::nowUtc()->toIso8601String()];
 
@@ -3522,6 +3533,35 @@ class InvoiceService
                 // it, and the retry that then found the refund at Mollie by its token added
                 // the same amount on top — `refunded_net` at twice what went back.
                 $refundedNetWrites[$originalKey] = [$original, $newRefundedNet, $line->mollieRefundId];
+            }
+
+            // One fresh look at the books before the credit note is written. The checks in
+            // the loop read the snapshot, which is sound while the refund lock holds — but
+            // the lock's lease is fixed, and a batch that outlives it lets RefundHandler book
+            // a refund this run just created. Booking it again here would be a second credit
+            // note for one refund. One read per batch, after every Mollie call, so it also
+            // sees a booking that landed while a *later* line was being posted.
+            //
+            // `refundedNetWrites` keeps the dropped line's net: the webhook's credit note
+            // books that refund, so it is part of what the original has refunded.
+            if ($persistedLines !== []) {
+                $bookedNow = $this->creditNoteBookings($billable)['refund_ids'];
+
+                $persistedLines = array_values(array_filter($persistedLines, function (ProrataLine $line) use ($bookedNow, $billable): bool {
+                    $refundId = (string) ($line->mollieRefundId ?? '');
+
+                    if ($refundId === '' || ! isset($bookedNow[$refundId])) {
+                        return true;
+                    }
+
+                    Log::info('Refund was booked by another actor during the batch — not booked again', [
+                        'billable' => $billable->getKey(),
+                        'original_invoice_id' => $line->originalInvoice?->getKey(),
+                        'mollie_refund_id' => $refundId,
+                    ]);
+
+                    return false;
+                }));
             }
 
             if (! empty($failedLines)) {

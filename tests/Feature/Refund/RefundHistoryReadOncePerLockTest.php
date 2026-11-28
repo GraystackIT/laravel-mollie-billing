@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Mollie\Api\Http\Requests\CreatePaymentRefundRequest;
 use Mollie\Api\Http\Requests\GetPaginatedPaymentRefundsRequest;
+use Mollie\Api\Http\Requests\GetPaymentRefundRequest;
 use Mollie\Laravel\Facades\Mollie;
 
 /**
@@ -173,9 +174,10 @@ it('reads the credit-note history and the Mollie refund list once for three line
             ->toBe(['re_new_1', 're_new_2', 're_new_3']);
     });
 
-    // One read for the booking lookups of all three lines, one for the original invoice's
-    // own memoised `refundChildren()` (effectiveRefundedNet). Per line and question it was 7.
-    expect($reads)->toBe(2);
+    // One read for the booking lookups of all three lines, one fresh look before the credit
+    // note is written, one for the original invoice's own memoised `refundChildren()`
+    // (effectiveRefundedNet). Per line and question it was 7.
+    expect($reads)->toBe(3);
 });
 
 it('still settles a line whose refund the books already hold, from the single read', function (): void {
@@ -217,4 +219,96 @@ it('still settles a line whose refund the books already hold, from the single re
     );
 
     expect(collect($note->line_items)->pluck('refund_token')->all())->toBe(['tok0', 'tok2']);
+});
+
+it('does not book a refund the webhook booked while a later line was being posted', function (): void {
+    $billable = historyOnceBillable();
+    $invoice = historyOnceInvoice($billable);
+
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnSelf();
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(GetPaginatedPaymentRefundsRequest::class))
+        ->andReturn(new ArrayIterator([]));
+
+    $calls = 0;
+    Mollie::shouldReceive('send')->twice()
+        ->with(Mockery::type(CreatePaymentRefundRequest::class))
+        ->andReturnUsing(function () use (&$calls, $billable, $invoice): object {
+            $calls++;
+
+            if ($calls === 2) {
+                // The refund lock lapsed: RefundHandler books line 0's refund meanwhile.
+                BillingInvoice::create([
+                    'billable_type' => $billable->getMorphClass(),
+                    'billable_id' => $billable->getKey(),
+                    'invoice_kind' => InvoiceKind::Refund,
+                    'status' => InvoiceStatus::Refunded,
+                    'country' => 'AT',
+                    'currency' => 'EUR',
+                    'amount_net' => -1000,
+                    'amount_vat' => -200,
+                    'amount_gross' => -1200,
+                    'serial_number' => 'CN-'.uniqid(),
+                    'line_items' => [[
+                        'kind' => 'plan', 'label' => 'Synced from Mollie dashboard', 'quantity' => 1,
+                        'amount_net' => -1000, 'vat_rate' => 20.0, 'vat_amount' => -200, 'amount_gross' => -1200,
+                        'parent_invoice_id' => $invoice->getKey(), 'parent_line_item_index' => 0,
+                        'mollie_refund_id' => 're_first',
+                    ]],
+                ]);
+            }
+
+            return (object) ['id' => $calls === 1 ? 're_first' : 're_second'];
+        });
+
+    $note = app(InvoiceService::class)->createRefund(
+        $billable,
+        [historyOnceRetriedLine($invoice, 0), historyOnceRetriedLine($invoice, 1)],
+        'Plan change',
+    );
+
+    expect(collect($note->line_items)->pluck('mollie_refund_id')->all())->toBe(['re_second']);
+});
+
+it('asks Mollie again before adopting a refund from a list read for an earlier line', function (): void {
+    $billable = historyOnceBillable();
+    $invoice = historyOnceInvoice($billable);
+
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnSelf();
+
+    // Listed while line 0 was handled: line 1's earlier refund is still queued.
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(GetPaginatedPaymentRefundsRequest::class))
+        ->andReturn(new ArrayIterator([(object) [
+            'id' => 're_queued', 'status' => 'queued',
+            'amount' => (object) ['value' => '12.00', 'currency' => 'EUR'],
+            'metadata' => (object) ['refund_token' => 'tok1'],
+        ]]));
+
+    // By the time line 1 comes up, it has failed — nothing was paid out.
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(GetPaymentRefundRequest::class))
+        ->andReturn((object) [
+            'id' => 're_queued', 'status' => 'failed',
+            'amount' => (object) ['value' => '12.00', 'currency' => 'EUR'],
+            'metadata' => (object) ['refund_token' => 'tok1'],
+        ]);
+
+    $created = 0;
+    Mollie::shouldReceive('send')->twice()
+        ->with(Mockery::type(CreatePaymentRefundRequest::class))
+        ->andReturnUsing(function () use (&$created): object {
+            $created++;
+
+            return (object) ['id' => 're_posted_'.$created];
+        });
+
+    $note = app(InvoiceService::class)->createRefund(
+        $billable,
+        [historyOnceRetriedLine($invoice, 0), historyOnceRetriedLine($invoice, 1)],
+        'Plan change',
+    );
+
+    // Line 1 was posted again rather than booked on the dead refund.
+    expect(collect($note->line_items)->pluck('mollie_refund_id')->all())->toBe(['re_posted_1', 're_posted_2']);
 });
