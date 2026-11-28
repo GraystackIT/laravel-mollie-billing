@@ -1,0 +1,54 @@
+{
+    "created_at": "2026-11-28T08:36:00+00:00",
+    "customer_id": "cst_Pi3YrdJbUD",
+    "subscriptions": {
+        "daily": {
+            "interval": "1 day",
+            "amount": "1.00",
+            "start": "2026-11-29",
+            "times": 10,
+            "id": "sub_oXC6gaZqFi",
+            "status": "active",
+            "next_payment_date": "2026-11-29"
+        },
+        "monthly": {
+            "interval": "1 month",
+            "amount": "34.51",
+            "start": "2026-11-29",
+            "times": null,
+            "id": "sub_AKVrjrMYy6",
+            "status": "active",
+            "next_payment_date": "2026-11-29"
+        },
+        "month_end": {
+            "interval": "1 month",
+            "amount": "34.51",
+            "start": "2026-12-31",
+            "times": null,
+            "id": "sub_Tg9i2kwpFt",
+            "status": "active",
+            "next_payment_date": "2026-12-31"
+        },
+        "pinned": {
+            "interval": "1 month",
+            "amount": "34.51",
+            "start": "2026-11-29",
+            "times": null,
+            "id": "sub_6HY3b4MFek",
+            "status": "active",
+            "next_payment_date": "2026-11-29"
+        }
+    },
+    "mandate_id": "mdt_2yqppcWmZw",
+    "visits": [
+        {
+            "at": "2026-11-28T08:35:59+00:00",
+            "created_world": true,
+            "rebuilt_world": false,
+            "observations": [],
+            "problems": []
+        }
+    ],
+    "last_checked_at": "2026-11-28T08:35:59+00:00",
+    "last_problems": []
+}

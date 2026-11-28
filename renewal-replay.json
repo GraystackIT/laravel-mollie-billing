@@ -573,10 +573,11 @@
             "done": true
         }
     },
-    "jobs_ran_on": "2026-11-27",
+    "jobs_ran_on": "2026-11-28",
     "jobs_runs": [
         "2026-11-26T20:52:03+00:00",
-        "2026-11-27T08:15:47+00:00"
+        "2026-11-27T08:15:47+00:00",
+        "2026-11-28T08:35:54+00:00"
     ],
     "events": [
         {
@@ -712,9 +713,18 @@
             ],
             "problems": [],
             "log": []
+        },
+        {
+            "at": "2026-11-28T08:35:59+00:00",
+            "created_world": false,
+            "jobs_ran": true,
+            "observations": [],
+            "problems": [],
+            "warnings": [],
+            "log": []
         }
     ],
-    "last_checked_at": "2026-11-27T19:35:15+00:00",
+    "last_checked_at": "2026-11-28T08:35:59+00:00",
     "last_problems": [],
     "receiver": {
         "webhooks": {
@@ -761,7 +771,7 @@
             }
         },
         "foreign_deliveries": 1,
-        "cursor": 10
+        "cursor": 23
     },
     "retry_probes": {
         "sets": [
@@ -785,5 +795,6 @@
                 "completed_at": null
             }
         ]
-    }
+    },
+    "last_warnings": []
 }
