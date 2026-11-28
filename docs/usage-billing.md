@@ -562,6 +562,18 @@ a second time, and a plan-change line is never credited back by the webhook beca
 `settles_wallet: false`); and `PrepareUsageOverageJob`'s retry pass skips it rather than
 sending it through a ladder that is only safe inside the idempotency window.
 
+**A refusal is not a lost answer** (27 November 2026). When Mollie answers the create request
+with a definite refusal — a 4xx per `MollieRefusal::isDefinite()` (not 408, 409 or a refusal
+of the idempotency key itself; 429 counts) — nothing was charged and that is known. The
+marker is not written: the refusal is counted under `usage_overage.key_refusals`, so the next
+attempt sends a moved-on key, and the snapshot stays `pending` with `payment_id: null`. The
+debt is therefore not frozen: `RetryUsageOverageChargeJob`'s ladder retries it at once, and
+`PrepareUsageOverageJob`'s retry pass dispatches it again the next night without waiting for
+the reconciliation below. A ladder spent on refusals ends as any create failure does
+(`failed()`: operator mail, no dunning, no past due). `chargeDeferredOverage()` keeps a refused
+plan-change charge in the snapshot and does not also hand it back to the wallet. A timeout, a
+5xx or a lost answer is marked exactly as before.
+
 `CleanupStalePendingOverageChargeJob` resolves it, by asking the only party that knows —
 Mollie's payment list for that customer:
 

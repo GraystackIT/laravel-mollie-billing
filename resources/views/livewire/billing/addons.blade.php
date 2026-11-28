@@ -14,6 +14,8 @@ use Livewire\Component;
 
 new class extends Component {
     use InteractsWithFluxUi;
+    use \GraystackIT\MollieBilling\Concerns\ShowsPendingOtherOrderNotice;
+
     public bool $polling = false;
     public ?string $pendingAddon = null;
     public ?string $pendingAction = null;
@@ -223,6 +225,7 @@ new class extends Component {
 
     public function enableAddon(string $addonCode): void
     {
+        $this->clearPendingOtherOrder();
         $billable = $this->resolveBillable();
         if (! $billable) return;
 
@@ -264,7 +267,13 @@ new class extends Component {
         if ($purchase->eligible($billable) && $purchase->needsPayment($billable, $addonsAfter, $billable->getBillingSeatCount())) {
             try {
                 $url = $purchase->handle($billable, $addonsAfter, $billable->getBillingSeatCount());
-            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException|\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
+            } catch (\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
+                // An earlier purchase of other extras is still open and Mollie would not
+                // withdraw it: until when, and its link — the checkout's notice.
+                $this->showPendingOtherOrder($e);
+
+                return;
+            } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException|\GraystackIT\MollieBilling\Exceptions\SubscriptionEndedChangeNotAllowedException $e) {
                 // Not an error to report: the customer is told what to do first.
                 $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
 
@@ -517,6 +526,11 @@ new class extends Component {
 
     @if ($polling)
         <flux:callout icon="arrow-path" color="blue" inline>{{ __('billing::portal.flash.plan_change_pending_payment') }}</flux:callout>
+    @endif
+
+    {{-- A changed order waits for an earlier payment Mollie would not withdraw --}}
+    @if ($pendingOtherOrder)
+        <x-mollie-billing::pending-other-order :until="$pendingOtherOrderUntil" :timezone="$pendingOtherOrderTimezone" :url="$pendingOtherOrderUrl" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" />
     @endif
 
     @if ($hasPendingPlanChange)

@@ -25,6 +25,7 @@ use Livewire\Component;
 new class extends Component {
     use InteractsWithFluxUi;
     use ValidatesVatNumber;
+    use \GraystackIT\MollieBilling\Concerns\ShowsPendingOtherOrderNotice;
 
     /**
      * Bound with wire:model.live by the interval toggle, so it cannot be locked — it is
@@ -645,6 +646,7 @@ new class extends Component {
 
     public function confirmAndPay(UpgradeLocalToMollie $service, PreviewService $previewService)
     {
+        $this->clearPendingOtherOrder();
         $billable = $this->resolveBillable();
 
         if (! $billable || ! $this->selectedPlan) {
@@ -765,8 +767,9 @@ new class extends Component {
             return null;
         } catch (\GraystackIT\MollieBilling\Exceptions\PendingPaymentForAnotherOrderException $e) {
             // Not an error to report: an earlier upgrade payment is still open and Mollie
-            // would not withdraw it. The customer is told what to do first.
-            $this->toast(\GraystackIT\MollieBilling\Support\ExceptionMessage::for($e), 'danger');
+            // would not withdraw it. The customer is told until when, and gets its link —
+            // the checkout's notice (`<x-mollie-billing::pending-other-order>`).
+            $this->showPendingOtherOrder($e);
             return null;
         } catch (\Throwable $e) {
             report($e);
@@ -1145,6 +1148,11 @@ new class extends Component {
                 </flux:button>
             </div>
         </flux:callout>
+    @endif
+
+    {{-- A changed order waits for an earlier payment Mollie would not withdraw --}}
+    @if ($pendingOtherOrder)
+        <x-mollie-billing::pending-other-order :until="$pendingOtherOrderUntil" :timezone="$pendingOtherOrderTimezone" :url="$pendingOtherOrderUrl" x-init="$el.scrollIntoView({ behavior: 'smooth', block: 'center' })" />
     @endif
 
     @if ($showLocalUpgradeConfirmation && $billable && $selectedPlan)

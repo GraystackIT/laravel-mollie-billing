@@ -79,6 +79,34 @@ final class CanaryReceiver
         return $all;
     }
 
+    /**
+     * What a failed read of `GET /deliveries` means for the visit — pure, pinned by
+     * `tests/Unit/Canary/CanaryReceiverFailureTest`.
+     *
+     * 401/403 is a misconfiguration (the read token differs from the receiver's `READ_TOKEN`): a
+     * problem, the visit is red. Anything else — the host down, a 5xx, a timeout — is the
+     * receiver's weather, not Mollie's or the package's: a warning, the visit replays
+     * synthetically and does not hold Mollie to a delivery it could not see.
+     *
+     * @return array{kind: 'token_rejected'|'unreachable', text: string}
+     */
+    public static function failure(?int $status, string $message): array
+    {
+        if (in_array($status, [401, 403], true)) {
+            return [
+                'kind' => 'token_rejected',
+                'text' => "The receiver rejected CANARY_RECEIVER_READ_TOKEN (HTTP {$status}): the secret differs from the receiver's READ_TOKEN. Mollie's deliveries could not be read; this visit replayed synthetically.",
+            ];
+        }
+
+        $cause = $status !== null ? "HTTP {$status}" : 'no answer: '.mb_strimwidth(trim($message), 0, 160, '…');
+
+        return [
+            'kind' => 'unreachable',
+            'text' => "Receiver unreachable ({$cause}): Mollie's deliveries could not be read; this visit replayed synthetically and did not check that Mollie delivered.",
+        ];
+    }
+
     private static function env(string $name): ?string
     {
         $value = $_SERVER[$name] ?? (getenv($name) ?: null);

@@ -1,11 +1,20 @@
 name: renewal canary
 
-# The renewal replay canary (tests/SandboxBrowser/RenewalReplayCanaryTest.php), once a day, against
-# the real Mollie test system — see docs/sandbox-testing.md, "The cloud canary".
+# Both canaries, once a day, against the real Mollie test system — see docs/sandbox-testing.md,
+# "The cloud canary":
+#  - the renewal replay canary (tests/SandboxBrowser/RenewalReplayCanaryTest.php): what the
+#    package books for the renewals Mollie creates, from Mollie's real webhook deliveries;
+#  - the subscription canary (tests/SandboxBrowser/SubscriptionCanaryTest.php): what Mollie's
+#    scheduler does with long-lived subscriptions (cycle dates, month ends, the refusal of a
+#    new start date on a charged subscription that MollieSubscriptionReplacer depends on).
 #
-# Its world (state JSON, SQLite database, invoice PDFs) lives on the orphan branch `canary-state`
-# and is committed back after every visit. Mollie's webhooks go to the receiver
-# (repository variable CANARY_RECEIVER_URL), which the test reads with CANARY_RECEIVER_READ_TOKEN.
+# Their worlds live on the orphan branch `canary-state` (renewal-replay.* and state.json) and
+# are committed back after every visit. Mollie's webhooks go to the receiver (repository
+# variable CANARY_RECEIVER_URL), which the renewal canary reads with CANARY_RECEIVER_READ_TOKEN.
+#
+# Each visit that dies without a finding (a network error, a Mollie 5xx) is tried once more
+# after a pause; the run is red only when a canary is red after that. The job's conclusion is
+# `failure` exactly then, so GitHub's mail about a failed workflow means a red canary.
 #
 # Scheduled workflows run only from the default branch.
 
@@ -15,9 +24,9 @@ on:
   workflow_dispatch:
     inputs:
       reset:
-        description: 'Reset: cancel everything at Mollie and delete the world (the next visit builds a new one)'
+        description: 'Reset: cancel everything at Mollie and delete that world (the next visit builds a new one)'
         type: choice
-        options: ['no', 'yes']
+        options: ['no', 'renewal', 'subscription', 'both']
         default: 'no'
 
 concurrency:
@@ -31,11 +40,13 @@ permissions:
 jobs:
   visit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     env:
       STATE_DIR: ${{ github.workspace }}/canary-state
-      RESET: ${{ github.event_name == 'workflow_dispatch' && inputs.reset == 'yes' && '1' || '' }}
+      RESET_CHOICE: ${{ github.event_name == 'workflow_dispatch' && inputs.reset || 'no' }}
+      RETRY_PAUSE_SECONDS: '180'
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
       - name: Checkout the default branch
@@ -43,7 +54,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Check out the canary's world (branch canary-state, created on the first visit)
+      - name: Check out the canaries' worlds (branch canary-state, created on the first visit)
         run: |
           set -euo pipefail
           if git ls-remote --exit-code --heads origin canary-state >/dev/null; then
@@ -83,12 +94,15 @@ jobs:
           google-chrome --version
           php vendor/bin/dusk-updater detect --auto-update
 
-      - name: Visit
-        id: visit
+      # ── the renewal replay canary ─────────────────────────────────────────────
+
+      - name: Renewal replay canary — visit
+        id: renewal1
+        continue-on-error: true
         env:
           MOLLIE_KEY: ${{ secrets.MOLLIE_KEY }}
-          MOLLIE_BILLING_CANARY_STATE: ${{ env.STATE_DIR }}/state.json
-          MOLLIE_BILLING_CANARY_RESET: ${{ env.RESET }}
+          MOLLIE_BILLING_CANARY_STATE: ${{ github.workspace }}/canary-state/state.json
+          MOLLIE_BILLING_RENEWAL_REPLAY_RESET: ${{ (github.event_name == 'workflow_dispatch' && (inputs.reset == 'renewal' || inputs.reset == 'both')) && '1' || '' }}
           CANARY_RECEIVER_URL: ${{ vars.CANARY_RECEIVER_URL }}
           CANARY_RECEIVER_READ_TOKEN: ${{ secrets.CANARY_RECEIVER_READ_TOKEN }}
         run: |
@@ -97,76 +111,163 @@ jobs:
             echo "::error::MOLLIE_KEY, CANARY_RECEIVER_READ_TOKEN (secrets) and CANARY_RECEIVER_URL (variable) must all be set."
             exit 1
           fi
-          vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --filter=RenewalReplayCanaryTest 2>&1 | tee canary.log
+          date -u +%Y-%m-%dT%H:%M:%SZ > renewal.started
+          vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --filter=RenewalReplayCanaryTest 2>&1 | tee -a renewal_replay.log
 
-      - name: Commit the world to canary-state
+      - name: Renewal replay canary — retry only a visit that died without a finding
+        id: renewal_decide
+        if: ${{ !cancelled() && steps.renewal1.outcome == 'failure' }}
+        run: |
+          if php .github/scripts/canary-summary.php should-retry "$STATE_DIR/renewal-replay.json" "$(cat renewal.started 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+            echo "retry=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::The renewal replay visit died without a finding; trying once more in $RETRY_PAUSE_SECONDS s."
+            sleep "$RETRY_PAUSE_SECONDS"
+          else
+            echo "retry=false" >> "$GITHUB_OUTPUT"
+            echo "The renewal replay visit wrote problems down — a finding, not retried."
+          fi
+
+      - name: Renewal replay canary — visit once more
+        id: renewal2
+        if: ${{ !cancelled() && steps.renewal_decide.outputs.retry == 'true' }}
+        continue-on-error: true
+        env:
+          MOLLIE_KEY: ${{ secrets.MOLLIE_KEY }}
+          MOLLIE_BILLING_CANARY_STATE: ${{ github.workspace }}/canary-state/state.json
+          MOLLIE_BILLING_RENEWAL_REPLAY_RESET: ${{ (github.event_name == 'workflow_dispatch' && (inputs.reset == 'renewal' || inputs.reset == 'both')) && '1' || '' }}
+          CANARY_RECEIVER_URL: ${{ vars.CANARY_RECEIVER_URL }}
+          CANARY_RECEIVER_READ_TOKEN: ${{ secrets.CANARY_RECEIVER_READ_TOKEN }}
+        run: |
+          echo "── second attempt ──" | tee -a renewal_replay.log
+          set -o pipefail
+          date -u +%Y-%m-%dT%H:%M:%SZ > renewal.started
+          vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --filter=RenewalReplayCanaryTest 2>&1 | tee -a renewal_replay.log
+
+      # ── the subscription canary — runs whatever the renewal canary did ────────
+
+      - name: Subscription canary — visit
+        id: subscription1
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          MOLLIE_KEY: ${{ secrets.MOLLIE_KEY }}
+          MOLLIE_BILLING_CANARY_STATE: ${{ github.workspace }}/canary-state/state.json
+          MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET: ${{ (github.event_name == 'workflow_dispatch' && (inputs.reset == 'subscription' || inputs.reset == 'both')) && '1' || '' }}
+        run: |
+          set -o pipefail
+          if [ -z "$MOLLIE_KEY" ]; then
+            echo "::error::The secret MOLLIE_KEY must be set."
+            exit 1
+          fi
+          date -u +%Y-%m-%dT%H:%M:%SZ > subscription.started
+          vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --filter=SubscriptionCanaryTest 2>&1 | tee -a subscription.log
+
+      - name: Subscription canary — retry only a visit that died without a finding
+        id: subscription_decide
+        if: ${{ !cancelled() && steps.subscription1.outcome == 'failure' }}
+        run: |
+          if php .github/scripts/canary-summary.php should-retry "$STATE_DIR/state.json" "$(cat subscription.started 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+            echo "retry=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::The subscription canary visit died without a finding; trying once more in $RETRY_PAUSE_SECONDS s."
+            sleep "$RETRY_PAUSE_SECONDS"
+          else
+            echo "retry=false" >> "$GITHUB_OUTPUT"
+            echo "The subscription canary visit wrote problems down — a finding, not retried."
+          fi
+
+      - name: Subscription canary — visit once more
+        id: subscription2
+        if: ${{ !cancelled() && steps.subscription_decide.outputs.retry == 'true' }}
+        continue-on-error: true
+        env:
+          MOLLIE_KEY: ${{ secrets.MOLLIE_KEY }}
+          MOLLIE_BILLING_CANARY_STATE: ${{ github.workspace }}/canary-state/state.json
+          MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET: ${{ (github.event_name == 'workflow_dispatch' && (inputs.reset == 'subscription' || inputs.reset == 'both')) && '1' || '' }}
+        run: |
+          echo "── second attempt ──" | tee -a subscription.log
+          set -o pipefail
+          vendor/bin/pest --configuration=phpunit.sandbox-browser.xml --filter=SubscriptionCanaryTest 2>&1 | tee -a subscription.log
+
+      # ── bookkeeping ───────────────────────────────────────────────────────────
+
+      - name: Commit the worlds to canary-state
+        id: commit
         if: always()
+        env:
+          OUTCOMES_RENEWAL: ${{ steps.renewal1.outcome }}/${{ steps.renewal2.outcome }}
+          OUTCOMES_SUBSCRIPTION: ${{ steps.subscription1.outcome }}/${{ steps.subscription2.outcome }}
         run: |
           set -euo pipefail
           cd "$STATE_DIR"
           git add -A
           if git diff --cached --quiet; then
             echo "Nothing changed."
-            exit 0
+          else
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "canary: visit of $(date -u +%Y-%m-%dT%H:%MZ) (renewal $OUTCOMES_RENEWAL, subscription $OUTCOMES_SUBSCRIPTION) [skip ci]"
+            git push origin HEAD:canary-state
           fi
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "canary: visit of $(date -u +%Y-%m-%dT%H:%MZ) (${{ steps.visit.outcome }}) [skip ci]"
-          git push origin HEAD:canary-state
+          echo "sha=$(git rev-parse HEAD 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
 
       - name: Summarise the visit
         id: summary
         if: always()
-        run: |
-          php -r '
-            $file = getenv("STATE_DIR")."/renewal-replay.json";
-            $state = is_file($file) ? json_decode(file_get_contents($file), true) : null;
-            $visit = is_array($state) ? (end($state["visits"]) ?: []) : [];
-            $problems = $state["last_problems"] ?? [];
-            $out = "### Renewal canary, ".gmdate("Y-m-d H:i")." UTC\n\n";
-            $out .= "Visit outcome: **".getenv("OUTCOME")."** · run: ".getenv("RUN_URL")."\n\n";
-            if ($problems !== []) { $out .= "#### Problems\n\n- ".implode("\n- ", $problems)."\n\n"; }
-            if (($visit["observations"] ?? []) !== []) { $out .= "#### Seen on this visit\n\n- ".implode("\n- ", $visit["observations"])."\n\n"; }
-            if (($visit["log"] ?? []) !== []) { $out .= "<details><summary>Warnings logged</summary>\n\n```\n".implode("\n", $visit["log"])."\n```\n</details>\n\n"; }
-            $log = is_file("canary.log") ? file("canary.log", FILE_IGNORE_NEW_LINES) : [];
-            $out .= "<details><summary>Test output (last 60 lines)</summary>\n\n```\n".implode("\n", array_slice($log, -60))."\n```\n</details>\n";
-            file_put_contents("summary.md", $out);
-            file_put_contents(getenv("GITHUB_OUTPUT"), "problems=".count($problems)."\n", FILE_APPEND);
-          '
-          cat summary.md >> "$GITHUB_STEP_SUMMARY"
         env:
-          OUTCOME: ${{ steps.visit.outcome }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATE_COMMIT: ${{ steps.commit.outputs.sha }}
+          RENEWAL_ATTEMPT_1: ${{ steps.renewal1.outcome }}
+          RENEWAL_ATTEMPT_2: ${{ steps.renewal2.outcome }}
+          SUBSCRIPTION_ATTEMPT_1: ${{ steps.subscription1.outcome }}
+          SUBSCRIPTION_ATTEMPT_2: ${{ steps.subscription2.outcome }}
+        run: |
+          php .github/scripts/canary-summary.php summarise
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep the log and Mollie's pages
+      # Red (a canary failed after its retry, or left problems behind) → one open issue labelled
+      # `canary`, commented on by every further red visit. Green → that issue is closed.
+      # Warnings and a visit that recovered on its retry are in the run summary only.
+      - name: Report to the canary issue
+        if: always() && env.RESET_CHOICE == 'no' && steps.summary.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RED: ${{ steps.summary.outputs.red }}
+        run: |
+          set -euo pipefail
+          gh label create canary --color B60205 --description 'A canary (renewal replay or subscription) found something' 2>/dev/null || true
+          open=$(gh issue list --label canary --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ "$RED" = "true" ]; then
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body-file issue.md
+            else
+              gh issue create --label canary --title "Canary is red ($(date -u +%Y-%m-%d))" --body-file issue.md
+            fi
+          elif [ -n "$open" ]; then
+            gh issue comment "$open" --body "Green again: $RUN_URL"
+            gh issue close "$open" --reason completed
+          fi
+
+      - name: Keep the summary, the logs and Mollie's pages
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: renewal-canary-${{ github.run_id }}
           path: |
-            canary.log
+            summary.json
             summary.md
+            renewal_replay.log
+            subscription.log
             tests/SandboxBrowser/screenshots/
           retention-days: 30
           if-no-files-found: ignore
 
-      # Red (the test failed, or a visit left problems behind) → one open issue labelled
-      # `canary`, commented on by every further red visit. Green → that issue is closed.
-      - name: Report to the canary issue
-        if: always() && env.RESET != '1'
+      # The job's conclusion is the run's verdict: failure exactly when red after the retry.
+      # The visit steps continue on error so that both canaries always run and get reported.
+      - name: Red ends the job red
+        if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
-          RED: ${{ steps.visit.outcome != 'success' || steps.summary.outputs.problems != '0' }}
+          RED: ${{ steps.summary.outputs.red }}
         run: |
-          set -euo pipefail
-          gh label create canary --color B60205 --description 'The renewal replay canary found something' 2>/dev/null || true
-          open=$(gh issue list --label canary --state open --limit 1 --json number --jq '.[0].number // empty')
-          if [ "$RED" = "true" ]; then
-            if [ -n "$open" ]; then
-              gh issue comment "$open" --body-file summary.md
-            else
-              gh issue create --label canary --title "Renewal canary is red ($(date -u +%Y-%m-%d))" --body-file summary.md
-            fi
-          elif [ -n "$open" ]; then
-            gh issue comment "$open" --body "Green again: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            gh issue close "$open" --reason completed
+          if [ "$RED" != "false" ]; then
+            echo "::error::The canary is red (or could not be summarised) — see the summary and the issue labelled canary."
+            exit 1
           fi
+          echo "Green (incomplete visits, warnings and recovered retries included)."

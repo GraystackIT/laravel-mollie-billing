@@ -68,7 +68,10 @@ return [
 
     // ── Addons screen ───────────────────────────────────────────────────────
     'screen:billing.addons' => ['feature' => [$fAddons, $fMatrixSeats], 'browser' => [$bCell, $bPoll, $bStateCells]],
-    'action:addons@enableAddon' => ['feature' => [$fAddons], 'browser' => [$bCell, $bSeveral]],
+    'action:addons@enableAddon' => [
+        'feature' => [$fAddons, 'tests/Feature/Portal/PendingPaymentWaitNoticeScreensTest.php::the addons screen shows the wait notice'],
+        'browser' => [$bCell, $bSeveral, 'tests/Browser/PortalPendingPaymentWaitTest.php::test_the_addons_screen_shows_the_wait_notice_when_a_gifted_tenant_comes_back_for_another_addon'],
+    ],
     'action:addons@disableAddon' => ['feature' => [$fAddons], 'browser' => [$bCell, $bSeveral]],
     'action:addons@pollForChange' => ['feature' => [$fAddons, $fAddonDeclined], 'browser' => [$bPoll]],
     'action:addons@applyCoupon' => ['feature' => [$fAddonCoupons], 'browser' => [$bForm]],
@@ -79,7 +82,10 @@ return [
     'screen:billing.seats' => ['feature' => [$fSeats, $fMatrixSeats], 'browser' => [$bCell, $bStates, $bStateCells]],
     'action:seats@increment' => ['feature' => [$fSeats], 'browser' => [$bCell, $bSeveral]],
     'action:seats@decrement' => ['feature' => [$fSeats], 'browser' => [$bCell, $bSeveral]],
-    'action:seats@syncSeats' => ['feature' => [$fSeats, $fCeiling], 'browser' => [$bCell, $bCeiling, $bStates]],
+    'action:seats@syncSeats' => [
+        'feature' => [$fSeats, $fCeiling, 'tests/Feature/Portal/PendingPaymentWaitNoticeScreensTest.php::the seats screen shows the wait notice'],
+        'browser' => [$bCell, $bCeiling, $bStates, 'tests/Browser/PortalPendingPaymentWaitTest.php::test_the_seats_screen_shows_the_wait_notice_when_a_gifted_tenant_comes_back_for_a_different_seat_count'],
+    ],
     'action:seats@applyCoupon' => ['feature' => [$fSeatCoupons], 'browser' => [$bForm, $screens.'test_a_second_discount_code_is_refused_on_the_seat_form_with_its_reason']],
     'action:seats@removeCoupon' => ['feature' => [$fSeatCoupons], 'browser' => [$bForm]],
     'action:seats@canAddMoreCoupons' => ['feature' => [$fSeatCoupons], 'browser' => [$bForm]],
@@ -119,7 +125,7 @@ return [
     'action:plan-change@saveBillingDetails' => ['feature' => [$fAddress], 'browser' => [$bLocal]],
     'action:plan-change@backToPlanSelection' => ['feature' => [$fLocal], 'browser' => [$bLocal]],
     'action:plan-change@confirmAndPay' => [
-        'feature' => [$fLocal, 'tests/Feature/Subscription/PlanChangeAmountTamperingTest.php::charges the catalog price, not the amount carried in the preview'],
-        'browser' => [$bLocal],
+        'feature' => [$fLocal, 'tests/Feature/Subscription/PlanChangeAmountTamperingTest.php::charges the catalog price, not the amount carried in the preview', 'tests/Feature/Portal/PendingPaymentWaitNoticeScreensTest.php::the plan screen shows the wait notice'],
+        'browser' => [$bLocal, 'tests/Browser/PortalPendingPaymentWaitTest.php::test_the_plan_screen_shows_until_when_the_earlier_upgrade_payment_stays_open_and_links_to_it'],
     ],
 ];

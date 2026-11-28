@@ -5,7 +5,11 @@ declare(strict_types=1);
 namespace GraystackIT\MollieBilling\Tests\SandboxBrowser;
 
 use Carbon\CarbonImmutable;
+use GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer;
 use GraystackIT\MollieBilling\Tests\Sandbox\SandboxTestCase;
+use GraystackIT\MollieBilling\Tests\SandboxBrowser\Support\CanaryReset;
+use GraystackIT\MollieBilling\Tests\SandboxBrowser\Support\SubscriptionCanaryWorld;
+use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Data\Date;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
@@ -13,6 +17,7 @@ use Mollie\Api\Http\Requests\CreateCustomerRequest;
 use Mollie\Api\Http\Requests\CreateMandateRequest;
 use Mollie\Api\Http\Requests\CreateSubscriptionRequest;
 use Mollie\Api\Http\Requests\DeleteCustomerRequest;
+use Mollie\Api\Http\Requests\GetMandateRequest;
 use Mollie\Api\Http\Requests\GetPaginatedSubscriptionPaymentsRequest;
 use Mollie\Api\Http\Requests\GetSubscriptionRequest;
 use Mollie\Api\Http\Requests\RevokeMandateRequest;
@@ -34,7 +39,9 @@ use Mollie\Laravel\Facades\Mollie;
  *    metadata and id — which is how a renewal webhook finds its billable;
  *  - what the cadence does after a month end (a subscription started on the 31st), which
  *    the long-run tests can only model both ways;
- *  - a subscription with `times` ends up `completed`;
+ *  - a subscription with `times` ends after its last charge (measured 25 November 2026:
+ *    `canceled` at the tenth charge, not `completed` — both count as an end, which one is
+ *    recorded; charging on is the problem);
  *  - whether Mollie takes a start date PATCHed onto a subscription after its first charge.
  *    It does not: on 17 November 2026 the `pinned` subscription was refused ("The start
  *    date cannot be changed when the subscription is already charged", 422) — which is why
@@ -46,15 +53,30 @@ use Mollie\Laravel\Facades\Mollie;
  *    not its start date, it sends TODAY (`start_date_today_answer`). If Mollie ever takes
  *    a date, the charges from then on are expected on it (`pinned_to`).
  *
- * Run it daily: `composer test:sandbox:canary` (cron or CI). It is `incomplete`, not
- * failed, while there is nothing to observe yet. State lives in a JSON file —
- * `MOLLIE_BILLING_CANARY_STATE`, default `workbench/storage/sandbox-canary.json` — and
- * `MOLLIE_BILLING_CANARY_RESET=1` cancels everything and deletes it.
+ * **A dead world is rebuilt.** The world of 15 November 2026 lost its mandate between
+ * 25 November 00:16 and 26 November 19:49 UTC (Mollie answers 410; nobody in the canary
+ * revoked it), after which its subscriptions read `pending` with no next payment date and
+ * nothing more could be observed. Every visit now reads the mandate; when it is gone or
+ * invalid, or a subscription that should run is gone or ended
+ * ({@see SubscriptionCanaryWorld::deathReasons()}), the visit reports that **once** as a
+ * problem (the canary itself never revokes or cancels outside a reset, so somebody else
+ * did), moves the old world to `previous_worlds`, tears down what is left of it at Mollie
+ * and builds a new one. The next visit looks at the new world.
+ *
+ * Run it daily (the cloud canary, `.github/workflows/renewal-canary.yml`, after the renewal
+ * replay canary). It is `incomplete`, not failed, while there is nothing new to observe.
+ * State lives in a JSON file — `MOLLIE_BILLING_CANARY_STATE`, default
+ * `workbench/storage/sandbox-canary.json`. `MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET=1`
+ * (or `MOLLIE_BILLING_CANARY_RESET=1`, which resets both canaries) cancels everything and
+ * deletes the file.
  *
  * Deliberately NOT cleaned up by the base class: surviving the run is the point.
  */
 class SubscriptionCanaryTest extends SandboxTestCase
 {
+    /** Visits kept in the state file. */
+    private const VISITS_KEPT = 120;
+
     private static function statePath(): string
     {
         $configured = $_SERVER['MOLLIE_BILLING_CANARY_STATE'] ?? getenv('MOLLIE_BILLING_CANARY_STATE') ?: null;
@@ -104,7 +126,7 @@ class SubscriptionCanaryTest extends SandboxTestCase
         }
 
         return [
-            // The fast signal: a charge every day, ten of them, then `completed`.
+            // The fast signal: a charge every day, ten of them, then it ends.
             'daily' => ['interval' => '1 day', 'amount' => '1.00', 'start' => $today->addDay()->toDateString(), 'times' => 10],
             // The ordinary case, from tomorrow.
             'monthly' => ['interval' => '1 month', 'amount' => '34.51', 'start' => $today->addDay()->toDateString(), 'times' => null],
@@ -117,16 +139,53 @@ class SubscriptionCanaryTest extends SandboxTestCase
 
     public function test_the_canary_subscriptions_behave_the_way_the_package_assumes(): void
     {
-        if (($_SERVER['MOLLIE_BILLING_CANARY_RESET'] ?? getenv('MOLLIE_BILLING_CANARY_RESET')) === '1') {
+        if (CanaryReset::requested('subscription')) {
             $this->reset();
-            $this->markTestIncomplete('Canary reset: everything cancelled and the state file removed.');
+            $this->markTestIncomplete('Subscription canary reset: everything cancelled at Mollie and the state file removed.');
         }
 
-        $state = self::readState();
+        try {
+            $this->visit();
+        } catch (\Throwable $e) {
+            if ($e instanceof \PHPUnit\Framework\AssertionFailedError) {
+                throw $e; // red, incomplete or skipped: the visit finished and wrote itself down
+            }
 
-        if ($state === null) {
-            $state = $this->create();
-            self::writeState($state);
+            // An attempt that died (network, Mollie 5xx) is written down, so the workflow's
+            // retry and the summary can tell it from a finding. Every check runs again on the
+            // next attempt — nothing is lost by repeating the visit.
+            $state = self::readState();
+
+            if ($state !== null) {
+                $state['visits'] = array_slice([...($state['visits'] ?? []), [
+                    'at' => CarbonImmutable::now('UTC')->toIso8601String(),
+                    'aborted' => mb_substr(get_class($e).': '.$e->getMessage(), 0, 500),
+                    'observations' => [],
+                    'problems' => [],
+                ]], -self::VISITS_KEPT);
+                self::writeState($state);
+            }
+
+            throw $e;
+        }
+    }
+
+    private function visit(): void
+    {
+        $now = CarbonImmutable::now('UTC');
+        $state = self::readState();
+        $created = $state === null || ! isset($state['customer_id']);
+        $previousVisitAt = isset($state['visits']) && $state['visits'] !== [] ? (string) end($state['visits'])['at'] : ($state['last_checked_at'] ?? null);
+
+        $observations = [];
+        $problems = [];
+
+        // Builds a new world, or whatever a world is missing (a subscription added to the
+        // plan later, a build that died half-way).
+        $state = $this->ensureWorld($state ?? [], $observations);
+
+        if ($created) {
+            $this->finishVisit($state, $now, $observations, $problems, created: true, rebuilt: false);
 
             $ids = array_map(static fn (array $s): string => $s['id'], $state['subscriptions']);
 
@@ -136,18 +195,28 @@ class SubscriptionCanaryTest extends SandboxTestCase
             );
         }
 
-        // A canary created before `pinned` existed grows it on its next visit.
-        if (! isset($state['subscriptions']['pinned'])) {
-            $today = CarbonImmutable::now('UTC')->startOfDay();
-            $state['subscriptions']['pinned'] = $this->createSubscription($state, 'pinned', self::plan($today)['pinned'], $today);
-            self::writeState($state);
+        $mandate = $this->readMandate($state);
+        $alive = SubscriptionCanaryWorld::deathReasons($mandate, []) === [];
+
+        if ($alive && ($mandate['status'] ?? null) === 'valid') {
+            $state['mandate_last_valid_at'] = $now->toIso8601String();
         }
 
-        $observed = 0;
-        $problems = [];
+        $seen = [];
 
         foreach ($state['subscriptions'] as $name => $plan) {
-            $subscription = Mollie::send(new GetSubscriptionRequest($state['customer_id'], $plan['id']));
+            try {
+                $subscription = Mollie::send(new GetSubscriptionRequest($state['customer_id'], $plan['id']));
+            } catch (ApiException $e) {
+                if (! in_array($e->getCode(), SubscriptionCanaryWorld::GONE, true)) {
+                    throw $e;
+                }
+
+                $seen[$name] = ['id' => $plan['id'], 'times' => $plan['times'] ?? null, 'http' => $e->getCode()];
+
+                continue;
+            }
+
             $payments = [];
 
             foreach (Mollie::send(new GetPaginatedSubscriptionPaymentsRequest($state['customer_id'], $plan['id'])) as $payment) {
@@ -158,34 +227,58 @@ class SubscriptionCanaryTest extends SandboxTestCase
 
             // After a charge, ask Mollie again whether it takes another start date. The
             // refusal is the expected answer (measured 17 November 2026) and is written down,
-            // not failed on.
-            if ($name === 'pinned' && $payments !== [] && ! isset($plan['pinned_to'])) {
+            // not failed on. Not on a dead world: there is nothing left to charge.
+            if ($alive && $name === 'pinned' && $payments !== [] && ! isset($plan['pinned_to'])) {
+                $answersBefore = $plan['start_date_answers'] ?? [];
+                $todayBefore = $plan['start_date_today_answer'] ?? null;
+
                 [$plan, $subscription, $problem] = $this->askForAnotherStartDate($state['customer_id'], $plan, $subscription, $payments);
                 $state['subscriptions'][$name] = $plan;
+
+                $answersAfter = $plan['start_date_answers'] ?? [];
+                $newest = $answersAfter === [] ? null : end($answersAfter);
+                $previous = $answersBefore === [] ? null : end($answersBefore);
+
+                if ($newest !== null && ($previous === null || $previous['answer'] !== $newest['answer'] || $previous['newest_charge_status'] !== $newest['newest_charge_status'])) {
+                    $observations[] = "pinned: a later start date ({$newest['sent']}) was {$newest['answer']}, newest charge {$newest['newest_charge_status']}";
+                }
+
+                if ($todayBefore === null && isset($plan['start_date_today_answer'])) {
+                    $observations[] = "pinned: today's date ({$plan['start_date_today_answer']['sent']}) was {$plan['start_date_today_answer']['answer']}";
+                }
+
+                if (isset($plan['pinned_to'])) {
+                    $observations[] = "pinned: Mollie TOOK start date {$plan['pinned_to']} after a charge — the refusal of 17 November 2026 no longer holds";
+                }
 
                 if ($problem !== null) {
                     $problems[] = $problem;
                 }
             }
 
+            $known = array_column($plan['payments'] ?? [], 'id');
             $rows = [];
 
             foreach ($payments as $index => $payment) {
-                $created = CarbonImmutable::parse((string) $payment->createdAt)->utc();
+                $chargedAt = CarbonImmutable::parse((string) $payment->createdAt)->utc();
                 $candidates = self::cycleCandidates($plan, $index);
 
                 $rows[] = [
                     'id' => (string) $payment->id,
-                    'created_at' => $created->toIso8601String(),
+                    'created_at' => $chargedAt->toIso8601String(),
                     'paid_at' => isset($payment->paidAt) ? (string) $payment->paidAt : null,
                     'status' => (string) $payment->status,
                     'amount' => (string) $payment->amount->value,
                     'expected_cycle' => $candidates,
                 ];
 
+                if (! in_array((string) $payment->id, $known, true)) {
+                    $observations[] = "{$name}: charge #{$index} {$payment->id} created {$chargedAt->toIso8601String()} ({$payment->status}, {$payment->amount->value})";
+                }
+
                 // The claim cycleStart() rests on.
-                if (! in_array($created->toDateString(), $candidates, true)) {
-                    $problems[] = "{$name} #{$index} ({$payment->id}): created {$created->toIso8601String()}, expected the cycle date ".implode(' or ', $candidates);
+                if (! in_array($chargedAt->toDateString(), $candidates, true)) {
+                    $problems[] = "{$name} #{$index} ({$payment->id}): created {$chargedAt->toIso8601String()}, expected the cycle date ".implode(' or ', $candidates);
                 }
 
                 if ((string) $payment->amount->value !== $plan['amount']) {
@@ -203,43 +296,160 @@ class SubscriptionCanaryTest extends SandboxTestCase
                 if ((string) ($payment->sequenceType ?? '') !== 'recurring') {
                     $problems[] = "{$name} #{$index}: sequenceType is ".($payment->sequenceType ?? 'missing');
                 }
-
-                $observed++;
             }
 
             // Which way the cadence goes after February — recorded the day it is known.
             if ($name === 'month_end') {
-                foreach ($rows as $index => $row) {
+                foreach ($rows as $row) {
                     if (count($row['expected_cycle']) === 2) {
-                        $state['month_end_cadence'] = substr($row['created_at'], 0, 10) === $row['expected_cycle'][0] ? 'clamp' : 'drift';
+                        $cadence = substr($row['created_at'], 0, 10) === $row['expected_cycle'][0] ? 'clamp' : 'drift';
+
+                        if (($state['month_end_cadence'] ?? null) !== $cadence) {
+                            $observations[] = "month_end: Mollie's cadence after a month end is {$cadence}";
+                        }
+
+                        $state['month_end_cadence'] = $cadence;
                     }
                 }
             }
 
-            if (($plan['times'] ?? null) !== null && count($payments) >= $plan['times'] && (string) $subscription->status !== 'completed') {
-                $problems[] = "{$name}: {$plan['times']} charges made and the subscription is {$subscription->status}, not completed";
+            $status = (string) $subscription->status;
+            $canceledAt = isset($subscription->canceledAt) ? (string) $subscription->canceledAt : null;
+
+            if (($plan['times'] ?? null) !== null) {
+                $end = SubscriptionCanaryWorld::timesEnd($name, (int) $plan['times'], count($payments), $status, $canceledAt, $rows === [] ? null : end($rows)['created_at']);
+
+                if ($end['problem'] !== null) {
+                    $problems[] = $end['problem'];
+                }
+
+                if ($end['ended'] !== null && ($plan['ended'] ?? null) === null) {
+                    $state['subscriptions'][$name]['ended'] = $end['ended'];
+                    $observations[] = "{$name}: ended after its {$plan['times']} charges — {$end['ended']}";
+                }
             }
 
             // Until its date has come, the pinned date stays what Mollie holds.
-            if ($name === 'pinned' && isset($plan['pinned_to']) && count($payments) === 1
+            if ($alive && $name === 'pinned' && isset($plan['pinned_to']) && count($payments) === 1
                 && (string) ($subscription->nextPaymentDate ?? '') !== $plan['pinned_to']) {
                 $problems[] = "pinned: Mollie's next payment date is ".($subscription->nextPaymentDate ?? 'missing').", pinned to {$plan['pinned_to']}";
             }
 
-            $state['subscriptions'][$name]['status'] = (string) $subscription->status;
+            $state['subscriptions'][$name]['status'] = $status;
+            $state['subscriptions'][$name]['canceled_at'] = $canceledAt;
             $state['subscriptions'][$name]['next_payment_date'] = isset($subscription->nextPaymentDate) ? (string) $subscription->nextPaymentDate : null;
             $state['subscriptions'][$name]['payments'] = $rows;
+
+            $seen[$name] = ['id' => $plan['id'], 'times' => $plan['times'] ?? null, 'status' => $status, 'charges' => count($payments)];
         }
 
-        $state['last_checked_at'] = CarbonImmutable::now('UTC')->toIso8601String();
-        $state['last_problems'] = $problems;
-        self::writeState($state);
+        $reasons = SubscriptionCanaryWorld::deathReasons($mandate, $seen);
+        $rebuilt = false;
 
-        if ($observed === 0) {
-            $this->markTestIncomplete('Canary alive, no charge created yet (created '.$state['created_at'].').');
+        if ($reasons !== []) {
+            [$state, $problems, $observations] = $this->rebuild($state, $reasons, $now, $previousVisitAt, $problems, $observations);
+            $rebuilt = true;
         }
+
+        $this->finishVisit($state, $now, $observations, $problems, created: false, rebuilt: $rebuilt);
 
         $this->assertSame([], $problems, "Mollie did something the package does not assume:\n".implode("\n", $problems));
+
+        if ($observations === []) {
+            $this->markTestIncomplete('Subscription canary alive, nothing new since '.($previousVisitAt ?? 'the last visit').'.');
+        }
+    }
+
+    /**
+     * The mandate as Mollie has it now. A 404/410 is an answer (the world is dead), not an error.
+     *
+     * @param  array<string, mixed>  $state
+     * @return array{id: string, status: ?string, http: ?int}
+     */
+    private function readMandate(array $state): array
+    {
+        $mandate = ['id' => (string) $state['mandate_id'], 'status' => null, 'http' => null];
+
+        try {
+            $mandate['status'] = (string) Mollie::send(new GetMandateRequest((string) $state['customer_id'], (string) $state['mandate_id']))->status;
+        } catch (ApiException $e) {
+            if (! in_array($e->getCode(), SubscriptionCanaryWorld::GONE, true)) {
+                throw $e;
+            }
+
+            $mandate['http'] = $e->getCode();
+        }
+
+        return $mandate;
+    }
+
+    /**
+     * Report the dead world once, keep it as history, tear down what is left of it at
+     * Mollie and build a new one.
+     *
+     * @param  array<string, mixed>  $state
+     * @param  list<string>  $reasons
+     * @param  list<string>  $problems
+     * @param  list<string>  $observations
+     * @return array{0: array<string, mixed>, 1: list<string>, 2: list<string>}
+     */
+    private function rebuild(array $state, array $reasons, CarbonImmutable $now, ?string $previousVisitAt, array $problems, array $observations): array
+    {
+        $lastAlive = isset($state['mandate_last_valid_at'])
+            ? 'mandate last seen valid '.$state['mandate_last_valid_at']
+            : 'visit before this one '.($previousVisitAt ?? 'unknown');
+
+        $problems[] = 'The canary\'s world (created '.($state['created_at'] ?? '?').') is dead: '.implode('; ', $reasons)
+            ." ({$lastAlive}). The canary never revokes or cancels outside a reset, so somebody or something else did."
+            .' The world was moved to previous_worlds and rebuilt; the next visit looks at the new one.';
+
+        $archived = array_diff_key($state, array_flip(['previous_worlds', 'visits']));
+        $archived['died'] = [
+            'detected_at' => $now->toIso8601String(),
+            'reasons' => $reasons,
+            'mandate_last_valid_at' => $state['mandate_last_valid_at'] ?? null,
+            'previous_visit_at' => $previousVisitAt,
+        ];
+
+        // From here on the old world is history only: whatever fails below cannot report it twice.
+        $carry = [
+            'previous_worlds' => [...($state['previous_worlds'] ?? []), $archived],
+            'visits' => $state['visits'] ?? [],
+        ];
+        self::writeState($carry);
+
+        $this->tearDownWorld($archived);
+
+        try {
+            $state = $this->ensureWorld($carry, $observations);
+            $observations[] = 'World rebuilt: customer '.$state['customer_id'].', mandate '.$state['mandate_id']
+                .', subscriptions '.json_encode(array_map(static fn (array $s): string => $s['id'], $state['subscriptions']));
+        } catch (\Throwable $e) {
+            $state = self::readState() ?? $carry;
+            $problems[] = 'Rebuilding the world failed half-way ('.$e->getMessage().'); the next visit builds the rest.';
+        }
+
+        return [$state, $problems, $observations];
+    }
+
+    /**
+     * @param  array<string, mixed>  $state
+     * @param  list<string>  $observations
+     * @param  list<string>  $problems
+     */
+    private function finishVisit(array $state, CarbonImmutable $now, array $observations, array $problems, bool $created, bool $rebuilt): void
+    {
+        $state['visits'] = array_slice([...($state['visits'] ?? []), [
+            'at' => $now->toIso8601String(),
+            'created_world' => $created,
+            'rebuilt_world' => $rebuilt,
+            'observations' => $observations,
+            'problems' => $problems,
+        ]], -self::VISITS_KEPT);
+        $state['last_checked_at'] = $now->toIso8601String();
+        $state['last_problems'] = $problems;
+
+        self::writeState($state);
     }
 
     /**
@@ -259,7 +469,9 @@ class SubscriptionCanaryTest extends SandboxTestCase
         $now = CarbonImmutable::now('UTC');
         $today = $now->startOfDay();
         $newest = $payments[count($payments) - 1];
-        $later = CarbonImmutable::parse((string) $subscription->nextPaymentDate, 'UTC')->addDays(3);
+        $later = isset($subscription->nextPaymentDate)
+            ? CarbonImmutable::parse((string) $subscription->nextPaymentDate, 'UTC')->addDays(3)
+            : $today->addDays(3);
 
         $attempts = [['later', $later]];
 
@@ -277,8 +489,8 @@ class SubscriptionCanaryTest extends SandboxTestCase
                     startDate: new Date($date),
                 ));
                 $answer = 'taken';
-            } catch (\Mollie\Api\Exceptions\ApiException $e) {
-                if (! \GraystackIT\MollieBilling\Support\MollieSubscriptionAnswer::refusesStartDateAfterCharge($e)) {
+            } catch (ApiException $e) {
+                if (! MollieSubscriptionAnswer::refusesStartDateAfterCharge($e)) {
                     throw $e;
                 }
 
@@ -349,35 +561,55 @@ class SubscriptionCanaryTest extends SandboxTestCase
         return array_values(array_unique([$clamp->toDateString(), $drift->toDateString()]));
     }
 
-    /** @return array<string, mixed> */
-    private function create(): array
+    /**
+     * Build whatever the world lacks — all of it on the first visit — writing the state
+     * after every step: a failure half-way must not orphan what exists at Mollie.
+     *
+     * @param  array<string, mixed>  $state
+     * @param  list<string>  $observations
+     * @return array<string, mixed>
+     */
+    private function ensureWorld(array $state, array &$observations): array
     {
         $today = CarbonImmutable::now('UTC')->startOfDay();
 
-        $customer = Mollie::send(new CreateCustomerRequest(
-            name: 'Billing canary — do not delete',
-            email: 'billing-canary-'.bin2hex(random_bytes(4)).'@example.test',
-        ));
+        if (! isset($state['customer_id'])) {
+            $customer = Mollie::send(new CreateCustomerRequest(
+                name: 'Billing canary — do not delete',
+                email: 'billing-canary-'.bin2hex(random_bytes(4)).'@example.test',
+            ));
 
-        $mandate = Mollie::send(new CreateMandateRequest(
-            customerId: (string) $customer->id,
-            method: 'directdebit',
-            consumerName: 'Billing canary',
-            consumerAccount: self::TEST_IBAN,
-        ));
+            $state['created_at'] = CarbonImmutable::now('UTC')->toIso8601String();
+            $state['customer_id'] = (string) $customer->id;
+            $state['subscriptions'] = [];
+            self::writeState($state);
+        }
 
-        $state = [
-            'created_at' => CarbonImmutable::now('UTC')->toIso8601String(),
-            'customer_id' => (string) $customer->id,
-            'mandate_id' => (string) $mandate->id,
-            'subscriptions' => [],
-        ];
+        if (! isset($state['mandate_id'])) {
+            $mandate = Mollie::send(new CreateMandateRequest(
+                customerId: (string) $state['customer_id'],
+                method: 'directdebit',
+                consumerName: 'Billing canary',
+                consumerAccount: self::TEST_IBAN,
+            ));
+
+            $state['mandate_id'] = (string) $mandate->id;
+            self::writeState($state);
+        }
+
+        $fresh = ($state['subscriptions'] ?? []) === [];
 
         foreach (self::plan($today) as $name => $plan) {
-            $state['subscriptions'][$name] = $this->createSubscription($state, $name, $plan, $today);
+            if (isset($state['subscriptions'][$name])) {
+                continue;
+            }
 
-            // Written after every one: a failure half-way must not orphan what exists.
+            $state['subscriptions'][$name] = $this->createSubscription($state, $name, $plan, $today);
             self::writeState($state);
+
+            if (! $fresh) {
+                $observations[] = "{$name}: added to the world ({$state['subscriptions'][$name]['id']}, from {$plan['start']})";
+            }
         }
 
         return $state;
@@ -408,6 +640,40 @@ class SubscriptionCanaryTest extends SandboxTestCase
         ];
     }
 
+    /**
+     * Cancel, revoke, delete — whatever of a world still exists at Mollie. Never fails:
+     * what is already gone is the point.
+     *
+     * @param  array<string, mixed>  $world
+     */
+    private function tearDownWorld(array $world): void
+    {
+        $customerId = (string) ($world['customer_id'] ?? '');
+
+        if ($customerId === '') {
+            return;
+        }
+
+        foreach ($world['subscriptions'] ?? [] as $plan) {
+            try {
+                Mollie::send(new CancelSubscriptionRequest($customerId, (string) $plan['id']));
+            } catch (\Throwable) {
+                // already ended
+            }
+        }
+
+        foreach ([
+            fn () => Mollie::send(new RevokeMandateRequest($customerId, (string) ($world['mandate_id'] ?? ''))),
+            fn () => Mollie::send(new DeleteCustomerRequest($customerId)),
+        ] as $step) {
+            try {
+                $step();
+            } catch (\Throwable) {
+                // already gone
+            }
+        }
+    }
+
     private function reset(): void
     {
         $state = self::readState();
@@ -416,23 +682,9 @@ class SubscriptionCanaryTest extends SandboxTestCase
             return;
         }
 
-        foreach ($state['subscriptions'] ?? [] as $plan) {
-            try {
-                Mollie::send(new CancelSubscriptionRequest($state['customer_id'], $plan['id']));
-            } catch (\Throwable) {
-                // already ended
-            }
-        }
-
-        foreach ([
-            fn () => Mollie::send(new RevokeMandateRequest($state['customer_id'], $state['mandate_id'])),
-            fn () => Mollie::send(new DeleteCustomerRequest($state['customer_id'])),
-        ] as $step) {
-            try {
-                $step();
-            } catch (\Throwable) {
-                // already gone
-            }
+        // The current world and, should one of their tear-downs have failed, the earlier ones.
+        foreach ([$state, ...($state['previous_worlds'] ?? [])] as $world) {
+            $this->tearDownWorld($world);
         }
 
         @unlink(self::statePath());

@@ -431,10 +431,41 @@ has to be *shown*:
   nothing is still asked, as before.
 - **Only the checkout shows the notice.** The plan page's upgrade, the addons and seats
   screens and the extras purchase still show the exception's message alone; the data is on
-  the exception for them when wanted.
+  the exception for them when wanted. *Superseded on 27 November 2026 — see the next entry.*
 
 Pinned by `tests/Feature/Checkout/PendingPaymentWaitNoticeTest.php` and
 `tests/Browser/CheckoutPendingPaymentWaitTest.php`.
+
+### The wait notice is the same on every screen that starts a first payment (27 November 2026)
+
+Maintainer's decision. The plan page's upgrade from a free plan and the purchase of extras on
+a gift (addons, seats — `StartGrantExtrasPurchase`) meet `PendingPaymentForAnotherOrderException`
+exactly as the checkout does, and showed only a toast or the red flash with the exception's
+message. They now show the checkout's notice — expiry time and the link to the earlier payment.
+
+- **One component, one state.** The markup is `<x-mollie-billing::pending-other-order>`
+  (`resources/views/components/pending-other-order.blade.php`), the state the
+  `Concerns\ShowsPendingOtherOrderNotice` trait: `pendingOtherOrder`, `pendingOtherOrderUntil`
+  (ISO, UTC), `pendingOtherOrderTimezone` (the billable's display timezone, taken from the
+  exception's billable when caught) and `pendingOtherOrderUrl`, all `#[Locked]`. A screen calls
+  `showPendingOtherOrder($e)` in its catch and `clearPendingOtherOrder()` at the start of the
+  action, so a retry that goes through leaves no stale notice. The checkout's dusk selectors
+  and lang keys (`checkout.pending_other_order_*`) are unchanged and reused — not moved — so an
+  app that overrode them keeps its wording. Its former `pendingOtherOrderUntilLabel()` action
+  is gone; the component formats the time.
+- **Only an https link is rendered** — or one on the application's own origin, which is where
+  the browser suite's fake Mollie checkout lives (plain http). Anything else (another scheme, a
+  relative path, a foreign plain-http host) becomes no link, and the notice says "wait"
+  instead of "finish it". The URL comes from Mollie's API, so this is defence in depth, not a
+  known hole.
+- **Not on the products page.** `products.blade.php` buys one-time orders
+  (`StartOneTimeOrderCheckout`), which never ask `PendingFirstPayment` and cannot throw this
+  exception — and a Local (gifted) subscription is refused products altogether. The "extras
+  purchase on a gift" is the addons and seats screens; a catch on the products page would be
+  dead code.
+
+Pinned by `tests/Feature/Portal/PendingPaymentWaitNoticeScreensTest.php` (red against the
+unchanged screens: 10 of 10) and `tests/Browser/PortalPendingPaymentWaitTest.php`.
 
 ### Grace on cancellation during a trial is the trial end
 
@@ -6862,7 +6893,7 @@ it is treated as unknown either way, which is the safe side.
 |---|---|---|
 | `invoice-refund:…` (`RefundInvoiceService`) | the operator, from the panel | count in `subscription_meta.refund_key_refusals.{invoice id}`, written with `MutatesBillingMeta` after Phase 2 threw (no transaction is open there), dropped when the refund books, records older than 24 h pruned on write. An invoice with no billable keeps the old key — refused again inside the hour, never paid twice |
 | `refund:…:{refund_token}` (`InvoiceService::createRefund()`: plan-change lines, `UnwantedPaymentRefund`, `GrantExtrasPurchaseRefund`, `ProrataChargeHandler`) | `RetryRefundLineJob` (1, 5, 30 min …), the hourly sweep | count on the line (`ProrataLine::$refundKeyRefusals`, serialised as `refund_key_refusals` only when set). The job re-reads it from the stored `pending_refund_retries` entry: the queue re-runs a job with its original payload, so the ladder itself never saw the count. `refund_outcome_unknown` stays set after a refusal (an *earlier* attempt's answer may have been lost), and the `refund_token` metadata never changes, so `refundCreatedWithToken()` still finds a refund whichever key created it |
-| `usage-overage:…` (`ChargeUsageOverageDirectly`) | `RetryUsageOverageChargeJob` (1, 5, 15 min) | count on the snapshot (`usage_overage.key_refusals`), carried by `persistPendingCharge()` until a payment id is stored. `payment_unknown_at` is still written on a refusal — unchanged, deliberately: the stale sweep's reconciliation stays the one that frees the slot; only the key changes |
+| `usage-overage:…` (`ChargeUsageOverageDirectly`) | `RetryUsageOverageChargeJob` (1, 5, 15 min) | count on the snapshot (`usage_overage.key_refusals`), carried by `persistPendingCharge()` until a payment id is stored. `payment_unknown_at` was still written on a refusal at first; since 27 November 2026 it is not — see "A refused overage charge does not freeze the debt" |
 | `subscription-replace:…` (`MollieSubscriptionReplacer`) | `RetrySubscriptionReplacementJob` (1, 5, 15, 30, 60 min) | count on the marker (`pending_subscription_replacement.key_refusals`); a new replacement writes a fresh marker. "Same description exists" (422) is not a refusal of ours to count — it is how a lost create is found, as before |
 | `unassigned-refund:…` (`RefundUnassignedPaymentsJob`) | the next daily run | **not changed**: a day later the key is long gone; and the amount in it is read from Mollie on every run |
 | `undercollection:…` (`UndercollectionCharge`) | nobody — one attempt per case, claimed; a failure goes to the operators | **not changed**: no retry sends the key again |
@@ -7079,3 +7110,100 @@ the line as failed and re-appends it.
 
 Red before (2 of 2) with the unfixed job copied back, green after; `tests/Feature/Refund` and
 `tests/Feature/Jobs` green.
+
+## A refused overage charge does not freeze the debt (27 November 2026)
+
+Maintainer's decision. `ChargeUsageOverageDirectly::charge()` marked every throw of the
+create-payment request `payment_unknown_at` — also a definite refusal, after which only the key
+moved on ("A refusal moves the idempotency key on; nothing else does"). The marker freezes the
+debt: `PrepareUsageOverageJob`'s retry pass skips it and `handle()` counts it as in flight
+until `CleanupStalePendingOverageChargeJob` has asked Mollie's payment list — a question whose
+answer a 4xx already gave.
+
+- *Rule:* a definite refusal (`MollieRefusal::isDefinite()`: a 4xx except 408, 409 and a refusal
+  of the key itself; 429 counts) writes no marker. The refusal is counted on the snapshot
+  (`key_refusals`, through `MutatesBillingMeta`), the snapshot stays `pending` without an id, and
+  the exception still reaches the caller, so `RetryUsageOverageChargeJob`'s ladder retries with
+  the moved-on key and pass 3 dispatches it again the next night. A ladder exhausted by refusals
+  takes the existing path — `failed()` mails the operators; create failures never dun and never
+  set past due. A timeout, a 5xx or a lost answer is marked and frozen exactly as before.
+- *Consequence for the plan change:* `WalletPlanChangeAdjuster::chargeDeferredOverage()` handed
+  the excess back to the wallet whenever `paymentMayExist()` was false. Without the marker a
+  refused charge would then be recorded twice — in the pending snapshot the retry charges, and
+  on the wallet the next sweep charges (a plan-change line carries `settles_wallet: false`, so
+  nothing cancels it out). A definite refusal with a snapshot in place now leaves the debt in the
+  snapshot only.
+- *Why it is safe:* `persistPendingCharge()` rebuilds the snapshot without the marker on every
+  attempt, so a marker from an earlier lost answer never survived a retry anyway; and a payment
+  created under a key is replayed for that key, never answered with a 4xx, inside the hour the
+  ladder runs in.
+
+`tests/Feature/Wallet/OverageRefusalReleasesDebtTest.php` — red before (3 of 5: "releases a
+refused overage charge at once…", "keeps the existing failure path when refusals exhaust the
+ladder…", "leaves a refused plan-change charge in the snapshot…" — all "not to have key
+'payment_unknown_at'"), green after; with only the adjuster reverted the plan-change case is red
+again (the wallet takes the units back). The 503 / lost-answer pins are green before and after.
+
+## The canaries rebuild a dead world, run in the cloud together and retry once (27 November 2026)
+
+Decided by the maintainer on 27 November 2026: `SubscriptionCanaryTest` moves into the cloud
+workflow next to the renewal replay canary (the local launchd job is retired), and both heal
+themselves instead of failing forever.
+
+Why the subscription canary failed: its world of 15 November lost its mandate between
+25 November 00:16 and 26 November 19:49 UTC. Read on 27 November: `GET` mandate → **410** "The
+mandate is no longer available"; `daily` `canceled`, `canceledAt` 2026-11-25T00:16:33Z — the
+moment of its tenth charge; `monthly`, `month_end`, `pinned` `pending` with no
+`nextPaymentDate`. Its check "a subscription with `times` ends up `completed`" failed on every
+visit from 26 November on, and nothing else could be observed any more. Nobody in the canary
+revoked anything. Measured while rebuilding (27 November, scratch worlds, removed again): a
+mandate revoked **through the API** answers 410 too, but Mollie then **cancels** every
+subscription on it at once — the dead world's subscriptions read `pending`, not `canceled`, so
+its mandate did not go by an ordinary API revoke. How it went is open; a rebuilt world records
+`mandate_last_valid_at` every visit, so the next death has a window of a day.
+
+Judgement calls:
+
+- **A dead world is a problem once, then rebuilt.** Dead = the mandate gone (404/410) or
+  `invalid`, an open-ended subscription gone or ended, or the `times` subscription ended before
+  its last charge (`SubscriptionCanaryWorld::deathReasons()`). A `pending` mandate is not dead.
+  The canary never revokes or cancels outside a reset, so every death is unexpected and worth a
+  look — but only once: the old world goes to `previous_worlds` (with `died`) and is torn down in
+  the same visit, so the next visit cannot report it again.
+- **`times` ends with `completed` or `canceled`.** Mollie ended `daily` as `canceled` at its last
+  charge (measured 25 November). Both are an end and recorded in `ended`; only charging past
+  `times`, or still running after it, is a problem. The package does not use `times`.
+- **The renewal replay world is judged only where the package still bills.** A scenario whose
+  billable is `active` or `past_due` must have a living mandate and a running Mollie subscription;
+  the cancel and dunning scenarios end theirs on purpose, and a subscription replacement in flight
+  (`pending_subscription_replacement`) is not a death. The rebuild happens on the **next** visit,
+  in a fresh process: deleting the SQLite file under a running app (or truncating it, which is
+  what `db:wipe` does for a file database) is not safe. Kept: visits, `previous_worlds`, the retry
+  probes and their baseline (standalone payments), the receiver's cursor. Lost: payments,
+  invoices, wallets, scenario progress — they stay in `canary-state`'s history.
+- **Retry only a visit that died without a finding.** Both visits write down what they found
+  before an exception leaves (`visits[].aborted`). A visit with problems written down is not
+  retried: the renewal canary books each payment once, so a second attempt would come back green
+  and hide the finding. A visit that died clean is retried once after three minutes; passing then
+  is `recovered` — a note in the summary, no issue.
+- **The receiver's weather is not Mollie's fault.** An unreachable receiver (5xx, timeout, no
+  answer after three tries) is a warning: the visit replays synthetically and does not report
+  "Mollie did not deliver" for payments it could not check; probe sets wait. A rejected read token
+  (401/403) is a misconfiguration nobody else would notice: red, one message per visit while it
+  lasts — "once" meaning one clear message instead of a "did not deliver" for every payment; it
+  stays red until fixed, since a green visit would close the issue.
+- **The job conclusion is the verdict.** The visit steps continue on error so both canaries
+  always run; a last step fails the job exactly when either canary is red after the retry.
+- **Separate resets.** `MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET` and
+  `MOLLIE_BILLING_RENEWAL_REPLAY_RESET`; `MOLLIE_BILLING_CANARY_RESET` keeps meaning both. A
+  reset also tears down `previous_worlds` whose tear-down failed.
+
+Verified locally against the real test API in scratch directories (never the cloud state): the
+subscription canary built a world (incomplete), saw nothing new on a second visit (incomplete),
+reported a mandate revoked behind its back once and rebuilt in the same visit, was incomplete on
+the visit after, and its reset removed both worlds (customers 410). The renewal replay canary
+built a world, found a living world alive on the next visit (incomplete; the cancelled scenario
+not mistaken for a death), reported a revoked mandate once, rebuilt on the next visit, and its
+reset removed both worlds. Not verified here, only in the cloud: the workflow itself (retry,
+verdict, issue, artifact), the receiver-failure paths against a real outage.
+

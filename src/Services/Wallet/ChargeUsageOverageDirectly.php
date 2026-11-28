@@ -89,7 +89,8 @@ class ChargeUsageOverageDirectly
      * hour: every retry got the first refusal replayed, even after the customer replaced
      * the mandate. Each definite refusal moves the key on; a timeout, 5xx or lost answer
      * does not. Bound to the stable key it was counted for, so a new amount or a new
-     * payment of the cycle starts from none.
+     * payment of the cycle starts from none. A definite refusal also leaves no
+     * {@see PAYMENT_UNKNOWN_KEY}: the outcome is known, so the debt is not frozen.
      */
     public const KEY_REFUSALS_KEY = 'key_refusals';
 
@@ -1101,11 +1102,18 @@ class ChargeUsageOverageDirectly
             $payment = $this->createMolliePayment($billable, $vat, $lineItems, $idempotencyKey);
         } catch (\Throwable $e) {
             // Mollie answered with a refusal: no payment, and the key is bound to the
-            // refusal. The retry carries a new one (see KEY_REFUSALS_KEY). The marker below
-            // is written all the same — the debt stays frozen exactly as before until the
-            // stale sweep has asked Mollie; only the key changes.
-            if ($stableKey !== null && MollieRefusal::isDefinite($e)) {
-                $this->recordKeyRefusal($billable, $stableKey);
+            // refusal. The retry carries a new one (see KEY_REFUSALS_KEY). Nothing was
+            // charged and that is known, so the debt is NOT frozen (maintainer's decision,
+            // 27 November 2026): no marker, the snapshot stays `pending` without an id and
+            // the ordinary retry ladder — RetryUsageOverageChargeJob, pass 3 of the nightly
+            // sweep — tries again at once instead of waiting for the stale sweep to ask
+            // Mollie a question whose answer is already in hand.
+            if (MollieRefusal::isDefinite($e)) {
+                if ($stableKey !== null) {
+                    $this->recordKeyRefusal($billable, $stableKey);
+                }
+
+                throw $e;
             }
 
             // The request left this process. Whether Mollie created the payment is now unknown

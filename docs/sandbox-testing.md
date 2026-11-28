@@ -163,7 +163,9 @@ a subscription is tomorrow. `SubscriptionCanaryTest` is therefore not a run but 
   - the payment names its subscription and carries the subscription's metadata — which is
     how a renewal webhook finds its billable;
   - `sequenceType` is `recurring`;
-  - a subscription with `times` ends up `completed`;
+  - a subscription with `times` ends after its last charge — `completed` or, as measured on
+    25 November 2026, `canceled` at the moment of the tenth charge; which one is recorded
+    (`ended`), charging on past `times` is the problem;
   - and it records which way the cadence goes after February for a subscription started on
     the 31st (`month_end_cadence`: `clamp` = back to the 31st/30th, `drift` = stays on the
     28th). The long-run tests model both; this is where it is measured — in March.
@@ -175,88 +177,87 @@ a subscription is tomorrow. `SubscriptionCanaryTest` is therefore not a run but 
     written to `pinned_to` and the following charges are expected on it; a date taken but not
     held is the only thing reported as a problem.
 
-It stays `incomplete` until the first charge exists and fails, with what it saw, when
-Mollie does something the package does not assume.
+It stays `incomplete` while a visit sees nothing new (no new charge, no changed answer) and
+fails, with what it saw, when Mollie does something the package does not assume. Every visit is
+written to the state file (`visits`: observations and problems; `last_problems`).
+
+**A dead world is rebuilt.** The world created on 15 November 2026 lost its mandate between
+25 November 00:16 and 26 November 19:49 UTC: Mollie answers **410** for it, `monthly`,
+`month_end` and `pinned` read `pending` with no next payment date, and nothing more could be
+observed — the canary failed on every visit from then on. Every visit now reads the mandate
+first. When the mandate is gone (404/410) or `invalid`, an open-ended subscription is gone or
+ended, or the `times` subscription ended before its last charge, the visit
+
+1. reports it **once** as a problem ("The canary's world … is dead: …", with when the mandate
+   was last seen valid) — the canary never revokes or cancels anything outside a reset, so
+   somebody or something else did, and that is worth a look;
+2. moves the old world to `previous_worlds` (with `died`: reasons, when, last valid), cancels
+   what is left of it at Mollie and deletes its customer;
+3. builds a new world in the same visit. The next visit looks at the new one.
+
+A world whose build died half-way (a customer without mandate, missing subscriptions) is
+finished by the next visit.
 
 ### Setting it up
 
-```bash
-# once — creates the subscriptions and the state file
-composer test:sandbox:canary
+It runs daily in the cloud, after the renewal replay canary, in the same workflow
+([below](#the-cloud-canary-github-actions-and-a-webhook-receiver)); its state is `state.json`
+on the branch `canary-state`. By hand:
 
-# then daily, e.g. from cron or a scheduled CI job
-0 7 * * *  cd /path/to/package && composer test:sandbox:canary
+```bash
+composer test:sandbox:canary     # one visit
 ```
 
 | Variable | Default | |
 |---|---|---|
 | `MOLLIE_KEY` | from `.env` | must be a `test_` key |
-| `MOLLIE_BILLING_CANARY_STATE` | `workbench/storage/sandbox-canary.json` | where the ids and observations are kept — point it at a path that survives your CI's workspace |
-| `MOLLIE_BILLING_CANARY_RESET` | — | `1` cancels the subscriptions, revokes the mandate, deletes the customer and removes the state file |
+| `MOLLIE_BILLING_CANARY_STATE` | `workbench/storage/sandbox-canary.json` | where the ids and observations are kept |
+| `MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET` | — | `1` cancels the subscriptions, revokes the mandate, deletes the customer (also of `previous_worlds`) and removes the state file |
+| `MOLLIE_BILLING_CANARY_RESET` | — | `1` resets **both** canaries (as before the per-canary variables existed) |
 
 The state file is the canary. Lose it and the subscriptions keep running at Mollie with
 nothing looking at them — reset first if you mean to move it.
 
 ### What to do and when
 
-The canary that exists today was created on **15 November 2026**. Its ids are in the state
-file and nowhere else — they are deliberately not written into the documentation.
+A world's dates follow from the day it was built (`created_at` in the state file; the ids are
+deliberately not written into the documentation). Mollie's scheduler creates the charges
+shortly after 00:00 UTC; the cloud visit at 08:15 UTC sees them the same day.
 
-**Where the state file is.** By default `workbench/storage/sandbox-canary.json`, inside the
-checkout that created it. `workbench/storage/` is git-ignored, so the file is on one machine
-only and disappears with that working copy. Before the checkout is thrown away, copy the file
-somewhere durable and point `MOLLIE_BILLING_CANARY_STATE` at it (the file is plain JSON;
-copying it is enough). A daily run from another checkout without that variable finds no state
-and **creates a second canary**.
-
-**When to run.** Once a day, after 07:00 UTC. Mollie's scheduler created the first charges at
-00:28 UTC; a run earlier in the night may find nothing new and is still green.
-
-| Date | What Mollie should do | What the run checks that day |
+| When | What Mollie should do | What the visit checks |
 |---|---|---|
-| 16 – 25 November 2026 | `daily`: one charge of 1.00 per day, ten in all | each charge created on its own day (UTC), amount 1.00, names its subscription, carries the metadata, `sequenceType: recurring` |
-| 25 November 2026 (or the day after) | `daily` has made its tenth charge | the subscription is `completed` — the last thing `daily` can tell; from then on it only repeats |
-| 16 November, 16 December, 16 January … | `monthly`: one charge of 34.51 on the 16th | the same five checks; this is the ordinary case and runs for as long as the canary lives |
-| 31 December 2026 | `month_end`: first charge | created on the 31st |
-| 31 January 2027 | `month_end`: second charge | created on the 31st |
-| **28 February 2027** | `month_end`: third charge | the run expects the **28th**. Any other day — 1 or 3 March, say — is red and is itself the finding |
-| **28 or 31 March 2027** | `month_end`: fourth charge — the open question | the 31st → `month_end_cadence: clamp` (Mollie keeps the start day and clamps short months); the 28th → `drift` (Mollie adds a month to the previous charge). Either is green; the answer is written into the state file |
-| April 2027 | `month_end`: fifth charge (30th or 28th) | confirms the answer of March |
-| 17 November 2026 | `pinned`: first charge (00:30 UTC, `pending`) | from this visit on, a later start date is sent and the refusal recorded in `start_date_answers` — measured refused on 17 November |
-| **18 November 2026** (first visit after 07:00 UTC) | `pinned`: its start date is the 17th, so today is a different day | `start_date_today_answer`: Mollie's answer to today's date on a charged subscription. Expected: refused |
-| every visit until the newest `pinned` charge is `paid` | — | `start_date_answers[].newest_charge_status`: the first row with `paid` answers whether a settled charge lifts the refusal. Expected: refused as before |
-| 17 December 2026, 17 January … | `pinned`: one charge of 34.51 on the 17th | the five ordinary checks, as `monthly` |
-
-After each run, `last_checked_at`, the payments seen so far and `last_problems` are in the
-state file. `incomplete` is not a failure: it means "created today" or "nothing charged yet".
+| days 1 – 10 after the build | `daily`: one charge of 1.00 per day, ten in all | each charge created on its own day (UTC), amount 1.00, names its subscription, carries the metadata, `sequenceType: recurring` |
+| day 10 (or the day after) | `daily` made its tenth charge | the subscription has ended — `ended` records `completed` or `canceled at its last charge`; more charges, or still active, is red |
+| day 1, then monthly | `monthly` and `pinned`: one charge of 34.51 | the same five checks |
+| from `pinned`'s first charge, every visit | — | a later start date is PATCHed and the answer recorded in `start_date_answers`; once, on a day that is not its start date, today (`start_date_today_answer`). Expected: refused ("…already charged"). The first row with `newest_charge_status: paid` answers whether a settled charge lifts the refusal (test-mode direct debits stay `pending`, so possibly never) |
+| the next 31st, then monthly | `month_end` | created on the 31st, the 28th in February |
+| **the first March after a February** | `month_end`'s charge after February — the open question | the 31st → `month_end_cadence: clamp`; the 28th → `drift`. Either is green and is recorded (an observation "Mollie's cadence after a month end is …") |
 
 **The dates that need a person.**
 
-1. **26 November 2026** — look once that `daily` is `completed` with ten payments. Nothing
-   else has to be done; the subscription stays in the state file as a record.
-   On the same day, read `pinned.start_date_today_answer` (written on 18 November) and the
-   newest `pinned.start_date_answers` row. Write both into [decisions.md](decisions.md), entry
-   "A charged subscription is replaced to move its next charge", under "Still measured by the
-   canary". Either answer needs no code change: the package tries the PATCH and replaces only
-   on the refusal, and never sends today. If today was **taken**, also note whether Mollie
-   charged that day (a second `pinned` payment) — the package never sends today, so this is
-   for the record. If a row with `newest_charge_status: paid` shows **taken**, the refusal
-   holds only while a charge is open; the package is right either way.
-2. **1 April 2027** — open the state file and read `month_end_cadence` (and the `month_end`
-   payments: the fourth charge's `createdAt` is 2027-03-28 → `drift`, 2027-03-31 → `clamp`).
-   Write the answer into [decisions.md](decisions.md), entry "Mollie's cadence after a month
-   end is measured for the record", in one sentence with the date and the payment id. No code
-   change follows from either answer: the package keeps the anchor day itself and sends
-   Mollie the date wherever the two answers could differ (`BillingAnchor`,
-   `pinNextChargeOnAnchor()`), and `RenewalMonthEndCadenceTest` runs both cadences. Since
-   17 November 2026 the package asks Mollie for its own next date first and moves it only
-   where that is not the anchor day — moving it means replacing the subscription, because
-   Mollie refuses a new start date on a charged one. With `clamp` that happens once at most
-   (where the start date itself was February's last day); with `drift` after every shorter
-   month. Only a third outcome — the fourth charge on neither the 28th nor the 31st, or
-   February's charge not on the 28th — is a finding; record it and check
-   `pinNextChargeOnAnchor()` against it before changing anything. The canary never PATCHes
-   `month_end`, so it measures Mollie's own rule.
+1. **The visit after `pinned.start_date_today_answer` appears** — write it and the newest
+   `start_date_answers` row into [decisions.md](decisions.md), entry "A charged subscription is
+   replaced to move its next charge", under "Still measured by the canary" (the world of
+   15 November answered **refused** for today on 27 November 2026). Either answer needs no code
+   change: the package tries the PATCH and replaces only on the refusal, and never sends today.
+   If a row with `newest_charge_status: paid` shows **taken**, the refusal holds only while a
+   charge is open; the package is right either way.
+2. **When `month_end_cadence` appears** (the visit after `month_end`'s charge following
+   February) — write the answer into [decisions.md](decisions.md), entry "Mollie's cadence after
+   a month end is measured for the record", in one sentence with the date and the payment id.
+   No code change follows from either answer: the package keeps the anchor day itself and
+   sends Mollie the date wherever the two answers could differ (`BillingAnchor`,
+   `pinNextChargeOnAnchor()`), and `RenewalMonthEndCadenceTest` runs both cadences. Moving a
+   charged subscription's next date means replacing it, because Mollie refuses a new start date
+   on a charged one; with `clamp` that happens once at most, with `drift` after every shorter
+   month. Only a third outcome — the charge on neither the 28th nor the 31st, or February's
+   charge not on the 28th — is a finding; record it and check `pinNextChargeOnAnchor()`
+   against it before changing anything. The canary never PATCHes `month_end`.
+3. **When a world dies** ("The canary's world … is dead") — the new world is already built.
+   Look at `previous_worlds[].died` and note in [decisions.md](decisions.md) when and how it
+   died; a pattern (a mandate that dies after a fixed number of days, or with the `times`
+   subscription's end) is itself a finding about Mollie's test mode. A month-end world rebuilt
+   after its February starts the March question over.
 
 **When a run is red.** The failure message lists every deviation, and the same list is in
 `last_problems`. Do not adjust the test first — a red canary means Mollie did something the
@@ -268,24 +269,23 @@ package assumes it does not.
 | "charged …, the subscription holds …" | the amount of a renewal is not the amount last sent to Mollie — the premise of every `PaymentAmountMismatch` check | compare with the subscription in the Mollie dashboard (test mode); nothing in the canary ever patches the amount, so this would be Mollie's doing |
 | "does not name its subscription" / "metadata was not copied" | a renewal webhook finds its billable through exactly these two fields | highest priority: without them `MollieWebhookController` reports a paid payment without a billable |
 | "sequenceType is …" | the handlers route on it | as above |
-| "… charges made and the subscription is …, not completed" | only the canary uses `times`; the package does not | record it; no package behaviour depends on it |
-| a network error, a 401, or a *skipped* run ("No Mollie test key") | nothing about Mollie's behaviour | fix the environment and run again — a missed day loses nothing, the next run sees all payments made in between |
+| "… charges made and the subscription is …, not ended" / "… charges made, the subscription was created with times …" | only the canary uses `times`; the package does not | record it; no package behaviour depends on it |
+| "The canary's world … is dead: …" | nothing by itself — the package does not revoke the canary's mandate. It is reported once; the world is rebuilt | see "When a world dies" above |
+| "Rebuilding the world failed half-way" | nothing about Mollie's behaviour | the next visit builds the rest |
+| a network error, a 401, or a *skipped* run ("No Mollie test key") | nothing about Mollie's behaviour | the workflow retries a visit that died without a finding once; if it is still red, fix the environment — a missed day loses nothing, the next visit sees all payments made in between |
 
-**Cleaning up, when the canary is no longer needed.** Not before the March answer is written
-down. Then:
-
-```bash
-MOLLIE_BILLING_CANARY_RESET=1 composer test:sandbox:canary
-```
-
-This cancels the four subscriptions, revokes the mandate, deletes the customer and removes
-the state file; the run reports `incomplete` ("Canary reset"). Remove the cron entry or the CI
-job afterwards — the next ordinary run would otherwise create a new canary. If the state file
-has been lost, the reset has nothing to work from: find the customer named "Billing canary —
-do not delete" in the Mollie dashboard (test mode) and cancel its subscriptions there.
+**Cleaning up, when the canary is no longer needed.** Actions → *renewal canary* → *Run
+workflow* with `reset: subscription` (or locally
+`MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET=1 composer test:sandbox:canary` against the same
+state file). This cancels the subscriptions, revokes the mandate, deletes the customer — of the
+current world and of every `previous_worlds` entry — and removes the state file; the run
+reports `incomplete` ("Subscription canary reset"). Remove the visit from the workflow
+afterwards — the next scheduled visit would otherwise build a new world. If the state file has
+been lost, the reset has nothing to work from: find the customers named "Billing canary — do
+not delete" in the Mollie dashboard (test mode) and cancel their subscriptions there.
 
 Everything here runs on a `test_` key, so no money moves: the charges are test-mode direct
-debits (`pending` hours after creation, when measured on 16 November).
+debits (they stay `pending` — see "What the test mode does with a recurring payment").
 
 ## The renewal replay canary: what the package books at the period end
 
@@ -341,23 +341,39 @@ package promises. So the renewals are a month apart: the first on the day after 
 visit, the coupon's full-price charge is the third. Most visits are therefore `incomplete`.
 
 **Results.** `incomplete` while there is nothing new; red, with the list (also in
-`last_problems`), when the package booked something it does not promise. Each payment row in
-`renewal-replay.json` says what was replayed and what came of it — status, HTTP answers, the
-invoice (serial, gross, period, lines), wallets before and after.
+`last_problems`), when the package booked something it does not promise. Warnings
+(`last_warnings`: the receiver unreachable, a half-built scenario rebuilt) are not red. Each
+payment row in `renewal-replay.json` says what was replayed and what came of it — status, HTTP
+answers, the invoice (serial, gross, period, lines), wallets before and after. A visit that dies
+on an exception writes what it found so far (`visits[].aborted`, its problems) before it fails.
+
+**A dead world is rebuilt.** Every visit first looks at each scenario the package still bills
+(status `active` or `past_due`): its mandate gone (404/410) or `invalid`, a customer deleted, or
+its Mollie subscription gone or ended — while no replacement is in flight — means somebody else
+killed the world (the cancel and dunning scenarios end their subscriptions on purpose and are not
+looked at). That visit reports it **once** ("The renewal replay world … died: …"), tears the world
+down at Mollie, deletes `renewal-replay.sqlite` and the invoices and keeps a state with only
+what outlives a world; the **next** visit builds a new world on it (a fresh process — the
+database is not swapped under a running app). Kept: `visits`, `previous_worlds` (ids, how it
+died), `retry_probes` with the baseline (standalone payments, not part of the world) and the
+receiver's cursor. Lost: the payments, invoices, wallets and every scenario's progress — the old
+database and PDFs stay in the history of `canary-state`. A build that died half-way is finished
+by the next attempt (each unfinished scenario torn down and built again) while its first charge
+date lies ahead; past it, the world is torn down with a warning and rebuilt on the next visit.
 
 | Variable | |
 |---|---|
 | `MOLLIE_BILLING_CANARY_STATE` | required; the files above are written next to it |
-| `MOLLIE_BILLING_CANARY_RESET=1` | cancels the subscriptions, revokes the mandates, deletes the customers and removes the three files. The launchd runner runs both canaries, so a reset through it resets both — run one file to reset one |
+| `MOLLIE_BILLING_RENEWAL_REPLAY_RESET=1` | cancels the subscriptions, revokes the mandates, deletes the customers (also of `previous_worlds`) and removes the three files |
+| `MOLLIE_BILLING_CANARY_RESET=1` | resets **both** canaries (kept from before the per-canary variables) |
 | `CANARY_RECEIVER_URL`, `CANARY_RECEIVER_READ_TOKEN` | the webhook receiver (below). Unset: webhook URLs on `https://example.com`, every delivery synthetic — as before |
 | `CANARY_RECEIVER_WAIT_SECONDS` | how long a visit waits for Mollie's delivery after a payment reached its final status; default 300 (60 once one was missed in the visit) |
 | `MOLLIE_BILLING_RENEWAL_REPLAY_FIRST_CHARGE=today` | a dress rehearsal in a **throwaway** directory: the first charge today (Mollie created it 14 minutes later on 26 November). The night-before sweep and the cancel's grace are then already behind it, so `overage` and the next-date checks report problems that belong to the rehearsal |
 
-The world that exists was created on **26 November 2026** (first charges 27 November) in
-`~/Library/Application Support/mollie-billing-canary/`, run daily at 09:15 by the launchd job
-there (`run.sh` filters `SubscriptionCanaryTest|RenewalReplayCanaryTest`, from the main
-checkout). It moves to the cloud canary below; **the launchd job is retired once the cloud
-canary has run green** — two runners on one world would settle and book the same payments twice.
+The world created on **26 November 2026** (first charges 27 November) lives in
+`~/Library/Application Support/mollie-billing-canary/`, where a launchd job ran both canaries
+daily. **The launchd job is retired** (maintainer, 27 November 2026): both canaries run in the
+cloud canary below — two runners on one world would settle and book the same payments twice.
 
 ### The cloud canary: GitHub Actions and a webhook receiver
 
@@ -430,23 +446,61 @@ Moving the existing world: put `renewal-replay.json`, `renewal-replay.sqlite` an
 branch `canary-state` (an orphan branch: `git switch --orphan canary-state`, copy the three,
 commit, push), **stop the launchd job** (`launchctl unload` its plist), then run the workflow by
 hand once. Without that branch the first visit builds a new world — reset the old one first
-(`MOLLIE_BILLING_CANARY_RESET=1` locally against its directory), or it charges on with nobody
-looking.
+(`MOLLIE_BILLING_RENEWAL_REPLAY_RESET=1` locally against its directory), or it charges on with
+nobody looking. The subscription canary's local `state.json` holds the world of 15 November,
+dead since its mandate went (410): either reset it locally
+(`MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET=1` with `MOLLIE_BILLING_CANARY_STATE` pointing at
+it) and let the first cloud visit build a new one, or put it on `canary-state` as `state.json`
+— the first cloud visit then reports the death once (red, one issue), tears it down and builds
+the new world.
 
-**Running it.** Daily at 08:15 UTC; Actions → *renewal canary* → *Run workflow* for a visit now,
-with `reset: yes` to cancel everything at Mollie and delete the world (the next visit builds a
-new one). `concurrency: renewal-canary` keeps two visits from overlapping. Scheduled workflows
+**Running it.** Daily at 08:15 UTC, one job: the renewal replay visit, then the subscription
+canary's visit — each runs whatever the other did. Actions → *renewal canary* → *Run workflow*
+for a visit now, with `reset`:
+
+| `reset` | What happens |
+|---|---|
+| `no` | an ordinary visit of both |
+| `renewal` | the renewal replay world is cancelled at Mollie and deleted (`MOLLIE_BILLING_RENEWAL_REPLAY_RESET=1`); the subscription canary visits as usual |
+| `subscription` | the subscription canary's world is cancelled and deleted (`MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET=1`); the renewal replay canary visits as usual |
+| `both` | both worlds are cancelled and deleted |
+
+The next visit builds a new world for whatever was reset. A reset run never touches the canary
+issue. `concurrency: renewal-canary` keeps two visits from overlapping. Scheduled workflows
 run **only from the default branch**, and GitHub disables a public repository's schedule after
 **60 days without repository activity** ([GitHub docs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule));
 the daily commit to `canary-state` is meant to be that activity (to verify: GitHub does not say
 whether a bot's commit on a non-default branch counts — if the schedule is ever disabled, enable
 it under Actions and note it here).
 
-**Reading a red run.** A red visit — the test failed, or left `last_problems` — opens one issue
-labelled `canary` with the problems, what was seen and the end of the log; every further red
-visit comments on it; the next green visit closes it. The full log and Mollie's pages
-(screenshots of a failed settle or checkout) are the run's artifact for 30 days; the world, with
-every payment row, is on `canary-state`. The messages specific to the receiver:
+**Retry, then verdict.** A visit that fails is looked at before anything is reported: if it wrote
+problems down (finished red, or died after finding something), that is a finding and is not
+retried — a second attempt would not see it again, since each payment is booked once. If it died
+without a finding (a network error, a Mollie 5xx, Chrome), the workflow waits three minutes and
+visits once more against the same state; both canaries are safe to repeat (written down after
+every step, a half-built world is finished, the jobs run once per UTC day). Per canary the
+verdict is
+
+| Verdict | When | Issue |
+|---|---|---|
+| `green` | passed or `incomplete` on the first attempt | closes an open one |
+| `recovered` | the first attempt died without a finding, the retry passed — the summary says what it died of | none; a note in the run summary |
+| `red` | the last attempt failed, or `last_problems` is not empty | opened, or commented on |
+| `skipped` | not run | — |
+
+The run is red when either canary is; the job's conclusion is `failure` exactly then (the visit
+steps continue on error so that both always run), so GitHub's mail about a failed workflow means
+a red canary. Warnings never make a run red.
+
+**Reading a red run.** A red run opens one issue labelled `canary` — per canary its verdict,
+attempts, problems, warnings, what was seen and the end of its log, and at the end a fenced
+` ```json canary ` block with the run URL, the `canary-state` commit, the failing tests and the
+problems — every further red run comments on it; the next green run closes it. The run's
+artifact (`renewal-canary-<run id>`, 30 days) holds `summary.json` (the same in machine-readable
+form: `outcome`, `failing_tests`, `problems`, `warnings`, per canary `status`, `attempts`,
+`recovered_from`), `summary.md`, both logs and Mollie's pages (screenshots of a failed settle or
+checkout); the worlds, with every payment row, are on `canary-state`. The messages specific to
+the receiver:
 
 | Message | What it means | What to do |
 |---|---|---|
@@ -454,7 +508,8 @@ every payment row, is on `canary-state`. The messages specific to the receiver:
 | "Mollie's later delivery … changed the world although the payment is still …" | a re-delivery booked something — the package's idempotency failed against a real delivery | a package bug: reproduce it in a feature test first |
 | "Mollie changed its retry behaviour (…)" | the probe's attempts differ from the baseline | compare with Mollie's documentation and changelog; the package itself does not depend on the schedule — it answers 503 to make Mollie retry, so a shorter chain matters |
 | "Mollie did not deliver to the retry probe …" | no call at all to a probe URL | as the first row |
-| an HTTP error from `…/deliveries` | the receiver is down or the token differs | fix the receiver; a missed day loses nothing, the next visit reads all since the cursor |
+| warning "Receiver unreachable (HTTP 5xx / no answer: …)" | the receiver is down or slow (`GET /deliveries` failed after three tries). Not red: the visit replays synthetically, does not wait for or demand Mollie's deliveries ("delivery not checked (receiver unreachable)") and leaves the retry probes for the next visit | check the host; a missed day loses nothing, the next visit reads all since the cursor. Deliveries Mollie sent while the receiver was down are Mollie's retries' business — a payment booked synthetically is not held to a delivery afterwards |
+| "The receiver rejected CANARY_RECEIVER_READ_TOKEN (HTTP 401)" | a misconfiguration: the secret differs from the receiver's `READ_TOKEN`. Red, one message per visit, while it lasts | set the same token on both sides |
 
 **Public by design.** The repository is public, so are `canary-state` and the issues: test-mode
 ids, `@example.test` addresses, invoice PDFs of fictitious companies. Nothing there moves money.

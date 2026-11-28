@@ -25,6 +25,7 @@ use Livewire\Component;
 
 new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     use ValidatesVatNumber;
+    use \GraystackIT\MollieBilling\Concerns\ShowsPendingOtherOrderNotice;
 
     public int $step = 1;
 
@@ -67,20 +68,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public ?string $backUrl = null;
     public ?string $errorMessage = null;
     public bool $processing = false;
-
-    /**
-     * A changed order waits for an earlier first payment Mollie would not withdraw
-     * (`PendingPaymentForAnotherOrderException`): whether to say so, until when that payment
-     * stays payable (ISO-8601, UTC; null when Mollie did not say) and its checkout link to
-     * finish it (null when Mollie no longer offers one). Locked: the link is rendered as an
-     * href and only the server may put a Mollie URL there.
-     */
-    #[Locked]
-    public bool $pendingOtherOrder = false;
-    #[Locked]
-    public ?string $pendingOtherOrderUntil = null;
-    #[Locked]
-    public ?string $pendingOtherOrderUrl = null;
 
     /**
      * The billable created in the billing-address step (stored as ID + class for
@@ -2200,24 +2187,6 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
         return method_exists($billable, 'usesReverseCharge') && $billable->usesReverseCharge();
     }
 
-    /**
-     * Until when the earlier payment stays open, as the customer reads it: in the billable's
-     * display timezone, formatted in the app locale. Null when Mollie did not say.
-     */
-    public function pendingOtherOrderUntilLabel(): ?string
-    {
-        if ($this->pendingOtherOrderUntil === null) {
-            return null;
-        }
-
-        $billable = $this->resolveBillable();
-
-        return \GraystackIT\MollieBilling\Support\BillingTime::display(
-            \Carbon\CarbonImmutable::parse($this->pendingOtherOrderUntil),
-            $billable instanceof Billable ? $billable : null,
-        )?->locale(app()->getLocale())->translatedFormat(__('billing::checkout.pending_other_order_time_format'));
-    }
-
     // -------------------------------------------------------------------------
     // Final submit
     // -------------------------------------------------------------------------
@@ -2225,9 +2194,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
     public function submit(StartSubscriptionCheckout $checkout, VatCalculationService $vat): mixed
     {
         $this->errorMessage = null;
-        $this->pendingOtherOrder = false;
-        $this->pendingOtherOrderUntil = null;
-        $this->pendingOtherOrderUrl = null;
+        $this->clearPendingOtherOrder();
 
         // Authorize FIRST — before validation, before anything mutates, and outside
         // the try below so the 403 is not swallowed by its catchall. Livewire actions
@@ -2425,9 +2392,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
                 // withdraw it (it never does for an open first payment — measured). Nothing
                 // new is created: the customer is told until when it stays open, and gets
                 // its link to finish it. See docs/decisions.md.
-                $this->pendingOtherOrder = true;
-                $this->pendingOtherOrderUntil = $e->expiresAt?->utc()->toIso8601String();
-                $this->pendingOtherOrderUrl = $e->checkoutUrl;
+                $this->showPendingOtherOrder($e);
 
                 return null;
             } catch (\GraystackIT\MollieBilling\Exceptions\PastDueExpansionNotAllowedException $e) {
@@ -2525,29 +2490,7 @@ new #[Layout('mollie-billing::layouts.checkout')] class extends Component {
 
     {{-- A changed order waits for an earlier payment Mollie would not withdraw --}}
     @if ($pendingOtherOrder)
-        @php($until = $this->pendingOtherOrderUntilLabel())
-        <flux:callout icon="clock" color="amber" class="mt-4 mb-4" dusk="pending-other-order">
-            <flux:callout.heading>{{ __('billing::checkout.pending_other_order_heading') }}</flux:callout.heading>
-            <flux:callout.text>
-                <span dusk="pending-other-order-text">
-                    @if ($until !== null)
-                        {!! __('billing::checkout.pending_other_order_until', ['time' => '<strong dusk="pending-other-order-until">'.e($until).'</strong>']) !!}
-                    @else
-                        {{ __('billing::checkout.pending_other_order_open') }}
-                    @endif
-                    {{ $pendingOtherOrderUrl
-                        ? __('billing::checkout.pending_other_order_finish_or_wait')
-                        : __('billing::checkout.pending_other_order_wait') }}
-                </span>
-            </flux:callout.text>
-            @if ($pendingOtherOrderUrl)
-                <div class="mt-3">
-                    <flux:button size="sm" variant="primary" href="{{ $pendingOtherOrderUrl }}" dusk="pending-other-order-resume">
-                        {{ __('billing::checkout.pending_other_order_resume') }}
-                    </flux:button>
-                </div>
-            @endif
-        </flux:callout>
+        <x-mollie-billing::pending-other-order :until="$pendingOtherOrderUntil" :timezone="$pendingOtherOrderTimezone" :url="$pendingOtherOrderUrl" class="mt-4 mb-4" />
     @endif
 
     {{-- Horizontal timeline --}}

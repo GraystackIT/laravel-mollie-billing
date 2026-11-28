@@ -514,6 +514,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   confines discovery to `horstoeko\invoicesuite` for the duration of a document, unless the
   app has set discovery namespaces of its own.
 
+### Changed
+
+- **The plan page, addons and seats show the checkout's wait notice (27 November 2026).** An
+  upgrade from a free plan or a purchase of extras on a gift that meets an earlier open first
+  payment for another order (`PendingPaymentForAnotherOrderException`) no longer shows a
+  generic error toast/flash: like the checkout, the screen says until when the earlier payment
+  stays open and links to it. Added the shared `<x-mollie-billing::pending-other-order>`
+  component and the `Concerns\ShowsPendingOtherOrderNotice` Livewire trait (locked state; only
+  an https link, or one on the app's own origin, is rendered). The checkout uses both; its
+  `pendingOtherOrderUntilLabel()` method is removed (the component formats the time). The
+  `checkout.pending_other_order_*` keys are reused unchanged.
+
+- **A usage-overage charge Mollie refused no longer freezes the debt (27 November 2026).** A
+  create-payment request Mollie definitely refused (a 4xx per `MollieRefusal::isDefinite()`)
+  was marked `payment_unknown_at` like a lost answer, so the debt waited for
+  `CleanupStalePendingOverageChargeJob` and the next night before anything tried again.
+  Nothing was charged and that is known: `ChargeUsageOverageDirectly::charge()` now only
+  counts the refusal (the next attempt sends a new key) and leaves the snapshot `pending`
+  without the marker, so `RetryUsageOverageChargeJob`'s ladder and the nightly retry pass run
+  at once. A ladder spent on refusals ends as before (operator mail, no dunning).
+  `WalletPlanChangeAdjuster::chargeDeferredOverage()` keeps a refused plan-change charge in
+  the snapshot instead of also returning it to the wallet. A timeout, 5xx or lost answer is
+  marked and frozen as before.
+
 ### Tests
 
 - **`tests/SandboxBrowser/RenewalReplayCanaryTest` — the renewal replay canary.** A daily visit
@@ -545,6 +569,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `tests/SandboxBrowser/Support/CanaryDeliveries`, pinned by `tests/Unit/Canary/CanaryDeliveriesTest`.
   Measured on the way (27 November 2026): Mollie takes a PATCH of only the `webhookUrl` on a
   subscription before and after its first charge, and the next charge carries the new URL.
+- **Both canaries run in the cloud and heal a dead world (27 November 2026).**
+  `SubscriptionCanaryTest` — red every day since its mandate was gone (410, between 25 November
+  00:16 and 26 November 19:49 UTC) — now reads its mandate each visit; a mandate gone or
+  invalid, or a subscription gone or ended that should run, is reported once as a problem, the
+  old world is kept in `previous_worlds` and torn down, and a new one is built in the same visit.
+  A `times` subscription that ends `canceled` at its last charge (measured 25 November) is an
+  end, not a failure. `RenewalReplayCanaryTest` does the same for the scenarios the package
+  still bills (rebuilt on the next visit, retry probes and baseline kept) and finishes a world
+  whose build died half-way. An unreachable receiver is a warning, not "Mollie did not deliver";
+  a rejected read token (401/403) is red. Per-canary resets
+  (`MOLLIE_BILLING_SUBSCRIPTION_CANARY_RESET`, `MOLLIE_BILLING_RENEWAL_REPLAY_RESET`;
+  `MOLLIE_BILLING_CANARY_RESET` still resets both), the workflow's `reset` input is
+  `no | renewal | subscription | both`. `renewal-canary.yml` runs the subscription canary after
+  the renewal visit whatever either does, retries a visit that died without a finding once after
+  three minutes ("recovered" — no issue), and fails the job exactly when a canary is red after
+  that; `summary.json` (machine-readable verdict) is in the run's artifact and the issue carries a
+  fenced JSON block (run, `canary-state` commit, failing tests, problems). Pure helpers
+  `CanaryReset`, `SubscriptionCanaryWorld`, `CanarySummary`, `CanaryReceiver::failure()`,
+  pinned in `tests/Unit/Canary`. The local launchd runner is retired.
 - `tests/Browser/LifecycleDeepTest` walks the end of a subscription and the way back: an
   operator's cancel at period end of a yearly trial whose first charge failed (ends now, no
   Resubscribe, the feature and subscription gates closed), a free plan cancelled on the 20th

@@ -11,6 +11,7 @@ use GraystackIT\MollieBilling\Enums\SubscriptionInterval;
 use GraystackIT\MollieBilling\Enums\SubscriptionStatus;
 use GraystackIT\MollieBilling\Support\BillingPolicy;
 use GraystackIT\MollieBilling\Support\BillingTime;
+use GraystackIT\MollieBilling\Support\MollieRefusal;
 use GraystackIT\MollieBilling\Support\TrialQuota;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
@@ -302,6 +303,21 @@ class WalletPlanChangeAdjuster
             // The debt stays where `handleExplicit()` left it — in the pending snapshot, marked
             // as unknown — and `CleanupStalePendingOverageChargeJob` asks Mollie which of the
             // two happened.
+            //
+            // A definite refusal (a 4xx, `MollieRefusal::isDefinite()`) is known to have charged
+            // nothing, so it carries no marker — but the debt is in the pending snapshot all the
+            // same, and the retry ladder charges it from there. Handing it back to the wallet as
+            // well is the double record the marker case above guards against.
+            if (MollieRefusal::isDefinite($e) && $this->overageService->pendingCharge($billable) !== null) {
+                Log::warning('Plan-change overage charge refused by Mollie — the debt stays in the pending snapshot for the retry ladder', [
+                    'billable_id' => $billable->getKey(),
+                    'line_items' => $overageLineItems,
+                    'exception' => $e->getMessage(),
+                ]);
+
+                return;
+            }
+
             if ($this->overageService->paymentMayExist($billable)) {
                 Log::error('Plan-change overage charge failed after the payment was posted — leaving the debt for reconciliation', [
                     'billable_id' => $billable->getKey(),

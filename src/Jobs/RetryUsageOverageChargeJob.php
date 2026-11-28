@@ -274,9 +274,12 @@ class RetryUsageOverageChargeJob implements ShouldQueue, ShouldBeUnique
      * Reached when `tries` runs out — three create-payment failures in a row with the
      * snapshot's `payment_id` still empty (a retry after a failed payment empties it too:
      * the failed id moves to `previous_payment_ids`). Nothing was collected and nothing was
-     * dunned, so the status stays `pending`: the snapshot is marked `payment_unknown_at`,
+     * dunned, so the status stays `pending`. If the last attempt's answer was lost (timeout,
+     * 5xx) `charge()` marked the snapshot `payment_unknown_at`, and
      * `CleanupStalePendingOverageChargeJob` asks Mollie whether one of the attempts arrived
-     * after all, and if none did, tomorrow's PrepareUsageOverageJob pass picks it up. Without
+     * after all before tomorrow's PrepareUsageOverageJob pass picks it up. If Mollie refused it
+     * outright (a 4xx, `MollieRefusal::isDefinite()`) nothing is marked — the outcome is known —
+     * and tomorrow's pass picks it up directly, with a moved-on key. Without
      * this the job just landed in failed_jobs and the negative wallet balance went unbilled
      * with nobody told.
      */

@@ -22,6 +22,7 @@ use GraystackIT\MollieBilling\Models\CouponRedemption;
 use GraystackIT\MollieBilling\Services\Billing\CancelSubscription;
 use GraystackIT\MollieBilling\Services\Billing\CouponService;
 use GraystackIT\MollieBilling\Services\Billing\CreateSubscription;
+use GraystackIT\MollieBilling\Services\Billing\MollieSubscriptionReplacer;
 use GraystackIT\MollieBilling\Services\Billing\RedeemCouponFromPortal;
 use GraystackIT\MollieBilling\Services\Billing\UpdateSubscription;
 use GraystackIT\MollieBilling\Services\Webhook\WebhookSupport;
@@ -31,15 +32,19 @@ use GraystackIT\MollieBilling\Support\MollieCustomerResolver;
 use GraystackIT\MollieBilling\Testing\TestBillable;
 use GraystackIT\MollieBilling\Tests\SandboxBrowser\Support\CanaryDeliveries;
 use GraystackIT\MollieBilling\Tests\SandboxBrowser\Support\CanaryReceiver;
+use GraystackIT\MollieBilling\Tests\SandboxBrowser\Support\CanaryReset;
+use GraystackIT\MollieBilling\Tests\SandboxBrowser\Support\SubscriptionCanaryWorld;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\URL;
+use Mollie\Api\Exceptions\ApiException;
 use Mollie\Api\Http\Data\Money;
 use Mollie\Api\Http\Requests\CancelSubscriptionRequest;
 use Mollie\Api\Http\Requests\CreateMandateRequest;
+use Mollie\Api\Http\Requests\GetMandateRequest;
 use Mollie\Api\Http\Requests\CreatePaymentRequest;
 use Mollie\Api\Http\Requests\DeleteCustomerRequest;
 use Mollie\Api\Http\Requests\GetPaginatedCustomerPaymentsRequest;
@@ -112,7 +117,8 @@ use Mollie\Laravel\Facades\Mollie;
  * Opt-in: it runs only with `MOLLIE_BILLING_CANARY_STATE` set (the state lands next to that
  * file as `renewal-replay.json`, the database as `renewal-replay.sqlite`, the invoice PDFs
  * in `renewal-replay-invoices/`); without it the test is skipped and creates nothing.
- * `MOLLIE_BILLING_CANARY_RESET=1` cancels everything at Mollie and deletes the three.
+ * `MOLLIE_BILLING_RENEWAL_REPLAY_RESET=1` (or `MOLLIE_BILLING_CANARY_RESET=1`, which resets both canaries)
+ * cancels everything at Mollie and deletes the three.
  * `incomplete` while there is nothing new to observe; it fails only on a discrepancy.
  *
  * Deliberately NOT cleaned up by the base class: surviving the run is the point.
@@ -142,6 +148,12 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
 
     /** @var list<string> */
     private array $observations = [];
+
+    /** @var list<string> what is worth knowing but not red by itself — the receiver unreachable, above all */
+    private array $warnings = [];
+
+    /** @var array{kind: string, text: string}|null the first failed read of the receiver this visit */
+    private ?array $receiverFailure = null;
 
     /** @var list<array<string, mixed>> */
     private array $events = [];
@@ -266,7 +278,7 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
 
     public function test_renewals_mollie_created_are_booked_the_way_the_package_promises(): void
     {
-        if (($_SERVER['MOLLIE_BILLING_CANARY_RESET'] ?? getenv('MOLLIE_BILLING_CANARY_RESET')) === '1') {
+        if (CanaryReset::requested('renewal_replay')) {
             $this->reset();
             $this->markTestIncomplete('Renewal replay canary reset: everything cancelled at Mollie, state, database and invoices removed.');
         }
@@ -274,10 +286,61 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
         Artisan::call('migrate', ['--database' => 'testing', '--force' => true]);
         $this->listen();
 
+        try {
+            $this->visit();
+        } catch (\Throwable $e) {
+            if ($e instanceof \PHPUnit\Framework\AssertionFailedError) {
+                throw $e; // red, incomplete or skipped: the visit finished and wrote itself down
+            }
+
+            // Written down before the exception leaves: what this attempt found is not lost
+            // when the workflow retries the visit, and the retry is skipped when it found
+            // something (.github/scripts/canary-summary.php should-retry).
+            $this->state['visits'] = array_slice(array_merge($this->state['visits'] ?? [], [[
+                'at' => CarbonImmutable::now('UTC')->toIso8601String(),
+                'aborted' => mb_substr(get_class($e).': '.$e->getMessage(), 0, 500),
+                'observations' => $this->observations,
+                'problems' => $this->problems,
+                'warnings' => $this->warnings,
+            ]]), -120);
+            $this->state['last_problems'] = $this->problems;
+            $this->state['last_warnings'] = $this->warnings;
+
+            if (self::worldPath('.json') !== null && $this->state !== []) {
+                $this->writeState();
+            }
+
+            throw $e;
+        }
+    }
+
+    private function visit(): void
+    {
         $state = $this->readState();
+        $carry = [];
+
+        // A world killed by somebody else was torn down by the visit that found it; this one
+        // builds the new world, keeping the history and the retry probes.
+        if ($state !== null && ! isset($state['scenarios'])) {
+            $carry = $state;
+            $state = null;
+        }
+
         $created = $state === null;
-        $this->state = $state ?? $this->createWorld();
+        $this->state = $state ?? $this->createWorld($carry);
         $this->writeState();
+
+        if (! $created && ($this->state['complete'] ?? true) === false) {
+            $created = $this->finishHalfBuiltWorld();
+
+            if ($created === null) {
+                return;
+            }
+        }
+
+        if (! $created && $this->buryDeadWorld()) {
+            return;
+        }
 
         $before = $this->fingerprint();
         $observedBefore = $created ? 0 : count($this->observations);
@@ -337,12 +400,20 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
             'jobs_ran' => $jobsRan,
             'observations' => array_slice($this->observations, $observedBefore),
             'problems' => $this->problems,
+            'warnings' => $this->warnings,
             'log' => array_slice($this->logged, 0, 40),
         ]]), -120);
         $this->state['last_checked_at'] = CarbonImmutable::now('UTC')->toIso8601String();
         $this->state['last_problems'] = $this->problems;
+        $this->state['last_warnings'] = $this->warnings;
         $this->writeState();
 
+        $this->finishCheckedVisit($created, $observedBefore, $newThisVisit);
+    }
+
+    /** @param int $newThisVisit observations this visit made */
+    private function finishCheckedVisit(bool $created, int $observedBefore, int $newThisVisit): void
+    {
         $this->assertSame([], $this->problems, "The package booked something it does not promise:\n".implode("\n", $this->problems));
 
         if ($created) {
@@ -361,8 +432,11 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
 
     // ── building the world ───────────────────────────────────────────────────
 
-    /** @return array<string, mixed> */
-    private function createWorld(): array
+    /**
+     * @param  array<string, mixed>  $carry  what a torn-down world handed on: its history, the retry probes, the receiver's cursor
+     * @return array<string, mixed>
+     */
+    private function createWorld(array $carry = []): array
     {
         $now = CarbonImmutable::now('UTC');
         $firstCharge = $now->addDay()->startOfDay();
@@ -375,22 +449,203 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
             $firstCharge = $now->startOfDay();
         }
 
-        $this->state = [
+        $this->state = array_merge($carry, [
             'created_at' => $now->toIso8601String(),
             'first_charge_on' => $firstCharge->toDateString(),
             'database' => self::worldPath('.sqlite'),
+            // false until every scenario stands: a build that dies half-way is finished
+            // (or, past its first charge date, torn down) by the next visit.
+            'complete' => false,
             'scenarios' => [],
             'payments' => [],
-        ];
+        ]);
 
+        $this->buildMissingScenarios($firstCharge);
+
+        return $this->state;
+    }
+
+    /** Every scenario that does not stand yet, one after another, the state written after each. */
+    private function buildMissingScenarios(CarbonImmutable $firstCharge): void
+    {
         foreach (self::SCENARIOS as $scenario) {
+            if (isset($this->state['scenarios'][$scenario]['setup'])) {
+                continue;
+            }
+
+            // Begun and not finished by an attempt that died: whatever it made goes first.
+            if (isset($this->state['scenarios'][$scenario])) {
+                $this->discardPartialScenario($scenario);
+            }
+
             $this->state['scenarios'][$scenario] = $this->createBillable($scenario, $firstCharge);
 
             // After every one: a failure half-way must not orphan what exists at Mollie.
             $this->writeState();
         }
 
-        return $this->state;
+        $this->state['complete'] = true;
+        $this->writeState();
+    }
+
+    private function discardPartialScenario(string $scenario): void
+    {
+        $row = $this->state['scenarios'][$scenario];
+        $billable = isset($row['billable_id']) ? TestBillable::query()->find($row['billable_id']) : null;
+        $customerId = (string) ($row['customer_id'] ?? $billable?->getMollieCustomerId() ?? '');
+
+        if ($customerId !== '') {
+            $this->tearDownAtMollie(['scenarios' => [$scenario => ['customer_id' => $customerId, 'mandate_id' => $row['mandate_id'] ?? $billable?->mollie_mandate_id]]]);
+        }
+
+        $billable?->delete();
+        unset($this->state['scenarios'][$scenario]);
+        $this->warnings[] = "{$scenario}: a half-built scenario from an attempt that died was torn down and built again";
+    }
+
+    /**
+     * A world whose build died half-way. Before its first charge date the missing scenarios
+     * are built now; after it, the world is torn down and the next visit builds a new one
+     * (a billable built today would not renew with the others).
+     *
+     * @return bool|null true: finished (a world created this visit); null: torn down, the visit is over
+     */
+    private function finishHalfBuiltWorld(): ?bool
+    {
+        $firstCharge = CarbonImmutable::parse((string) $this->state['first_charge_on'], 'UTC')->startOfDay();
+
+        if ($firstCharge->isAfter(CarbonImmutable::now('UTC'))) {
+            $this->buildMissingScenarios($firstCharge);
+
+            return true;
+        }
+
+        $this->warnings[] = 'A world whose build died half-way, past its first charge date ('.$this->state['first_charge_on'].'): torn down, the next visit builds a new one.';
+        $this->retireWorld(['reasons' => ['half-built'], 'detected_at' => CarbonImmutable::now('UTC')->toIso8601String()]);
+        $this->markTestIncomplete(implode(' ', $this->warnings));
+    }
+
+    /**
+     * A world somebody else killed — a mandate revoked or gone, a customer deleted, a Mollie
+     * subscription cancelled while the package still bills on it — teaches nothing more and
+     * would fail every visit from then on. It is reported once (the canary never revokes or
+     * cancels outside a reset; the package only where its own billable says so, and those
+     * scenarios are not looked at here), torn down at Mollie, and the next visit builds a new
+     * world. Kept: the visits, the retry probes and their baseline (standalone payments, not
+     * part of the world) and the receiver's cursor. Lost: the payments, invoices, wallets and
+     * the scenarios' progress — the old database and PDFs remain in `canary-state`'s history.
+     */
+    private function buryDeadWorld(): bool
+    {
+        $reasons = [];
+
+        foreach (self::SCENARIOS as $scenario) {
+            $row = $this->state['scenarios'][$scenario];
+            $billable = TestBillable::query()->find($row['billable_id'] ?? 0);
+
+            if ($billable === null) {
+                $reasons[] = "{$scenario}: billable {$row['billable_id']} is missing from the database";
+
+                continue;
+            }
+
+            // Only where the package itself still bills: a cancelled or expired scenario's
+            // Mollie subscription is ended by the package, on purpose.
+            if (! in_array($billable->subscription_status, [SubscriptionStatus::Active, SubscriptionStatus::PastDue], true)) {
+                continue;
+            }
+
+            $customerId = (string) $row['customer_id'];
+            $mandateId = (string) ($billable->mollie_mandate_id ?? $row['mandate_id'] ?? '');
+            $mandate = ['id' => $mandateId, 'status' => null, 'http' => null];
+
+            try {
+                $mandate['status'] = (string) Mollie::send(new GetMandateRequest($customerId, $mandateId))->status;
+            } catch (ApiException $e) {
+                if (! in_array($e->getCode(), SubscriptionCanaryWorld::GONE, true)) {
+                    throw $e;
+                }
+
+                $mandate['http'] = $e->getCode();
+            }
+
+            $meta = $billable->getBillingSubscriptionMeta();
+            $subscriptions = [];
+
+            // A replacement in flight cancels the old subscription before the new id is
+            // written: not a death, the replacement's own retry finishes it.
+            if (! is_array($meta[MollieSubscriptionReplacer::META_KEY] ?? null)) {
+                $subscriptionId = (string) ($meta['mollie_subscription_id'] ?? '');
+
+                try {
+                    $subscriptions[$scenario] = ['id' => $subscriptionId, 'times' => null, 'status' => (string) Mollie::send(new GetSubscriptionRequest($customerId, $subscriptionId))->status];
+                } catch (ApiException $e) {
+                    if (! in_array($e->getCode(), SubscriptionCanaryWorld::GONE, true)) {
+                        throw $e;
+                    }
+
+                    $subscriptions[$scenario] = ['id' => $subscriptionId, 'times' => null, 'http' => $e->getCode()];
+                }
+            }
+
+            foreach (SubscriptionCanaryWorld::deathReasons($mandate, $subscriptions) as $reason) {
+                $reasons[] = "{$scenario} ({$billable->subscription_status->value}): {$reason}";
+            }
+        }
+
+        if ($reasons === []) {
+            return false;
+        }
+
+        $this->problems[] = 'The renewal replay world (created '.($this->state['created_at'] ?? '?').') died: '.implode('; ', $reasons)
+            .'. Neither the canary nor the package did this. The world was torn down at Mollie; the next visit builds a new one.';
+        $this->retireWorld(['reasons' => $reasons, 'detected_at' => CarbonImmutable::now('UTC')->toIso8601String()]);
+
+        $this->assertSame([], $this->problems, implode("\n", $this->problems));
+
+        return true;
+    }
+
+    /**
+     * Tear the world down at Mollie and on disk and leave a state that only carries what
+     * outlives a world; the next visit builds on it (`visit()`: a state without scenarios).
+     *
+     * @param  array<string, mixed>  $died
+     */
+    private function retireWorld(array $died): void
+    {
+        $old = $this->state;
+        $this->tearDownAtMollie($old);
+
+        $archived = [
+            'created_at' => $old['created_at'] ?? null,
+            'first_charge_on' => $old['first_charge_on'] ?? null,
+            'died' => $died,
+            'scenarios' => array_map(static fn (array $row): array => array_intersect_key($row, array_flip(['billable_id', 'customer_id', 'mandate_id', 'subscription_ids', 'milestones'])), $old['scenarios'] ?? []),
+            'payments_seen' => count($old['payments'] ?? []),
+        ];
+
+        $receiver = $old['receiver'] ?? [];
+        unset($receiver['webhooks']);
+
+        $this->state = array_filter([
+            'previous_worlds' => [...($old['previous_worlds'] ?? []), $archived],
+            'retry_probes' => $old['retry_probes'] ?? null,
+            'receiver' => $receiver ?: null,
+            'visits' => array_slice([...($old['visits'] ?? []), [
+                'at' => CarbonImmutable::now('UTC')->toIso8601String(),
+                'retired_world' => $died,
+                'observations' => $this->observations,
+                'problems' => $this->problems,
+                'warnings' => $this->warnings,
+            ]], -120),
+            'last_checked_at' => CarbonImmutable::now('UTC')->toIso8601String(),
+            'last_problems' => $this->problems,
+            'last_warnings' => $this->warnings,
+        ], static fn ($v): bool => $v !== null);
+
+        $this->removeWorldFiles(keepJson: true);
+        $this->writeState();
     }
 
     /** @return array<string, mixed> */
@@ -746,11 +1001,43 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
             ? ['after_id' => $last]
             : ['since' => CarbonImmutable::parse((string) $this->state['created_at'])->utc()->subDay()->format('Y-m-d\TH:i:s.v\Z')];
 
-        foreach ($this->receiver->deliveries($filter) as $delivery) {
+        foreach ($this->readReceiver($filter) ?? [] as $delivery) {
             if (! isset($known[(int) $delivery['id']])) {
                 $this->pool[] = $delivery;
             }
         }
+    }
+
+    /**
+     * `GET /deliveries`, or null when the receiver cannot be read. The first failure of a visit
+     * is written down once ({@see CanaryReceiver::failure()}): a rejected token is a problem
+     * (a misconfiguration nobody else will notice), an unreachable receiver a warning — the
+     * visit goes on with synthetic deliveries and does not blame Mollie for what it could not see.
+     *
+     * @param  array<string, mixed>  $filter
+     * @return list<array<string, mixed>>|null
+     */
+    private function readReceiver(array $filter): ?array
+    {
+        if ($this->receiverFailure !== null) {
+            return null;
+        }
+
+        try {
+            return $this->receiver->deliveries($filter);
+        } catch (\Illuminate\Http\Client\RequestException $e) {
+            $this->receiverFailure = CanaryReceiver::failure($e->response->status(), $e->getMessage());
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            $this->receiverFailure = CanaryReceiver::failure(null, $e->getMessage());
+        }
+
+        if ($this->receiverFailure['kind'] === 'token_rejected') {
+            $this->problems[] = $this->receiverFailure['text'];
+        } else {
+            $this->warnings[] = $this->receiverFailure['text'];
+        }
+
+        return null;
     }
 
     /** A payment Mollie reports to the receiver — its own webhookUrl says so, not ours. */
@@ -829,9 +1116,17 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
         $wait = $this->deliveryWaitExhausted ? min(60, $configured) : $configured;
         $started = microtime(true);
 
-        while (($arrived = CanaryDeliveries::forPayment($this->pool, $id, $since)) === [] && microtime(true) - $started < $wait) {
+        while (($arrived = CanaryDeliveries::forPayment($this->pool, $id, $since)) === [] && $this->receiverFailure === null && microtime(true) - $started < $wait) {
             usleep(10_000_000);
             $this->fetchDeliveries();
+        }
+
+        // The receiver could not be read: whether Mollie delivered is unknown, not "no".
+        if ($arrived === [] && $this->receiverFailure !== null) {
+            $this->warnings[] = "{$scenario} {$id}: delivery not checked (receiver unreachable); replayed synthetically";
+            $row['delivery'] = ['source' => 'synthetic', 'reason' => 'receiver unreachable', 'waited_s' => (int) round(microtime(true) - $started)];
+
+            return $this->deliver($id);
         }
 
         if ($arrived === []) {
@@ -958,6 +1253,11 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
 
     private function observeRetries(): void
     {
+        // Nothing can be read or started without the receiver; the sets wait for the next visit.
+        if ($this->receiverFailure !== null) {
+            return;
+        }
+
         $now = CarbonImmutable::now('UTC');
         $sets = $this->state['retry_probes']['sets'] ?? [];
 
@@ -973,10 +1273,16 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
                     continue;
                 }
 
-                $summaries[$name] = CanaryDeliveries::retrySummary($this->receiver->deliveries([
+                $attempts = $this->readReceiver([
                     'payment_id' => (string) $probe['payment_id'],
                     'path_prefix' => (string) $probe['path'],
-                ]));
+                ]);
+
+                if ($attempts === null) {
+                    return; // read again on the next visit, whole
+                }
+
+                $summaries[$name] = CanaryDeliveries::retrySummary($attempts);
 
                 if ($summaries[$name]['attempts'] === 0) {
                     $this->problems[] = "Mollie did not deliver to the retry probe {$name} ({$probe['payment_id']}) at all";
@@ -1604,6 +1910,21 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
     {
         $state = $this->readState();
 
+        foreach ([$state ?? [], ...($state['previous_worlds'] ?? [])] as $world) {
+            $this->tearDownAtMollie($world);
+        }
+
+        $this->removeWorldFiles(keepJson: false);
+    }
+
+    /**
+     * Cancel, revoke, delete — whatever of a world still exists at Mollie. Never fails: what
+     * is already gone is the point.
+     *
+     * @param  array<string, mixed>  $state
+     */
+    private function tearDownAtMollie(array $state): void
+    {
         foreach ($state['scenarios'] ?? [] as $row) {
             $customerId = (string) ($row['customer_id'] ?? '');
 
@@ -1632,10 +1953,13 @@ class RenewalReplayCanaryTest extends SandboxBrowserTestCase
                 }
             }
         }
+    }
 
+    private function removeWorldFiles(bool $keepJson): void
+    {
         DB::disconnect('testing');
 
-        foreach (['.json', '.sqlite'] as $suffix) {
+        foreach ($keepJson ? ['.sqlite'] : ['.json', '.sqlite'] as $suffix) {
             @unlink((string) self::worldPath($suffix));
         }
 

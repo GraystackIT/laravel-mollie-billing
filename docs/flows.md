@@ -233,7 +233,9 @@ sequenceDiagram
   will not withdraw it — for an open first payment always, measured — nothing new and
   `PendingPaymentForAnotherOrderException`: the checkout shows until when the earlier
   payment stays open (its `expiresAt`, else `createdAt` + 15 min, in the billable's
-  timezone) with its checkout link to finish it; the other screens show the message; `pending` → the return page; `open`
+  timezone) with its checkout link to finish it — and so do the plan page's upgrade and the
+  extras purchase on a gift (addons, seats), through the same `<x-mollie-billing::pending-other-order>`
+  notice; `pending` → the return page; `open`
   *without* a checkout link (Mollie drops it once the customer has picked a method and gone
   back) or any terminal status → a new payment.
 - **Opening the checkout while an activation is in flight** (`PendingFirstPayment::activationUnderway()`,
@@ -1121,6 +1123,9 @@ flowchart TD
     I -->|"yes"| J["skipped, one overage charge at a time"]
     I -->|"no"| K["ChargeUsageOverageDirectly handle<br/>lines from the negative wallets<br/>snapshot usage_overage with the usage period, status pending"]
     K --> L["Mollie CreatePaymentRequest, recurring, type overage<br/>idempotency key on the dunning cycle and the payment before it<br/>moved on by each 4xx refusal, snapshot key_refusals"]
+    L -.->|"4xx refusal, MollieRefusal isDefinite"| L1["nothing charged, known: no payment_unknown_at<br/>refusal counted, snapshot stays pending without id<br/>RetryUsageOverageChargeJob ladder, then nightly pass 3"]
+    L1 --> L
+    L -.->|"timeout, 5xx, lost answer"| L2["payment_unknown_at: debt frozen<br/>until CleanupStalePendingOverageChargeJob has asked Mollie"]
     L --> M{"webhook"}
     M -->|"paid"| N["SingleChargeHandler paid<br/>invoice for the snapshot usage period, units credited back to the wallet<br/>markers cleared, past due for debt released<br/>events OverageCharged, PaymentSucceeded, InvoiceAvailableNotification"]
     M -->|"failed"| O["RetryUsageOverageChargeJob<br/>event OverageChargeFailed per failed payment"]
@@ -1160,6 +1165,14 @@ flowchart TD
   `HARD_LIMIT_DAYS` (14) whose payment cannot be created — a mandate Mollie invalidated
   after the previous attempt failed — is deferred there (`deferFailedCycle`, past due for
   the debt) instead of being retried by pass 3 every night.
+- **A create-payment call Mollie refused** (a 4xx per `MollieRefusal::isDefinite()`: not 408,
+  409 or a refusal of the key itself; 429 counts) charged nothing, and that is known — so it
+  is **not** marked `payment_unknown_at` and the debt is not frozen (27 November 2026). The
+  refusal is counted (`key_refusals`, the next attempt sends a new key), the snapshot stays
+  `pending` without an id, and the retry ladder runs at once; pass 3 dispatches it again the
+  next night. A ladder spent on refusals ends in `failed()` as before (operator mail, no
+  dunning). A refused plan-change charge stays in the snapshot rather than also going back
+  to the wallet.
 - **The whole pass fails three times:** `AdminOverageSweepFailedNotification`.
 - **Local subscriptions** are hard-capped and never charged; the one exception is a debt a
   downgrade to the free plan left behind with a recorded price, collected at the Local
