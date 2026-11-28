@@ -57,6 +57,17 @@ class InvoiceService
 {
     use MutatesBillingMeta;
 
+    /** Lease of the per-invoice refund lock. Nothing renews it. */
+    private const REFUND_LOCK_SECONDS = 120;
+
+    /**
+     * How long after taking a refund lock `createRefund()` trusts what it read under it.
+     * Half the lease: past this point the lease may run out before the line is decided, and
+     * RefundHandler could book or reverse against the invoice meanwhile — so each line reads
+     * again, as it did before the snapshot existed.
+     */
+    private const REFUND_SNAPSHOT_TRUSTED_SECONDS = 60;
+
     /**
      * `subscription_meta` key for a prorata payment that is being created: written before
      * Mollie is asked, removed in the same write that records the payment. Still there
@@ -3003,6 +3014,46 @@ class InvoiceService
     }
 
     /**
+     * The `refunded_net` each original should hold once this batch's credit note exists,
+     * read from the books rather than the batch's running tracker: what the billable's
+     * credit notes already derive for it (standing credits minus reversals, read fresh)
+     * plus the lines this batch still books against it.
+     *
+     * Used when the final look at the books dropped a line — the tracker counted that line,
+     * and only the books know whether the other actor's booking of it still stands.
+     *
+     * @param  array<int|string, array{0: BillingInvoice, 1: int, 2: ?string}>  $writes
+     * @param  list<ProrataLine>  $persistedLines
+     * @return array<int|string, array{0: BillingInvoice, 1: int, 2: ?string}>
+     */
+    private function refundedNetFromBooks(array $writes, array $persistedLines): array
+    {
+        $keptNet = [];
+
+        foreach ($persistedLines as $line) {
+            $key = $line->originalInvoice?->getKey();
+
+            if ($key !== null) {
+                $keptNet[$key] = ($keptNet[$key] ?? 0) + (int) abs($line->amountNet);
+            }
+        }
+
+        foreach ($writes as $key => [$original, , $mollieRefundId]) {
+            $fresh = BillingInvoice::query()->whereKey($key)->first();
+
+            if ($fresh === null) {
+                unset($writes[$key]);
+
+                continue;
+            }
+
+            $writes[$key] = [$original, $fresh->effectiveRefundedNet() + ($keptNet[$key] ?? 0), $mollieRefundId];
+        }
+
+        return $writes;
+    }
+
+    /**
      * Take the per-invoice refund lock, waiting briefly for a holder to finish.
      *
      * Waits rather than refusing outright, unlike RefundInvoiceService: that one answers an
@@ -3012,7 +3063,7 @@ class InvoiceService
      */
     private function acquireRefundLock(int|string $invoiceId): ?\Illuminate\Contracts\Cache\Lock
     {
-        $lock = Cache::lock('billing:invoice-refund:'.$invoiceId, 120);
+        $lock = Cache::lock('billing:invoice-refund:'.$invoiceId, self::REFUND_LOCK_SECONDS);
 
         try {
             $lock->block(3);
@@ -3216,6 +3267,8 @@ class InvoiceService
         $books = null;
         /** @var array<string, list<object>> $mollieRefunds */
         $mollieRefunds = [];
+        /** @var array<int|string, int> $lockTakenAt  unix time each refund lock was taken */
+        $lockTakenAt = [];
 
         try {
             foreach ($effective as $line) {
@@ -3237,6 +3290,7 @@ class InvoiceService
 
                 if (! array_key_exists($lockInvoiceId, $refundLocks)) {
                     $refundLocks[$lockInvoiceId] = $this->acquireRefundLock($lockInvoiceId);
+                    $lockTakenAt[$lockInvoiceId] = BillingTime::nowUtc()->getTimestamp();
                     $books = null;
                 }
 
@@ -3265,6 +3319,14 @@ class InvoiceService
                 // nothing out, and settling the line on it dropped an owed refund with no
                 // retry left. Such a line is posted again, as when the lookup below finds
                 // the dead refund at Mollie before anything booked it.
+                // Past the trusted window the lease may lapse before this line is decided, and
+                // a standing token that another actor reversed meanwhile would settle a line
+                // that was never paid — dropped with no retry. Read again for every such line.
+                if (BillingTime::nowUtc()->getTimestamp() - $lockTakenAt[$lockInvoiceId] >= self::REFUND_SNAPSHOT_TRUSTED_SECONDS) {
+                    $books = null;
+                    $mollieRefunds = [];
+                }
+
                 $books ??= $this->creditNoteBookings($billable);
                 $tokenBooking = $line->refundToken !== null ? ($books['tokens'][$line->refundToken] ?? null) : null;
 
@@ -3542,10 +3604,12 @@ class InvoiceService
             // note for one refund. One read per batch, after every Mollie call, so it also
             // sees a booking that landed while a *later* line was being posted.
             //
-            // `refundedNetWrites` keeps the dropped line's net: the webhook's credit note
-            // books that refund, so it is part of what the original has refunded.
+            // A dropped line's net is no longer this run's to count: the other actor's booking
+            // either stands (and is on the books already) or was reversed meanwhile (and
+            // credits nothing). The counters are then recomputed from the books.
             if ($persistedLines !== []) {
                 $bookedNow = $this->creditNoteBookings($billable)['refund_ids'];
+                $linesBefore = count($persistedLines);
 
                 $persistedLines = array_values(array_filter($persistedLines, function (ProrataLine $line) use ($bookedNow, $billable): bool {
                     $refundId = (string) ($line->mollieRefundId ?? '');
@@ -3562,6 +3626,10 @@ class InvoiceService
 
                     return false;
                 }));
+
+                if (count($persistedLines) !== $linesBefore) {
+                    $refundedNetWrites = $this->refundedNetFromBooks($refundedNetWrites, $persistedLines);
+                }
             }
 
             if (! empty($failedLines)) {

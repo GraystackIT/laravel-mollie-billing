@@ -7233,9 +7233,16 @@ before (7 history reads where 2 are expected; the refund list fetched 3 times, e
   120-second lease that nothing renews, so a batch that outlives it lets RefundHandler book a
   refund the batch just created. Before the credit note is written the books are read once more
   and a line whose `mollie_refund_id` is now booked is dropped (its net stays in the
-  `refunded_net` write: the webhook's note books that refund). One read per batch, after every
-  Mollie call — it also sees a booking that landed while a later line was posted, which the old
-  per-line check right after each call did not.
+  `refunded_net` write is then recomputed from the books — `effectiveRefundedNet()` read fresh,
+  plus the lines still booked — because only the books know whether the other actor's booking
+  stands or was reversed meanwhile; the running tracker counted it either way). One read per
+  batch, after every Mollie call — it also sees a booking that landed while a later line was
+  posted, which the old per-line check right after each call did not.
+- *The snapshot expires with half the lease (CodeRabbit, second round).* A token read as
+  `standing` settles a line without posting or retrying it, so a snapshot older than the lease
+  could drop an owed refund another actor had reversed meanwhile. Once a line's lock was taken
+  `REFUND_SNAPSHOT_TRUSTED_SECONDS` (60, half of `REFUND_LOCK_SECONDS`) ago, the books and the
+  Mollie refund list are read again for every line — the per-line behaviour from before.
 - *A cached refund is re-read before it is adopted (CodeRabbit).* When the refund list was read
   for an earlier line, the refund a later line would adopt is fetched again by id
   (`GetPaymentRefundRequest`): a queued refund that failed meanwhile is not booked, the line is
@@ -7246,6 +7253,6 @@ before (7 history reads where 2 are expected; the refund list fetched 3 times, e
 - *Removed:* `refundTokenOnBooks()` (no caller), `refundTokenBooking()`, `refundIdOnBooks()`,
   `creditNoteLineExists()`. `refundTokenBookings()` stays public for ProrataChargeHandler.
 
-Red before (2 of 2; the two CodeRabbit cases 2 of 2 against the first fix) with the unfixed
+Red before (2 of 2; each CodeRabbit round's two cases 2 of 2 against the commit before it) with the unfixed
 `InvoiceService` restored, green after; `tests/Feature/Refund`, `tests/Feature/Webhook`, `tests/Feature/Billing`, `tests/Feature/Coverage`
 green.

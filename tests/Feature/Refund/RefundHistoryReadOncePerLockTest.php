@@ -312,3 +312,101 @@ it('asks Mollie again before adopting a refund from a list read for an earlier l
     // Line 1 was posted again rather than booked on the dead refund.
     expect(collect($note->line_items)->pluck('mollie_refund_id')->all())->toBe(['re_posted_1', 're_posted_2']);
 });
+
+function historyOnceNote(TestBillable $billable, BillingInvoice $invoice, array $lines): void
+{
+    BillingInvoice::create([
+        'billable_type' => $billable->getMorphClass(),
+        'billable_id' => $billable->getKey(),
+        'invoice_kind' => InvoiceKind::Refund,
+        'status' => InvoiceStatus::Refunded,
+        'country' => 'AT',
+        'currency' => 'EUR',
+        'amount_net' => -1000,
+        'amount_vat' => -200,
+        'amount_gross' => -1200,
+        'serial_number' => 'CN-'.uniqid(),
+        'line_items' => array_map(fn (array $line): array => [
+            'kind' => 'plan', 'label' => 'Synced', 'quantity' => 1,
+            'amount_net' => -1000, 'vat_rate' => 20.0, 'vat_amount' => -200, 'amount_gross' => -1200,
+            'parent_invoice_id' => $invoice->getKey(), 'parent_line_item_index' => 0,
+            ...$line,
+        ], $lines),
+    ]);
+}
+
+it('does not settle a line on a snapshot read before the lock lease may have lapsed', function (): void {
+    $billable = historyOnceBillable();
+    $invoice = historyOnceInvoice($billable);
+
+    // Line 1's refund stands on the books when the batch starts.
+    historyOnceNote($billable, $invoice, [['mollie_refund_id' => 're_old', 'refund_token' => 'tok1']]);
+
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnSelf();
+
+    // A reversed token is looked up at Mollie before it is posted again (here: nothing live).
+    Mollie::shouldReceive('send')->once()
+        ->with(Mockery::type(GetPaginatedPaymentRefundsRequest::class))
+        ->andReturn(new ArrayIterator([]));
+
+    $calls = 0;
+    Mollie::shouldReceive('send')->twice()
+        ->with(Mockery::type(CreatePaymentRefundRequest::class))
+        ->andReturnUsing(function () use (&$calls, $billable, $invoice): object {
+            $calls++;
+
+            if ($calls === 1) {
+                // Line 0's call outlives the trusted window; meanwhile Mollie reports line 1's
+                // refund failed and RefundHandler reverses its booking.
+                \Illuminate\Support\Carbon::setTestNow(now()->addSeconds(61));
+                historyOnceNote($billable, $invoice, [['mollie_refund_id' => 're_old', 'reverses_credit' => true]]);
+            }
+
+            return (object) ['id' => 're_posted_'.$calls];
+        });
+
+    $line0 = historyOnceRetriedLine($invoice, 0);
+    $line1 = historyOnceRetriedLine($invoice, 1);
+    $line0->refundOutcomeUnknown = false;
+    $line1->refundOutcomeUnknown = false;
+
+    $note = app(InvoiceService::class)->createRefund($billable, [$line0, $line1], 'Plan change');
+
+    // Line 1 is posted again, not settled on the reversed booking.
+    expect(collect($note->line_items)->pluck('refund_token')->all())->toBe(['tok0', 'tok1']);
+});
+
+it('counts refunded_net from the books when a dropped line was booked and reversed meanwhile', function (): void {
+    $billable = historyOnceBillable();
+    $invoice = historyOnceInvoice($billable);
+
+    Mollie::shouldReceive('setIdempotencyKey')->andReturnSelf();
+
+    $calls = 0;
+    Mollie::shouldReceive('send')->twice()
+        ->with(Mockery::type(CreatePaymentRefundRequest::class))
+        ->andReturnUsing(function () use (&$calls, $billable, $invoice): object {
+            $calls++;
+
+            if ($calls === 2) {
+                // Line 0's refund was booked by another actor and reversed again.
+                historyOnceNote($billable, $invoice, [
+                    ['mollie_refund_id' => 're_first'],
+                    ['mollie_refund_id' => 're_first', 'reverses_credit' => true],
+                ]);
+            }
+
+            return (object) ['id' => $calls === 1 ? 're_first' : 're_second'];
+        });
+
+    $line0 = historyOnceRetriedLine($invoice, 0);
+    $line1 = historyOnceRetriedLine($invoice, 1);
+    $line0->refundOutcomeUnknown = false;
+    $line1->refundOutcomeUnknown = false;
+
+    $note = app(InvoiceService::class)->createRefund($billable, [$line0, $line1], 'Plan change');
+
+    expect(collect($note->line_items)->pluck('mollie_refund_id')->all())->toBe(['re_second'])
+        // Only line 1 refunded money: line 0's credit and its reversal cancel.
+        ->and((int) $invoice->fresh()->refunded_net)->toBe(1000);
+});
